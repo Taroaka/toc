@@ -432,8 +432,8 @@ def main() -> None:
     parser.add_argument(
         "--video-tool",
         choices=["kling", "kling-omni", "veo"],
-        default="kling",
-        help='Video generation tool in manifests ("kling" uses kling_3_0, "kling-omni" uses kling_3_0_omni, "veo" uses google_veo_3_1).',
+        default="kling-omni",
+        help='Video generation tool in manifests ("kling" uses kling_3_0, "kling-omni" uses kling_3_0_omni). "veo" is mapped to Kling for safety.',
     )
 
     args = parser.parse_args()
@@ -449,7 +449,8 @@ def main() -> None:
     elif args.video_tool == "kling-omni":
         video_tool = "kling_3_0_omni"
     else:
-        video_tool = "google_veo_3_1"
+        print('[warn] --video-tool veo is disabled for safety; using kling_3_0_omni instead.')
+        video_tool = "kling_3_0_omni"
 
     # run-root defaults
     state_path = run_dir / "state.txt"

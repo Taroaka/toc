@@ -91,10 +91,12 @@ class KlingConfig:
     secret_key: str | None = None
     api_base: str = "https://api.klingai.com"
     video_model: str = "kling-3.0"
-    submit_path: str = "/v1/videos/generations"
-    status_path_template: str = "/v1/videos/generations/{operation_id}"
+    submit_path: str = "/v1/videos/image2video"
+    status_path_template: str = "/v1/videos/image2video/{operation_id}"
     api_key_header: str = "authorization"
     api_key_prefix: str = "Bearer "
+    payload_format: str = "official_task"
+    auth_mode: str = "auto"
     jwt_expiration_seconds: int = 1800
     jwt_clock_skew_seconds: int = 5
 
@@ -110,6 +112,8 @@ class KlingConfig:
         status_path_template: str | None = None,
         api_key_header: str | None = None,
         api_key_prefix: str | None = None,
+        payload_format: str | None = None,
+        auth_mode: str | None = None,
         jwt_expiration_seconds: int | None = None,
         jwt_clock_skew_seconds: int | None = None,
     ) -> "KlingConfig":
@@ -126,12 +130,14 @@ class KlingConfig:
             secret_key=sk,
             api_base=api_base or _env("KLING_API_BASE", "https://api.klingai.com") or "",
             video_model=video_model or _env("KLING_VIDEO_MODEL", "kling-3.0") or "",
-            submit_path=submit_path or _env("KLING_VIDEO_SUBMIT_PATH", "/v1/videos/generations") or "",
+            submit_path=submit_path or _env("KLING_VIDEO_SUBMIT_PATH", "/v1/videos/image2video") or "",
             status_path_template=status_path_template
-            or _env("KLING_VIDEO_STATUS_PATH_TEMPLATE", "/v1/videos/generations/{operation_id}")
+            or _env("KLING_VIDEO_STATUS_PATH_TEMPLATE", "/v1/videos/image2video/{operation_id}")
             or "",
             api_key_header=api_key_header or _env("KLING_API_KEY_HEADER", "authorization") or "",
             api_key_prefix=api_key_prefix or _env("KLING_API_KEY_PREFIX", "Bearer ") or "",
+            payload_format=payload_format or _env("KLING_PAYLOAD_FORMAT", "official_task") or "official_task",
+            auth_mode=auth_mode or _env("KLING_AUTH_MODE", "auto") or "auto",
             jwt_expiration_seconds=int(jwt_expiration_seconds or _env("KLING_JWT_EXPIRATION_SECONDS", None) or 1800),
             jwt_clock_skew_seconds=int(jwt_clock_skew_seconds or _env("KLING_JWT_CLOCK_SKEW_SECONDS", None) or 5),
         )
@@ -142,6 +148,7 @@ class KlingClient:
         self.config = config
         self._cached_jwt: str | None = None
         self._cached_jwt_exp: int | None = None
+        self._last_status_path_template: str | None = None
 
     @staticmethod
     def from_env(**overrides: Any) -> "KlingClient":
@@ -159,7 +166,7 @@ class KlingClient:
         nbf = now - int(self.config.jwt_clock_skew_seconds)
 
         header = {"alg": "HS256", "typ": "JWT"}
-        payload = {"iss": self.config.access_key, "exp": exp, "nbf": nbf}
+        payload = {"iss": self.config.access_key, "exp": exp, "nbf": nbf, "iat": now}
 
         header_b64 = self._base64url(json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
         payload_b64 = self._base64url(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
@@ -183,12 +190,23 @@ class KlingClient:
         return jwt
 
     def _headers(self) -> dict[str, str]:
+        mode = (self.config.auth_mode or "auto").strip().lower()
+        if mode not in {"auto", "api_key", "jwt"}:
+            mode = "auto"
+
         token: str | None = None
-        if self.config.api_key:
-            token = self.config.api_key
-        elif self.config.access_key and self.config.secret_key:
+        if mode == "jwt":
             token = self._get_jwt()
+        elif mode == "api_key":
+            token = self.config.api_key
         else:
+            # Prefer official JWT auth when access+secret are available.
+            if self.config.access_key and self.config.secret_key:
+                token = self._get_jwt()
+            else:
+                token = self.config.api_key
+
+        if not token:
             raise ValueError("Kling credentials not configured.")
 
         key_header = self.config.api_key_header.strip()
@@ -221,32 +239,85 @@ class KlingClient:
         model: str | None = None,
         extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": model or self.config.video_model,
+        payload_format = (self.config.payload_format or "official_task").strip().lower()
+        if payload_format in {"legacy", "flat"}:
+            payload: dict[str, Any] = {
+                "model": model or self.config.video_model,
+                "prompt": prompt,
+                "duration_seconds": int(duration_seconds),
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            }
+
+            if negative_prompt and negative_prompt.strip():
+                payload["negative_prompt"] = negative_prompt.strip()
+
+            if input_image is not None:
+                payload["first_frame_image"] = {
+                    "mime_type": _guess_mime(input_image),
+                    "data": base64.b64encode(input_image.read_bytes()).decode("ascii"),
+                }
+
+            if last_frame_image is not None:
+                payload["last_frame_image"] = {
+                    "mime_type": _guess_mime(last_frame_image),
+                    "data": base64.b64encode(last_frame_image.read_bytes()).decode("ascii"),
+                }
+
+            if extra_payload:
+                payload = _deep_merge(payload, extra_payload)
+
+            return payload
+
+        if payload_format in {"input_wrapper", "wrapped_input"}:
+            input_block: dict[str, Any] = {
+                "prompt": prompt,
+                "duration": int(duration_seconds),
+                "aspect_ratio": aspect_ratio,
+                "resolution": resolution,
+            }
+
+            if negative_prompt and negative_prompt.strip():
+                input_block["negative_prompt"] = negative_prompt.strip()
+
+            if input_image is not None:
+                input_block["first_frame_image"] = {
+                    "mime_type": _guess_mime(input_image),
+                    "data": base64.b64encode(input_image.read_bytes()).decode("ascii"),
+                }
+
+            if last_frame_image is not None:
+                input_block["last_frame_image"] = {
+                    "mime_type": _guess_mime(last_frame_image),
+                    "data": base64.b64encode(last_frame_image.read_bytes()).decode("ascii"),
+                }
+
+            payload: dict[str, Any] = {"model": model or self.config.video_model, "input": input_block}
+            if extra_payload:
+                payload = _deep_merge(payload, extra_payload)
+            return payload
+
+        # Official-style task payloads commonly use flat keys and specific field names.
+        payload = {
+            "model_name": model or self.config.video_model,
             "prompt": prompt,
-            "duration_seconds": int(duration_seconds),
+            "duration": str(int(duration_seconds)),
             "aspect_ratio": aspect_ratio,
-            "resolution": resolution,
         }
+        # Keep compatibility with older docs/tools that still use "model".
+        payload["model"] = payload["model_name"]
 
         if negative_prompt and negative_prompt.strip():
             payload["negative_prompt"] = negative_prompt.strip()
 
+        # Best-effort: inline base64 images (supported by some official docs).
         if input_image is not None:
-            payload["first_frame_image"] = {
-                "mime_type": _guess_mime(input_image),
-                "data": base64.b64encode(input_image.read_bytes()).decode("ascii"),
-            }
-
+            payload["image"] = base64.b64encode(input_image.read_bytes()).decode("ascii")
         if last_frame_image is not None:
-            payload["last_frame_image"] = {
-                "mime_type": _guess_mime(last_frame_image),
-                "data": base64.b64encode(last_frame_image.read_bytes()).decode("ascii"),
-            }
+            payload["image_tail"] = base64.b64encode(last_frame_image.read_bytes()).decode("ascii")
 
         if extra_payload:
             payload = _deep_merge(payload, extra_payload)
-
         return payload
 
     def start_video_generation(
@@ -274,8 +345,22 @@ class KlingClient:
             model=model,
             extra_payload=extra_payload,
         )
+        submit_path = self.config.submit_path
+        status_template = self.config.status_path_template
+        if input_image is None:
+            submit_path = _env("KLING_TEXT2VIDEO_SUBMIT_PATH", "/v1/videos/text2video") or "/v1/videos/text2video"
+            status_template = (
+                _env("KLING_TEXT2VIDEO_STATUS_PATH_TEMPLATE", "/v1/videos/text2video/{operation_id}")
+                or "/v1/videos/text2video/{operation_id}"
+            )
+        else:
+            status_template = (
+                _env("KLING_IMAGE2VIDEO_STATUS_PATH_TEMPLATE", self.config.status_path_template)
+                or self.config.status_path_template
+            )
+        self._last_status_path_template = status_template
         return request_json(
-            url=self._resolve_url(self.config.submit_path),
+            url=self._resolve_url(submit_path),
             method="POST",
             headers={"content-type": "application/json", **self._headers()},
             json_payload=payload,
@@ -288,7 +373,7 @@ class KlingClient:
         *,
         id_paths: list[str] | None = None,
     ) -> str:
-        paths = id_paths or _split_csv(_env("KLING_OPERATION_ID_PATHS", "data.id,id,task_id,data.task_id"))
+        paths = id_paths or _split_csv(_env("KLING_OPERATION_ID_PATHS", "data.id,id,task_id,data.task_id,data.task.id"))
         operation_id = _first_non_empty(response, paths)
         if operation_id is None:
             raise ValueError(
@@ -303,7 +388,9 @@ class KlingClient:
         *,
         status_paths: list[str] | None = None,
     ) -> str | None:
-        paths = status_paths or _split_csv(_env("KLING_STATUS_PATHS", "status,data.status,task.status,data.task_status"))
+        paths = status_paths or _split_csv(
+            _env("KLING_STATUS_PATHS", "status,data.status,task.status,data.task_status,task_status")
+        )
         status = _first_non_empty(operation, paths)
         if status is None:
             return None
@@ -347,8 +434,7 @@ class KlingClient:
         statuses = set(
             s.lower().strip()
             for s in (
-                done_statuses
-                or _split_csv(_env("KLING_DONE_STATUSES", "succeeded,success,completed,done,finished"))
+                done_statuses or _split_csv(_env("KLING_DONE_STATUSES", "succeed,succeeded,success,completed,done,finished"))
             )
             if s.strip()
         )
@@ -367,10 +453,11 @@ class KlingClient:
         poll_every_seconds: float = 5.0,
         timeout_seconds: float = 900.0,
     ) -> dict[str, Any]:
+        status_template = self._last_status_path_template or self.config.status_path_template
         operation_url = (
             operation_id_or_url
             if operation_id_or_url.startswith("http://") or operation_id_or_url.startswith("https://")
-            else self._resolve_url(self.config.status_path_template, operation_id=operation_id_or_url)
+            else self._resolve_url(status_template, operation_id=operation_id_or_url)
         )
 
         deadline = time.time() + float(timeout_seconds)
@@ -399,7 +486,7 @@ class KlingClient:
         paths = video_url_paths or _split_csv(
             _env(
                 "KLING_VIDEO_URL_PATHS",
-                "data.video.url,data.video_url,data.output.url,video.url,video_url,output.video_url,result.video.url",
+                "data.task_result.videos.0.url,data.video.url,data.video_url,data.output.url,video.url,video_url,output.video_url,result.video.url,videos.0.url,data.videos.0.url",
             )
         )
 

@@ -23,6 +23,22 @@
   - `.claude/commands/toc/toc-immersive-ride.md`
 - 実行手順（全体）: `docs/how-to-run.md`
 
+## まず参照するドキュメント（プロンプト別）
+
+あなた（エージェント）への指示が「台本の本作成」ではなく「ネタ収集（調査）」寄りのとき、次に読むべき正本は以下。
+
+- **ネタ収集 / 調査 / リサーチ**: `docs/information-gathering.md`
+  - 実行担当エージェント: `.claude/agents/deep-researcher.md`
+  - 出力テンプレ: `workflow/research-template.yaml` / `workflow/research-template.production.yaml`
+- **調査→物語化（story.md）**: `docs/story-creation.md`
+  - 実行担当エージェント: `.claude/agents/director.md`
+  - 出力テンプレ: `workflow/story-template.yaml`
+- **sceneごとの根拠（evidence.md）**: `.claude/agents/scene-evidence-researcher.md`
+- **台本（script.md）/ manifest（video_manifest.md）作成**:
+  - 没入型（/toc-immersive-ride）: `.claude/agents/immersive-scriptwriter.md`
+  - scene-series: `.claude/agents/scene-scriptwriter.md`
+  - テンプレ/契約: `workflow/video-manifest-template.md`（+ `docs/implementation/` 配下）
+
 ## `improve_claude_code/` の位置づけ
 
 - `improve_claude_code/` は ToC 本体とは別の「開発運用レイヤー」（multi-agent実行基盤）として同居している

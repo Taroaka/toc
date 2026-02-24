@@ -266,8 +266,8 @@ def main() -> None:
     parser.add_argument(
         "--video-tool",
         choices=["kling", "kling-omni", "veo"],
-        default="kling",
-        help='Video generation tool in manifest ("kling" uses kling_3_0, "kling-omni" uses kling_3_0_omni, "veo" uses google_veo_3_1).',
+        default="kling-omni",
+        help='Video generation tool in manifest ("kling" uses kling_3_0, "kling-omni" uses kling_3_0_omni). "veo" is mapped to Kling for safety.',
     )
 
     # Prompt overrides applied at API-call time (not baked into manifest).
@@ -313,7 +313,7 @@ def main() -> None:
             "scene cut, shot change, camera cut, transition, "
             "title card, subtitle text, on-screen text, watermark"
         ),
-        help="Negative prompt for Veo to reduce unwanted transitions inside a clip.",
+        help="Negative prompt to reduce unwanted transitions inside a clip.",
     )
 
     args = parser.parse_args()
@@ -323,12 +323,14 @@ def main() -> None:
     if args.videos_only:
         args.skip_audio = True
 
+    if args.video_tool == "veo":
+        print("[warn] --video-tool veo is disabled for safety; using kling-omni instead.")
+        args.video_tool = "kling-omni"
+
     # Preflight (avoid paid mistakes)
     if not args.videos_only:
         must_env("GEMINI_API_KEY")
-    if args.video_tool == "veo":
-        must_env("GEMINI_API_KEY")
-    elif args.video_tool in {"kling", "kling-omni"}:
+    if args.video_tool in {"kling", "kling-omni"}:
         must_kling_credentials()
     voice_id = ""
     if not args.skip_audio:
@@ -375,7 +377,7 @@ def main() -> None:
         video_tool=(
             "kling_3_0"
             if args.video_tool == "kling"
-            else ("kling_3_0_omni" if args.video_tool == "kling-omni" else "google_veo_3_1")
+            else "kling_3_0_omni"
         ),
         out_path=manifest_path,
     )

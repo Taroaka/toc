@@ -3,7 +3,7 @@
 Generate assets (image/video/audio) from a `video_manifest.md`.
 
 - Image: Google Gemini Image (Nano Banana Pro = gemini-3-pro-image-preview)
-- Video: Google Veo 3.1 (veo-3.1-generate-preview)
+- Video: Kling (kling_3_0 / kling_3_0_omni). Any Veo tool names are treated as Kling for safety.
 
 Audio (TTS):
 - ElevenLabs Text-to-Speech API
@@ -35,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 from toc.env import load_env_files
 from toc.http import HttpError, request_bytes
 from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID, ElevenLabsClient, ElevenLabsConfig
+from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
@@ -1517,106 +1518,10 @@ def generate_veo_video(
         kind = "F2F" if (input_image and last_frame_image) else ("I2V" if input_image else "T2V")
         print(f"[dry-run] VIDEO({kind}) {out_path} <- {model} ({duration_seconds}s, {aspect_ratio}, {resolution})")
         return
-
-    # Use the official Google GenAI Python SDK for Veo.
-    # This supports first-frame image + lastFrame constraint via config.
-    try:
-        from google import genai  # type: ignore
-        from google.genai import types  # type: ignore
-    except Exception as e:
-        raise SystemExit(
-            "google-genai is required for Veo video generation.\n"
-            "Install: pip install google-genai"
-        ) from e
-
-    api_key = _env("GEMINI_API_KEY")
-    if not api_key:
-        raise SystemExit("Missing GEMINI_API_KEY (required for Veo video generation).")
-
-    if input_image is None:
-        raise SystemExit("Veo image-to-video requires a first-frame image (input_image).")
-
-    client_sdk = genai.Client(api_key=api_key)
-
-    first = types.Image.from_file(location=str(input_image))
-    last = types.Image.from_file(location=str(last_frame_image)) if last_frame_image is not None else None
-
-    refs_cfg: list[types.VideoGenerationReferenceImage] | None = None
-    # Some fast/cheap variants may not support reference images; keep this best-effort.
-    allow_reference_images = "fast" not in (model or "").lower()
-    if reference_images and allow_reference_images:
-        refs_cfg = []
-        for p in reference_images:
-            refs_cfg.append(
-                types.VideoGenerationReferenceImage(
-                    image=types.Image.from_file(location=str(p)),
-                    reference_type=types.VideoGenerationReferenceType.ASSET,
-                )
-            )
-
-    cfg = types.GenerateVideosConfig(
-        number_of_videos=1,
-        duration_seconds=int(duration_seconds),
-        aspect_ratio=aspect_ratio,
-        resolution=resolution,
-        last_frame=last,
-        negative_prompt=(negative_prompt.strip() or None),
-        reference_images=refs_cfg,
+    raise SystemExit(
+        "Veo video generation is disabled in this repo for safety. "
+        "Use Kling instead (set scenes[].video_generation.tool to kling_3_0 or kling_3_0_omni)."
     )
-
-    op = client_sdk.models.generate_videos(model=model, prompt=prompt, image=first, config=cfg)
-
-    deadline = time.time() + float(timeout_seconds)
-    while not getattr(op, "done", False):
-        if time.time() > deadline:
-            raise SystemExit(f"Timed out waiting for Veo operation: {getattr(op, 'name', '<unknown>')}")
-        time.sleep(float(poll_every))
-        op = client_sdk.operations.get(op)
-
-    if getattr(op, "error", None):
-        raise SystemExit(f"Veo operation failed: {op.error}")
-
-    if log_path:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            log_path.write_text(json.dumps(op.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")  # type: ignore[attr-defined]
-        except Exception:
-            log_path.write_text(str(op), encoding="utf-8")
-
-    resp = getattr(op, "response", None) or getattr(op, "result", None)
-    if resp is None:
-        raise SystemExit("Veo operation done but response/result is None.")
-
-    videos = getattr(resp, "generated_videos", None) or getattr(resp, "generatedVideos", None) or []
-    if not videos:
-        filtered_count = getattr(resp, "rai_media_filtered_count", None) or getattr(resp, "raiMediaFilteredCount", None)
-        filtered_reasons = getattr(resp, "rai_media_filtered_reasons", None) or getattr(resp, "raiMediaFilteredReasons", None)
-        raise SystemExit(
-            "Veo operation completed but generated_videos is empty.\n"
-            f"rai_media_filtered_count={filtered_count}\n"
-            f"rai_media_filtered_reasons={filtered_reasons}"
-        )
-
-    video_obj = getattr(videos[0], "video", None)
-    if video_obj is None:
-        raise SystemExit("Veo response missing generated_videos[0].video.")
-
-    raw = getattr(video_obj, "video_bytes", None)
-    if isinstance(raw, str) and raw:
-        import base64
-
-        data = base64.b64decode(raw)
-    elif isinstance(raw, (bytes, bytearray)) and raw:
-        data = bytes(raw)
-    else:
-        uri = getattr(video_obj, "uri", None)
-        if uri:
-            data = request_bytes(url=str(uri), method="GET", headers={"x-goog-api-key": api_key}, timeout_seconds=600.0)
-        else:
-            raise SystemExit("Veo response video has no video_bytes and no uri.")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(data)
 
 
 def generate_kling_video(
@@ -1685,10 +1590,97 @@ def generate_kling_video(
         raise SystemExit(str(e)) from e
 
 
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def generate_evolink_video(
+    *,
+    client: EvoLinkClient | None,
+    model: str,
+    prompt: str,
+    negative_prompt: str,
+    duration_seconds: int,
+    aspect_ratio: str,
+    resolution: str,
+    input_image: Path | None,
+    last_frame_image: Path | None,
+    extra_payload: dict[str, Any] | None,
+    out_path: Path,
+    poll_every: float,
+    timeout_seconds: float,
+    force: bool,
+    log_path: Path | None,
+    dry_run: bool,
+) -> None:
+    if out_path.exists() and not force:
+        return
+
+    if dry_run:
+        kind = "I2V" if input_image else "T2V"
+        print(f"[dry-run] VIDEO({kind}) {out_path} <- {model} ({duration_seconds}s, {aspect_ratio}, {resolution})")
+        return
+
+    if client is None:
+        raise SystemExit("EvoLink client not configured (missing EVOLINK_API_KEY).")
+
+    quality = resolution if resolution in {"720p", "1080p"} else "720p"
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "duration": int(duration_seconds),
+        "aspect_ratio": aspect_ratio,
+        "quality": quality,
+        # Safety default: no audio unless explicitly enabled via extra_payload override.
+        "sound": False,
+    }
+    if negative_prompt and negative_prompt.strip():
+        payload["negative_prompt"] = negative_prompt.strip()
+
+    if input_image is not None:
+        payload["image_start"] = client.upload_image_base64(path=input_image)
+    if last_frame_image is not None:
+        payload["image_end"] = client.upload_image_base64(path=last_frame_image)
+
+    if extra_payload:
+        payload = _deep_merge_dict(payload, extra_payload)
+
+    try:
+        submit = client.submit_video_task(payload=payload)
+        task_id = client.extract_task_id(submit)
+        task = client.poll_task(task_id=task_id, poll_every_seconds=float(poll_every), timeout_seconds=float(timeout_seconds))
+    except (HttpError, TimeoutError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps({"submit": submit, "task": task}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    status = str(task.get("status") or "").strip().lower()
+    if status in {"failed", "error", "canceled", "cancelled", "rejected"}:
+        raise SystemExit(f"EvoLink task failed: {json.dumps(task, ensure_ascii=False)}")
+
+    try:
+        video_url = client.extract_video_url(task)
+        client.download_to_file(url=video_url, out_path=out_path)
+    except (HttpError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+
+
 def normalize_tool_name(tool: str | None) -> str:
     if not tool:
         return ""
-    return tool.strip().lower().replace(" ", "_")
+    normalized = tool.strip().lower().replace(" ", "_")
+    # Safety: treat Veo tool names as Kling to avoid accidental paid Google video calls.
+    if normalized in {"google_veo_3_1", "veo", "veo_3_1", "veo3", "veo_3"}:
+        return "kling_3_0_omni"
+    return normalized
 
 
 def resolve_path(base_dir: Path, maybe_path: str | None) -> Path | None:
@@ -1848,6 +1840,15 @@ def main() -> None:
         default=_env("KLING_OMNI_EXTRA_JSON", None),
         help="Optional JSON object merged into Kling request payload when using kling_3_0_omni.",
     )
+
+    # EvoLink (Kling gateway)
+    parser.add_argument("--evolink-api-key", default=_env("EVOLINK_API_KEY"), help="EvoLink API key (optional).")
+    parser.add_argument("--evolink-api-base", default=_env("EVOLINK_API_BASE", "https://api.evolink.ai"))
+    parser.add_argument("--evolink-files-api-base", default=_env("EVOLINK_FILES_API_BASE", "https://files-api.evolink.ai"))
+    parser.add_argument("--evolink-kling-v3-i2v-model", default=_env("EVOLINK_KLING_V3_I2V_MODEL", "kling-v3-image-to-video"))
+    parser.add_argument("--evolink-kling-v3-t2v-model", default=_env("EVOLINK_KLING_V3_T2V_MODEL", "kling-v3-text-to-video"))
+    parser.add_argument("--evolink-kling-o3-i2v-model", default=_env("EVOLINK_KLING_O3_I2V_MODEL", "kling-v3-image-to-video"))
+    parser.add_argument("--evolink-kling-o3-t2v-model", default=_env("EVOLINK_KLING_O3_T2V_MODEL", "kling-o3-text-to-video"))
 
     # logging
     parser.add_argument("--log-dir", default=None, help="Directory to write provider logs (default: <base>/logs/providers).")
@@ -2032,8 +2033,19 @@ def main() -> None:
             )
         )
 
+    evolink_client: EvoLinkClient | None = None
+    evolink_enabled = bool((args.evolink_api_key or "").strip())
+    if not args.dry_run and needs_kling_video and evolink_enabled:
+        evolink_client = EvoLinkClient(
+            EvoLinkConfig.from_env(
+                api_key=args.evolink_api_key,
+                api_base=args.evolink_api_base,
+                files_api_base=args.evolink_files_api_base,
+            )
+        )
+
     kling_client: KlingClient | None = None
-    if not args.dry_run and needs_kling_video:
+    if not args.dry_run and needs_kling_video and not evolink_enabled:
         has_gateway_key = bool((args.kling_api_key or "").strip())
         has_official_keys = bool((args.kling_access_key or "").strip()) and bool((args.kling_secret_key or "").strip())
         if not (has_gateway_key or has_official_keys):
@@ -2476,29 +2488,60 @@ def main() -> None:
                             out_path.parent.mkdir(parents=True, exist_ok=True)
                             out_path.write_bytes(concat_path.read_bytes())
         elif tool in {"kling_3_0", "kling", "kling_3_0_omni", "kling_omni", "kling-omni"}:
-            kling_model = args.kling_video_model
-            kling_payload = kling_extra_payload
-            if tool in {"kling_3_0_omni", "kling_omni", "kling-omni"}:
-                kling_model = args.kling_omni_video_model
-                kling_payload = kling_omni_extra_payload or kling_extra_payload
-            generate_kling_video(
-                client=kling_client,
-                model=kling_model,
-                prompt=prompt,
-                negative_prompt=args.video_negative_prompt or "",
-                duration_seconds=int(dur),
-                aspect_ratio=aspect_ratio,
-                resolution=args.video_resolution,
-                input_image=input_image,
-                last_frame_image=last_image,
-                extra_payload=kling_payload,
-                out_path=out_path,
-                poll_every=args.poll_every,
-                timeout_seconds=args.timeout_seconds,
-                force=args.force,
-                log_path=log_dir / f"scene{scene.scene_id}_video.json",
-                dry_run=args.dry_run,
-            )
+            if evolink_client is not None:
+                if tool in {"kling_3_0_omni", "kling_omni", "kling-omni"}:
+                    evolink_model = (
+                        args.evolink_kling_o3_i2v_model if input_image is not None else args.evolink_kling_o3_t2v_model
+                    )
+                    evolink_payload = kling_omni_extra_payload or kling_extra_payload
+                else:
+                    evolink_model = (
+                        args.evolink_kling_v3_i2v_model if input_image is not None else args.evolink_kling_v3_t2v_model
+                    )
+                    evolink_payload = kling_extra_payload
+
+                generate_evolink_video(
+                    client=evolink_client,
+                    model=str(evolink_model),
+                    prompt=prompt,
+                    negative_prompt=args.video_negative_prompt or "",
+                    duration_seconds=int(dur),
+                    aspect_ratio=aspect_ratio,
+                    resolution=args.video_resolution,
+                    input_image=input_image,
+                    last_frame_image=last_image,
+                    extra_payload=evolink_payload,
+                    out_path=out_path,
+                    poll_every=args.poll_every,
+                    timeout_seconds=args.timeout_seconds,
+                    force=args.force,
+                    log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                    dry_run=args.dry_run,
+                )
+            else:
+                kling_model = args.kling_video_model
+                kling_payload = kling_extra_payload
+                if tool in {"kling_3_0_omni", "kling_omni", "kling-omni"}:
+                    kling_model = args.kling_omni_video_model
+                    kling_payload = kling_omni_extra_payload or kling_extra_payload
+                generate_kling_video(
+                    client=kling_client,
+                    model=kling_model,
+                    prompt=prompt,
+                    negative_prompt=args.video_negative_prompt or "",
+                    duration_seconds=int(dur),
+                    aspect_ratio=aspect_ratio,
+                    resolution=args.video_resolution,
+                    input_image=input_image,
+                    last_frame_image=last_image,
+                    extra_payload=kling_payload,
+                    out_path=out_path,
+                    poll_every=args.poll_every,
+                    timeout_seconds=args.timeout_seconds,
+                    force=args.force,
+                    log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                    dry_run=args.dry_run,
+                )
         else:
             raise SystemExit(f"scene{scene.scene_id}: unsupported video tool: {scene.video_tool}")
 

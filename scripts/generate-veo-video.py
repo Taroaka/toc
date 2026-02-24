@@ -50,6 +50,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if not args.dry_run:
+        raise SystemExit(
+            "Veo video generation is disabled in this repo for safety. "
+            "Use Kling instead (e.g. scripts/generate-kling-video.py)."
+        )
+
     if args.dry_run:
         url = f"{args.api_base.rstrip('/')}/models/{args.model}:predictLongRunning"
         payload = {

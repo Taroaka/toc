@@ -37,13 +37,18 @@ def _split_csv(value: str) -> list[str]:
 
 def _redact_image_b64(payload: dict[str, Any]) -> dict[str, Any]:
     redacted = json.loads(json.dumps(payload))
-    for key in ("first_frame_image", "last_frame_image"):
-        node = redacted.get(key)
-        if not isinstance(node, dict):
-            continue
-        b64 = node.get("data")
-        if isinstance(b64, str) and b64:
-            node["data"] = f"<base64 omitted: {len(b64)} chars>"
+    candidates = [redacted]
+    input_node = redacted.get("input")
+    if isinstance(input_node, dict):
+        candidates.append(input_node)
+    for cand in candidates:
+        for key in ("first_frame_image", "last_frame_image"):
+            node = cand.get(key)
+            if not isinstance(node, dict):
+                continue
+            b64 = node.get("data")
+            if isinstance(b64, str) and b64:
+                node["data"] = f"<base64 omitted: {len(b64)} chars>"
     return redacted
 
 
@@ -60,10 +65,10 @@ def main() -> None:
     parser.add_argument("--api-key", default=_env("KLING_API_KEY"), help="Gateway-style API key (optional).")
     parser.add_argument("--access-key", default=_env("KLING_ACCESS_KEY"), help="Official Kling AccessKey (recommended).")
     parser.add_argument("--secret-key", default=_env("KLING_SECRET_KEY"), help="Official Kling SecretKey (recommended).")
-    parser.add_argument("--submit-path", default=_env("KLING_VIDEO_SUBMIT_PATH", "/v1/videos/generations"))
+    parser.add_argument("--submit-path", default=_env("KLING_VIDEO_SUBMIT_PATH", "/v1/videos/image2video"))
     parser.add_argument(
         "--status-path-template",
-        default=_env("KLING_VIDEO_STATUS_PATH_TEMPLATE", "/v1/videos/generations/{operation_id}"),
+        default=_env("KLING_VIDEO_STATUS_PATH_TEMPLATE", "/v1/videos/image2video/{operation_id}"),
         help="Polling endpoint path. Supports {operation_id}.",
     )
     parser.add_argument(

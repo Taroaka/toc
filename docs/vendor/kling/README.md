@@ -24,3 +24,9 @@
 - Kling API Docs（第三者: `klingapi.com`）: https://klingapi.com/docs
 - Kling 3.0 Omni（第三者: PiAPI）: https://piapi.ai/docs/kling-api/kling-3-omni-api
 - Kling 3.0 Pricing（第三者: kling3-ai.com）: https://www.kling3-ai.com/pricing
+- EvoLink Kling API（第三者ゲートウェイ）: https://docs.evolink.ai/en/api-manual/video-series/kling
+
+## EvoLink を使う場合（このrepo）
+
+`EVOLINK_API_KEY` を設定すると、`kling_3_0` / `kling_3_0_omni` は EvoLink 経由を優先します。  
+メモ: `evolink.md`

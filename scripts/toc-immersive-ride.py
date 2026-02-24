@@ -69,8 +69,8 @@ def main() -> None:
     parser.add_argument(
         "--video-tool",
         choices=["kling", "kling-omni", "veo"],
-        default="kling",
-        help='Video generation tool in manifest ("kling", "kling-omni", or "veo").',
+        default="kling-omni",
+        help='Video generation tool in manifest ("kling" or "kling-omni"). "veo" is mapped to Kling for safety.',
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files.")
     args = parser.parse_args()
@@ -128,7 +128,9 @@ def main() -> None:
         if args.video_tool == "kling":
             tmpl = re.sub(r'(?m)^(\s*)tool: "google_veo_3_1"\s*$', r'\1tool: "kling_3_0"', tmpl)
             tmpl = re.sub(r'(?m)^(\s*)tool: "kling_3_0_omni"\s*$', r'\1tool: "kling_3_0"', tmpl)
-        elif args.video_tool == "kling-omni":
+        elif args.video_tool in {"kling-omni", "veo"}:
+            if args.video_tool == "veo":
+                print('[warn] --video-tool veo is disabled for safety; using kling_3_0_omni instead.')
             tmpl = re.sub(r'(?m)^(\s*)tool: "google_veo_3_1"\s*$', r'\1tool: "kling_3_0_omni"', tmpl)
             tmpl = re.sub(r'(?m)^(\s*)tool: "kling_3_0"\s*$', r'\1tool: "kling_3_0_omni"', tmpl)
         write_text(run_dir / "video_manifest.md", tmpl, force=args.force)
