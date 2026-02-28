@@ -37,40 +37,49 @@ assets:
 scenes:
   - scene_id: 1
     timestamp: "00:00-00:10"
-    image_generation:
-      # tool: "google_nanobanana_pro"
-      # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
-      tool: "google_nanobanana_pro"
-      prompt: |
-        [全体 / 不変条件]
-        シネマティック。暖色寄り。自然な照明。画面内テキストなし、字幕なし、ウォーターマークなし。
+    # Cut planning rule (recommended):
+    # - 1 cut = 1 narration
+    # - main cut (at least 1): 5–15 seconds (based on narration actual duration)
+    # - sub cuts (optional): 3–15 seconds (short 3–4s cuts are sub-only; not for single-cut narration)
+    cuts:
+      - cut_id: 1
+        cut_role: "main"  # main|sub
+        image_generation:
+          # tool: "google_nanobanana_pro"
+          # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
+          tool: "google_nanobanana_pro"
+          prompt: |
+            [全体 / 不変条件]
+            シネマティック。暖色寄り。自然な照明。画面内テキストなし、字幕なし、ウォーターマークなし。
 
-        [シーン]
-        夜明けの静かな田舎の村。柔らかな朝霧。広い導入ショット。
+            [シーン]
+            夜明けの静かな田舎の村。柔らかな朝霧。広い導入ショット。
 
-        [禁止]
-        文字、ウォーターマーク、ロゴ。
-      output: "assets/scenes/scene1_base.png"
-      iterations: 4
-      selected: 1
-    video_generation:
-      # tool: "google_veo_3_1"  # disabled; routed to Kling for safety
-      # tool: "kling_3_0"
-      # tool: "kling_3_0_omni"
-      # tool: "seedance"       # BytePlus ModelArk Seedance (video; see ARK_* env)
-      tool: "kling_3_0"
-      input_image: "assets/scenes/scene1_base.png"
-      motion_prompt: "ゆっくりパン（落ち着いた速度、微細な視差）"
-      output: "assets/scenes/scene1_video.mp4"
-    audio:
-      narration:
-        text: "昔、ある村に桃から生まれた少年がいました。"
-        tool: "elevenlabs"
-        output: "assets/audio/scene1_narration.mp3"
-      bgm:
-        source: "assets/audio/bgm_intro.mp3"
-        volume: 0.3
-      sfx: []
+            [禁止]
+            文字、ウォーターマーク、ロゴ。
+          output: "assets/scenes/scene1_cut1_base.png"
+          iterations: 4
+          selected: 1
+        video_generation:
+          # tool: "google_veo_3_1"  # disabled; routed to Kling for safety
+          # tool: "kling_3_0"
+          # tool: "kling_3_0_omni"
+          # tool: "seedance"       # BytePlus ModelArk Seedance (video; see ARK_* env)
+          tool: "kling_3_0"
+          duration_seconds: 10
+          input_image: "assets/scenes/scene1_cut1_base.png"
+          motion_prompt: "ゆっくりパン（落ち着いた速度、微細な視差）"
+          output: "assets/scenes/scene1_cut1_video.mp4"
+        audio:
+          narration:
+            text: "昔、ある村に桃から生まれた少年がいました。"
+            tool: "elevenlabs"
+            output: "assets/audio/scene1_cut1_narration.mp3"
+            normalize_to_scene_duration: false
+          bgm:
+            source: "assets/audio/bgm_intro.mp3"
+            volume: 0.3
+          sfx: []
 
 # === 最終出力 ===
 final_output:

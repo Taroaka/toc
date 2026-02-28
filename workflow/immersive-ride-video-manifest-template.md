@@ -131,9 +131,9 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
-        text: "TODO: ナレーション全文"
+        text: "TODO: このクリップのナレーション（1カット=1ナレーション、15秒以内目安）"
         tool: "elevenlabs"
-        output: "assets/audio/narration.mp3"
+        output: "assets/audio/scene10_narration.mp3"
         normalize_to_scene_duration: false
 
   - scene_id: 20
@@ -181,6 +181,12 @@ scenes:
       last_frame: "assets/scenes/scene30.png"
       motion_prompt: "緩やかなカーブを描きながら前進を継続。POVと手と安全バーの位置を維持。"
       output: "assets/scenes/scene20_to_30.mp4"
+    audio:
+      narration:
+        text: "TODO: このクリップのナレーション（1カット=1ナレーション、15秒以内目安）"
+        tool: "elevenlabs"
+        output: "assets/audio/scene20_narration.mp3"
+        normalize_to_scene_duration: false
 
   - scene_id: 30
     timestamp: "00:16-00:24"

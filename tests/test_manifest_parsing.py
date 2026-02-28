@@ -105,6 +105,40 @@ scenes:
         self.assertEqual(scenes[0].image_output, "assets/scenes/scene10_1.png")
         self.assertEqual(scenes[0].video_output, "assets/scenes/scene10_1_to_2.mp4")
 
+    def test_parse_manifest_supports_cut_duration_seconds_override(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 10
+    timestamp: "00:00-00:24"
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 12
+          input_image: "assets/scenes/scene10_1.png"
+          motion_prompt: "m1"
+          output: "assets/scenes/scene10_1.mp4"
+      - cut_id: 2
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 7
+          input_image: "assets/scenes/scene10_2.png"
+          motion_prompt: "m2"
+          output: "assets/scenes/scene10_2.mp4"
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, scenes = mod.parse_manifest_yaml(yaml_text)
+
+        self.assertEqual([s.scene_id for s in scenes], [1001, 1002])
+        self.assertEqual([s.duration_seconds for s in scenes], [12, 7])
+
 
 if __name__ == "__main__":
     unittest.main()

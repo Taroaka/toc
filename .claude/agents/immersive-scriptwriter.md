@@ -42,14 +42,14 @@ model: inherit
 
 ## 固定プロンプト要件（experience別）
 
-### `ride_action_boat`（default）
+### `ride_action_boat`（legacy / optional）
 
 必ず全sceneのpromptに含める:
 
 - `一人称POVのライド（アクションボート）`
 - `画面下の前景に手があり、安全バーを握っている`
 
-### `cloud_island_walk`
+### `cloud_island_walk`（default）
 
 必ず全sceneのpromptに含める（推奨セット）:
 
@@ -104,7 +104,7 @@ model: inherit
   - 例: 竜宮城 / 玉手箱（背景ではなく“主役級”）
   - 各 object は `reference_images` を必ず持ち、どれかの scene がそのパスを `image_generation.output` として生成する（reference scene）
 - 画像生成:
-  - `image_generation.references` に参照画像パスを配列で入れる（キャラ・手/ボート）
+  - `image_generation.references` に参照画像パスを配列で入れる（キャラ・重要小道具。`ride_action_boat` の場合は手元/乗り物参照も検討）
     - 生成スクリプトは YAML の配列（inline/multi-line）を読める。短くしたい場合は `references: ["a.png", "b.png"]` を推奨
     - `/toc-immersive-ride` の生成では `--apply-asset-guides` を使うため、`assets.character_bible/style_guide` の参照画像は scene 側へ自動マージされる
   - 複数キャラがいる物語では「混ざり」を避けるため、各sceneで `image_generation.character_ids: ["id1","id2"]` を指定する
@@ -127,15 +127,19 @@ model: inherit
     - 後から中間sceneを差し込めるように `scene_id` は **10刻み**（例: 10,20,30...）を推奨
       - 例: 30と40の間に中間sceneを入れたい場合は `35` を追加する
 - 音声:
-  - ナレーションは run root の単一音声（`assets/audio/narration.mp3`）として生成する前提で、
-    `audio.narration.text` に全文を入れる
+  - `ride_action_boat`:
+    - **1カット（clip）= 1ナレーション** を基本にし、1カットの最大は **15秒**（実秒ベース）
+    - `audio.narration.output` は clip ごとに分ける（例: `assets/audio/scene10_narration.mp3`）
+    - `normalize_to_scene_duration: false` を基本（音声秒数に合わせる。`ride_action_boat` は原則 8秒運用なので、超える場合は clip を増やす）
+  - `cloud_island_walk`:
+    - この体験は既存仕様を維持し、run root の単一音声（`assets/audio/narration.mp3`）でもよい
   - style instructions は `notes` に明記し、textには読み上げ原稿のみを書く
 
 ## 出力フォーマット
 
 ### script.md
 
-- narration全文（読み上げ原稿）
+- narration（cut/clip単位の読み上げ原稿。必要なら全文も併記）
 - scene一覧（scene_id / 画面の見せ場 / 次sceneへのつなぎ）
 - 参照画像（何をどこに生成するか）
 

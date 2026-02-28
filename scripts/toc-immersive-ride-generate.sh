@@ -75,10 +75,17 @@ python scripts/generate-assets-from-manifest.py \
 
 python scripts/build-clip-lists.py --manifest "$manifest" --out-dir "$run_dir"
 
+narration_list="${run_dir%/}/video_narration_list.txt"
 audio="${run_dir%/}/assets/audio/narration.mp3"
 stage="render"
 python scripts/toc-state.py append --run-dir "$run_dir" --set "runtime.stage=${stage}"
-if [[ -f "$audio" ]]; then
+if [[ -s "$narration_list" ]]; then
+  scripts/render-video.sh \
+    --clip-list "${run_dir%/}/video_clips.txt" \
+    --narration-list "$narration_list" \
+    --fps 24 --size 1280x720 \
+    --out "${run_dir%/}/video.mp4"
+elif [[ -f "$audio" ]]; then
   scripts/render-video.sh \
     --clip-list "${run_dir%/}/video_clips.txt" \
     --audio "$audio" \

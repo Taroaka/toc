@@ -14,7 +14,7 @@ Claude Code の slash command を起点に、最小限の入力（topic）で
   - `--topic`（必須）
   - `--dry-run`（任意。外部生成APIは呼ばない）
   - `--config`（任意。`config/system.yaml` を差し替え）
-  - `--experience`（任意。default: `ride_action_boat`）
+  - `--experience`（任意。default: `cloud_island_walk`）
     - `ride_action_boat`: 従来のテーマパーク・ライド（ボート/安全バー）パターン
     - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
 
@@ -39,15 +39,15 @@ run root:
 - Style: photorealistic / cinematic / practical effects（アニメ調排除）
 - ガイドは音声（ナレーション）として必須（視覚的に登場させない）
 
-`ride_action_boat`（default / must）:
+`ride_action_boat`（legacy / optional）:
 
 - 統一要素:
-  - 20代女性の手
+  - 人間の手（年齢/性別は指定しない。必要なら作品側で指定）
   - ornate brass safety bar
   - ride action boat（線路に沿って進む）
   - 物語キャラクターが毎scene登場
 
-`cloud_island_walk`（optional）:
+`cloud_island_walk`（default）:
 
 - 統一要素（推奨）:
   - 手元の“アンカー”（例: compass / journal）を前景に置き、POVの安定を作る
@@ -57,7 +57,7 @@ run root:
 ## 生成設計（最小）
 
 - 画像:
-  - 参照画像（キャラクター/手/ボート）を **全scene** に適用
+  - 参照画像（キャラクター/重要小道具）を **必要なscene** に適用（`ride_action_boat` では手元アンカー/乗り物参照も検討）
   - 16:9 / 2K（素材側）
 - 動画:
   - provider は `video_manifest.md` の `scenes[].video_generation.tool` で選ぶ（default: `kling_3_0` / alt: `seedance`）

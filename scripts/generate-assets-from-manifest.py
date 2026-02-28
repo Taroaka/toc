@@ -2,7 +2,7 @@
 """
 Generate assets (image/video/audio) from a `video_manifest.md`.
 
-- Image: Google Gemini Image (Nano Banana Pro = gemini-3-pro-image-preview)
+- Image: Google Gemini Image (default: gemini-3.1-flash-image-preview)
 - Video: Kling (kling_3_0 / kling_3_0_omni) or BytePlus ModelArk Seedance. Any Veo tool names are treated as Kling for safety.
 
 Audio (TTS):
@@ -49,6 +49,7 @@ ALLOWED_VEO_DURATIONS = (4, 6, 8)
 class SceneSpec:
     scene_id: int
     timestamp: str | None
+    duration_seconds: int | None
     image_tool: str | None
     image_prompt: str | None
     image_output: str | None
@@ -339,6 +340,7 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
             current = SceneSpec(
                 scene_id=scene_id,
                 timestamp=None,
+                duration_seconds=None,
                 image_tool=None,
                 image_prompt=None,
                 image_output=None,
@@ -368,6 +370,14 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
         # per-scene fields
         if key == "timestamp" and "scenes" in context_keys:
             current.timestamp = _parse_yaml_scalar(value)
+            continue
+        if key == "duration_seconds" and "scenes" in context_keys:
+            raw_dur = (_parse_yaml_scalar(value) or "").strip()
+            if raw_dur:
+                try:
+                    current.duration_seconds = int(raw_dur)
+                except ValueError:
+                    current.duration_seconds = None
             continue
 
         # image generation
@@ -411,6 +421,13 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 current.video_first_frame = _parse_yaml_scalar(value)
             elif key == "last_frame":
                 current.video_last_frame = _parse_yaml_scalar(value)
+            elif key == "duration_seconds":
+                raw_dur = (_parse_yaml_scalar(value) or "").strip()
+                if raw_dur:
+                    try:
+                        current.duration_seconds = int(raw_dur)
+                    except ValueError:
+                        current.duration_seconds = None
             elif key == "motion_prompt":
                 current.video_motion_prompt = value if "\n" in value else (_parse_yaml_scalar(value) or value)
             elif key == "output":
@@ -468,6 +485,13 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             continue
 
         timestamp = _as_opt_str(raw_scene.get("timestamp"))
+        scene_duration_seconds: int | None = None
+        duration_raw = raw_scene.get("duration_seconds")
+        if duration_raw is not None:
+            try:
+                scene_duration_seconds = int(duration_raw)
+            except Exception:
+                scene_duration_seconds = None
 
         raw_cuts = raw_scene.get("cuts")
         if isinstance(raw_cuts, list) and raw_cuts:
@@ -485,6 +509,18 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
                 ig = raw_cut.get("image_generation") if isinstance(raw_cut.get("image_generation"), dict) else {}
                 vg = raw_cut.get("video_generation") if isinstance(raw_cut.get("video_generation"), dict) else {}
+                cut_duration_seconds: int | None = None
+                cut_duration_raw = raw_cut.get("duration_seconds")
+                if cut_duration_raw is not None:
+                    try:
+                        cut_duration_seconds = int(cut_duration_raw)
+                    except Exception:
+                        cut_duration_seconds = None
+                if cut_duration_seconds is None and isinstance(vg, dict) and ("duration_seconds" in vg):
+                    try:
+                        cut_duration_seconds = int(vg.get("duration_seconds"))
+                    except Exception:
+                        cut_duration_seconds = None
 
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
@@ -531,6 +567,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                     SceneSpec(
                         scene_id=cut_scene_id,
                         timestamp=timestamp,
+                        duration_seconds=cut_duration_seconds if cut_duration_seconds is not None else scene_duration_seconds,
                         image_tool=image_tool,
                         image_prompt=image_prompt,
                         image_output=image_output,
@@ -557,6 +594,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
         ig = raw_scene.get("image_generation") if isinstance(raw_scene.get("image_generation"), dict) else {}
         vg = raw_scene.get("video_generation") if isinstance(raw_scene.get("video_generation"), dict) else {}
+        if scene_duration_seconds is None and isinstance(vg, dict) and ("duration_seconds" in vg):
+            try:
+                scene_duration_seconds = int(vg.get("duration_seconds"))
+            except Exception:
+                scene_duration_seconds = None
 
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
@@ -604,6 +646,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             SceneSpec(
                 scene_id=scene_id,
                 timestamp=timestamp,
+                duration_seconds=scene_duration_seconds,
                 image_tool=image_tool,
                 image_prompt=image_prompt,
                 image_output=image_output,
@@ -1775,7 +1818,7 @@ def main() -> None:
     # Gemini Image
     parser.add_argument("--gemini-api-base", default=_env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"))
     parser.add_argument("--gemini-api-key", default=_env("GEMINI_API_KEY"))
-    parser.add_argument("--gemini-image-model", default=_env("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview"))
+    parser.add_argument("--gemini-image-model", default=_env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image-preview"))
     parser.add_argument("--image-size", default="2K")
     parser.add_argument("--image-aspect-ratio", default=None)
     parser.add_argument("--image-prompt-prefix", default="", help="Optional text prepended to every image prompt.")
@@ -1912,6 +1955,21 @@ def main() -> None:
     parser.add_argument("--evolink-api-key", default=_env("EVOLINK_API_KEY"), help="EvoLink API key (optional).")
     parser.add_argument("--evolink-api-base", default=_env("EVOLINK_API_BASE", "https://api.evolink.ai"))
     parser.add_argument("--evolink-files-api-base", default=_env("EVOLINK_FILES_API_BASE", "https://files-api.evolink.ai"))
+    parser.add_argument(
+        "--evolink-video-submit-path",
+        default=_env("EVOLINK_VIDEO_SUBMIT_PATH", "/v1/videos/generations"),
+        help='Override submit path (useful when EVOLINK_API_BASE already includes "/v1").',
+    )
+    parser.add_argument(
+        "--evolink-task-status-path-template",
+        default=_env("EVOLINK_TASK_STATUS_PATH_TEMPLATE", "/v1/tasks/{task_id}"),
+        help='Override task status path template (useful when EVOLINK_API_BASE already includes "/v1").',
+    )
+    parser.add_argument(
+        "--evolink-file-upload-base64-path",
+        default=_env("EVOLINK_FILE_UPLOAD_BASE64_PATH", "/api/v1/files/upload/base64"),
+        help='Override file upload path for images (default: "/api/v1/files/upload/base64").',
+    )
     parser.add_argument("--evolink-kling-v3-i2v-model", default=_env("EVOLINK_KLING_V3_I2V_MODEL", "kling-v3-image-to-video"))
     parser.add_argument("--evolink-kling-v3-t2v-model", default=_env("EVOLINK_KLING_V3_T2V_MODEL", "kling-v3-text-to-video"))
     parser.add_argument("--evolink-kling-o3-i2v-model", default=_env("EVOLINK_KLING_O3_I2V_MODEL", "kling-v3-image-to-video"))
@@ -2160,6 +2218,9 @@ def main() -> None:
                 api_key=args.evolink_api_key,
                 api_base=args.evolink_api_base,
                 files_api_base=args.evolink_files_api_base,
+                video_submit_path=args.evolink_video_submit_path,
+                task_status_path_template=args.evolink_task_status_path_template,
+                file_upload_base64_path=args.evolink_file_upload_base64_path,
             )
         )
 
@@ -2489,7 +2550,7 @@ def main() -> None:
         if not out_path:
             raise SystemExit(f"scene{scene.scene_id}: missing video output path")
 
-        dur = duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+        dur = int(scene.duration_seconds) if scene.duration_seconds is not None else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
 
         input_image = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
         if input_image is None and scene.image_output:
@@ -2729,7 +2790,7 @@ def main() -> None:
         if args.skip_audio or not scene.narration_output:
             continue
 
-        dur = duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+        dur = int(scene.duration_seconds) if scene.duration_seconds is not None else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
         out_path = resolve_path(base_dir, scene.narration_output)
         if not out_path:
             raise SystemExit(f"scene{scene.scene_id}: missing narration output path")

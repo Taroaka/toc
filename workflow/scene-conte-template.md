@@ -53,9 +53,16 @@
 
 各カットは以下の情報を埋める（画像コンテの要点を優先）:
 
+推奨ルール:
+- 1カット = 1ナレーション
+- メインカット（最低1つ）: 5–15 秒（ナレーション実秒）
+- サブカット（任意 / 複数可）: 3–15 秒（ナレーション実秒）
+- 15秒以下でも、scene と narration を書き終えた時点で分割の要否を都度判断する
+
 ### Cut `<scene_id>_1`
 
 - cut_purpose: `<このカットで観客に与える情報>`
+- narration_text: `<このカットのナレーション（メイン=5–15秒 / サブ=3–15秒）>`
 - shot_type: `<WS/MS/CU/POV/etc>`
 - composition: `<前景/中景/背景 + 画面アンカー + 視線誘導>`
 - camera: `<高さ/レンズ感/手ブレ/移動（前進/パン/ドリー）>`
@@ -88,4 +95,3 @@
 - 各cutに `character_ids: []` と `object_ids: []` が明示されている
 - cut画像の `output` は `assets/scenes/scene<scene_id>_<cut>.png` に揃っている
 - 各I2V clip の `first_frame/last_frame/output` が隣接cut同士になっている
-

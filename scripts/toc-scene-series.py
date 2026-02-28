@@ -327,6 +327,7 @@ def render_scene_manifest_md(
     target_seconds: int,
     main_text: str,
     question: str,
+    video_tool: str,
 ) -> str:
     created_at = now_iso()
     ts_end = format_mmss(target_seconds)
@@ -343,7 +344,73 @@ def render_scene_manifest_md(
     )
 
     motion_prompt = "TODO: minimal camera movement; keep it readable for overlays."
-    narration_text = f"TODO: Answer '{question}' with evidence (30–60s)."
+
+    # Cut planning (DRAFT):
+    # - 1 cut = 1 narration
+    # - main cut (at least 1): 5–15 seconds (based on actual narration audio duration)
+    # - sub cuts (optional): 3–15 seconds (short 3–4s cuts are sub-only; not for single-cut narration)
+    # - If narration would exceed 15s, split into multiple cuts
+    # - Even if <= 15s, decide whether to split after both scene + narration are drafted
+
+    def plan_cut_durations(total_seconds: int) -> list[tuple[str, int]]:
+        max_seconds = 15
+        min_main = 5
+        min_sub = 3
+
+        total = max(0, int(total_seconds))
+        if total <= 0:
+            return [("main", max_seconds)]
+
+        if total <= max_seconds:
+            return [("main", max(min_main, total))]
+
+        # Minimum number of cuts to keep each <= 15s.
+        cut_count = (total + max_seconds - 1) // max_seconds
+
+        # Make at least one main cut.
+        # Start with an even split, then enforce minima.
+        base = total // cut_count
+        rem = total % cut_count
+        durs = [(base + (1 if i < rem else 0)) for i in range(cut_count)]
+
+        # Ensure a main cut >= 5s (pick the longest).
+        main_idx = max(range(len(durs)), key=lambda i: durs[i])
+        if durs[main_idx] < min_main:
+            needed = min_main - durs[main_idx]
+            durs[main_idx] += needed
+            for i in range(len(durs)):
+                if i == main_idx:
+                    continue
+                take = min(needed, max(0, durs[i] - min_sub))
+                durs[i] -= take
+                needed -= take
+                if needed <= 0:
+                    break
+
+        # Ensure sub cuts >= 3s (best-effort). If violated, collapse into fewer cuts.
+        if any(i != main_idx and d < min_sub for i, d in enumerate(durs)):
+            # Fallback: use the minimal feasible cut count given min_sub and max_seconds.
+            # We guarantee <= 15 by construction; we just reduce count until all subs >= 3.
+            for count in range(max(2, cut_count - 1), 1, -1):
+                base2 = total // count
+                rem2 = total % count
+                durs2 = [(base2 + (1 if i < rem2 else 0)) for i in range(count)]
+                main2 = max(range(len(durs2)), key=lambda i: durs2[i])
+                if durs2[main2] < min_main:
+                    continue
+                if all(i == main2 or d >= min_sub for i, d in enumerate(durs2)):
+                    durs = durs2
+                    main_idx = main2
+                    break
+
+        plan: list[tuple[str, int]] = []
+        for i, d in enumerate(durs):
+            role = "main" if i == main_idx else "sub"
+            plan.append((role, max(1, int(d))))
+        return plan
+
+    cut_plan = plan_cut_durations(target_seconds)
+    cut_count = len(cut_plan)
 
     lines = [
         "# Scene Video Manifest Output (DRAFT)",
@@ -366,29 +433,37 @@ def render_scene_manifest_md(
         "scenes:",
         f"  - scene_id: {scene_id}",
         f'    timestamp: "{timestamp_range}"',
-        "    image_generation:",
-        '      tool: "google_nanobanana_pro"',
-        "      prompt: |",
+        "    cuts:",
     ]
-    lines += ["        " + ln for ln in image_prompt.rstrip().splitlines()]
+    for idx, (role, dur) in enumerate(cut_plan, start=1):
+        cut_narration_text = f"TODO: Part {idx}/{cut_count} for '{question}' (role={role}, main=5-15s, sub=3-15s)."
+        lines += [
+            f"      - cut_id: {idx}",
+            f'        cut_role: "{role}"',
+            "        image_generation:",
+            '          tool: "google_nanobanana_pro"',
+            "          prompt: |",
+        ]
+        lines += ["            " + ln for ln in image_prompt.rstrip().splitlines()]
+        lines += [
+            f'          output: "assets/scenes/scene{scene_id}_cut{idx}_base.png"',
+            "          iterations: 4",
+            "          selected: null",
+            "        video_generation:",
+            f'          tool: "{video_tool}"',
+            f"          duration_seconds: {dur}",
+            f'          input_image: "assets/scenes/scene{scene_id}_cut{idx}_base.png"',
+            f'          motion_prompt: "{motion_prompt}"',
+            f'          output: "assets/scenes/scene{scene_id}_cut{idx}_video.mp4"',
+            "        audio:",
+            "          narration:",
+            f'            text: "{cut_narration_text}"',
+            '            tool: "elevenlabs"',
+            f'            output: "assets/audio/scene{scene_id}_cut{idx}_narration.mp3"',
+            "            normalize_to_scene_duration: false",
+        ]
+
     lines += [
-        f'      output: "assets/scenes/scene{scene_id}_base.png"',
-        "      iterations: 4",
-        "      selected: null",
-        "    video_generation:",
-        f'      tool: "{video_tool}"',
-        f'      input_image: "assets/scenes/scene{scene_id}_base.png"',
-        f'      motion_prompt: "{motion_prompt}"',
-        f'      output: "assets/scenes/scene{scene_id}_video.mp4"',
-        "    audio:",
-        "      narration:",
-        f'        text: "{narration_text}"',
-        '        tool: "elevenlabs"',
-        f'        output: "assets/audio/scene{scene_id}_narration.mp3"',
-        "      bgm:",
-        "        source: null",
-        "        volume: 0.0",
-        "      sfx: []",
         "    text_overlay:",
         f'      main_text: "{main_text}"',
         f'      sub_text: "{question}"',
@@ -541,6 +616,7 @@ def main() -> None:
                 target_seconds=default_target_seconds,
                 main_text=main_text,
                 question=question,
+                video_tool=video_tool,
             ),
             force=args.force,
         )

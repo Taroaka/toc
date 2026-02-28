@@ -47,10 +47,10 @@ scene folder（1本の縦動画）:
 
 - 雛形生成ヘルパ: `scripts/toc-scene-series.py`
   - `--placeholder-e2e` でプレースホルダ素材→結合まで実行可能
+- カット設計: `video_manifest.md` は `scenes[].cuts[]` を使い、**1カット=1ナレーション**（メイン=5–15秒、サブ=3–15秒）を基本にする
 
 ## 参照
 
 - `.claude/commands/toc/toc-scene-series.md`
 - `docs/how-to-run.md`
 - `docs/implementation/video-integration.md`
-

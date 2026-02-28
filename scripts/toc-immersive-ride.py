@@ -63,8 +63,8 @@ def main() -> None:
     parser.add_argument(
         "--experience",
         choices=sorted(EXPERIENCE_TEMPLATES.keys()),
-        default="ride_action_boat",
-        help="Experience template to scaffold (default: ride_action_boat).",
+        default="cloud_island_walk",
+        help="Experience template to scaffold (default: cloud_island_walk).",
     )
     parser.add_argument(
         "--video-tool",

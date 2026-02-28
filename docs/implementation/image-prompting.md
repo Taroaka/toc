@@ -1,10 +1,10 @@
-# Image Prompting（Nano Banana Pro / cross-model）: 正本
+# Image Prompting（Gemini Image / cross-model）: 正本
 
 このドキュメントは **画像生成プロンプト品質**をシステムの根幹として扱い、
 `video_manifest.md` の `scenes[].image_generation.prompt` を「全体 → 個別」の順で安定して組み立てるための正本。
 
 対象:
-- `/toc-immersive-ride` の `video_manifest.md`（特に Nano Banana Pro）
+- `/toc-immersive-ride` の `video_manifest.md`（特に Gemini Image）
 - scene-series / 通常 run の `video_manifest.md`（静止画生成）
 
 除外:
@@ -59,13 +59,13 @@
 画像生成は「何が重要か」の優先順位に迷うと破綻しやすい。
 優先したい要素は **画面内の位置**まで書く:
 
-- “hands and brass safety bar in the lower foreground”
-- “track centered with central rail visible”
-- “story character in the mid-ground”
+- “a clear foreground anchor in the lower foreground (e.g., hands+bar for an immersive ride, or a prop like a compass)”
+- “leading lines centered (path / track / rail)”
+- “main subject in the mid-ground”
 
 （日本語で書くなら例）
-- 「画面下の前景に手と安全バー」
-- 「中央にレールが見える軌道を中央構図」
+- 「画面下の前景に“アンカー”（手元/小道具など）」
+- 「導線（道/軌道/レール）を中央構図」
 - 「登場人物は中景」
 
 ### 1.4 ネガティブは「禁止カテゴリ + 事故りやすい欠陥」を短く
@@ -137,7 +137,9 @@ aspect ratio / size は `image_generation.aspect_ratio` / `image_generation.imag
 
 ---
 
-## 3) /toc-immersive-ride 用の必須 invariants（推奨セット）
+## 3) /toc-immersive-ride（ride_action_boat）向け invariants（推奨セット）
+
+注意: これは `/toc-immersive-ride --experience ride_action_boat` 用の固定条件。通常の run / scene-series では前提にしない（必要なら個別に指定する）。
 
 `全体 / 不変条件` に毎回入れる（または将来的に assets から自動注入する）:
 

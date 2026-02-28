@@ -23,6 +23,7 @@ from typing import Iterable
 class SceneAssetSpec:
     scene_id: int
     timestamp: str | None
+    duration_seconds: int | None
     image_output: str | None
     video_output: str | None
     narration_output: str | None
@@ -68,6 +69,10 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[tuple[int, int], list[SceneAsse
     resolution = (1080, 1920)
     scenes: list[SceneAssetSpec] = []
     current: SceneAssetSpec | None = None
+    current_scene_id: int | None = None
+    current_scene_timestamp: str | None = None
+    current_scene_duration_seconds: int | None = None
+    in_cut = False
     stack: list[tuple[int, str]] = []
 
     def push(indent: int, key: str) -> None:
@@ -75,6 +80,14 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[tuple[int, int], list[SceneAsse
         while stack and indent <= stack[-1][0]:
             stack.pop()
         stack.append((indent, key))
+
+    def flush_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        if current.image_output or current.video_output or current.narration_output:
+            scenes.append(current)
+        current = None
 
     for raw in yaml_text.splitlines():
         line = raw.rstrip("\n")
@@ -108,16 +121,39 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[tuple[int, int], list[SceneAsse
                     pass
             continue
 
-        if key == "scene_id" and "scenes" in context_keys:
-            if current:
-                scenes.append(current)
+        if key == "scene_id" and "scenes" in context_keys and "cuts" not in context_keys:
+            flush_current()
             try:
                 scene_id = int(value)
             except ValueError:
                 scene_id = len(scenes) + 1
+            current_scene_id = scene_id
+            current_scene_timestamp = None
+            current_scene_duration_seconds = None
+            in_cut = False
             current = SceneAssetSpec(
                 scene_id=scene_id,
                 timestamp=None,
+                duration_seconds=None,
+                image_output=None,
+                video_output=None,
+                narration_output=None,
+            )
+            continue
+
+        if key == "cut_id" and "cuts" in context_keys:
+            flush_current()
+            if current_scene_id is None:
+                continue
+            try:
+                cut_id = int(value)
+            except ValueError:
+                cut_id = 1
+            in_cut = True
+            current = SceneAssetSpec(
+                scene_id=int(current_scene_id) * 100 + int(cut_id),
+                timestamp=current_scene_timestamp,
+                duration_seconds=current_scene_duration_seconds,
                 image_output=None,
                 video_output=None,
                 narration_output=None,
@@ -128,7 +164,27 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[tuple[int, int], list[SceneAsse
             continue
 
         if key == "timestamp" and "scenes" in context_keys and value:
-            current.timestamp = value.strip('"').strip("'")
+            ts = value.strip('"').strip("'")
+            current.timestamp = ts
+            if not in_cut:
+                current_scene_timestamp = ts
+            continue
+
+        if key == "duration_seconds" and "scenes" in context_keys and value:
+            try:
+                dur = int(value.strip('"').strip("'"))
+            except ValueError:
+                dur = None
+            current.duration_seconds = dur
+            if not in_cut:
+                current_scene_duration_seconds = dur
+            continue
+
+        if key == "duration_seconds" and "video_generation" in context_keys and value:
+            try:
+                current.duration_seconds = int(value.strip('"').strip("'"))
+            except ValueError:
+                pass
             continue
 
         if key == "output" and value:
@@ -140,8 +196,7 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[tuple[int, int], list[SceneAsse
             elif "narration" in context_keys:
                 current.narration_output = out_path
 
-    if current:
-        scenes.append(current)
+    flush_current()
 
     return resolution, scenes
 
@@ -262,7 +317,11 @@ def main() -> None:
         raise SystemExit("No scenes found in manifest YAML.")
 
     for scene in scenes:
-        dur = duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+        dur = (
+            int(scene.duration_seconds)
+            if scene.duration_seconds is not None
+            else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+        )
         color = color_for_scene(scene.scene_id)
 
         for path in iter_paths(base_dir, scene.image_output):
@@ -279,4 +338,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
