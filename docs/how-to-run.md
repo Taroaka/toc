@@ -113,6 +113,7 @@ output/<topic>_<timestamp>/
 - TTS: ElevenLabs
 - 当面は `video_manifest.md` を入力に素材生成→結合でフローを検証する
 - 具体は `docs/implementation/video-integration.md` を参照
+- 画像生成は `video_manifest.md` 直読みではなく、`export-image-prompt-collection.py` で prompt collection を切り出してレビューしてから回す
 
 例（`momotaro` のマニフェストから素材生成→結合）:
 

@@ -9,7 +9,7 @@
 
 ## Steps
 1. 共通リファレンス（キャラ/手/バー/乗り物）を固定する
-2. `video_manifest.md` から prompt collection を書き出してレビューする
+2. `video_manifest.md` から prompt collection を書き出し、anchor/reference が固定されているかをレビューする
 3. scene定義（scene outline / asset brief）に沿って `sceneN.png` を一括生成する
 4. 一貫性チェック（手・バー・視点・舞台連続性）を実施する
 
@@ -23,7 +23,12 @@ python scripts/export-image-prompt-collection.py \
 ## Prompt assembly (recommended)
 image prompt は `scene_outline` の情報を「削らず」使う。未知トピックでの幻覚を避けるため、勝手に新情報を足さない。
 
+補足:
+- camera の記述は数値だけで終わらせず、`広め / 中広角 / 寄り` と `前景 / 中景 / 背景` を併記し、その shot で何を読ませるかを明示する。
+- 生成前の正しい順番は、構造化 → anchor 決定 → reference 固定 → prompt 集レビュー → 生成。
+
 Prompt の“型”（見出し/順序固定）は正本 `docs/implementation/image-prompting.md` を参照。
+ここで重要なのは、**うまい一文を作ることではなく、構造化された prompt collection を anchor/reference 固定でレビューすること**。
 
 1) Global（毎回入れる）
 - `global_constraints.pov/style/must_include/must_avoid`
