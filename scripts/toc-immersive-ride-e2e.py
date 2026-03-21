@@ -25,12 +25,12 @@ from pathlib import Path
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.env import load_env_files  # noqa: E402
+from toc.immersive_manifest import DEFAULT_IMMERSIVE_STORY_SCENE_STEP  # noqa: E402
 from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID  # noqa: E402
 
 
@@ -127,7 +127,9 @@ def build_manifest_from_script(
     manifest["scenes"].append(
         {
             "scene_id": 0,
+            "reference_id": "protagonist_front_ref",
             "timestamp": "00:00-00:08",
+            "kind": "character_reference",
             "image_generation": {
                 "tool": "google_nanobanana_pro",
                 "prompt": (
@@ -146,7 +148,7 @@ def build_manifest_from_script(
 
     # scene images + transitions
     for idx, s in enumerate(selected, start=1):
-        scene_id = idx * 10
+        scene_id = idx * DEFAULT_IMMERSIVE_STORY_SCENE_STEP
         visual = s.get("visual") or {}
         loc = (visual.get("location") or {}) if isinstance(visual, dict) else {}
 
@@ -198,7 +200,7 @@ def build_manifest_from_script(
 
         # transitions (idx -> idx+1)
         if idx < len(selected):
-            next_scene_id = (idx + 1) * 10
+            next_scene_id = (idx + 1) * DEFAULT_IMMERSIVE_STORY_SCENE_STEP
             item["video_generation"] = {
                 "tool": video_tool,
                 "duration_seconds": 8,

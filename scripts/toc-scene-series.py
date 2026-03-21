@@ -494,7 +494,9 @@ def render_scene_manifest_md(
             "        image_generation:",
             '          tool: "google_nanobanana_pro"',
             "          character_ids: []",
+            "          character_variant_ids: []",
             "          object_ids: []",
+            "          object_variant_ids: []",
             "          prompt: |",
         ]
         lines += ["            " + ln for ln in image_prompt.rstrip().splitlines()]

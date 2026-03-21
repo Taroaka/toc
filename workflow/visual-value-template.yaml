@@ -1,0 +1,53 @@
+visual_value_metadata:
+  topic: "<topic>"
+  source_research: "output/<topic>_<timestamp>/research.md"
+  source_story: "output/<topic>_<timestamp>/story.md"
+  created_at: "<ISO8601>"
+  purpose: "物語本筋では語り切られないが、動画生成AIで実写風に見せると視聴価値が高い中盤パートを定義する"
+
+value_parts:
+  - part_id: "midroll_visual_payoff_01"
+    title: "例: 竜宮城の中身を探索する"
+    placement_window:
+      start_percent: 20
+      end_percent: 80
+      preferred_percent: 50
+      rationale: "最序盤や最終盤ではなく、中盤の視覚報酬として置く"
+    why_this_matters:
+      - "読者は名前を知っているが、細部を見たことがない要素を報酬化する"
+      - "高価な実物セットなしでは難しい壮大さを、生成AI前提で視覚化する"
+    ai_visualization_advantage:
+      no_physical_set_required: true
+      spectacle_scale: "巨大建築 / 異界 / 群体 / 発光 / 流体 / 変形"
+      notes: "文字説明ではなく、形・光・動き・機構で価値を伝える。Ryugu 系では乙姫をすぐ見せず、探索と発見を先に置く"
+    related_objects:
+      - "tbd_object_id"
+    cut_plan:
+      - cut_id: 1
+        duration_seconds: 4
+        narration: ""
+        focus: "主役となる場所 / 物 / 現象"
+        description: "何が見えるかを1-2文で具体的に"
+        viewer_payoff: "このカットで何を感じさせるか"
+      - cut_id: 2
+        duration_seconds: 4
+        narration: ""
+        focus: "主役となる場所 / 物 / 現象"
+        description: "何が見えるかを1-2文で具体的に"
+        viewer_payoff: "このカットで何を感じさせるか"
+      - cut_id: 3
+        duration_seconds: 4
+        narration: ""
+        focus: "主役となる場所 / 物 / 現象"
+        description: "何が見えるかを1-2文で具体的に"
+        viewer_payoff: "このカットで何を感じさせるか"
+      - cut_id: 4
+        duration_seconds: 4
+        narration: ""
+        focus: "主役となる場所 / 物 / 現象"
+        description: "何が見えるかを1-2文で具体的に"
+        viewer_payoff: "このカットで何を感じさせるか"
+    notes:
+      - "1価値パートあたり 4-6カットを基本にする"
+      - "ナレーションは入れず、映像だけで満足感を作る"
+      - "Ryugu 系は、門→回廊→中庭→大広間→入口の順で探索を積み、乙姫は最後まで温存する"

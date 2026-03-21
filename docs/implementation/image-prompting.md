@@ -2,6 +2,9 @@
 
 このドキュメントは **画像生成プロンプト品質**をシステムの根幹として扱い、
 `video_manifest.md` の `scenes[].image_generation.prompt` を「全体 → 個別」の順で安定して組み立てるための正本。
+ただし、**全scene/cutに新規の生成静止画が必要とは限らない**。新規生成は、同じ場所/物体/人物状態の continuity anchor を初めて作るとき、または複数scene/cutで再利用する参照画像が必要なときに優先する。
+
+画像生成の既定順は、**対象選定 → prompt collection 作成 → 人間レビュー → 画像生成** とする。`video_manifest.md` を直接見て生成に入るのではなく、まず review 用の prompt 集を切り出して確認する。
 
 対象:
 - `/toc-immersive-ride` の `video_manifest.md`（特に Gemini Image）
@@ -16,6 +19,12 @@
 ## 結論（最短の型）
 
 **prompt は 1本の自由文にせず、毎回同じ見出し順で書く。**
+
+加えて運用順は次の通り。
+
+1. `still_image_plan` で新規生成対象を確定する
+2. `python scripts/export-image-prompt-collection.py --manifest output/<run>/video_manifest.md` で prompt 集を出す
+3. prompt 集をレビューしてから、初めて画像生成を回す
 
 ## 言語ポリシー（重要）
 
@@ -34,7 +43,7 @@
 6) `禁止`（禁止/地雷）
 
 この repo の生成は、最終的に `scenes[].image_generation.prompt` のテキストをそのまま API に渡すため、
-**「どこに何を書くか」自体をテンプレ化**すると品質が安定する。
+**「どこに何を書くか」自体をテンプレ化**すると品質が安定する。新規の静止画は、anchor を作る scene/cut に集中させる。
 
 ---
 
@@ -51,8 +60,9 @@
 ### 1.2 一貫性は「固定フレーズ + 参照画像」で作る
 
 人物/小物/手元が重要なら:
-- **参照画像**（character / hands / props）を用意し、毎sceneで `references` に入れる
+- **参照画像**（character / hands / props）を用意し、必要なscene/cutで `references` に入れる
 - さらに **同じ語で**特徴を繰り返す（言い換え禁止）
+- 参照画像は、毎回新規に作るのではなく、同じ場所/物体/人物状態をまたぐ複数scene/cutの共通アンカーとして再利用する
 
 ### 1.3 “構図のアンカー”を明示する
 
@@ -177,6 +187,10 @@ aspect ratio / size は `image_generation.aspect_ratio` / `image_generation.imag
 
 B-roll（キャラを映さない）sceneは `character_ids: []` を明示し、キャラ注入ゼロにする。
 
+- `character_reference` scene は reference-only として扱い、**全身（頭からつま先まで）** だけを撮る
+- 顔寄り、上半身のみ、途中クロップの基準画像は作らない
+- 参照用の識別子は人間が読める安定名にする（例: `protagonist_front_ref`, `protagonist_side_ref`, `protagonist_back_ref`）
+
 ### Human character baseline（推奨）
 
 人間キャラは、物語上の特段の理由がない限り「美男美女（映画俳優レベル）」を初期値にする。
@@ -202,6 +216,48 @@ B-roll（キャラを映さない）sceneは `character_ids: []` を明示し、
 ポイント:
 - 画面内の文字で説明しない（看板/刻印/銘板などは禁止）。**形/光/動き/ショー性**で理解させる。
 - “物語に直接関係しない”ショー/仕掛けでも、映像の魅力と世界の深みを作る（spectacle）。
+
+### 3.4 Ryugu exploratory block（Otohime 登場前の視覚報酬）
+
+`Ryugu Palace` の内部を見せる場面では、乙姫をすぐに登場させず、まず **4-6 cuts / 1 cut = 約4秒** の探索ブロックとして設計してよい。
+
+このブロックの目的は次の通り。
+
+- 竜宮城を「説明」ではなく「発見」で見せる
+- 実写の見せ物として、建築・機構・光・群泳を先に印象づける
+- 乙姫の登場を遅らせ、次のドラマの入口を強くする
+
+推奨ルール:
+
+- `character_ids: []` を基本にし、乙姫は出さない
+- `object_ids: ["ryugu_palace"]` を使い、舞台装置を固定する
+- 各 cut は `4` 秒前後、ナレーションなし
+- 最後の cut は「乙姫が現れる直前の門/回廊/玉座の間の入口」で止める
+
+Ryugu 探索ブロックの prompt には、以下の順で書くと安定しやすい。
+
+1. `[全体 / 不変条件]` に実写・シネマ・プラクティカルを明記する
+2. `[小道具 / 舞台装置]` に `ryugu_palace` の固定フレーズを入れる
+3. `[シーン]` で gate / corridor / atrium / spectacle / threshold を cut ごとに変える
+4. `[連続性]` で「前の cut の導線」と「次の cut の発見」を接続する
+5. `[禁止]` に文字要素とアニメ調を再掲する
+
+例:
+
+```text
+[全体 / 不変条件]
+実写、シネマティック、プラクティカルエフェクト。自然な映画照明。
+画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+
+[小道具 / 舞台装置]
+Ryugu Palace is built from living coral, mother-of-pearl, and lacquered bronze ribs; wet sheen; realistic scale.
+Interior features suspended bubble-lanterns and bioluminescent coral chandeliers; no text signage.
+Showmanship: distant atrium, swirling fish schools, controlled currents.
+
+[シーン]
+珊瑚門が開く。回廊が深く伸びる。建築そのものが生き物のように呼吸する。
+最後の cut は、乙姫が現れる直前の入口で止める。
+```
 
 例:
 
@@ -229,12 +285,13 @@ scenes:
 
 ## 4) 具体例（immersive ride）
 
-### 4.1 Character turnaround 基準画像（scene_id: 0）
+### 4.1 Character turnaround 基準画像（scene_id: 0, full-body only）
 
 この repo では、キャラクター参照画像を「前/横/後ろ」の3枚で作り、さらに3枚を横並び結合した1枚（動画生成側の参照）も作る運用を推奨する。
 `scripts/generate-assets-from-manifest.py` の `--character-reference-views front,side,back --character-reference-strip` で自動生成できる。
 
 また、後から中間sceneを差し込めるように `scene_id` は **10刻み**（例: 10,20,30...）で運用するのがおすすめ（後段は scene_id の連番を前提にしない）。
+`scene_id: 0` は character_reference 専用に分け、story scene の spacing と混ぜない。
 
 ```text
 [GLOBAL / INVARIANTS]

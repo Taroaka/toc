@@ -40,6 +40,12 @@ assets:
   #   kind: "setpiece"
   #   reference_images:
   #     - "assets/objects/tbd_metaphor_gate.png"
+  #   reference_variants:
+  #     - variant_id: "tbd_metaphor_gate_activated"
+  #       reference_images:
+  #         - "assets/objects/tbd_metaphor_gate_activated.png"
+  #       fixed_prompts:
+  #         - "発光や開口など、状態差分だけを追加"
   #   fixed_prompts:
   #     - "実写的な材質/構造（SFのHUDは禁止、文字看板は禁止）"
   #     - "形/光/動きで比喩が読める（ラベルで説明しない）"
@@ -72,7 +78,9 @@ scenes:
     image_generation:
       tool: "google_nanobanana_pro"
       character_ids: []
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         一人称POVで前進しながら歩く。水平線は安定、カメラ高さ一定、自然な歩行。
@@ -122,7 +130,9 @@ scenes:
     image_generation:
       tool: "google_nanobanana_pro"
       character_ids: []
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         一人称POVで前進しながら歩く。水平線は安定、カメラ高さ一定、自然な歩行。
@@ -165,7 +175,9 @@ scenes:
     image_generation:
       tool: "google_nanobanana_pro"
       character_ids: []
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         一人称POVで前進しながら歩く。水平線は安定、カメラ高さ一定、自然な歩行。

@@ -52,11 +52,12 @@ ToC（TikTok Story Creator）で「没入型（実写シネマティック体験
 - `state.txt`（追記型）
 - `research.md`
 - `story.md`
+- `visual_value.md`
 - `script.md`
 - `video_manifest.md`
 - `assets/**`
 - `video.mp4`（完成動画。1280x720 / 24fps）
-- 成果物（`research.md` / `story.md` / `script.md` / `video_manifest.md` / `scene_conte.md` 等）の本文は **日本語**で記述する（ユーザーが直接修正する前提）
+- 成果物（`research.md` / `story.md` / `visual_value.md` / `script.md` / `video_manifest.md` / `scene_conte.md` 等）の本文は **日本語**で記述する（ユーザーが直接修正する前提）
 
 ## 実行フロー（内部の意図）
 
@@ -64,6 +65,7 @@ ToC（TikTok Story Creator）で「没入型（実写シネマティック体験
 topic
   → Deep Research（deep-researcher）
   → Story（director）
+  → Visual Value（visual-value-ideator）
   → Script + Manifest（immersive-scriptwriter）
   → Generate assets（API）
   → Render final video（ffmpeg）
@@ -72,6 +74,8 @@ topic
 ## 方針メモ（創造と選択 / 混成承認）
 
 - Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story でスコアが高い案を **選択**する
+- Story の後に `visual_value.md` を作り、動画生成AIで最も価値が出る中盤パートを抽出してから Script へ渡す
+- 価値パートは原則として `20% - 80%` に置き、`4-6` カット、各 `4` 秒、ナレーションなしを基本にする
 - Hero's Journey への当てはめは必須ではない（フレームワークは道具）
 - 複数ソースの矛盾を、同一シーン/設定として **混成（ハイブリッド）**しない（破綻しやすい）
   - どうしても混成がスコアに効く場合は、確定前にユーザー承認を取る（衝突点・混ぜたい要素・リスクと安全策を提示して Yes/No）
@@ -103,12 +107,15 @@ $ARGUMENTS:
 4) Story（エージェント: `director`）
    - 入力: `research.md`
    - 出力: `story.md`
-5) Script + Manifest（エージェント: `immersive-scriptwriter`）
-   - 入力: `story.md`（必要なら `research.md` も参照）
+5) Visual Value（エージェント: `visual-value-ideator`）
+   - 入力: `research.md` + `story.md`
+   - 出力: `visual_value.md`
+6) Script + Manifest（エージェント: `immersive-scriptwriter`）
+   - 入力: `story.md` + `visual_value.md`（必要なら `research.md` も参照）
    - 出力: `script.md` と `video_manifest.md`
-6) `--stage video` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
+7) `--stage video` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
    - `scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>`
-7) `state.txt` に最終状態（`runtime.stage=done` と成果物パス）を追記する
+8) `state.txt` に最終状態（`runtime.stage=done` と成果物パス）を追記する
    - `runtime.render.status=started|success|failed`
    - `artifact.video=output/<topic>_<timestamp>/video.mp4`
    - `review.video.status=pending`（人間が最終判定で `approved` を付ける）
@@ -130,6 +137,7 @@ scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>
 メモ:
 - 生成のシームレス性を上げるため、`last_frame` 制約 + chaining（前動画終盤フレームを次の first frame に使用）+ ネガティブプロンプトを併用する
 - 音声（ナレーション）はデフォルト必須。意図的にサイレントで進める場合は `scripts/generate-assets-from-manifest.py --skip-audio` を使う（その場合はサイレント動画として書き出す）
+- ただし `visual_value.md` に基づく silent cut は例外で、`audio.narration.tool: "silent"` と `text: ""` を使って部分的に無音へできる
 - 後から中間scene（例: 35）を差し込めるように、`scene_id` は **10刻み**（例: 10,20,30...）を推奨（後段はmanifest順を正とする）
 - コスト/反復のため、画像は `--image-batch-size 10 --image-batch-index 1` のように **10枚ずつ**生成して進められる
 

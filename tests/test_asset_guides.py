@@ -172,6 +172,93 @@ scenes:
             )
         self.assertIn("missing image_generation.character_ids", str(ctx.exception))
 
+    def test_apply_asset_guides_uses_selected_character_variant_refs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      reference_images: ["assets/characters/hero_default.png"]
+      fixed_prompts: ["hero base"]
+      reference_variants:
+        - variant_id: "hero_day"
+          reference_images:
+            - "assets/characters/hero_day_front.png"
+            - "assets/characters/hero_day_side.png"
+          fixed_prompts:
+            - "day costume"
+        - variant_id: "hero_night"
+          reference_images: ["assets/characters/hero_night_front.png"]
+          fixed_prompts:
+            - "night costume"
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: ["hero"]
+      character_variant_ids: ["hero_night"]
+      object_ids: []
+      prompt: |
+        [CHARACTERS]
+        base characters
+
+        [SCENE]
+        story
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        mod.validate_scene_reference_variant_ids(scenes=scenes, guides=guides, require=True, scene_filter=None)
+        mod.apply_asset_guides_to_scene(scene=scenes[0], guides=guides, character_refs_mode="scene")
+
+        self.assertEqual(scenes[0].image_references, ["assets/characters/hero_night_front.png"])
+        self.assertIn("hero base", scenes[0].image_prompt)
+        self.assertIn("night costume", scenes[0].image_prompt)
+        self.assertNotIn("day costume", scenes[0].image_prompt)
+
+    def test_unknown_character_variant_id_fails_validation(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      reference_variants:
+        - variant_id: "hero_day"
+          reference_images: ["assets/characters/hero_day_front.png"]
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: ["hero"]
+      character_variant_ids: ["hero_missing"]
+      object_ids: []
+      prompt: "story"
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        with self.assertRaises(SystemExit) as ctx:
+            mod.validate_scene_reference_variant_ids(scenes=scenes, guides=guides, require=True, scene_filter=None)
+        self.assertIn("unknown character_variant_ids", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 try:
     import yaml  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.immersive_manifest import is_character_reference_scene, scene_numeric_id
 
 
 def extract_yaml_block(text: str) -> str:
@@ -51,6 +58,93 @@ def first_prompt_line(prompt: str | None) -> str:
     return ""
 
 
+def split_sentences(text: str) -> list[str]:
+    if not text:
+        return []
+    normalized = re.sub(r"\s+", " ", str(text)).strip()
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[。！？])\s*", normalized)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def derive_scene_summary(cuts: list[dict], fallback: str | None = None) -> str:
+    narrations = [str(((cut.get("audio") or {}).get("narration") or {}).get("text") or "").strip() for cut in cuts if isinstance(cut, dict)]
+    narrations = [text for text in narrations if text]
+    if narrations:
+        if len(narrations) == 1:
+            return narrations[0]
+        first = narrations[0]
+        second = narrations[1]
+        if first.endswith("。"):
+            first = first[:-1]
+        return f"{first}。{second}"
+    return str(fallback or "").strip()
+
+
+VISUAL_BEAT_DROP_PATTERNS = [
+    r"実写、?シネマティック[^。]*[。]?",
+    r"プラクティカルエフェクト[^。]*[。]?",
+    r"自然な映画照明[^。]*[。]?",
+    r"画面内テキストなし[^。]*[。]?",
+    r"ショット目的:\s*",
+    r"Scene\s*\d+\s*/\s*Cut\s*\d+\s*[—-]\s*",
+    r"\b\d+\s*mm\b",
+    r"\b\d+\s*mmレンズ\b",
+    r"\b(?:ワイド|ミドルワイド|ミドル|マクロ寄り|マクロ)\b[。]*",
+    r"(?:カメラ|レンズ|ドリー|ドリフト|パン|チルト|オービット|スライド|スパイラル|フレーミング|フォーカス|押し込み|寄る|引く|追従|滑走|バンク)[^。]*[。]?",
+]
+
+VISUAL_BEAT_META_KEYWORDS = [
+    "mm",
+    "レンズ",
+    "カメラ",
+    "ドリー",
+    "ドリフト",
+    "パン",
+    "チルト",
+    "オービット",
+    "スライド",
+    "フレーミング",
+    "フォーカス",
+    "ショット",
+    "Scene",
+    "Cut",
+    "拍",
+    "導入",
+    "退出",
+    "ブリッジ",
+    "帰結",
+    "発見",
+    "核心",
+    "余韻",
+]
+
+
+def simplify_visual_beat(prompt: str | None, narration: str | None) -> str:
+    line = first_prompt_line(prompt)
+    if line:
+        simplified = line
+        for pattern in VISUAL_BEAT_DROP_PATTERNS:
+            simplified = re.sub(pattern, "", simplified, flags=re.IGNORECASE)
+        simplified = re.sub(r"[「」]", "", simplified)
+        simplified = re.sub(r"\s+", " ", simplified).strip(" 、。")
+        if simplified:
+            sentence = split_sentences(simplified)
+            if sentence:
+                candidate = sentence[0]
+                if not any(keyword in candidate for keyword in VISUAL_BEAT_META_KEYWORDS):
+                    return candidate
+            if not any(keyword in simplified for keyword in VISUAL_BEAT_META_KEYWORDS):
+                return simplified
+
+    narration_text = str(narration or "").strip()
+    narration_sentences = split_sentences(narration_text)
+    if narration_sentences:
+        return narration_sentences[0]
+    return narration_text
+
+
 def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manifest_data: dict) -> str:
     scenes = manifest_data.get("scenes") or []
     script_data: dict = {
@@ -67,15 +161,14 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
-        if str(scene.get("kind") or "").strip() == "character_reference":
+        if is_character_reference_scene(scene):
             continue
-        try:
-            scene_id = int(scene.get("scene_id"))
-        except Exception:
+        scene_id = scene_numeric_id(scene)
+        if scene_id is None:
             continue
 
         story_scene = story_scene_map.get(scene_id, {})
-        summary = str(story_scene.get("narration") or "").strip()
+        summary = ""
         visual = str(story_scene.get("visual") or "").strip()
         phase = str(story_scene.get("phase") or "").strip()
         scene_entry: dict = {
@@ -88,6 +181,8 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
 
         cuts = scene.get("cuts")
         if isinstance(cuts, list) and cuts:
+            summary = derive_scene_summary(cuts, story_scene.get("narration"))
+            scene_entry["scene_summary"] = summary
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
@@ -102,7 +197,10 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
                     {
                         "cut_id": cut_id,
                         "narration": str(narration.get("text") or "").strip(),
-                        "visual_beat": first_prompt_line(str(image_generation.get("prompt") or "")),
+                        "visual_beat": simplify_visual_beat(
+                            str(image_generation.get("prompt") or ""),
+                            str(narration.get("text") or ""),
+                        ),
                         "image_output": str(image_generation.get("output") or "").strip(),
                     }
                 )
@@ -110,11 +208,16 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
             image_generation = scene.get("image_generation") or {}
             audio = scene.get("audio") or {}
             narration = (audio.get("narration") if isinstance(audio, dict) else {}) or {}
+            summary = str(narration.get("text") or story_scene.get("narration") or "").strip()
+            scene_entry["scene_summary"] = summary
             scene_entry["cuts"].append(
                 {
                     "cut_id": 1,
                     "narration": str(narration.get("text") or "").strip(),
-                    "visual_beat": first_prompt_line(str(image_generation.get("prompt") or "")),
+                    "visual_beat": simplify_visual_beat(
+                        str(image_generation.get("prompt") or ""),
+                        str(narration.get("text") or ""),
+                    ),
                     "image_output": str(image_generation.get("output") or "").strip(),
                 }
             )

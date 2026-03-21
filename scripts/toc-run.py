@@ -17,6 +17,7 @@ from toc.harness import append_state_snapshot, now_iso
 
 
 MANIFEST_TEMPLATE = Path("workflow/video-manifest-template.md")
+VISUAL_VALUE_TEMPLATE = Path("workflow/visual-value-template.yaml")
 
 
 def sanitize_topic(topic: str) -> str:
@@ -67,6 +68,16 @@ def main() -> None:
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", args.force)
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", args.force)
+    if VISUAL_VALUE_TEMPLATE.exists():
+        visual_value = (
+            VISUAL_VALUE_TEMPLATE.read_text(encoding="utf-8")
+            .replace("<topic>", topic_raw)
+            .replace("<timestamp>", ts)
+            .replace("<ISO8601>", now_iso())
+        )
+    else:
+        visual_value = "# 視覚化価値パート（visual value）\n\nTODO\n"
+    write_text(run_dir / "visual_value.md", visual_value, args.force)
     write_text(run_dir / "script.md", "# 台本（script）\n\nTODO\n", args.force)
 
     if MANIFEST_TEMPLATE.exists():
@@ -81,6 +92,7 @@ def main() -> None:
     write_text(run_dir / "video_manifest.md", manifest, args.force)
 
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
+    (run_dir / "assets" / "objects").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "styles").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
@@ -94,6 +106,7 @@ def main() -> None:
             "runtime.stage": "toc_run_scaffolded",
             "artifact.research": str((run_dir / "research.md").resolve()),
             "artifact.story": str((run_dir / "story.md").resolve()),
+            "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
             "artifact.script": str((run_dir / "script.md").resolve()),
             "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
         },

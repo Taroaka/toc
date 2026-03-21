@@ -34,8 +34,10 @@ class TestTocRunScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "run_status.json").exists())
             self.assertTrue((run_dir / "research.md").exists())
             self.assertTrue((run_dir / "story.md").exists())
+            self.assertTrue((run_dir / "visual_value.md").exists())
             self.assertTrue((run_dir / "script.md").exists())
             self.assertTrue((run_dir / "video_manifest.md").exists())
+            self.assertTrue((run_dir / "assets" / "objects").is_dir())
 
 
 if __name__ == "__main__":

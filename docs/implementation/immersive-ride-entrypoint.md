@@ -28,6 +28,7 @@ run root:
   - `state.txt`（追記型）
   - `research.md`
   - `story.md`
+  - `visual_value.md`
   - `script.md`（言語情報の正本）
   - `video_manifest.md`
   - `assets/**`
@@ -48,6 +49,8 @@ run root:
   - 視点は必要に応じて（POV固定にしない）
   - 固定の乗り物/デバイスを前景アンカーにしない
   - 物語キャラクター / 主役級アイテム（例: 玉手箱）をアンカーにして連続性を作る（照明/色/構図も含む）
+  - story scene は **10刻み**（10,20,30...）で振る
+  - `scene_id: 0` の character_reference は別枠として扱い、**全身（頭からつま先まで）** の参照に限定する
 
 `cloud_island_walk`（default）:
 
@@ -77,6 +80,7 @@ run root:
   - `audio.narration.text` は Narration Writer が確定する（`TODO:` 等のメタ情報は入れない）
   - 先に音声だけ生成し、実秒から `duration_seconds` / `timestamp` を同期してから映像生成に進む
   - 反復中に意図的に音声を省略してサイレントで進める場合のみ `--skip-audio` を使う
+  - 例外として、`visual_value.md` に基づく silent cut は `audio.narration.tool: "silent"` と `text: ""` を許可する
 
 ## コスト最適化（任意）
 
@@ -88,6 +92,7 @@ run root:
 `state.txt` に追記（例）:
 
 - `runtime.stage=research|story|script|manifest|assets|render|done`
+- `runtime.stage=research|story|visual_value|script|manifest|assets|render|done`
 - `runtime.render.status=started|success|failed`
 - `artifact.video=output/<topic>_<timestamp>/video.mp4`
 - `review.video.status=pending|approved|changes_requested`（最終判断は人間）
@@ -109,3 +114,4 @@ python scripts/toc-state.py approve-video --run-dir output/<topic>_<timestamp> -
 - **最初から 10 刻み**で振る（例: 10, 20, 30, 40, ...）
   - 後から中間シーンを差し込みたい時に `15` や `35` のように追加できる
   - 後段処理は **scene_id の連番** を前提にしない（manifest順を正とする）
+- ただし `scene_id: 0` の character_reference は story scene とは別枠で固定する

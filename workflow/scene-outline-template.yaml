@@ -24,6 +24,7 @@ scene_outline:
     style: "tbd"               # e.g. photorealistic / cinematic / practical effects
     must_include: ["string"]   # invariants across scenes (hands/bar/boat/etc)
     must_avoid: ["string"]     # global negatives (anime/text/watermark/etc)
+    image_policy: "reuse anchors unless a new continuity anchor is needed"
     references:
       # Optional, but recommended when you already have them.
       # Image/video methods should include these as multi-image references.

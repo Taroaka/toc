@@ -25,6 +25,7 @@
 #   review.hybridization.at=ISO8601
 #   artifact.research=output/<topic>_<timestamp>/research.md
 #   artifact.story=output/<topic>_<timestamp>/story.md
+#   artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 #   artifact.script=output/<topic>_<timestamp>/script.md
 #   artifact.video=output/<topic>_<timestamp>/video.mp4
 #   artifact.video.short.01=output/<topic>_<timestamp>/shorts/short01.mp4

@@ -2,6 +2,7 @@
 script_metadata:
   topic: "string"
   source_story: "output/<topic>_<timestamp>/story.md"
+  source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
   target_duration: 60
   aspect_ratio: "9:16"
@@ -25,6 +26,10 @@ scenes:
     narrative:
       phase: "ordinary_world"
       purpose: "string"
+    visual_value:
+      source_part_id: ""
+      role: "none|visual_payoff"
+      narration_policy: "spoken|silent"
     visual:
       generation_prompt: "string"
     audio:

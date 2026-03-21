@@ -171,6 +171,55 @@ scenes:
             mod.validate_object_reference_scenes(scenes=scenes, guides=guides, require=True)
         self.assertIn("Missing object reference scenes", str(ctx.exception))
 
+    def test_object_variant_selectors_use_only_selected_variant_refs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  object_bible:
+    - object_id: "amulet"
+      reference_images: ["assets/objects/amulet_default.png"]
+      fixed_prompts: ["amulet base"]
+      reference_variants:
+        - variant_id: "amulet_pristine"
+          reference_images: ["assets/objects/amulet_pristine.png"]
+          fixed_prompts: ["no cracks"]
+        - variant_id: "amulet_corrupted"
+          reference_images: ["assets/objects/amulet_corrupted.png"]
+          fixed_prompts: ["hairline cracks and dark aura"]
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: []
+      object_ids: ["amulet"]
+      object_variant_ids: ["amulet_corrupted"]
+      prompt: |
+        [PROPS / SETPIECES]
+        base props
+
+        [SCENE]
+        story
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        mod.validate_scene_reference_variant_ids(scenes=scenes, guides=guides, require=True, scene_filter=None)
+        mod.apply_asset_guides_to_scene(scene=scenes[0], guides=guides, character_refs_mode="scene")
+
+        self.assertEqual(scenes[0].image_references, ["assets/objects/amulet_corrupted.png"])
+        self.assertIn("amulet base", scenes[0].image_prompt)
+        self.assertIn("hairline cracks and dark aura", scenes[0].image_prompt)
+        self.assertNotIn("no cracks", scenes[0].image_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,12 +48,15 @@ def parse_manifest(path: Path):
             if key != "output":
                 continue
 
-            if not value:
-                continue
-
             # Remove surrounding quotes if present
             if (value.startswith("\"") and value.endswith("\"")) or (value.startswith("'") and value.endswith("'")):
                 value = value[1:-1]
+
+            if not value:
+                continue
+
+            if value.lower() in {"null", "~", "none"}:
+                continue
 
             context_keys = [k for _, k in stack]
 

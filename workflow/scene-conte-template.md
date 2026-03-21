@@ -7,6 +7,9 @@
 
 重要制約:
 - 映像内に文字は存在しない（字幕/看板/刻印/ロゴ/透かし禁止）
+- `visual_value.md` に基づく探索ブロックは、**4-6カット / 各4秒前後 / ナレーションなし** で設計してよい
+- Ryugu 系の探索ブロックでは、乙姫の登場を最後まで遅らせ、門・回廊・玉座の間の入口で止める
+- 各カットの画像は毎回新規生成しなくてよい。必要なのは、同じ場所/物体/人物状態をまたぐ continuity anchor を作るか再利用するかの判断
 
 ---
 
@@ -60,6 +63,8 @@
 - メインカット（最低1つ）: 5–15 秒（ナレーション実秒）
 - サブカット（任意 / 複数可）: 3–15 秒（ナレーション実秒）
 - 15秒以下でも、scene と narration を書き終えた時点で分割の要否を都度判断する
+- `visual_value.md` に基づく視覚報酬カットは例外で、4秒固定 / ナレーションなしを許可する
+- その場合、Ryugu 探索ブロックのように「見せ場を先に積む」構成を優先し、登場人物の初出は最後の cut に寄せる
 
 ### Cut `<scene_id>_1`
 
@@ -93,7 +98,7 @@
 
 ## 5) `video_manifest.md` への落とし込み（チェック）
 
-- `scenes[].cuts[]` として、各cutを `image_generation` に落とし込んだ
+- `scenes[].cuts[]` として、各cutを `image_generation` に落とし込んだ（新規生成が不要な cut は既存 anchor の再利用でよい）
 - 各cutに `character_ids: []` と `object_ids: []` が明示されている
 - cut画像の `output` は `assets/scenes/scene<scene_id>_<cut>.png` に揃っている
 - 各I2V clip の `first_frame/last_frame/output` が隣接cut同士になっている

@@ -41,6 +41,8 @@ sceneに映す object/setpiece を **IDで宣言**する。
 
 - `assets/objects/...png` を `scenes[].image_generation.output` にする
 - 参照画像は「無人の setpiece」「クローズアップの artifact」中心（混ざり防止）
+- ここでいう reference scene は、**毎scene/cutに作るものではない**。同じ場所/物体/人物状態をまたぐ continuity anchor として、必要な回数だけ作る。
+- アンカーがすでに存在する scene/cut は、既存の reference image や直前の anchor frame を再利用してよい。
 
 生成側は `--apply-asset-guides` で、該当 object の `fixed_prompts` と cinematic 情報を
 sceneの `[PROPS / SETPIECES]` に自動注入できる。
@@ -126,4 +128,3 @@ assets:
 - 検証ゲート:
   - `--require-object-ids`（object_bibleがある場合、各sceneで `object_ids: []` を必須）
   - `--require-object-reference-scenes`（reference_images が必ずどこかの scene output として生成されること）
-

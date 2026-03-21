@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,12 @@ try:
     import yaml  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.immersive_manifest import is_character_reference_scene, scene_numeric_id, story_scene_ids
 
 
 def now_iso() -> str:
@@ -164,11 +171,11 @@ def main() -> None:
     if not isinstance(raw_scenes, list):
         raise SystemExit("Manifest YAML scenes must be a list.")
 
-    excluded = {0, 100, 101}
     scratch_files = sorted(scratch_dir.glob("scene*.yaml"))
     if not scratch_files:
         raise SystemExit(f"No scratch files found in: {scratch_dir}")
 
+    available_story_scene_ids = set(story_scene_ids(raw_scenes))
     cuts_by_scene: dict[int, list[dict]] = {}
     for f in scratch_files:
         parsed = _validate_cut_scene_file(
@@ -180,7 +187,7 @@ def main() -> None:
         if parsed is None:
             continue
         sid, cuts = parsed
-        if sid in excluded or sid < 2 or sid >= 100:
+        if sid not in available_story_scene_ids:
             continue
         cuts_by_scene[int(sid)] = cuts
 
@@ -193,12 +200,12 @@ def main() -> None:
     for s in raw_scenes:
         if not isinstance(s, dict):
             continue
-        sid = _as_int(s.get("scene_id"))
+        if is_character_reference_scene(s):
+            continue
+        sid = scene_numeric_id(s)
         if sid is None:
             continue
         if sid not in cuts_by_scene:
-            continue
-        if sid in excluded:
             continue
 
         has_cuts = isinstance(s.get("cuts"), list) and bool(s.get("cuts"))

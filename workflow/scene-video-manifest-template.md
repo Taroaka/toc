@@ -17,6 +17,22 @@ assets:
     visual_style: "tbd"
     reference_images: []
 
+  # 主役級アイテム / 舞台装置（任意だが推奨）
+  object_bible: []
+  # - object_id: "tbd_setpiece"
+  #   kind: "setpiece"  # setpiece|artifact|phenomenon
+  #   reference_images:
+  #     - "assets/objects/tbd_setpiece.png"
+  #   fixed_prompts:
+  #     - "材質/構造/機構の不変条件"
+  #     - "文字/看板/銘板なし。形/光/動きで見せる"
+  #   cinematic:
+  #     role: "映画での役割"
+  #     visual_takeaways:
+  #       - "映像だけで伝えるべき情報"
+  #     spectacle_details:
+  #       - "見せ場ディテール"
+
 scenes:
   - scene_id: 1
     timestamp: "00:00-00:30"
@@ -28,11 +44,15 @@ scenes:
       - cut_id: 1
         cut_role: "main"  # main|sub
         image_generation:
+          # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
+          # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
           # tool: "google_nanobanana_pro"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
           tool: "google_nanobanana_pro"
           character_ids: ["character_id_here"]  # Use [] for B-roll scenes with no characters visible
+          character_variant_ids: []  # Optional: pick a specific state/time variant for the active character(s)
           object_ids: []  # Use [] when no item / setpiece anchor is needed
+          object_variant_ids: []  # Optional: pick a specific object/setpiece variant when needed
           prompt: |
             [全体 / 不変条件]
             TODO: スタイル/POVの不変条件。画面内テキストなし、字幕なし、ウォーターマークなし。
@@ -70,9 +90,12 @@ scenes:
       - cut_id: 2
         cut_role: "sub"  # main|sub
         image_generation:
+          # 新規生成を前提にしない。必要なときだけ anchor を更新する。
           tool: "google_nanobanana_pro"
           character_ids: ["character_id_here"]
+          character_variant_ids: []
           object_ids: []
+          object_variant_ids: []
           prompt: |
             [全体 / 不変条件]
             TODO: 前と同じスタイル/禁止。画面内テキストなし。

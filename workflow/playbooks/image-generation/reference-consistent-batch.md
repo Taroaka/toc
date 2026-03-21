@@ -9,8 +9,16 @@
 
 ## Steps
 1. 共通リファレンス（キャラ/手/バー/乗り物）を固定する
-2. scene定義（scene outline / asset brief）に沿って `sceneN.png` を一括生成する
-3. 一貫性チェック（手・バー・視点・舞台連続性）を実施する
+2. `video_manifest.md` から prompt collection を書き出してレビューする
+3. scene定義（scene outline / asset brief）に沿って `sceneN.png` を一括生成する
+4. 一貫性チェック（手・バー・視点・舞台連続性）を実施する
+
+推奨コマンド:
+
+```bash
+python scripts/export-image-prompt-collection.py \
+  --manifest output/<topic>_<timestamp>/video_manifest.md
+```
 
 ## Prompt assembly (recommended)
 image prompt は `scene_outline` の情報を「削らず」使う。未知トピックでの幻覚を避けるため、勝手に新情報を足さない。

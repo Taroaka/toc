@@ -5,12 +5,19 @@ import argparse
 import datetime as dt
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 try:
     import yaml  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.immersive_manifest import default_story_scene_start, story_scene_ids
 
 
 def now_iso() -> str:
@@ -51,7 +58,7 @@ def _parse_scene_ids(scene_ids_csv: str | None) -> list[int] | None:
     return out or None
 
 
-def _load_manifest_scenes(manifest_path: Path) -> list[int]:
+def _load_manifest_scenes(manifest_path: Path) -> list[dict]:
     if yaml is None:
         raise SystemExit("PyYAML is required. Install with: pip install pyyaml")
     md = manifest_path.read_text(encoding="utf-8")
@@ -62,17 +69,7 @@ def _load_manifest_scenes(manifest_path: Path) -> list[int]:
     raw_scenes = data.get("scenes") or []
     if not isinstance(raw_scenes, list):
         raise SystemExit("Manifest YAML scenes must be a list.")
-
-    ids: list[int] = []
-    for s in raw_scenes:
-        if not isinstance(s, dict):
-            continue
-        try:
-            scene_id = int(s.get("scene_id"))
-        except Exception:
-            continue
-        ids.append(scene_id)
-    return ids
+    return [scene for scene in raw_scenes if isinstance(scene, dict)]
 
 
 def _default_cut_skeleton(scene_id: int, cut_id: int) -> dict:
@@ -102,7 +99,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare per-scene scratch files for immersive ride cuts (multi-agent safe).")
     parser.add_argument("--run-dir", required=True, help="Existing immersive run dir (contains video_manifest.md).")
     parser.add_argument("--scene-ids", default=None, help='Comma-separated scene ids to prepare (default: auto from manifest).')
-    parser.add_argument("--start-scene-id", type=int, default=2, help="Prepare scenes with id >= this (default: 2).")
+    parser.add_argument(
+        "--start-scene-id",
+        type=int,
+        default=None,
+        help="Prepare scenes with id >= this (default: auto-detect from manifest story scenes).",
+    )
     parser.add_argument("--min-cuts", type=int, default=3)
     parser.add_argument("--max-cuts", type=int, default=5)
     parser.add_argument("--write-command", action="store_true", help="Write queue/shogun_to_karo.yaml command entry.")
@@ -114,12 +116,16 @@ def main() -> None:
     if not manifest_path.exists():
         raise SystemExit(f"Manifest not found: {manifest_path}")
 
+    manifest_scenes = _load_manifest_scenes(manifest_path)
+    available_story_scene_ids = set(story_scene_ids(manifest_scenes))
     requested = _parse_scene_ids(args.scene_ids)
-    scene_ids = requested if requested is not None else _load_manifest_scenes(manifest_path)
-
-    # Exclude character reference scenes and early scenes; keep stable, small surface area.
-    excluded = {0, 100, 101}
-    targets = sorted({sid for sid in scene_ids if sid not in excluded and int(sid) >= int(args.start_scene_id) and int(sid) < 100})
+    scene_ids = requested if requested is not None else sorted(available_story_scene_ids)
+    start_scene_id = (
+        int(args.start_scene_id)
+        if args.start_scene_id is not None
+        else default_story_scene_start(manifest_scenes)
+    )
+    targets = sorted({sid for sid in scene_ids if int(sid) >= start_scene_id and int(sid) in available_story_scene_ids})
     if not targets:
         raise SystemExit("No target scenes found. Check --scene-ids / --start-scene-id.")
 

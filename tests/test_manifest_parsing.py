@@ -139,6 +139,98 @@ scenes:
         self.assertEqual([s.scene_id for s in scenes], [1001, 1002])
         self.assertEqual([s.duration_seconds for s in scenes], [12, 7])
 
+    def test_parse_manifest_supports_character_reference_id_selectors(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 0
+    reference_id: protagonist_front_ref
+    kind: character_reference
+    image_generation:
+      tool: "google_nanobanana_pro"
+      prompt: "character ref"
+      output: "assets/characters/protagonist_front.png"
+      references: []
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      prompt: "story"
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, scenes = mod.parse_manifest_yaml(yaml_text)
+
+        self.assertEqual(scenes[0].scene_id, 0)
+        self.assertEqual(scenes[0].manifest_scene_id, 0)
+        self.assertEqual(scenes[0].reference_id, "protagonist_front_ref")
+        self.assertEqual(scenes[0].kind, "character_reference")
+        self.assertTrue(mod._scene_matches_filter(scenes[0], {"protagonist_front_ref"}))
+        self.assertTrue(mod._scene_matches_filter(scenes[0], {"0"}))
+        self.assertTrue(mod._scene_matches_filter(scenes[1], {"10"}))
+        self.assertFalse(mod._scene_matches_filter(scenes[1], {"protagonist_front_ref"}))
+
+    def test_parse_manifest_supports_reference_variants_and_scene_variant_selectors(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      fixed_prompts: ["hero base"]
+      reference_variants:
+        - variant_id: "hero_day"
+          reference_images:
+            - "assets/characters/hero_day_front.png"
+            - "assets/characters/hero_day_side.png"
+          fixed_prompts:
+            - "day outfit"
+    - character_id: "villain"
+      reference_images: ["assets/characters/villain.png"]
+      fixed_prompts: ["villain base"]
+  object_bible:
+    - object_id: "amulet"
+      fixed_prompts: ["amulet base"]
+      reference_variants:
+        - variant_id: "amulet_glowing"
+          reference_images: ["assets/objects/amulet_glowing.png"]
+          fixed_prompts: ["amulet emits blue light"]
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: ["hero", "villain"]
+      character_variant_ids: ["hero_day"]
+      object_ids: ["amulet"]
+      object_variant_ids: ["amulet_glowing"]
+      prompt: "story"
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        self.assertEqual(guides.character_bible[0].reference_variants[0].variant_id, "hero_day")
+        self.assertEqual(
+            guides.character_bible[0].reference_variants[0].reference_images,
+            ["assets/characters/hero_day_front.png", "assets/characters/hero_day_side.png"],
+        )
+        self.assertEqual(guides.object_bible[0].reference_variants[0].variant_id, "amulet_glowing")
+        self.assertEqual(scenes[0].image_character_variant_ids, ["hero_day"])
+        self.assertEqual(scenes[0].image_object_variant_ids, ["amulet_glowing"])
+
 
 if __name__ == "__main__":
     unittest.main()

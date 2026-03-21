@@ -16,9 +16,16 @@ video_metadata:
 assets:
   character_bible:
     # 登場人物（例）。ガイドは音声（ナレーション）のみで、画面内には出さない。
+    # reference_images / output の識別子は、人間が読める安定名にする（例: protagonist_front_ref / protagonist_side_ref / protagonist_back_ref）。
     - character_id: "protagonist"
       reference_images:
         - "assets/characters/protagonist_front.png"
+      reference_variants:
+        - variant_id: "protagonist_wet_ref"
+          reference_images:
+            - "assets/characters/protagonist_wet_front.png"
+          fixed_prompts:
+            - "衣装が濡れ、裾に水滴が残る"
       fixed_prompts:
         - "主人公は参照画像と完全一致（顔、髪型、服装が同一）"
         - "人間の主人公は美男美女（映画俳優レベルの魅力）。顔立ちのバランス、肌の質感、表情、目の印象が自然で実写的"
@@ -44,6 +51,12 @@ assets:
   #   kind: "setpiece"  # setpiece|artifact|phenomenon
   #   reference_images:
   #     - "assets/objects/tbd_setpiece.png"
+  #   reference_variants:
+  #     - variant_id: "tbd_setpiece_activated"
+  #       reference_images:
+  #         - "assets/objects/tbd_setpiece_activated.png"
+  #       fixed_prompts:
+  #         - "発光状態/起動状態の差分"
   #   fixed_prompts:
   #     - "材質/構造の不変条件（実写で成立する重量感/工芸/経年）"
   #     - "機構/ルール/誘惑/ショー性（物語に無関係でも映像として魅力的に）"
@@ -60,24 +73,29 @@ scenes:
   # 0) キャラクター参照（推奨）
   # `scripts/toc-immersive-ride-generate.sh` で、正面出力から側面/背面と結合stripを自動生成する。
   - scene_id: 0
+    reference_id: "protagonist_front_ref"
     kind: character_reference
     image_generation:
+      # reference scene は continuity anchor を作るためのもの。毎sceneではない。
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
+      character_variant_ids: []  # Optional: ["protagonist_wet_ref"] のように、そのscene専用のvariantを選ぶ
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         実写、シネマティック、プラクティカルエフェクト（実物セット感）。自然な映画照明。
         画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
 
         [シーン]
-        主人公のターンアラウンド参照画像。
+        主人公のターンアラウンド参照画像（全身専用）。
         全身（頭からつま先まで）を入れ、足先が切れない（クロップしない）。ニュートラルな姿勢で中央構図。
+        顔寄り、上半身のみ、途中クロップは不可。
         背景はクリーンで無地。
 
         [禁止]
         アニメ/漫画/イラスト調。あらゆる文字要素。
-      output: "assets/characters/protagonist_front.png"
+      output: "assets/characters/protagonist_front.png"  # readable reference id: protagonist_front_ref
       aspect_ratio: "16:9"
       image_size: "2K"
       references: []
@@ -85,13 +103,17 @@ scenes:
       selected: null
 
   # 1) scene静止画 + つなぎ動画（ガイドは音声のみ）
-  # 推奨: scene_id を10刻みにする（後で差し込みやすい）。
+  # 推奨: story scene は 10刻みで生成する（10,20,30...）。character_reference scene は別枠。
   - scene_id: 10
     timestamp: "00:00-00:08"
     image_generation:
+      # 新規の静止画は、場所/物体/人物状態の continuity anchor が必要な scene で優先する。
+      # 既存の anchor frame を再利用できる cut は、新規生成を強制しない。
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         実写、シネマティック、プラクティカルエフェクト（実物セット感）。自然な映画照明。
@@ -140,9 +162,12 @@ scenes:
   - scene_id: 20
     timestamp: "00:08-00:16"
     image_generation:
+      # 同上: ここでは新規生成を前提にしない。必要なときだけ anchor を更新する。
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         実写、シネマティック、プラクティカルエフェクト（実物セット感）。自然な映画照明。
@@ -192,9 +217,12 @@ scenes:
   - scene_id: 30
     timestamp: "00:16-00:24"
     image_generation:
+      # 同上
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         実写、シネマティック、プラクティカルエフェクト（実物セット感）。自然な映画照明。
@@ -227,9 +255,12 @@ scenes:
   - scene_id: 40
     timestamp: "00:24-00:32"
     image_generation:
+      # B-roll でも新規静止画は必須ではない。連続性が保てるなら anchor を再利用する。
       tool: "google_nanobanana_pro"
       character_ids: []
+      character_variant_ids: []
       object_ids: []
+      object_variant_ids: []
       prompt: |
         [全体 / 不変条件]
         実写、シネマティック、プラクティカルエフェクト（実物セット感）。自然な映画照明。

@@ -11,7 +11,7 @@ Intended workflow:
 
 Notes:
 - Uses `ffprobe` to read audio duration.
-- Updates `video_generation.duration_seconds` (ceil by default) so video is not shorter than narration.
+- Updates `video_generation.duration_seconds` from `audio duration + padding` (ceil by default).
 - Updates `scenes[].timestamp` sequentially (00:00-...).
 """
 
@@ -113,6 +113,35 @@ def _infer_cut_role(*, cut: dict, cut_index: int, cut_count: int) -> str:
     return "main" if cut_index == 0 else "sub"
 
 
+def _padding_preset_seconds(*, preset: str, args: argparse.Namespace) -> float:
+    p = (preset or "").strip().lower()
+    if p in {"linger", "lingering", "余韻"}:
+        return float(args.linger_padding_seconds)
+    if p in {"tempo", "sub", "テンポ", "サブ"}:
+        return float(args.sub_padding_seconds)
+    return float(args.default_padding_seconds)
+
+
+def _resolve_padding_seconds(*, container: dict, role: str, args: argparse.Namespace) -> float:
+    explicit = container.get("duration_padding_seconds")
+    if explicit is not None:
+        try:
+            return max(0.0, float(explicit))
+        except Exception:
+            raise SystemExit(f"Invalid duration_padding_seconds: {explicit!r}")
+
+    preset = _as_opt_str(container.get("duration_padding_preset"))
+    if preset:
+        return _padding_preset_seconds(preset=preset, args=args)
+
+    r = (role or "").strip().lower()
+    if r in {"sub", "tempo"}:
+        return float(args.sub_padding_seconds)
+    if r in {"linger", "lingering"}:
+        return float(args.linger_padding_seconds)
+    return float(args.default_padding_seconds)
+
+
 def _round_duration(seconds: float, *, mode: str) -> int:
     m = (mode or "").strip().lower()
     if m == "round":
@@ -128,6 +157,24 @@ def main() -> None:
     parser.add_argument("--manifest", required=True, help="Path to video_manifest.md")
     parser.add_argument("--base-dir", default=None, help="Resolve relative asset paths from this dir (default: manifest dir).")
     parser.add_argument("--rounding", choices=["ceil", "round", "floor"], default="ceil")
+    parser.add_argument(
+        "--default-padding-seconds",
+        type=float,
+        default=1.0,
+        help="Padding added to narration duration for normal/main cuts.",
+    )
+    parser.add_argument(
+        "--sub-padding-seconds",
+        type=float,
+        default=0.5,
+        help="Padding added to narration duration for sub/tempo cuts.",
+    )
+    parser.add_argument(
+        "--linger-padding-seconds",
+        type=float,
+        default=1.5,
+        help="Padding added to narration duration for lingering cuts.",
+    )
     parser.add_argument("--no-backup", action="store_true", help="Do not create video_manifest.md.bak before writing.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes only; do not write.")
     parser.add_argument(
@@ -171,13 +218,17 @@ def main() -> None:
             raise SystemExit(f"Missing narration audio: {audio_path}")
 
         dur_f = _ffprobe_duration_seconds(audio_path)
-        dur_i = max(0, _round_duration(dur_f, mode=args.rounding))
         min_s, max_s = _role_bounds(role=role)
-        if dur_i > max_s:
+        if dur_f > max_s:
             raise SystemExit(f"{key_path}: narration is {dur_f:.2f}s (> {max_s}s). Split into multiple cuts.")
+        padding_seconds = _resolve_padding_seconds(container=container, role=role, args=args)
+        target_f = max(0.0, dur_f + padding_seconds)
+        dur_i = max(0, _round_duration(target_f, mode=args.rounding))
         if dur_i < min_s:
             # Allow padding the visual duration up to min.
             dur_i = min_s
+        if dur_i > max_s:
+            dur_i = max_s
 
         vg = container.get("video_generation")
         if not isinstance(vg, dict):
@@ -185,7 +236,10 @@ def main() -> None:
             return None
         prev = vg.get("duration_seconds")
         if prev != dur_i:
-            print(f"[update] {key_path}: duration_seconds {prev!r} -> {dur_i} (audio={dur_f:.2f}s, role={role})")
+            print(
+                f"[update] {key_path}: duration_seconds {prev!r} -> {dur_i} "
+                f"(audio={dur_f:.2f}s, padding={padding_seconds:.2f}s, role={role})"
+            )
             vg["duration_seconds"] = int(dur_i)
             changed += 1
         return int(dur_i)
@@ -264,4 +318,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

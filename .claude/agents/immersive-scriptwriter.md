@@ -16,6 +16,7 @@ model: inherit
 ## 入力
 
 - `output/<topic>_<timestamp>/story.md`
+- `output/<topic>_<timestamp>/visual_value.md`（存在する場合は必ず参照）
 - `output/<topic>_<timestamp>/research.md`（または `output/research/<topic>_*.md`）
 
 ## 出力（必須）
@@ -29,6 +30,7 @@ model: inherit
 - **`script.md` を言語情報の正本**にする
 - `video_manifest.md` の `audio.narration.text` と `image_generation.prompt` は、`script.md` に書いた内容を具体化したものでなければならない
 - `video_manifest.md` 側で **新しい物語情報・新しい感情解釈・新しい見せ場** を勝手に足さない
+- `visual_value.md` がある場合、その価値パートは **中盤の視覚報酬** として優先的に取り込む
 - つまり:
   - `script.md`: 何が起きるか / どう感じるか / 何を見せるか
   - `video_manifest.md`: それを生成モデル向けの実行指示に翻訳したもの
@@ -99,6 +101,7 @@ model: inherit
   - `cloud_island_walk`: 道/橋/階段など「前進の導線」が常に画面内にある（歩みが理解の深化になる）
 - 各sceneに「意味のある対象」を必ず置く（キャラクターでも、概念の比喩オブジェクトでもよい）
 - ガイドは **音声（ナレーション）として必須**（視覚的に登場させない）
+- ただし `visual_value.md` に基づく価値パートは例外で、**4-6カット / 各4秒 / ナレーションなし** の silent sequence を許可する
 - 複数ソースの矛盾を **同一シーン/設定として混成（ハイブリッド）**しない（破綻しやすい）
   - どうしても混成がスコアに効く場合は、確定前にユーザー承認が必要（運用）
 
@@ -129,8 +132,10 @@ model: inherit
   - 1つの story scene を `scenes[].cuts[]` に分解し、各cutで `image_generation.output` を `assets/scenes/scene<scene_id>_<cut>.png` にする
   - 各cutの隣接画像を `video_generation.first_frame/last_frame` にして、**1シーンあたり複数clip（8秒程度）**を作る
   - これにより、英雄の旅/感情カーブを “カット列” で作りやすくする
+  - `visual_value.md` の価値パートは例外として、`4秒 fixed cut` を `4-6` 本並べてよい
 - 動画生成:
-  - 各clipは **8秒**
+  - 通常clipは **8秒**
+  - `visual_value.md` に基づく silent cut は **4秒**
   - `scenes[].video_generation.tool` はユーザー指示に合わせて選ぶ（未指定なら `kling_3_0`）
     - `kling_3_0`（Kling 3.0）
     - `kling_3_0_omni`（Kling 3.0 Omni）
@@ -145,6 +150,7 @@ model: inherit
     - **1カット（clip）= 1ナレーション** を基本にし、1カットの最大は **15秒**（実秒ベース）
     - `audio.narration.output` は clip ごとに分ける（例: `assets/audio/scene10_narration.mp3`）
     - `normalize_to_scene_duration: false` を基本（音声秒数に合わせる。超える場合は clip を増やす）
+    - ただし `visual_value.md` に基づく silent cut は `audio.narration.tool: "silent"` と `text: ""` を使い、無音でよい
   - `cloud_island_walk`:
     - この体験は既存仕様を維持し、run root の単一音声（`assets/audio/narration.mp3`）でもよい
   - style instructions は `notes` に明記し、textには読み上げ原稿のみを書く
@@ -155,7 +161,9 @@ model: inherit
 
 - narration（cut/clip単位の読み上げ原稿）
 - scene一覧（scene_id / シーン要約 / 次sceneへのつなぎ）
-- cutごとの visual beat（画面で必ず見せる出来事。カメラ専門語より「何が見えるか」を優先）
+- narration は原則 **です・ます調** で、平易な話し言葉にする
+- scene_summary は出来事を素直に要約し、必要のない含みや設計意図の先出しは避ける
+- cutごとの visual beat は **概要確認用** として簡潔に書き、カメラ専門語は入れない
 - 参照画像（何をどこに生成するか）
 - この `script.md` だけ読めば、ナレーションと映像の整合が追える状態にする
 
@@ -167,6 +175,7 @@ model: inherit
 - `video_metadata.resolution: "1280x720"`
 - `video_metadata.frame_rate: 24`
 - `scenes[].video_generation.duration_seconds: 8`
+- `visual_value.md` に基づく cut は `scenes[].video_generation.duration_seconds: 4`
 - `scenes[].video_generation.first_frame: ...`
 - `scenes[].video_generation.last_frame: ...`
 - `scenes[].image_generation.references: [...]`

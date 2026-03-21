@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.env import load_env_files
 from toc.http import HttpError, request_bytes
+from toc.immersive_manifest import parse_scene_selectors, scene_selector_tokens, selector_matches
 from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID, ElevenLabsClient, ElevenLabsConfig
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
@@ -48,6 +49,9 @@ ALLOWED_VEO_DURATIONS = (4, 6, 8)
 @dataclass
 class SceneSpec:
     scene_id: int
+    manifest_scene_id: int
+    kind: str | None
+    reference_id: str | None
     timestamp: str | None
     duration_seconds: int | None
     image_tool: str | None
@@ -56,8 +60,12 @@ class SceneSpec:
     image_references: list[str]
     image_character_ids: list[str]
     image_character_ids_present: bool
+    image_character_variant_ids: list[str]
+    image_character_variant_ids_present: bool
     image_object_ids: list[str]
     image_object_ids_present: bool
+    image_object_variant_ids: list[str]
+    image_object_variant_ids_present: bool
     image_aspect_ratio: str | None
     image_size: str | None
     video_tool: str | None
@@ -73,9 +81,18 @@ class SceneSpec:
 
 
 @dataclass(frozen=True)
+class ReferenceVariantSpec:
+    variant_id: str | None
+    reference_images: list[str]
+    fixed_prompts: list[str]
+    notes: str | None
+
+
+@dataclass(frozen=True)
 class CharacterBibleEntry:
     character_id: str | None
     reference_images: list[str]
+    reference_variants: list[ReferenceVariantSpec]
     fixed_prompts: list[str]
     notes: str | None
 
@@ -92,6 +109,7 @@ class ObjectBibleEntry:
     object_id: str | None
     kind: str | None  # setpiece|artifact|phenomenon (soft-validated)
     reference_images: list[str]
+    reference_variants: list[ReferenceVariantSpec]
     fixed_prompts: list[str]
     cinematic_role: str | None
     cinematic_visual_takeaways: list[str]
@@ -175,6 +193,16 @@ def _ensure_str_list(value: Any) -> list[str]:
     return [s] if s else []
 
 
+def _parse_inline_yaml_list(value: str) -> list[str]:
+    raw = str(value).strip()
+    if not raw.startswith("[") or not raw.endswith("]"):
+        return []
+    inner = raw[1:-1].strip()
+    if not inner:
+        return []
+    return [x for x in [part.strip().strip('"').strip("'") for part in inner.split(",")] if x]
+
+
 def _as_opt_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -184,6 +212,24 @@ def _as_opt_str(value: Any) -> str | None:
     if s.lower() in {"null", "none"}:
         return None
     return s
+
+
+def _parse_reference_variants(raw_variants: Any) -> list[ReferenceVariantSpec]:
+    variants: list[ReferenceVariantSpec] = []
+    if not isinstance(raw_variants, list):
+        return variants
+    for item in raw_variants:
+        if not isinstance(item, dict):
+            continue
+        variants.append(
+            ReferenceVariantSpec(
+                variant_id=_as_opt_str(item.get("variant_id")) or _as_opt_str(item.get("reference_id")),
+                reference_images=_ensure_str_list(item.get("reference_images")),
+                fixed_prompts=_ensure_str_list(item.get("fixed_prompts")),
+                notes=_as_opt_str(item.get("notes")),
+            )
+        )
+    return variants
 
 
 def _parse_assets_spec(assets: Any) -> AssetGuides:
@@ -201,6 +247,7 @@ def _parse_assets_spec(assets: Any) -> AssetGuides:
                 CharacterBibleEntry(
                     character_id=_as_opt_str(item.get("character_id")),
                     reference_images=_ensure_str_list(item.get("reference_images")),
+                    reference_variants=_parse_reference_variants(item.get("reference_variants") or item.get("variants")),
                     fixed_prompts=_ensure_str_list(item.get("fixed_prompts")),
                     notes=_as_opt_str(item.get("notes")),
                 )
@@ -238,6 +285,7 @@ def _parse_assets_spec(assets: Any) -> AssetGuides:
                     object_id=_as_opt_str(item.get("object_id")),
                     kind=_as_opt_str(item.get("kind")),
                     reference_images=_ensure_str_list(item.get("reference_images")),
+                    reference_variants=_parse_reference_variants(item.get("reference_variants") or item.get("variants")),
                     fixed_prompts=_ensure_str_list(item.get("fixed_prompts")),
                     cinematic_role=role,
                     cinematic_visual_takeaways=visual,
@@ -339,6 +387,9 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 scene_id = len(scenes) + 1
             current = SceneSpec(
                 scene_id=scene_id,
+                manifest_scene_id=scene_id,
+                kind=None,
+                reference_id=None,
                 timestamp=None,
                 duration_seconds=None,
                 image_tool=None,
@@ -347,8 +398,12 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 image_references=[],
                 image_character_ids=[],
                 image_character_ids_present=False,
+                image_character_variant_ids=[],
+                image_character_variant_ids_present=False,
                 image_object_ids=[],
                 image_object_ids_present=False,
+                image_object_variant_ids=[],
+                image_object_variant_ids_present=False,
                 image_aspect_ratio=None,
                 image_size=None,
                 video_tool=None,
@@ -371,6 +426,12 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
         if key == "timestamp" and "scenes" in context_keys:
             current.timestamp = _parse_yaml_scalar(value)
             continue
+        if key == "kind" and "scenes" in context_keys:
+            current.kind = _parse_yaml_scalar(value)
+            continue
+        if key in {"reference_id", "character_reference_id"} and "scenes" in context_keys:
+            current.reference_id = _parse_yaml_scalar(value)
+            continue
         if key == "duration_seconds" and "scenes" in context_keys:
             raw_dur = (_parse_yaml_scalar(value) or "").strip()
             if raw_dur:
@@ -389,26 +450,23 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
             elif key == "output":
                 current.image_output = _parse_yaml_scalar(value)
             elif key == "references":
-                # Minimal YAML: support inline list syntax like [a, b] only.
-                raw = value.strip()
-                if raw.startswith("[") and raw.endswith("]"):
-                    inner = raw[1:-1].strip()
-                    if inner:
-                        items = [x.strip().strip('"').strip("'") for x in inner.split(",")]
-                        current.image_references = [x for x in items if x]
-                else:
-                    # Multi-line list parsing is not supported by this minimal parser.
-                    current.image_references = []
+                current.image_references = _parse_inline_yaml_list(value)
             elif key == "aspect_ratio":
                 current.image_aspect_ratio = _parse_yaml_scalar(value)
             elif key == "image_size":
                 current.image_size = _parse_yaml_scalar(value)
             elif key == "character_ids":
-                # The minimal parser doesn't support list parsing here; mark presence only.
                 current.image_character_ids_present = True
+                current.image_character_ids = _parse_inline_yaml_list(value)
+            elif key == "character_variant_ids":
+                current.image_character_variant_ids_present = True
+                current.image_character_variant_ids = _parse_inline_yaml_list(value)
             elif key == "object_ids":
-                # The minimal parser doesn't support list parsing here; mark presence only.
                 current.image_object_ids_present = True
+                current.image_object_ids = _parse_inline_yaml_list(value)
+            elif key == "object_variant_ids":
+                current.image_object_variant_ids_present = True
+                current.image_object_variant_ids = _parse_inline_yaml_list(value)
             continue
 
         # video generation
@@ -485,6 +543,8 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             continue
 
         timestamp = _as_opt_str(raw_scene.get("timestamp"))
+        scene_kind = _as_opt_str(raw_scene.get("kind"))
+        reference_id = _as_opt_str(raw_scene.get("reference_id")) or _as_opt_str(raw_scene.get("character_reference_id"))
         scene_duration_seconds: int | None = None
         duration_raw = raw_scene.get("duration_seconds")
         if duration_raw is not None:
@@ -530,8 +590,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
                 image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
                 image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
+                image_character_variant_ids_present = isinstance(ig, dict) and ("character_variant_ids" in ig)
+                image_character_variant_ids = _ensure_str_list(ig.get("character_variant_ids")) if isinstance(ig, dict) else []
                 image_object_ids_present = isinstance(ig, dict) and ("object_ids" in ig)
                 image_object_ids = _ensure_str_list(ig.get("object_ids")) if isinstance(ig, dict) else []
+                image_object_variant_ids_present = isinstance(ig, dict) and ("object_variant_ids" in ig)
+                image_object_variant_ids = _ensure_str_list(ig.get("object_variant_ids")) if isinstance(ig, dict) else []
                 image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
                 image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
 
@@ -568,6 +632,9 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 scenes.append(
                     SceneSpec(
                         scene_id=cut_scene_id,
+                        manifest_scene_id=scene_id,
+                        kind=scene_kind,
+                        reference_id=reference_id,
                         timestamp=timestamp,
                         duration_seconds=cut_duration_seconds if cut_duration_seconds is not None else scene_duration_seconds,
                         image_tool=image_tool,
@@ -576,8 +643,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         image_references=image_references,
                         image_character_ids=image_character_ids,
                         image_character_ids_present=image_character_ids_present,
+                        image_character_variant_ids=image_character_variant_ids,
+                        image_character_variant_ids_present=image_character_variant_ids_present,
                         image_object_ids=image_object_ids,
                         image_object_ids_present=image_object_ids_present,
+                        image_object_variant_ids=image_object_variant_ids,
+                        image_object_variant_ids_present=image_object_variant_ids_present,
                         image_aspect_ratio=image_aspect_ratio,
                         image_size=image_size,
                         video_tool=video_tool,
@@ -608,8 +679,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
         image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
         image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
+        image_character_variant_ids_present = isinstance(ig, dict) and ("character_variant_ids" in ig)
+        image_character_variant_ids = _ensure_str_list(ig.get("character_variant_ids")) if isinstance(ig, dict) else []
         image_object_ids_present = isinstance(ig, dict) and ("object_ids" in ig)
         image_object_ids = _ensure_str_list(ig.get("object_ids")) if isinstance(ig, dict) else []
+        image_object_variant_ids_present = isinstance(ig, dict) and ("object_variant_ids" in ig)
+        image_object_variant_ids = _ensure_str_list(ig.get("object_variant_ids")) if isinstance(ig, dict) else []
         image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
         image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
 
@@ -647,6 +722,9 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         scenes.append(
             SceneSpec(
                 scene_id=scene_id,
+                manifest_scene_id=scene_id,
+                kind=scene_kind,
+                reference_id=reference_id,
                 timestamp=timestamp,
                 duration_seconds=scene_duration_seconds,
                 image_tool=image_tool,
@@ -655,8 +733,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_references=image_references,
                 image_character_ids=image_character_ids,
                 image_character_ids_present=image_character_ids_present,
+                image_character_variant_ids=image_character_variant_ids,
+                image_character_variant_ids_present=image_character_variant_ids_present,
                 image_object_ids=image_object_ids,
                 image_object_ids_present=image_object_ids_present,
+                image_object_variant_ids=image_object_variant_ids,
+                image_object_variant_ids_present=image_object_variant_ids_present,
                 image_aspect_ratio=image_aspect_ratio,
                 image_size=image_size,
                 video_tool=video_tool,
@@ -686,6 +768,17 @@ def parse_manifest_yaml_full(yaml_text: str) -> tuple[dict, AssetGuides, list[Sc
 def parse_manifest_yaml(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
     metadata, _, scenes = parse_manifest_yaml_full(yaml_text)
     return metadata, scenes
+
+
+def _scene_matches_filter(scene: SceneSpec, scene_filter: set[str] | None) -> bool:
+    return selector_matches(
+        scene_selector_tokens(
+            operational_scene_id=scene.scene_id,
+            manifest_scene_id=scene.manifest_scene_id,
+            reference_id=scene.reference_id,
+        ),
+        scene_filter,
+    )
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -785,13 +878,45 @@ def _asset_guides_character_refs_to_add(guides: AssetGuides, mode: str) -> list[
     if mode_norm == "all":
         refs: list[str] = []
         for entry in guides.character_bible:
-            refs.extend(entry.reference_images or [])
+            refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
         return _dedupe_keep_order(refs)
 
     # auto: only apply when there's exactly one character entry (avoids accidentally mixing multiple identities)
     if len(guides.character_bible) == 1:
-        return _dedupe_keep_order(list(guides.character_bible[0].reference_images or []))
+        entry = guides.character_bible[0]
+        return _dedupe_keep_order(_default_reference_images(entry.reference_images, entry.reference_variants))
     return []
+
+
+def _selected_reference_variants(
+    reference_variants: list[ReferenceVariantSpec], selected_variant_ids: set[str]
+) -> list[ReferenceVariantSpec]:
+    if not selected_variant_ids:
+        return []
+    return [variant for variant in (reference_variants or []) if variant.variant_id in selected_variant_ids]
+
+
+def _default_reference_images(reference_images: list[str], reference_variants: list[ReferenceVariantSpec]) -> list[str]:
+    if reference_images:
+        return list(reference_images)
+    if len(reference_variants or []) == 1:
+        return list(reference_variants[0].reference_images or [])
+    return []
+
+
+def _default_active_reference_variants(reference_images: list[str], reference_variants: list[ReferenceVariantSpec]) -> list[ReferenceVariantSpec]:
+    if reference_images:
+        return []
+    if len(reference_variants or []) == 1:
+        return [reference_variants[0]]
+    return []
+
+
+def _all_reference_images(reference_images: list[str], reference_variants: list[ReferenceVariantSpec]) -> list[str]:
+    refs = list(reference_images or [])
+    for variant in reference_variants or []:
+        refs.extend(variant.reference_images or [])
+    return _dedupe_keep_order(refs)
 
 
 def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, character_refs_mode: str) -> None:
@@ -809,14 +934,20 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
         style_refs = guides.style_guide.reference_images or []
 
     mode_norm = (character_refs_mode or "").strip().lower()
+    selected_character_variant_ids = set(scene.image_character_variant_ids or [])
+    selected_object_variant_ids = set(scene.image_object_variant_ids or [])
     if mode_norm == "scene":
-        if scene.image_character_ids:
-            chosen = set(scene.image_character_ids)
-            char_refs = _dedupe_keep_order(
-                [ref for entry in guides.character_bible for ref in (entry.reference_images or []) if entry.character_id in chosen]
-            )
-        else:
-            char_refs = []
+        chosen_character_ids = set(scene.image_character_ids or [])
+        char_refs: list[str] = []
+        for entry in guides.character_bible:
+            selected_variants = _selected_reference_variants(entry.reference_variants, selected_character_variant_ids)
+            if selected_variants:
+                for variant in selected_variants:
+                    char_refs.extend(variant.reference_images or [])
+                continue
+            if chosen_character_ids and entry.character_id in chosen_character_ids:
+                char_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
+        char_refs = _dedupe_keep_order(char_refs)
     else:
         char_refs = _asset_guides_character_refs_to_add(guides, character_refs_mode)
 
@@ -826,15 +957,16 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
     # Add object/setpiece reference images based on explicit per-scene object_ids.
     obj_refs: list[str] = []
     chosen_object_ids = set(scene.image_object_ids or [])
-    if chosen_object_ids:
-        obj_refs = _dedupe_keep_order(
-            [
-                ref
-                for entry in (guides.object_bible or [])
-                for ref in (entry.reference_images or [])
-                if entry.object_id in chosen_object_ids
-            ]
-        )
+    if chosen_object_ids or selected_object_variant_ids:
+        for entry in (guides.object_bible or []):
+            selected_variants = _selected_reference_variants(entry.reference_variants, selected_object_variant_ids)
+            if selected_variants:
+                for variant in selected_variants:
+                    obj_refs.extend(variant.reference_images or [])
+                continue
+            if chosen_object_ids and entry.object_id in chosen_object_ids:
+                obj_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
+        obj_refs = _dedupe_keep_order(obj_refs)
     merged_refs = _merge_refs(merged_refs, obj_refs, exclude=scene.image_output)
     scene.image_references = merged_refs
 
@@ -858,31 +990,45 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
     ref_set = set(merged_refs)
     chosen_ids = set(scene.image_character_ids or [])
     for entry in guides.character_bible or []:
+        selected_variants = _selected_reference_variants(entry.reference_variants, selected_character_variant_ids)
         if mode_norm == "scene" and chosen_ids:
             is_active = entry.character_id in chosen_ids
         else:
-            is_active = any(ref in ref_set for ref in (entry.reference_images or []))
-        if not is_active and scene.image_output and scene.image_output in (entry.reference_images or []):
+            is_active = any(ref in ref_set for ref in _all_reference_images(entry.reference_images, entry.reference_variants))
+        if not is_active and selected_variants:
+            is_active = True
+        if not is_active and scene.image_output and scene.image_output in _all_reference_images(
+            entry.reference_images, entry.reference_variants
+        ):
             is_active = True
         if is_active and entry.fixed_prompts:
             char_lines.extend(entry.fixed_prompts)
+        active_variants = selected_variants or _default_active_reference_variants(entry.reference_images, entry.reference_variants)
+        if is_active:
+            for variant in active_variants:
+                char_lines.extend(variant.fixed_prompts or [])
 
     # Inject object/setpiece prompts only when that object is active for the scene.
     prop_lines: list[str] = []
     for entry in guides.object_bible or []:
-        if not entry.object_id:
-            continue
-
+        selected_variants = _selected_reference_variants(entry.reference_variants, selected_object_variant_ids)
         is_active = entry.object_id in chosen_object_ids
         if not is_active:
-            is_active = any(ref in ref_set for ref in (entry.reference_images or []))
-        if not is_active and scene.image_output and scene.image_output in (entry.reference_images or []):
+            is_active = any(ref in ref_set for ref in _all_reference_images(entry.reference_images, entry.reference_variants))
+        if not is_active and selected_variants:
+            is_active = True
+        if not is_active and scene.image_output and scene.image_output in _all_reference_images(
+            entry.reference_images, entry.reference_variants
+        ):
             is_active = True
         if not is_active:
             continue
 
         if entry.fixed_prompts:
             prop_lines.extend(entry.fixed_prompts)
+        active_variants = selected_variants or _default_active_reference_variants(entry.reference_images, entry.reference_variants)
+        for variant in active_variants:
+            prop_lines.extend(variant.fixed_prompts or [])
         if entry.cinematic_role:
             prop_lines.append(f"映画での役割: {entry.cinematic_role}")
         for v in entry.cinematic_visual_takeaways or []:
@@ -903,14 +1049,14 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
 
 
 def validate_scene_character_ids(
-    *, scenes: list[SceneSpec], require: bool, mode: str, scene_filter: set[int] | None
+    *, scenes: list[SceneSpec], require: bool, mode: str, scene_filter: set[str] | None
 ) -> None:
     if not require:
         return
     if (mode or "").strip().lower() != "scene":
         return
     for scene in scenes:
-        if scene_filter is not None and int(scene.scene_id) not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
         if not scene.image_output or not scene.image_prompt:
             continue
@@ -922,14 +1068,14 @@ def validate_scene_character_ids(
 
 
 def validate_scene_object_ids(
-    *, scenes: list[SceneSpec], guides: AssetGuides, require: bool, scene_filter: set[int] | None
+    *, scenes: list[SceneSpec], guides: AssetGuides, require: bool, scene_filter: set[str] | None
 ) -> None:
     if not require:
         return
     if not guides.object_bible:
         return
     for scene in scenes:
-        if scene_filter is not None and int(scene.scene_id) not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
         if not scene.image_output or not scene.image_prompt:
             continue
@@ -940,13 +1086,98 @@ def validate_scene_object_ids(
             )
 
 
+def _build_reference_variant_index(
+    entries: list[Any], *, entry_kind: str, entry_id_attr: str
+) -> dict[str, str | None]:
+    issues: list[str] = []
+    index: dict[str, str | None] = {}
+    for entry in entries:
+        entry_id = getattr(entry, entry_id_attr, None)
+        for variant in getattr(entry, "reference_variants", []) or []:
+            variant_id = _as_opt_str(getattr(variant, "variant_id", None))
+            if not variant_id:
+                issues.append(f"{entry_kind} {entry_id or '<unknown>'}: reference_variants[].variant_id is required.")
+                continue
+            if not getattr(variant, "reference_images", None):
+                issues.append(f"{entry_kind} {entry_id or '<unknown>'}:{variant_id}: reference_images is required and must be non-empty.")
+            if variant_id in index:
+                issues.append(f"{entry_kind} variant_id must be unique across assets.{entry_kind}_bible: {variant_id}")
+                continue
+            index[variant_id] = entry_id
+    if issues:
+        raise SystemExit(f"assets.{entry_kind}_bible invalid:\n- " + "\n- ".join(issues))
+    return index
+
+
+def validate_scene_reference_variant_ids(
+    *, scenes: list[SceneSpec], guides: AssetGuides, require: bool, scene_filter: set[str] | None
+) -> None:
+    if not require:
+        return
+
+    character_variant_index = _build_reference_variant_index(
+        guides.character_bible, entry_kind="character", entry_id_attr="character_id"
+    )
+    object_variant_index = _build_reference_variant_index(
+        guides.object_bible, entry_kind="object", entry_id_attr="object_id"
+    )
+
+    for scene in scenes:
+        if not _scene_matches_filter(scene, scene_filter):
+            continue
+
+        unknown_character_variants = [
+            variant_id for variant_id in (scene.image_character_variant_ids or []) if variant_id not in character_variant_index
+        ]
+        if unknown_character_variants:
+            raise SystemExit(
+                f"scene{scene.scene_id}: unknown character_variant_ids: {sorted(set(unknown_character_variants))}"
+            )
+
+        unknown_object_variants = [
+            variant_id for variant_id in (scene.image_object_variant_ids or []) if variant_id not in object_variant_index
+        ]
+        if unknown_object_variants:
+            raise SystemExit(f"scene{scene.scene_id}: unknown object_variant_ids: {sorted(set(unknown_object_variants))}")
+
+        chosen_character_ids = set(scene.image_character_ids or [])
+        if chosen_character_ids:
+            mismatched_character_variants = sorted(
+                {
+                    variant_id
+                    for variant_id in (scene.image_character_variant_ids or [])
+                    if character_variant_index.get(variant_id) not in chosen_character_ids
+                }
+            )
+            if mismatched_character_variants:
+                raise SystemExit(
+                    f"scene{scene.scene_id}: character_variant_ids do not match image_generation.character_ids: "
+                    f"{mismatched_character_variants}"
+                )
+
+        chosen_object_ids = set(scene.image_object_ids or [])
+        if chosen_object_ids:
+            mismatched_object_variants = sorted(
+                {
+                    variant_id
+                    for variant_id in (scene.image_object_variant_ids or [])
+                    if object_variant_index.get(variant_id) not in chosen_object_ids
+                }
+            )
+            if mismatched_object_variants:
+                raise SystemExit(
+                    f"scene{scene.scene_id}: object_variant_ids do not match image_generation.object_ids: "
+                    f"{mismatched_object_variants}"
+                )
+
+
 def validate_scene_narration(
-    *, scenes: list[SceneSpec], require: bool, scene_filter: set[int] | None
+    *, scenes: list[SceneSpec], require: bool, scene_filter: set[str] | None
 ) -> None:
     if not require:
         return
     for scene in scenes:
-        if scene_filter is not None and int(scene.scene_id) not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
         # Narration is required only for scenes/cuts that participate in video generation.
         if not scene.video_tool and not scene.video_output:
@@ -968,7 +1199,7 @@ def validate_scene_narration(
         if tool == "elevenlabs" and not (scene.narration_text and scene.narration_text.strip()):
             raise SystemExit(
                 f"scene{scene.scene_id}: missing audio.narration.text for ElevenLabs (required). "
-                "To intentionally generate assets without narration, pass --skip-audio."
+                'For intentionally silent cuts, use audio.narration.tool: "silent" with text: "".'
             )
 
 
@@ -986,12 +1217,18 @@ def validate_object_reference_scenes(*, scenes: list[SceneSpec], guides: AssetGu
         if not entry.object_id:
             missing_required.append("object_id is required (found null/empty).")
             continue
-        if not entry.reference_images:
-            missing_required.append(f"{entry.object_id}: reference_images is required and must be non-empty.")
-        if not entry.fixed_prompts:
-            missing_required.append(f"{entry.object_id}: fixed_prompts is required and must be non-empty.")
+        all_refs = _all_reference_images(entry.reference_images, entry.reference_variants)
+        if not all_refs:
+            missing_required.append(
+                f"{entry.object_id}: reference_images or reference_variants[].reference_images is required and must be non-empty."
+            )
+        has_any_fixed_prompts = bool(entry.fixed_prompts) or any(variant.fixed_prompts for variant in entry.reference_variants or [])
+        if not has_any_fixed_prompts:
+            missing_required.append(
+                f"{entry.object_id}: fixed_prompts or reference_variants[].fixed_prompts is required and must be non-empty."
+            )
 
-        for ref in entry.reference_images or []:
+        for ref in all_refs:
             if ref not in outputs:
                 missing_outputs.append(f"{entry.object_id}:{ref}")
 
@@ -1989,7 +2226,7 @@ def main() -> None:
 
     # Veo
     parser.add_argument("--gemini-video-model", default=_env("GEMINI_VIDEO_MODEL", "veo-3.1-fast-generate-preview"))
-    parser.add_argument("--video-resolution", default="720p")
+    parser.add_argument("--video-resolution", default="1080p")
     parser.add_argument("--video-aspect-ratio", default=None)
     parser.add_argument("--default-scene-seconds", type=int, default=6)
     parser.add_argument("--video-prompt-prefix", default="", help="Optional text prepended to every video prompt.")
@@ -2170,10 +2407,33 @@ def main() -> None:
                 if args.character_reference_strip:
                     extra.append(str(_derive_character_refstrip_path(ref_p, args.character_reference_strip_suffix)))
             expanded = _dedupe_keep_order(refs + extra)
+            expanded_variants: list[ReferenceVariantSpec] = []
+            for variant in entry.reference_variants or []:
+                variant_refs = _dedupe_keep_order(list(variant.reference_images or []))
+                variant_extra: list[str] = []
+                for ref in variant_refs:
+                    ref_p = Path(ref)
+                    if "assets" not in ref_p.parts or "characters" not in ref_p.parts:
+                        continue
+                    for v in char_views:
+                        if v == "front":
+                            continue
+                        variant_extra.append(str(_derive_character_view_path(ref_p, v)))
+                    if args.character_reference_strip:
+                        variant_extra.append(str(_derive_character_refstrip_path(ref_p, args.character_reference_strip_suffix)))
+                expanded_variants.append(
+                    ReferenceVariantSpec(
+                        variant_id=variant.variant_id,
+                        reference_images=_dedupe_keep_order(variant_refs + variant_extra),
+                        fixed_prompts=list(variant.fixed_prompts or []),
+                        notes=variant.notes,
+                    )
+                )
             expanded_cb.append(
                 CharacterBibleEntry(
                     character_id=entry.character_id,
                     reference_images=expanded,
+                    reference_variants=expanded_variants,
                     fixed_prompts=list(entry.fixed_prompts or []),
                     notes=entry.notes,
                 )
@@ -2197,9 +2457,7 @@ def main() -> None:
     if not scenes:
         raise SystemExit("No scenes found in manifest YAML.")
 
-    scene_filter: set[int] | None = None
-    if args.scene_ids:
-        scene_filter = {int(x.strip()) for x in args.scene_ids.split(",") if x.strip()}
+    scene_filter = parse_scene_selectors(args.scene_ids)
 
     validate_scene_character_ids(
         scenes=scenes,
@@ -2211,6 +2469,12 @@ def main() -> None:
         scenes=scenes,
         guides=guides,
         require=bool(args.require_object_ids),
+        scene_filter=scene_filter,
+    )
+    validate_scene_reference_variant_ids(
+        scenes=scenes,
+        guides=guides,
+        require=bool(args.apply_asset_guides),
         scene_filter=scene_filter,
     )
     validate_object_reference_scenes(
@@ -2242,7 +2506,7 @@ def main() -> None:
             _scene_uses_tool(scene, {"google_nanobanana_pro", "nanobanana_pro"})
             and scene.image_output
             and scene.image_prompt
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
@@ -2252,7 +2516,7 @@ def main() -> None:
             _scene_uses_tool(scene, {"seadream", "seedream", "seedream_4_5", "byteplus_seedream_4_5"})
             and scene.image_output
             and scene.image_prompt
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
@@ -2261,7 +2525,7 @@ def main() -> None:
         and any(
             normalize_tool_name(scene.video_tool) == "google_veo_3_1"
             and scene.video_output
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
@@ -2270,7 +2534,7 @@ def main() -> None:
         and any(
             normalize_tool_name(scene.video_tool) in {"kling_3_0", "kling", "kling_3_0_omni", "kling_omni", "kling-omni"}
             and scene.video_output
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
@@ -2288,7 +2552,7 @@ def main() -> None:
                 "see_dream",
             }
             and scene.video_output
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
@@ -2364,7 +2628,7 @@ def main() -> None:
         needs_elevenlabs = any(
             normalize_tool_name(scene.narration_tool) == "elevenlabs"
             and scene.narration_output
-            and (scene_filter is None or scene.scene_id in scene_filter)
+            and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
         if needs_elevenlabs:
@@ -2393,7 +2657,7 @@ def main() -> None:
     # Pass 1: images (allows later videos to reference other scene images, e.g. first/last frame conditioning).
     image_scenes: list[SceneSpec] = []
     for scene in scenes:
-        if scene_filter is not None and scene.scene_id not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
         if args.skip_images or not scene.image_output or not scene.image_prompt:
             continue
@@ -2451,7 +2715,7 @@ def main() -> None:
         image_scenes = selected
 
     for scene in image_scenes:
-        if scene_filter is not None and scene.scene_id not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
 
         if args.skip_images or not scene.image_output or not scene.image_prompt:
@@ -2625,7 +2889,7 @@ def main() -> None:
     # Pass 2: videos
     video_scenes_in_order: list[SceneSpec] = []
     for s in scenes:
-        if scene_filter is not None and s.scene_id not in scene_filter:
+        if not _scene_matches_filter(s, scene_filter):
             continue
         if args.skip_videos or not s.video_output or not (s.video_motion_prompt or s.image_prompt):
             continue
@@ -2635,7 +2899,7 @@ def main() -> None:
 
     prev_chain_first_frame: Path | None = None
     for scene in scenes:
-        if scene_filter is not None and scene.scene_id not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
 
         if args.skip_videos or not scene.video_output or not (scene.video_motion_prompt or scene.image_prompt):
@@ -2880,7 +3144,7 @@ def main() -> None:
 
     # Pass 3: audio (TTS)
     for scene in scenes:
-        if scene_filter is not None and scene.scene_id not in scene_filter:
+        if not _scene_matches_filter(scene, scene_filter):
             continue
 
         if args.skip_audio or not scene.narration_output:
@@ -2932,7 +3196,7 @@ def main() -> None:
                 force=args.force,
                 dry_run=args.dry_run,
             )
-        elif tool in {"tbd", ""}:
+        elif tool in {"silent", "tbd", ""}:
             if args.dry_run:
                 print(f"[dry-run] AUDIO {out_path} <- placeholder (tool={scene.narration_tool})")
             else:

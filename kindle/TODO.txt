@@ -1,0 +1,7 @@
+Kindle / Calibre TODO
+
+- Evaluate `Calibre + calibre-mcp` as the primary path for local ebook access.
+- Confirm which book sources are DRM-free and can be imported into Calibre safely.
+- Define a workflow to export readable text files from Calibre-managed books when licensing permits it.
+- Decide whether this repo should store source ebooks, extracted txt files, or only derived notes.
+- If needed, prototype a local MCP setup that can search the Calibre library and read exported text.

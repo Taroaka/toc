@@ -9,13 +9,14 @@
 ### 位置づけ
 
 ```
-[情報収集] → [物語生成] → [台本作成] → [動画生成]
-                           ↑ 本書
+[情報収集] → [物語生成] → [視覚価値設計] → [台本作成] → [動画生成]
+                                          ↑ 本書
 ```
 
 ### 入力
 
 - `output/stories/{topic}_{timestamp}.md` - 物語スクリプト（story-creation.md出力）
+- `output/<topic>_<timestamp>/visual_value.md` - 中盤の視覚報酬パート設計（あれば参照）
 - 物語構造、感情曲線、エンゲージメント設計
 
 ### 出力
@@ -56,6 +57,22 @@
 1. **具体性**: 「感動的な場面」ではなく「涙を流す主人公のクローズアップ」
 2. **再現性**: 誰が読んでも同じ映像をイメージできる
 3. **制作可能性**: 技術的に実現可能な指示のみ
+
+### 1.4 視覚化価値パートの扱い
+
+`visual_value.md` がある場合、Scriptwriter はそれを
+**中盤の視覚報酬** として script に取り込む。
+
+基本ルール:
+
+- 配置は動画全体の `20% - 80%`
+- 1パート `4-6` カット
+- 各カット `4` 秒
+- ナレーションなし
+- 文字説明ではなく、映像だけで満足感を作る
+
+これは本筋を止める寄り道ではなく、
+視聴者に「この題材だからこそ見たいもの」を与えるための設計とする。
 
 ---
 
@@ -221,6 +238,13 @@ scenes:
       purpose: "視聴者を引き込み、主人公に共感させる"
       hook_type: "question | statement | shock | emotion"
       emotional_target: "curiosity"  # この時点で狙う感情
+
+    # --- 視覚価値パート（任意）---
+    visual_value:
+      source_part_id: "optional"
+      role: "visual_payoff | none"
+      narration_policy: "spoken | silent"
+      placement_guard: "20-80%"
 
     # --- シーン目的（G.O.D.D.）---
     scene_goal:
@@ -692,6 +716,7 @@ timing_check:
 script_metadata:
   topic: "string"
   source_story: "output/stories/{file}.md"
+  source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
   target_duration: 60  # 秒
   aspect_ratio: "9:16"
@@ -778,6 +803,12 @@ scenes:
       hook_type: "question"
       emotional_target: "curiosity"
 
+    visual_value:
+      source_part_id: ""
+      role: "none"
+      narration_policy: "spoken"
+      placement_guard: ""
+
     characters:
       - character_id: "protagonist"
         action: "窓の外を見つめている"
@@ -837,6 +868,28 @@ scenes:
       duration: 0.5
 
   # === Scene 2-8: 同様の構造で続く ===
+
+  - scene_id: 4
+    scene_name: "中盤の視覚報酬"
+    timing:
+      position_percent: "40-56"
+      duration_seconds: 24
+      timestamp: "00:24-00:48"
+
+    narrative:
+      phase: "ordeal"
+      purpose: "視聴者に、この題材で最も見たいものを体験させる"
+      hook_type: "visual_payoff"
+      emotional_target: "awe"
+
+    visual_value:
+      source_part_id: "midroll_visual_payoff_01"
+      role: "visual_payoff"
+      narration_policy: "silent"
+      placement_guard: "20-80%"
+
+    # 実際の manifest / scene_conte では 4-6 cuts に分解し、
+    # 各 cut を 4 秒・ナレーションなしで表現する
 
 # === エンゲージメント設計（story-creationから継承）===
 engagement_design:

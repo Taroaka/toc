@@ -22,6 +22,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "20990101_0000",
                     "--base",
                     str(base),
+                    "--experience",
+                    "cinematic_story",
                     "--force",
                 ],
                 check=True,
@@ -34,11 +36,17 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "run_status.json").exists())
             self.assertTrue((run_dir / "research.md").exists())
             self.assertTrue((run_dir / "story.md").exists())
+            self.assertTrue((run_dir / "visual_value.md").exists())
             self.assertTrue((run_dir / "script.md").exists())
             self.assertTrue((run_dir / "video_manifest.md").exists())
             self.assertTrue((run_dir / "assets" / "characters").is_dir())
+            self.assertTrue((run_dir / "assets" / "objects").is_dir())
             self.assertTrue((run_dir / "assets" / "scenes").is_dir())
             self.assertTrue((run_dir / "assets" / "audio").is_dir())
+            manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            self.assertIn('reference_id: "protagonist_front_ref"', manifest)
+            self.assertIn("全身（頭からつま先まで）", manifest)
+            self.assertIn("scene_id: 10", manifest)
 
     def test_scaffold_cloud_island_experience_uses_template(self) -> None:
         import tempfile

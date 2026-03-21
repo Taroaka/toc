@@ -24,6 +24,13 @@ assets:
         - "assets/characters/protagonist_front.png"
         - "assets/characters/protagonist_side.png"
         - "assets/characters/protagonist_back.png"
+      reference_variants:
+        - variant_id: "protagonist_battle_damaged"
+          reference_images:
+            - "assets/characters/protagonist_battle_damaged_front.png"
+            - "assets/characters/protagonist_battle_damaged_side.png"
+          fixed_prompts:
+            - "右肩の布が裂け、軽い泥汚れがある"
       fixed_prompts:
         - "黒髪の短髪"
         - "和装（実写的な生地感）"
@@ -32,6 +39,23 @@ assets:
     visual_style: "cinematic, warm tones"
     reference_images:
       - "assets/styles/reference_1.png"
+
+  # 主役級アイテム / 舞台装置（任意だが推奨）
+  # 竜宮城/玉手箱のような要素は character bible と同じく固定して扱う。
+  object_bible: []
+  # - object_id: "tamatebako"
+  #   kind: "artifact"  # setpiece|artifact|phenomenon
+  #   reference_images:
+  #     - "assets/objects/tamatebako_closeup.png"
+  #   fixed_prompts:
+  #     - "箱の材質/構造の不変条件"
+  #     - "文字で説明せず、形/光/動きで魅力と危うさを伝える"
+  #   cinematic:
+  #     role: "贈与 + 禁忌 + 代償"
+  #     visual_takeaways:
+  #       - "開けたくなるが、開けると何かが起こる"
+  #     spectacle_details:
+  #       - "封印が呼吸するように発光する"
 
 # === シーン別素材 ===
 scenes:
@@ -45,11 +69,15 @@ scenes:
       - cut_id: 1
         cut_role: "main"  # main|sub
         image_generation:
+          # 新規の静止画は、連続性アンカーが必要なときだけ優先して作る。
+          # 既存の参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
           # tool: "google_nanobanana_pro"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
           tool: "google_nanobanana_pro"
           character_ids: ["protagonist"]  # Use [] when no character is visible
+          character_variant_ids: []         # Optional: ["protagonist_battle_damaged"] when a specific state/time variant is needed
           object_ids: []                    # Use [] when no setpiece / prop anchor is required
+          object_variant_ids: []            # Optional: choose a specific object/setpiece variant when defined in assets.object_bible[]
           prompt: |
             [全体 / 不変条件]
             シネマティック。暖色寄り。自然な照明。画面内テキストなし、字幕なし、ウォーターマークなし。

@@ -29,6 +29,7 @@ EXPERIENCE_TEMPLATES: dict[str, Path] = {
     "ride_action_boat": Path("workflow/immersive-ride-video-manifest-template.md"),
 }
 SCENE_CONTE_TEMPLATE = Path("workflow/scene-conte-template.md")
+VISUAL_VALUE_TEMPLATE = Path("workflow/visual-value-template.yaml")
 
 
 def sanitize_topic(topic: str) -> str:
@@ -116,6 +117,16 @@ def main() -> None:
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", force=args.force)
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", force=args.force)
+    if VISUAL_VALUE_TEMPLATE.exists():
+        visual_value = (
+            VISUAL_VALUE_TEMPLATE.read_text(encoding="utf-8")
+            .replace("<topic>", topic_raw)
+            .replace("<timestamp>", ts)
+            .replace("<ISO8601>", now_iso())
+        )
+        write_text(run_dir / "visual_value.md", visual_value, force=args.force)
+    else:
+        write_text(run_dir / "visual_value.md", "# 視覚化価値パート（visual value）\n\nTODO\n", force=args.force)
     write_text(run_dir / "script.md", "# 台本（没入型 / cinematic）\n\nTODO\n", force=args.force)
     if SCENE_CONTE_TEMPLATE.exists():
         tmpl = SCENE_CONTE_TEMPLATE.read_text(encoding="utf-8")
@@ -160,6 +171,7 @@ def main() -> None:
             "status": "DONE",
             "runtime.stage": "immersive_ride_scaffolded",
             "immersive.experience": str(experience),
+            "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
             "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
         },
     )

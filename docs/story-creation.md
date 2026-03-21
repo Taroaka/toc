@@ -13,7 +13,7 @@
 ### 位置づけ
 
 ```
-[情報収集] → [物語生成] → [動画生成]
+[情報収集] → [物語生成] → [視覚価値設計] → [台本作成] → [動画生成]
               ↑ 本書
 ```
 
@@ -25,6 +25,7 @@
 ### 出力
 
 - `output/<topic>_<timestamp>/story.md` - 物語スクリプト
+- `output/<topic>_<timestamp>/visual_value.md` - 視覚化価値パートの設計メモ（後続エージェントが作成）
 - 動画用台本（任意の長さに対応）
 
 ---
@@ -427,6 +428,28 @@ accuracy_checklist:
 
 ---
 
+### Phase 5: 視覚化価値パートへの handoff
+
+`story.md` を確定した後、Scriptwriter に直接渡す前に
+**Visual Value Ideator** が `visual_value.md` を作る。
+
+目的:
+
+- 物語本筋の外側にある「見たいもの」を中盤の視覚報酬として定義する
+- 動画生成AIだからこそ、実写セット不要で壮大に見せられる要素を拾う
+- 竜宮城の内部、禁忌の箱、異界の回廊のような
+  **読者は知っているが細部を見たことがないもの** を強化する
+
+運用ルール:
+
+- 価値パートは原則として動画全体の `20% - 80%` に置く
+- 1価値パートは `4-6` カット
+- 各カットは `4` 秒
+- ナレーションは入れず、映像だけで満足感を作る
+- 文字説明ではなく、形 / 光 / 動き / 機構 / ショー性で価値を伝える
+
+---
+
 ## 物語パターンライブラリ
 
 ### パターン1: 隠された真実型
@@ -654,6 +677,42 @@ sources:
     - claim: "string"
       verification: "verified | unverified | partially_verified"
       source: "string"
+```
+
+## Handoff Artifact: `visual_value.md`
+
+Visual Value Ideator は `workflow/visual-value-template.yaml` を基に、
+次のような構造で `visual_value.md` を作る。
+
+```yaml
+visual_value_metadata:
+  topic: "string"
+  source_research: "output/<topic>_<timestamp>/research.md"
+  source_story: "output/<topic>_<timestamp>/story.md"
+  created_at: "ISO8601"
+
+value_parts:
+  - part_id: "midroll_visual_payoff_01"
+    title: "string"
+    placement_window:
+      start_percent: 20
+      end_percent: 80
+      preferred_percent: 50
+      rationale: "string"
+    why_this_matters:
+      - "string"
+    ai_visualization_advantage:
+      no_physical_set_required: true
+      spectacle_scale: "string"
+      notes: "string"
+    related_objects: ["object_id"]
+    cut_plan:
+      - cut_id: 1
+        duration_seconds: 4
+        narration: ""
+        focus: "string"
+        description: "string"
+        viewer_payoff: "string"
 ```
 
 ---

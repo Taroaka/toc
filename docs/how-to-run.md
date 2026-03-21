@@ -38,10 +38,29 @@ Claude Code で以下を実行:
 /toc-run "桃太郎" --dry-run
 ```
 
+YouTube サムネイル用の prompt だけ作る場合:
+
+```text
+/toc-youtube-thumbnail "桃太郎"
+```
+
+既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合:
+
+```text
+/toc-youtube-thumbnail "浦島太郎" --run-dir output/浦島太郎_<timestamp>
+```
+
 sceneごとにQ&A動画を複数本作る場合:
 
 ```
 /toc-scene-series "桃太郎" --min-seconds 30 --max-seconds 60
+```
+
+シーンエージェント（multi-agent）で scene-series の下準備を行う場合:
+
+```bash
+python scripts/ai/toc-scene-series-multiagent.py "桃太郎" --min-seconds 30 --max-seconds 60
+python scripts/toc-scene-series.py "桃太郎" --run-dir output/桃太郎_<timestamp>
 ```
 
 没入型（実写シネマティック体験）の単発動画:
@@ -98,12 +117,19 @@ output/<topic>_<timestamp>/
 例（`momotaro` のマニフェストから素材生成→結合）:
 
 ```bash
+python scripts/export-image-prompt-collection.py \
+  --manifest output/momotaro_20260110_1700/video_manifest.md
+
 python scripts/generate-assets-from-manifest.py \
   --manifest output/momotaro_20260110_1700/video_manifest.md \
   --character-reference-views front,side,back \
   --character-reference-strip \
   --image-batch-size 10 --image-batch-index 1 \
   # ナレーション音声を生成しない（意図的にサイレントで進める）場合だけ --skip-audio を付ける
+
+# 既定値:
+# - video generation は 1080p
+# - provider 音声は sound off（別途 narration/BGM を render で合成）
 
 python scripts/build-clip-lists.py \
   --manifest output/momotaro_20260110_1700/video_manifest.md \
