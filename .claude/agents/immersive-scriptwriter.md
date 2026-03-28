@@ -114,6 +114,9 @@ model: inherit
 ## `video_manifest.md` の作り方（このコマンド用）
 
 - 言語: `video_manifest.md` の本文（prompt / fixed_prompts / notes 等）は **日本語**で書く（修正指示を日本語で出しやすくするため）。見出しは日本語推奨（例: `[全体 / 不変条件]` 等）。
+- `scenes[].video_generation.tool` が `kling_3_0` / `kling_3_0_omni` の scene では、動画 prompt の作成時に
+  `docs/video-generation.md` の一般論だけで済ませず、`workflow/playbooks/video-generation/kling.md` を優先参照する
+- その場合、`video_generation.prompt` は被写体・環境・固定条件、`video_generation.motion_prompt` は主動作・カメラ・連続性に分けて書く
 - run root の `assets/` を使う（`assets/characters`, `assets/objects`, `assets/scenes`, `assets/audio`）
 - `assets.character_bible` を作り、参照画像の出力先を決める
   - 人間キャラは原則「映画俳優レベルの魅力」で設計する（例: balanced facial features / clear skin / expressive eyes / camera-ready presence）

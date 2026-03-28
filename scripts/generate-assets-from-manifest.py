@@ -54,6 +54,7 @@ class SceneSpec:
     reference_id: str | None
     timestamp: str | None
     duration_seconds: int | None
+    still_image_plan_mode: str | None
     image_tool: str | None
     image_prompt: str | None
     image_output: str | None
@@ -89,11 +90,23 @@ class ReferenceVariantSpec:
 
 
 @dataclass(frozen=True)
+class PhysicalScaleSpec:
+    height_cm: int | None
+    body_length_cm: int | None
+    shell_length_cm: int | None
+    shoulder_height_cm: int | None
+    silhouette_notes: list[str]
+
+
+@dataclass(frozen=True)
 class CharacterBibleEntry:
     character_id: str | None
     reference_images: list[str]
     reference_variants: list[ReferenceVariantSpec]
     fixed_prompts: list[str]
+    physical_scale: PhysicalScaleSpec | None
+    relative_scale_rules: list[str]
+    review_aliases: list[str]
     notes: str | None
 
 
@@ -232,6 +245,29 @@ def _parse_reference_variants(raw_variants: Any) -> list[ReferenceVariantSpec]:
     return variants
 
 
+def _as_opt_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _parse_physical_scale_spec(raw_scale: Any) -> PhysicalScaleSpec | None:
+    if not isinstance(raw_scale, dict):
+        return None
+    return PhysicalScaleSpec(
+        height_cm=_as_opt_int(raw_scale.get("height_cm")),
+        body_length_cm=_as_opt_int(raw_scale.get("body_length_cm")),
+        shell_length_cm=_as_opt_int(raw_scale.get("shell_length_cm")),
+        shoulder_height_cm=_as_opt_int(raw_scale.get("shoulder_height_cm")),
+        silhouette_notes=_ensure_str_list(raw_scale.get("silhouette_notes")),
+    )
+
+
 def _parse_assets_spec(assets: Any) -> AssetGuides:
     if not isinstance(assets, dict):
         return AssetGuides(character_bible=[], style_guide=None, object_bible=[])
@@ -249,6 +285,9 @@ def _parse_assets_spec(assets: Any) -> AssetGuides:
                     reference_images=_ensure_str_list(item.get("reference_images")),
                     reference_variants=_parse_reference_variants(item.get("reference_variants") or item.get("variants")),
                     fixed_prompts=_ensure_str_list(item.get("fixed_prompts")),
+                    physical_scale=_parse_physical_scale_spec(item.get("physical_scale")),
+                    relative_scale_rules=_ensure_str_list(item.get("relative_scale_rules")),
+                    review_aliases=_ensure_str_list(item.get("review_aliases")),
                     notes=_as_opt_str(item.get("notes")),
                 )
             )
@@ -392,6 +431,7 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 reference_id=None,
                 timestamp=None,
                 duration_seconds=None,
+                still_image_plan_mode=None,
                 image_tool=None,
                 image_prompt=None,
                 image_output=None,
@@ -587,6 +627,8 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
                 image_output = _as_opt_str(ig.get("output")) if isinstance(ig, dict) else None
+                cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
+                still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
                 image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
                 image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
                 image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
@@ -637,6 +679,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         reference_id=reference_id,
                         timestamp=timestamp,
                         duration_seconds=cut_duration_seconds if cut_duration_seconds is not None else scene_duration_seconds,
+                        still_image_plan_mode=still_image_plan_mode,
                         image_tool=image_tool,
                         image_prompt=image_prompt,
                         image_output=image_output,
@@ -676,6 +719,8 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
         image_output = _as_opt_str(ig.get("output")) if isinstance(ig, dict) else None
+        scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
+        still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
         image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
         image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
         image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
@@ -727,6 +772,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 reference_id=reference_id,
                 timestamp=timestamp,
                 duration_seconds=scene_duration_seconds,
+                still_image_plan_mode=still_image_plan_mode,
                 image_tool=image_tool,
                 image_prompt=image_prompt,
                 image_output=image_output,
@@ -779,6 +825,22 @@ def _scene_matches_filter(scene: SceneSpec, scene_filter: set[str] | None) -> bo
         ),
         scene_filter,
     )
+
+
+def _should_generate_story_still_by_plan(scene: SceneSpec, allowed_modes: set[str]) -> bool:
+    mode = (scene.still_image_plan_mode or "").strip().lower()
+    if not mode:
+        return False
+    return mode in allowed_modes
+
+
+def _should_generate_image_scene(scene: SceneSpec, *, allowed_story_modes: set[str], base_dir: Path) -> bool:
+    if not scene.image_output or not scene.image_prompt:
+        return False
+    outp = resolve_path(base_dir, scene.image_output)
+    if outp and (_is_character_ref_path(outp) or _is_object_ref_path(outp)):
+        return True
+    return _should_generate_story_still_by_plan(scene, allowed_story_modes)
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -919,6 +981,89 @@ def _all_reference_images(reference_images: list[str], reference_variants: list[
     return _dedupe_keep_order(refs)
 
 
+def _format_physical_scale_lines(entry: CharacterBibleEntry) -> list[str]:
+    scale = entry.physical_scale
+    if not scale:
+        return []
+
+    subject = entry.character_id or "character"
+    dims: list[str] = []
+    if scale.height_cm is not None:
+        dims.append(f"身長約{scale.height_cm}cm")
+    if scale.body_length_cm is not None:
+        dims.append(f"全長約{scale.body_length_cm}cm")
+    if scale.shell_length_cm is not None:
+        dims.append(f"甲長約{scale.shell_length_cm}cm")
+    if scale.shoulder_height_cm is not None:
+        dims.append(f"肩高約{scale.shoulder_height_cm}cm")
+
+    lines: list[str] = []
+    if dims:
+        lines.append(f"{subject} の体格固定: " + "、".join(dims) + "。")
+    for note in scale.silhouette_notes or []:
+        lines.append(f"{subject} の体格補足: {note}")
+    return lines
+
+
+def _expand_character_bible_with_existing_refstrips(
+    *,
+    guides: AssetGuides,
+    base_dir: Path,
+    strip_suffix: str,
+) -> AssetGuides:
+    expanded_cb: list[CharacterBibleEntry] = []
+    for entry in guides.character_bible or []:
+        refs = _dedupe_keep_order(list(entry.reference_images or []))
+        extra: list[str] = []
+        for ref in refs:
+            ref_p = Path(ref)
+            if "assets" not in ref_p.parts or "characters" not in ref_p.parts:
+                continue
+            strip_rel = _derive_character_refstrip_path(ref_p, strip_suffix)
+            strip_abs = resolve_path(base_dir, str(strip_rel))
+            if strip_abs and strip_abs.exists():
+                extra.append(str(strip_rel))
+
+        expanded_variants: list[ReferenceVariantSpec] = []
+        for variant in entry.reference_variants or []:
+            variant_refs = _dedupe_keep_order(list(variant.reference_images or []))
+            variant_extra: list[str] = []
+            for ref in variant_refs:
+                ref_p = Path(ref)
+                if "assets" not in ref_p.parts or "characters" not in ref_p.parts:
+                    continue
+                strip_rel = _derive_character_refstrip_path(ref_p, strip_suffix)
+                strip_abs = resolve_path(base_dir, str(strip_rel))
+                if strip_abs and strip_abs.exists():
+                    variant_extra.append(str(strip_rel))
+            expanded_variants.append(
+                ReferenceVariantSpec(
+                    variant_id=variant.variant_id,
+                    reference_images=_dedupe_keep_order(variant_refs + variant_extra),
+                    fixed_prompts=list(variant.fixed_prompts or []),
+                    notes=variant.notes,
+                )
+            )
+
+        expanded_cb.append(
+            CharacterBibleEntry(
+                character_id=entry.character_id,
+                reference_images=_dedupe_keep_order(refs + extra),
+                reference_variants=expanded_variants,
+                fixed_prompts=list(entry.fixed_prompts or []),
+                physical_scale=entry.physical_scale,
+                relative_scale_rules=list(entry.relative_scale_rules or []),
+                review_aliases=list(entry.review_aliases or []),
+                notes=entry.notes,
+            )
+        )
+    return AssetGuides(
+        character_bible=expanded_cb,
+        style_guide=guides.style_guide,
+        object_bible=guides.object_bible,
+    )
+
+
 def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, character_refs_mode: str) -> None:
     """
     Mutates scene in-place:
@@ -987,6 +1132,7 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
     # Inject character fixed prompts only when that character is "active" for the scene:
     # - either its reference images are used, or this scene is generating that reference image.
     char_lines: list[str] = []
+    active_character_entries: list[CharacterBibleEntry] = []
     ref_set = set(merged_refs)
     chosen_ids = set(scene.image_character_ids or [])
     for entry in guides.character_bible or []:
@@ -1001,12 +1147,19 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
             entry.reference_images, entry.reference_variants
         ):
             is_active = True
+        if is_active:
+            active_character_entries.append(entry)
         if is_active and entry.fixed_prompts:
             char_lines.extend(entry.fixed_prompts)
         active_variants = selected_variants or _default_active_reference_variants(entry.reference_images, entry.reference_variants)
         if is_active:
             for variant in active_variants:
                 char_lines.extend(variant.fixed_prompts or [])
+            char_lines.extend(_format_physical_scale_lines(entry))
+
+    if len(active_character_entries) >= 2:
+        for entry in active_character_entries:
+            char_lines.extend(entry.relative_scale_rules or [])
 
     # Inject object/setpiece prompts only when that object is active for the scene.
     prop_lines: list[str] = []
@@ -1107,6 +1260,27 @@ def _build_reference_variant_index(
     if issues:
         raise SystemExit(f"assets.{entry_kind}_bible invalid:\n- " + "\n- ".join(issues))
     return index
+
+
+def validate_character_bible(*, guides: AssetGuides) -> None:
+    issues: list[str] = []
+    for entry in guides.character_bible or []:
+        entry_id = entry.character_id or "<unknown>"
+        scale = entry.physical_scale
+        if scale is None:
+            continue
+        if (
+            scale.height_cm is None
+            and scale.body_length_cm is None
+            and scale.shell_length_cm is None
+            and scale.shoulder_height_cm is None
+            and not (scale.silhouette_notes or [])
+        ):
+            issues.append(
+                f"{entry_id}: physical_scale must include at least one measurement or silhouette_notes."
+            )
+    if issues:
+        raise SystemExit("assets.character_bible invalid:\n- " + "\n- ".join(issues))
 
 
 def validate_scene_reference_variant_ids(
@@ -2134,6 +2308,17 @@ def main() -> None:
     parser.add_argument("--skip-images", action="store_true")
     parser.add_argument("--skip-videos", action="store_true")
     parser.add_argument("--skip-audio", action="store_true")
+    parser.add_argument(
+        "--skip-image-prompt-review",
+        action="store_true",
+        help="Skip the pre-image-generation story consistency review gate.",
+    )
+    parser.add_argument(
+        "--image-prompt-review-fix-character-ids",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Before image generation, auto-add missing character_ids inferred by the review script.",
+    )
 
     parser.add_argument("--scene-ids", default=None, help='Comma-separated list like "1,3,5" (default: all).')
 
@@ -2141,7 +2326,7 @@ def main() -> None:
     parser.add_argument("--gemini-api-base", default=_env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"))
     parser.add_argument("--gemini-api-key", default=_env("GEMINI_API_KEY"))
     parser.add_argument("--gemini-image-model", default=_env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image-preview"))
-    parser.add_argument("--image-size", default="2K")
+    parser.add_argument("--image-size", default="1K")
     parser.add_argument("--image-aspect-ratio", default=None)
     parser.add_argument("--image-prompt-prefix", default="", help="Optional text prepended to every image prompt.")
     parser.add_argument("--image-prompt-suffix", default="", help="Optional text appended to every image prompt.")
@@ -2216,6 +2401,11 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="When using --image-batch-size, also generate missing character reference images (assets/characters/*) in the same run.",
+    )
+    parser.add_argument(
+        "--image-plan-modes",
+        default="generate_still",
+        help="Comma-separated still_image_plan.mode values that are allowed for story image generation (default: generate_still). Character/object reference images are always eligible.",
     )
 
     # SeaDream (Seedream 4.5, OpenAI Images compatible)
@@ -2373,6 +2563,26 @@ def main() -> None:
         raise SystemExit(f"Manifest not found: {manifest_path}")
 
     base_dir = Path(args.base_dir) if args.base_dir else manifest_path.parent
+    allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
+
+    if not args.skip_images and not args.skip_image_prompt_review:
+        review_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/review-image-prompt-story-consistency.py"),
+            "--manifest",
+            str(manifest_path),
+            "--story",
+            str(base_dir / "story.md"),
+            "--script",
+            str(base_dir / "script.md"),
+            "--image-plan-modes",
+            args.image_plan_modes,
+            "--fail-on-findings",
+        ]
+        if args.image_prompt_review_fix_character_ids:
+            review_cmd.append("--fix-character-ids")
+        subprocess.run(review_cmd, check=True)
+
     md = manifest_path.read_text(encoding="utf-8")
     yaml_text = extract_yaml_block(md)
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
@@ -2385,6 +2595,14 @@ def main() -> None:
     # If the user asks for a ref strip, we must have all three views.
     if args.character_reference_strip:
         char_views = sorted(set(char_views) | {"front", "side", "back"})
+
+    # Always include existing refstrip siblings for character still generation when present.
+    # This keeps character consistency stronger for image generation without requiring extra flags.
+    guides = _expand_character_bible_with_existing_refstrips(
+        guides=guides,
+        base_dir=base_dir,
+        strip_suffix=args.character_reference_strip_suffix,
+    )
 
     # Expand character_bible reference_images to include derived view/strip filenames (opt-in).
     # This keeps existing manifests compatible while letting story scenes automatically reference
@@ -2429,20 +2647,24 @@ def main() -> None:
                         notes=variant.notes,
                     )
                 )
-            expanded_cb.append(
-                CharacterBibleEntry(
-                    character_id=entry.character_id,
-                    reference_images=expanded,
-                    reference_variants=expanded_variants,
-                    fixed_prompts=list(entry.fixed_prompts or []),
-                    notes=entry.notes,
+                expanded_cb.append(
+                    CharacterBibleEntry(
+                        character_id=entry.character_id,
+                        reference_images=expanded,
+                        reference_variants=expanded_variants,
+                        fixed_prompts=list(entry.fixed_prompts or []),
+                        physical_scale=entry.physical_scale,
+                        relative_scale_rules=list(entry.relative_scale_rules or []),
+                        review_aliases=list(entry.review_aliases or []),
+                        notes=entry.notes,
+                    )
                 )
-            )
         guides = AssetGuides(character_bible=expanded_cb, style_guide=guides.style_guide, object_bible=guides.object_bible)
 
     if args.apply_asset_guides:
         if yaml is None:
             raise SystemExit("PyYAML is required for --apply-asset-guides (dependency: pyyaml).")
+        validate_character_bible(guides=guides)
         if not guides.character_bible and guides.style_guide is None:
             print("[warn] --apply-asset-guides: no assets.character_bible/style_guide found in manifest.")
         if len(guides.character_bible) > 1 and str(args.asset_guides_character_refs).strip().lower() == "auto":
@@ -2659,7 +2881,13 @@ def main() -> None:
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
             continue
-        if args.skip_images or not scene.image_output or not scene.image_prompt:
+        if args.skip_images:
+            continue
+        if not _should_generate_image_scene(
+            scene,
+            allowed_story_modes=allowed_image_plan_modes,
+            base_dir=base_dir,
+        ):
             continue
         image_scenes.append(scene)
 
@@ -2718,7 +2946,13 @@ def main() -> None:
         if not _scene_matches_filter(scene, scene_filter):
             continue
 
-        if args.skip_images or not scene.image_output or not scene.image_prompt:
+        if args.skip_images:
+            continue
+        if not _should_generate_image_scene(
+            scene,
+            allowed_story_modes=allowed_image_plan_modes,
+            base_dir=base_dir,
+        ):
             continue
 
         tool = normalize_tool_name(scene.image_tool)

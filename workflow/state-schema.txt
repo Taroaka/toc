@@ -18,11 +18,15 @@
 #   immersive.experience=cinematic_story|cloud_island_walk|ride_action_boat  # ride_action_boat は legacy alias
 #   gate.research_review=required|optional|skipped
 #   gate.story_review=required|optional|skipped
+#   gate.image_prompt_review=required|optional|skipped
 #   gate.video_review=required|optional|skipped
 #   gate.hybridization_review=required|optional|skipped
 #   review.hybridization.status=pending|approved|rejected
 #   review.hybridization.note=string
 #   review.hybridization.at=ISO8601
+#   review.image_prompt.status=pending|approved|changes_requested
+#   review.image_prompt.note=string
+#   review.image_prompt.at=ISO8601
 #   artifact.research=output/<topic>_<timestamp>/research.md
 #   artifact.story=output/<topic>_<timestamp>/story.md
 #   artifact.visual_value=output/<topic>_<timestamp>/visual_value.md

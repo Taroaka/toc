@@ -76,6 +76,12 @@ scenes:
   - scene_id: 10
     timestamp: "00:00-00:08"
     image_generation:
+      # review metadata は image_prompt_collection.md 側で持つ。
+      # subagent false には reason key を必ず残し、fix 後に再 review する。
+      # human_review_ok は例外許容の記録であり、subagent finding を消さない。
+      # required block:
+      # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
+      # 1 つでも欠けていれば subagent review は false にする。
       tool: "google_nanobanana_pro"
       character_ids: []
       character_variant_ids: []
@@ -103,7 +109,7 @@ scenes:
         アニメ/漫画/イラスト調。手の崩れ、指の増殖。あらゆる文字要素。
       output: "assets/scenes/scene10.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -154,7 +160,7 @@ scenes:
         アニメ/漫画/イラスト調。手の崩れ、指の増殖。あらゆる文字要素。
       output: "assets/scenes/scene20.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -199,7 +205,7 @@ scenes:
         アニメ/漫画/イラスト調。手の崩れ、指の増殖。あらゆる文字要素。
       output: "assets/scenes/scene30.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null

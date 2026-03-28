@@ -9,6 +9,8 @@
 ### 関連ドキュメント
 
 - `docs/orchestration-and-ops.md`（全体制御・品質保証・配信/改善ループ）
+- `docs/video-generation.md`（下流の汎用動画生成原則）
+- `workflow/playbooks/video-generation/kling.md`（`kling_3_0` / `kling_3_0_omni` を使う場合の provider 固有 prompt guide）
 
 ### 位置づけ
 
@@ -27,6 +29,13 @@
 - `output/<topic>_<timestamp>/story.md` - 物語スクリプト
 - `output/<topic>_<timestamp>/visual_value.md` - 視覚化価値パートの設計メモ（後続エージェントが作成）
 - 動画用台本（任意の長さに対応）
+
+### 下流 prompt 設計への受け渡し
+
+- Story は下流の `script.md` / `video_manifest.md` が **1 clip = 1意図** で分解しやすい粒度で設計する
+- 動画プロバイダが未指定なら、汎用ルールとして `docs/video-generation.md` を前提にしてよい
+- 動画プロバイダが `kling_3_0` / `kling_3_0_omni` と明示されている場合、後続 agent が参照する動画 prompt guide は
+  `docs/video-generation.md` に加えて `workflow/playbooks/video-generation/kling.md` を優先する前提で、scene の意図を切り出す
 
 ---
 

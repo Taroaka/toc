@@ -24,6 +24,13 @@ assets:
         - "assets/characters/protagonist_front.png"
         - "assets/characters/protagonist_side.png"
         - "assets/characters/protagonist_back.png"
+      review_aliases: ["主人公"]
+      physical_scale:
+        height_cm: 175
+        silhouette_notes:
+          - "成人の自然な体格。scene をまたいでも身長感と骨格を変えない"
+      relative_scale_rules:
+        - "他キャラクターと同フレームにいるときも、主人公の体格を scene 間で変えない"
       reference_variants:
         - variant_id: "protagonist_battle_damaged"
           reference_images:
@@ -71,6 +78,19 @@ scenes:
         image_generation:
           # 新規の静止画は、連続性アンカーが必要なときだけ優先して作る。
           # 既存の参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
+          # review metadata は image_generation.review 側で持つ:
+          # review:
+          #   agent_review_ok: true
+          #   agent_review_reason_keys: []
+          #   agent_review_reason_messages: []
+          #   human_review_ok: false
+          #   human_review_reason: ""
+          # 現行表記で agent_review_reason_codes を使っていても、意味は reason_keys と同じに保つ。
+          # subagent は不足 entry を false にし、fix 後に再 review して true へ戻す。
+          # human_review_ok は finding を理解して例外許容した記録であり、subagent false を上書きしない。
+          # required block:
+          # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
+          # 1 つでも欠けていれば subagent review は false にする。
           # tool: "google_nanobanana_pro"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
           tool: "google_nanobanana_pro"

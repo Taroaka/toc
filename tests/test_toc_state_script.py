@@ -82,6 +82,25 @@ class TestTocStateScript(unittest.TestCase):
                 [
                     sys.executable,
                     "scripts/toc-state.py",
+                    "approve-image-prompts",
+                    "--run-dir",
+                    str(run_dir),
+                    "--note",
+                    "human checked",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            st = _merge_state(state_path)
+            self.assertEqual(st.get("review.image_prompt.status"), "approved")
+            self.assertEqual(st.get("review.image_prompt.note"), "human checked")
+            self.assertIn("review.image_prompt.at", st)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
                     "approve-video",
                     "--run-dir",
                     str(run_dir),
@@ -104,6 +123,7 @@ class TestTocStateScript(unittest.TestCase):
                 text=True,
             )
             self.assertIn("Review: approved", r.stdout)
+            self.assertIn("Image prompt gate:", r.stdout)
             self.assertIn("Render: started", r.stdout)
             self.assertIn("Run status:", r.stdout)
 

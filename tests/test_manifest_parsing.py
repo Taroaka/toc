@@ -231,6 +231,141 @@ scenes:
         self.assertEqual(scenes[0].image_character_variant_ids, ["hero_day"])
         self.assertEqual(scenes[0].image_object_variant_ids, ["amulet_glowing"])
 
+    def test_parse_manifest_supports_character_physical_scale_and_relative_rules(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      reference_images: ["assets/characters/hero.png"]
+      physical_scale:
+        height_cm: 178
+        silhouette_notes:
+          - "adult natural build"
+      relative_scale_rules:
+        - "hero keeps the same body scale across scenes"
+    - character_id: "turtle"
+      reference_images: ["assets/characters/turtle.png"]
+      physical_scale:
+        body_length_cm: 180
+        shell_length_cm: 125
+        shoulder_height_cm: 95
+      relative_scale_rules:
+        - "turtle remains rideable for hero"
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: ["hero", "turtle"]
+      object_ids: []
+      prompt: "story"
+      output: "assets/scenes/scene10.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        hero = guides.character_bible[0]
+        turtle = guides.character_bible[1]
+        self.assertEqual(hero.physical_scale.height_cm, 178)
+        self.assertEqual(hero.physical_scale.silhouette_notes, ["adult natural build"])
+        self.assertEqual(hero.relative_scale_rules, ["hero keeps the same body scale across scenes"])
+        self.assertEqual(turtle.physical_scale.body_length_cm, 180)
+        self.assertEqual(turtle.physical_scale.shell_length_cm, 125)
+        self.assertEqual(turtle.physical_scale.shoulder_height_cm, 95)
+        self.assertEqual(scenes[0].image_character_ids, ["hero", "turtle"])
+
+    def test_parse_manifest_supports_still_image_plan_mode_on_cuts(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 10
+    cuts:
+      - cut_id: 1
+        still_image_plan:
+          mode: generate_still
+        image_generation:
+          tool: "google_nanobanana_pro"
+          prompt: "p1"
+          output: "assets/scenes/scene10_1.png"
+      - cut_id: 2
+        still_image_plan:
+          mode: reuse_anchor
+        image_generation:
+          tool: "google_nanobanana_pro"
+          prompt: "p2"
+          output: "assets/scenes/scene10_2.png"
+```
+"""
+        yaml_text = mod.extract_yaml_block(md)
+        _, scenes = mod.parse_manifest_yaml(yaml_text)
+
+        self.assertEqual([s.still_image_plan_mode for s in scenes], ["generate_still", "reuse_anchor"])
+
+    def test_story_image_generation_defaults_to_generate_still_only(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        ref_scene = mod.SceneSpec(
+            scene_id=0,
+            manifest_scene_id=0,
+            kind="character_reference",
+            reference_id="hero_ref",
+            timestamp=None,
+            duration_seconds=None,
+            still_image_plan_mode=None,
+            image_tool="google_nanobanana_pro",
+            image_prompt="ref",
+            image_output="assets/characters/hero.png",
+            image_references=[],
+            image_character_ids=[],
+            image_character_ids_present=False,
+            image_character_variant_ids=[],
+            image_character_variant_ids_present=False,
+            image_object_ids=[],
+            image_object_ids_present=False,
+            image_object_variant_ids=[],
+            image_object_variant_ids_present=False,
+            image_aspect_ratio=None,
+            image_size=None,
+            video_tool=None,
+            video_input_image=None,
+            video_first_frame=None,
+            video_last_frame=None,
+            video_motion_prompt=None,
+            video_output=None,
+            narration_tool=None,
+            narration_text=None,
+            narration_output=None,
+            narration_normalize_to_scene_duration=True,
+        )
+        generate_scene = mod.SceneSpec(
+            **{**ref_scene.__dict__, "scene_id": 1001, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_1.png", "still_image_plan_mode": "generate_still"}
+        )
+        reuse_scene = mod.SceneSpec(
+            **{**ref_scene.__dict__, "scene_id": 1002, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_2.png", "still_image_plan_mode": "reuse_anchor"}
+        )
+        bridge_scene = mod.SceneSpec(
+            **{**ref_scene.__dict__, "scene_id": 1003, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_3.png", "still_image_plan_mode": "no_dedicated_still"}
+        )
+
+        allowed_modes = {"generate_still"}
+        self.assertTrue(mod._should_generate_image_scene(ref_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+        self.assertTrue(mod._should_generate_image_scene(generate_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+        self.assertFalse(mod._should_generate_image_scene(reuse_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+        self.assertFalse(mod._should_generate_image_scene(bridge_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+
 
 if __name__ == "__main__":
     unittest.main()

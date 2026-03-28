@@ -225,6 +225,82 @@ scenes:
         self.assertIn("night costume", scenes[0].image_prompt)
         self.assertNotIn("day costume", scenes[0].image_prompt)
 
+    def test_apply_asset_guides_injects_physical_scale_and_relative_rules(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      reference_images: ["assets/characters/hero.png"]
+      fixed_prompts: ["hero matches reference exactly"]
+      physical_scale:
+        height_cm: 178
+        silhouette_notes:
+          - "adult natural build"
+      relative_scale_rules:
+        - "hero keeps the same body scale across scenes"
+    - character_id: "turtle"
+      reference_images: ["assets/characters/turtle.png"]
+      fixed_prompts: ["turtle matches reference exactly"]
+      physical_scale:
+        body_length_cm: 180
+        shell_length_cm: 125
+        shoulder_height_cm: 95
+        silhouette_notes:
+          - "rideable adult sea turtle"
+      relative_scale_rules:
+        - "turtle remains rideable for hero and never shrinks to pet size"
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: ["hero", "turtle"]
+      object_ids: []
+      prompt: |
+        [CHARACTERS]
+        base characters
+
+        [SCENE]
+        story
+      output: "assets/scenes/scene10.png"
+      references: []
+  - scene_id: 11
+    image_generation:
+      tool: "google_nanobanana_pro"
+      character_ids: []
+      object_ids: []
+      prompt: |
+        [CHARACTERS]
+        base characters
+
+        [SCENE]
+        b-roll
+      output: "assets/scenes/scene11.png"
+      references: []
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, guides, scenes = mod.parse_manifest_yaml_full(yaml_text)
+        mod.validate_character_bible(guides=guides)
+
+        mod.apply_asset_guides_to_scene(scene=scenes[0], guides=guides, character_refs_mode="scene")
+        mod.apply_asset_guides_to_scene(scene=scenes[1], guides=guides, character_refs_mode="scene")
+
+        self.assertIn("hero の体格固定: 身長約178cm。", scenes[0].image_prompt)
+        self.assertIn("hero の体格補足: adult natural build", scenes[0].image_prompt)
+        self.assertIn("turtle の体格固定: 全長約180cm、甲長約125cm、肩高約95cm。", scenes[0].image_prompt)
+        self.assertIn("turtle の体格補足: rideable adult sea turtle", scenes[0].image_prompt)
+        self.assertIn("hero keeps the same body scale across scenes", scenes[0].image_prompt)
+        self.assertIn("turtle remains rideable for hero and never shrinks to pet size", scenes[0].image_prompt)
+        self.assertNotIn("体格固定", scenes[1].image_prompt)
+        self.assertNotIn("rideable", scenes[1].image_prompt)
+
     def test_unknown_character_variant_id_fails_validation(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_generate_assets_module(repo_root)

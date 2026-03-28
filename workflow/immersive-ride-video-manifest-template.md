@@ -20,6 +20,13 @@ assets:
     - character_id: "protagonist"
       reference_images:
         - "assets/characters/protagonist_front.png"
+      review_aliases: ["主人公"]   # story/script review 用の別名。日本語固有名や略称を入れる
+      physical_scale:
+        height_cm: 175
+        silhouette_notes:
+          - "成人の自然な体格。頭身と手足の長さは実写で無理がない"
+      relative_scale_rules:
+        - "他キャラクターと同フレームにいるときも、主人公の体格を scene 間で変えない"
       reference_variants:
         - variant_id: "protagonist_wet_ref"
           reference_images:
@@ -77,6 +84,12 @@ scenes:
     kind: character_reference
     image_generation:
       # reference scene は continuity anchor を作るためのもの。毎sceneではない。
+      # review metadata は image_generation.review 側で持つ。
+      # subagent は不足 entry を false にし、reason key を残し、fix 後に true へ戻す。
+      # human override は human_review_ok / human_review_reason に記録する。
+      # required block:
+      # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
+      # 1 つでも欠けていれば subagent review は false にする。
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
       character_variant_ids: []  # Optional: ["protagonist_wet_ref"] のように、そのscene専用のvariantを選ぶ
@@ -97,7 +110,7 @@ scenes:
         アニメ/漫画/イラスト調。あらゆる文字要素。
       output: "assets/characters/protagonist_front.png"  # readable reference id: protagonist_front_ref
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -109,6 +122,15 @@ scenes:
     image_generation:
       # 新規の静止画は、場所/物体/人物状態の continuity anchor が必要な scene で優先する。
       # 既存の anchor frame を再利用できる cut は、新規生成を強制しない。
+      # review metadata は image_generation.review 側で持つ:
+      # review:
+      #   agent_review_ok: true
+      #   agent_review_reason_keys: []
+      #   agent_review_reason_messages: []
+      #   human_review_ok: false
+      #   human_review_reason: ""
+      # required block:
+      # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
       tool: "google_nanobanana_pro"
       character_ids: ["protagonist"]
       character_variant_ids: []
@@ -137,7 +159,7 @@ scenes:
         アニメ/漫画/イラスト調。あらゆる文字要素。人体の崩れ、指の増殖、パース破綻。
       output: "assets/scenes/scene10.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -192,7 +214,7 @@ scenes:
         アニメ/漫画/イラスト調。あらゆる文字要素。人体の崩れ、指の増殖、パース破綻。
       output: "assets/scenes/scene20.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -246,7 +268,7 @@ scenes:
         アニメ/漫画/イラスト調。あらゆる文字要素。人体の崩れ、指の増殖、パース破綻。
       output: "assets/scenes/scene30.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null
@@ -276,7 +298,7 @@ scenes:
         アニメ/漫画/イラスト調。あらゆる文字要素。
       output: "assets/scenes/scene40.png"
       aspect_ratio: "16:9"
-      image_size: "2K"
+      image_size: "1K"
       references: []
       iterations: 4
       selected: null

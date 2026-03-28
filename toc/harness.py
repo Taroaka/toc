@@ -82,11 +82,15 @@ def _order_keys(state: dict[str, str]) -> list[str]:
         "immersive.experience",
         "gate.research_review",
         "gate.story_review",
+        "gate.image_prompt_review",
         "gate.video_review",
         "gate.hybridization_review",
         "review.hybridization.status",
         "review.hybridization.at",
         "review.hybridization.note",
+        "review.image_prompt.status",
+        "review.image_prompt.at",
+        "review.image_prompt.note",
         "review.video.status",
         "review.video.at",
         "review.video.note",
@@ -155,6 +159,7 @@ def pending_gates(state: dict[str, str]) -> list[str]:
     gate_pairs = [
         ("research_review", "review.research.status"),
         ("story_review", "review.story.status"),
+        ("image_prompt_review", "review.image_prompt.status"),
         ("hybridization_review", "review.hybridization.status"),
         ("video_review", "review.video.status"),
     ]
@@ -234,4 +239,3 @@ def append_state_snapshot(state_path: Path, updates: dict[str, str]) -> dict[str
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-

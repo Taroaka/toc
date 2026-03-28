@@ -34,6 +34,7 @@
 - 入力: `story.md` + `visual_value.md` + scene plan
 - 出力: `script.md`
 - 参照: `docs/script-creation.md`
+- Kling 分岐: `video_generation.tool` が `kling_3_0` / `kling_3_0_omni` の場合、動画 prompt 設計は `docs/video-generation.md` の一般論ではなく `workflow/playbooks/video-generation/kling.md` を優先参照する
 
 ### Narration Writer（TTS原稿）
 - 入力: `story.md` / `script.md` / `video_manifest.md`
@@ -105,3 +106,4 @@
 - `docs/story-creation.md`
 - `docs/script-creation.md`
 - `docs/orchestration-and-ops.md`
+- `workflow/playbooks/video-generation/kling.md`

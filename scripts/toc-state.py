@@ -114,6 +114,22 @@ def cmd_approve_video(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_approve_image_prompts(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    state_path = run_dir / "state.txt"
+    if not state_path.exists():
+        raise SystemExit(f"state.txt not found: {state_path} (run ensure first)")
+    updates: dict[str, str] = {
+        "gate.image_prompt_review": "required",
+        "review.image_prompt.status": "approved",
+        "review.image_prompt.at": now_iso(),
+    }
+    if args.note:
+        updates["review.image_prompt.note"] = str(args.note).replace("\n", " ").strip()
+    append_state_snapshot(state_path, updates)
+    return 0
+
+
 def cmd_approve_hybridization(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     state_path = run_dir / "state.txt"
@@ -160,6 +176,10 @@ def cmd_show(args: argparse.Namespace) -> int:
     hybrid_status = state.get("review.hybridization.status", "")
     hybrid_at = state.get("review.hybridization.at", "")
     hybrid_note = state.get("review.hybridization.note", "")
+    image_prompt_gate = state.get("gate.image_prompt_review", "")
+    image_prompt_status = state.get("review.image_prompt.status", "")
+    image_prompt_at = state.get("review.image_prompt.at", "")
+    image_prompt_note = state.get("review.image_prompt.note", "")
     review_status = state.get("review.video.status", "")
     review_at = state.get("review.video.at", "")
     review_note = state.get("review.video.note", "")
@@ -185,6 +205,15 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(s)
         if hybrid_note:
             print(f"Hybridization note: {hybrid_note}")
+    if image_prompt_gate or image_prompt_status:
+        s = f"Image prompt gate: {image_prompt_gate or '(unset)'}"
+        if image_prompt_status:
+            s += f" / review={image_prompt_status}"
+        if image_prompt_at:
+            s += f" at {image_prompt_at}"
+        print(s)
+        if image_prompt_note:
+            print(f"Image prompt note: {image_prompt_note}")
     print(f"Video: {artifact_video} ({'exists' if video_exists else 'missing'})")
     if review_status:
         s = f"Review: {review_status}"
@@ -227,6 +256,11 @@ def main() -> int:
     p_approve.add_argument("--run-dir", required=True)
     p_approve.add_argument("--note", default=None)
     p_approve.set_defaults(fn=cmd_approve_video)
+
+    p_ip_approve = sub.add_parser("approve-image-prompts", help="Mark image prompts as human-reviewed and approved.")
+    p_ip_approve.add_argument("--run-dir", required=True)
+    p_ip_approve.add_argument("--note", default=None)
+    p_ip_approve.set_defaults(fn=cmd_approve_image_prompts)
 
     p_h_approve = sub.add_parser("approve-hybridization", help="Approve narrative hybridization (human gate).")
     p_h_approve.add_argument("--run-dir", required=True)

@@ -63,7 +63,7 @@ run root:
 
 - 画像:
   - 参照画像（キャラクター/重要小道具）を **必要なscene** に適用（必要なら scene 側で `references` を指定）
-  - 16:9 / 2K（素材側）
+  - 16:9 / 1K（素材側の既定。必要な scene だけ個別に引き上げる）
 - 動画:
   - provider は `video_manifest.md` の `scenes[].video_generation.tool` で選ぶ（default: `kling_3_0` / alt: `seedance`）
   - 注: Google Veo は安全のためこのリポジトリでは無効化している

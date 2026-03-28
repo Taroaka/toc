@@ -18,6 +18,8 @@
 - `output/stories/{topic}_{timestamp}.md` - 物語スクリプト（story-creation.md出力）
 - `output/<topic>_<timestamp>/visual_value.md` - 中盤の視覚報酬パート設計（あれば参照）
 - 物語構造、感情曲線、エンゲージメント設計
+- `docs/video-generation.md` - 汎用の動画生成原則
+- `workflow/playbooks/video-generation/kling.md` - `kling_3_0` / `kling_3_0_omni` 利用時の専用 prompt guide
 
 ### 出力
 
@@ -57,6 +59,13 @@
 1. **具体性**: 「感動的な場面」ではなく「涙を流す主人公のクローズアップ」
 2. **再現性**: 誰が読んでも同じ映像をイメージできる
 3. **制作可能性**: 技術的に実現可能な指示のみ
+
+### 1.3.1 Provider 別の prompt 参照先
+
+- 通常は `docs/video-generation.md` の汎用原則に合わせて、後続の動画 prompt を逆算する
+- `video_generation.tool` が `kling_3_0` / `kling_3_0_omni` の場合、動画 prompt を書く agent は
+  **通常の動画生成ガイドの代わりに** `workflow/playbooks/video-generation/kling.md` を prompt 設計の正本として使う
+- ただし、運用原則・品質保証・一貫性管理などの全体方針は引き続き `docs/video-generation.md` を参照する
 
 ### 1.4 視覚化価値パートの扱い
 

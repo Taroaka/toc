@@ -46,6 +46,17 @@ scenes:
         image_generation:
           # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
           # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
+          # review metadata は image_generation.review 側で管理する:
+          # review:
+          #   agent_review_ok: true
+          #   agent_review_reason_keys: []
+          #   agent_review_reason_messages: []
+          #   human_review_ok: false
+          #   human_review_reason: ""
+          # false reason は修正対象を示し、fix 後に subagent が true へ戻す。
+          # required block:
+          # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
+          # 1 つでも欠けていれば subagent review は false にする。
           # tool: "google_nanobanana_pro"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
           tool: "google_nanobanana_pro"
@@ -91,6 +102,8 @@ scenes:
         cut_role: "sub"  # main|sub
         image_generation:
           # 新規生成を前提にしない。必要なときだけ anchor を更新する。
+          # required block:
+          # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           tool: "google_nanobanana_pro"
           character_ids: ["character_id_here"]
           character_variant_ids: []
@@ -100,8 +113,20 @@ scenes:
             [全体 / 不変条件]
             TODO: 前と同じスタイル/禁止。画面内テキストなし。
 
+            [登場人物]
+            TODO: 誰が映るか + 参照一致ルール（必要なら）。
+
+            [小道具 / 舞台装置]
+            TODO: 必須の小道具 / 舞台装置（無ければ空 block を残す）。
+
             [シーン]
             TODO: 続き（結論/根拠/締め）。
+
+            [連続性]
+            TODO: 前 cut / 次 cut とどうつなぐか。
+
+            [禁止]
+            TODO: 禁止（例: 文字/ウォーターマーク/ロゴ + 望まないスタイル）。
           output: "assets/scenes/scene1_cut2_base.png"
           iterations: 4
           selected: null

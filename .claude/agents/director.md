@@ -27,6 +27,7 @@ model: inherit
 - **生成AI API（画像/動画/TTS）は使用しない**
 - 事実・主張は可能な限り research の `sources` / `facts_used` を参照し、追跡可能にする
 - 物語は「動画化しやすい」ことを優先（シーンごとの narration / visual / text_overlay を明確化）
+- 下流の動画 tool が `kling_3_0` / `kling_3_0_omni` と分かっている場合、scene は `1 clip = 1 intention` で分解しやすい粒度にし、後続 agent が `workflow/playbooks/video-generation/kling.md` を使って prompt 化しやすいように設計する
 - 曖昧さを残さない（後続の Scriptwriter / Video で迷わないため）
 - cut設計の下流を意識し、ナレーションは **メインカット(5–15秒)** を中心に、必要なら **サブカット(3–15秒)** を足せるまとまり（文脈の区切り）を用意しておく
 - **創造と選択**: まず複数案で多様性を出し、スコア（視聴維持/感情/映像化/分かりやすさ/一貫性）が高い案を選ぶ
