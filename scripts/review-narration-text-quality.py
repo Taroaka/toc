@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, load_structured_document
+from toc.immersive_manifest import normalize_dotted_id
 
 META_MARKER_RE = re.compile(r"\bTODO\b|\bTBD\b|未記入|要修正|メモ|仮文", re.I)
 URL_RE = re.compile(r"https?://|www\.", re.I)
@@ -99,6 +100,14 @@ ENDING_VALUE_TERMS = (
     "その後",
 )
 
+ENDING_MODE_SIGNAL_MAP = {
+    "happy": ("達成", "たっせい", "回復", "かいふく", "祝福", "しゅくふく", "報い", "むくい"),
+    "bittersweet": ("失う", "うしなう", "残る", "のこる", "別れ", "わかれ", "余韻", "よいん", "代償", "だいしょう"),
+    "tragic": ("失う", "うしなう", "戻らない", "もどらない", "喪失", "そうしつ", "取り返し", "とりかえし", "重い", "おもい"),
+    "cautionary": ("代償", "だいしょう", "禁忌", "きんき", "取り返し", "とりかえし", "重い", "おもい", "教訓", "きょうくん"),
+    "ambiguous": ("余韻", "よいん", "気配", "けはい", "わからない", "わからぬ", "残る", "のこる"),
+}
+
 TOKEN_STOPWORDS = {
     "そして",
     "しかし",
@@ -169,8 +178,8 @@ SEMANTIC_ANCHOR_MAP = {
 
 @dataclass(frozen=True)
 class NarrationEntry:
-    scene_id: int
-    cut_id: int | None
+    scene_id: str
+    cut_id: str | None
     selector: str
     text: str
     tts_text: str
@@ -191,6 +200,10 @@ class NarrationEntry:
     agent_review_reason_messages: list[str]
     rubric_scores: dict[str, float]
     overall_score: float
+    ending_mode: str = ""
+    narration_distance_policy: str = ""
+    narrative_value_mode: str = ""
+    narrative_value_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,6 +238,20 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _as_dotted_id(value: Any) -> str | None:
+    return normalize_dotted_id(value)
+
+
+def _selector_label(scene_id: Any, cut_id: Any | None = None) -> str:
+    scene = str(_as_dotted_id(scene_id) or "unknown")
+    scene_label = f"{int(scene):02d}" if re.fullmatch(r"\d+", scene) else scene
+    if cut_id is None:
+        return f"scene{scene_label}"
+    cut = str(_as_dotted_id(cut_id) or "unknown")
+    cut_label = f"{int(cut):02d}" if re.fullmatch(r"\d+", cut) else cut
+    return f"scene{scene_label}_cut{cut_label}"
+
+
 def _phase_to_story_role(phase: str, *, scene_index: int, total_scenes: int) -> str:
     normalized = phase.strip().lower()
     if normalized in OPENING_PHASES:
@@ -243,54 +270,68 @@ def _phase_to_story_role(phase: str, *, scene_index: int, total_scenes: int) -> 
     return "middle"
 
 
-def load_script_context(script_path: Path) -> dict[str, dict[str, str]]:
+def load_script_context(script_path: Path) -> dict[str, dict[str, Any]]:
     if not script_path.exists():
         return {}
     _, data = load_structured_document(script_path)
     if not isinstance(data, dict):
         return {}
+    script_metadata = data.get("script_metadata") if isinstance(data.get("script_metadata"), dict) else {}
+    ending_mode = str(script_metadata.get("ending_mode") or "").strip().lower()
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
         return {}
 
-    valid_scenes = [scene for scene in scenes if isinstance(scene, dict) and _as_int(scene.get("scene_id")) is not None]
+    valid_scenes = [scene for scene in scenes if isinstance(scene, dict) and _as_dotted_id(scene.get("scene_id")) is not None]
     total_scenes = len(valid_scenes)
-    context: dict[str, dict[str, str]] = {}
+    context: dict[str, dict[str, Any]] = {}
     for idx, scene in enumerate(valid_scenes):
-        scene_id = int(_as_int(scene.get("scene_id")) or 0)
+        scene_id = str(_as_dotted_id(scene.get("scene_id")) or "")
         phase = str(scene.get("phase") or "").strip()
         scene_summary = str(scene.get("scene_summary") or "").strip()
         story_role = _phase_to_story_role(phase, scene_index=idx, total_scenes=total_scenes)
+        narration_distance_policy = str(scene.get("narration_distance_policy") or "").strip().lower()
+        narrative_value_goal = scene.get("narrative_value_goal") if isinstance(scene.get("narrative_value_goal"), dict) else {}
+        narrative_value_mode = str(narrative_value_goal.get("mode") or "").strip().lower()
+        narrative_value_targets = tuple(str(v).strip() for v in list(narrative_value_goal.get("leave_viewer_with") or []) if str(v).strip())
         cuts = scene.get("cuts")
         if isinstance(cuts, list) and cuts:
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cut_id = _as_int(cut.get("cut_id"))
+                cut_id = _as_dotted_id(cut.get("cut_id"))
                 if cut_id is None:
                     continue
-                selector = f"scene{scene_id:02d}_cut{cut_id:02d}"
+                selector = _selector_label(scene_id, cut_id)
                 context[selector] = {
                     "phase": phase,
                     "story_role": story_role,
                     "scene_summary": scene_summary,
                     "script_narration": str(cut.get("narration") or "").strip(),
+                    "ending_mode": ending_mode,
+                    "narration_distance_policy": narration_distance_policy,
+                    "narrative_value_mode": narrative_value_mode,
+                    "narrative_value_targets": narrative_value_targets,
                 }
             continue
-        selector = f"scene{scene_id:02d}"
+        selector = _selector_label(scene_id)
         context[selector] = {
             "phase": phase,
             "story_role": story_role,
             "scene_summary": scene_summary,
             "script_narration": str(scene.get("narration") or "").strip(),
+            "ending_mode": ending_mode,
+            "narration_distance_policy": narration_distance_policy,
+            "narrative_value_mode": narrative_value_mode,
+            "narrative_value_targets": narrative_value_targets,
         }
     return context
 
 
 def _entry_from_node(
     *,
-    scene_id: int,
-    cut_id: int | None,
+    scene_id: str,
+    cut_id: str | None,
     node: dict[str, Any],
     script_context: dict[str, dict[str, str]],
 ) -> NarrationEntry | None:
@@ -303,7 +344,7 @@ def _entry_from_node(
     review = narration.get("review") if isinstance(narration.get("review"), dict) else {}
     image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
     video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
-    selector = f"scene{scene_id:02d}" if cut_id is None else f"scene{scene_id:02d}_cut{cut_id:02d}"
+    selector = _selector_label(scene_id, cut_id)
     script_data = script_context.get(selector, {})
     scores_raw = review.get("rubric_scores") if isinstance(review.get("rubric_scores"), dict) else {}
     rubric_scores = {str(k): float(v) for k, v in scores_raw.items() if _is_number(v)}
@@ -336,6 +377,10 @@ def _entry_from_node(
         agent_review_reason_messages=[str(v) for v in list(review.get("agent_review_reason_messages") or []) if str(v).strip()],
         rubric_scores=rubric_scores,
         overall_score=float(overall_raw) if _is_number(overall_raw) else 1.0,
+        ending_mode=str(script_data.get("ending_mode") or ""),
+        narration_distance_policy=str(script_data.get("narration_distance_policy") or ""),
+        narrative_value_mode=str(script_data.get("narrative_value_mode") or ""),
+        narrative_value_targets=tuple(script_data.get("narrative_value_targets") or ()),
     )
 
 
@@ -357,7 +402,7 @@ def manifest_narration_entries(manifest: dict[str, Any], *, script_context: dict
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
-        scene_id = _as_int(scene.get("scene_id"))
+        scene_id = _as_dotted_id(scene.get("scene_id"))
         if scene_id is None:
             continue
 
@@ -366,7 +411,7 @@ def manifest_narration_entries(manifest: dict[str, Any], *, script_context: dict
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cut_id = _as_int(cut.get("cut_id"))
+                cut_id = _as_dotted_id(cut.get("cut_id"))
                 if cut_id is None:
                     continue
                 entry = _entry_from_node(scene_id=scene_id, cut_id=cut_id, node=cut, script_context=script_context)
@@ -489,9 +534,26 @@ def _story_basis(entry: NarrationEntry) -> str:
     return "\n".join(part for part in (entry.script_narration, entry.scene_summary) if part)
 
 
+def _effective_distance_policy(entry: NarrationEntry) -> str:
+    policy = entry.narration_distance_policy.strip().lower()
+    return policy if policy in {"stay_close", "contextual", "meaning_first"} else ""
+
+
+def _entry_value_signal(entry: NarrationEntry) -> bool:
+    text = entry.text
+    if any(_semantic_phrase_match(text, target) for target in entry.narrative_value_targets):
+        return True
+    mode = entry.ending_mode.strip().lower()
+    if mode in ENDING_MODE_SIGNAL_MAP:
+        return any(_semantic_phrase_match(text, phrase) for phrase in ENDING_MODE_SIGNAL_MAP[mode])
+    return False
+
+
 def _score_story_role_fit(entry: NarrationEntry) -> float:
     basis = _story_basis(entry)
     score = 0.45 + (_token_alignment_score(entry.text, basis) * 0.55)
+    policy = _effective_distance_policy(entry)
+    value_signal = _entry_value_signal(entry)
     if entry.story_role == "opening":
         if basis and any(term in entry.text and term not in basis for term in OPENING_ABSTRACT_TERMS):
             score -= 0.25
@@ -505,10 +567,23 @@ def _score_story_role_fit(entry: NarrationEntry) -> float:
             score += 0.10
         elif basis and _token_alignment_score(entry.text, basis) < 0.35:
             score -= 0.10
+    if policy == "meaning_first" and value_signal:
+        score += 0.12
+    elif policy == "stay_close" and basis and _semantic_phrase_match(entry.text, basis):
+        score += 0.05
     return max(0.0, min(1.0, score))
 
 
-def _score_anti_redundancy(text: str, image_prompt: str, motion_prompt: str, story_role: str, story_role_fit: float) -> float:
+def _score_anti_redundancy(
+    text: str,
+    image_prompt: str,
+    motion_prompt: str,
+    story_role: str,
+    story_role_fit: float,
+    *,
+    distance_policy: str,
+    value_signal: bool,
+) -> float:
     narration_tokens = _extract_tokens(text)
     if not narration_tokens:
         return 0.0
@@ -518,8 +593,14 @@ def _score_anti_redundancy(text: str, image_prompt: str, motion_prompt: str, sto
     overlap = narration_tokens & visual_tokens
     overlap_ratio = len(overlap) / max(1, len(narration_tokens))
     score = 1.0 - overlap_ratio
-    if story_role == "opening":
+    if distance_policy == "stay_close":
+        score = max(score, min(1.0, 0.78 + (story_role_fit * 0.12)))
+    elif story_role == "opening":
         score = max(score, min(1.0, 0.70 + (story_role_fit * 0.20)))
+    elif distance_policy == "contextual" and story_role == "ending":
+        score = max(score, 0.50 if value_signal else 0.45)
+    elif distance_policy == "meaning_first" and value_signal:
+        score = max(score, 0.62)
     elif story_role_fit < RUBRIC_THRESHOLDS["story_role_fit"]:
         score -= 0.10
     return max(0.0, min(1.0, score))
@@ -563,10 +644,20 @@ def _score_spoken_japanese(text: str) -> float:
 def score_entry(entry: NarrationEntry) -> tuple[dict[str, float], float]:
     spoken_text = entry.tts_text.strip() or entry.text.strip()
     story_role_fit = _score_story_role_fit(entry)
+    distance_policy = _effective_distance_policy(entry)
+    value_signal = _entry_value_signal(entry)
     scores = {
         "tts_readiness": _score_tts_readiness(spoken_text),
         "story_role_fit": story_role_fit,
-        "anti_redundancy": _score_anti_redundancy(entry.text, entry.image_prompt, entry.motion_prompt, entry.story_role, story_role_fit),
+        "anti_redundancy": _score_anti_redundancy(
+            entry.text,
+            entry.image_prompt,
+            entry.motion_prompt,
+            entry.story_role,
+            story_role_fit,
+            distance_policy=distance_policy,
+            value_signal=value_signal,
+        ),
         "pacing_fit": _score_pacing_fit(spoken_text, entry.duration_seconds),
         "spoken_japanese": _score_spoken_japanese(spoken_text),
     }
@@ -651,7 +742,8 @@ def review_entries(entries: list[NarrationEntry]) -> list[ReviewOutcome]:
                 findings.append(Finding(code="narration_contract_target_function_unmet", message="target_function=meaning is set, but the text does not clearly add meaning-layer information."))
         if rubric_scores["story_role_fit"] < RUBRIC_THRESHOLDS["story_role_fit"]:
             findings.append(Finding(code="narration_story_role_mismatch", message="narration text does not fit the cut's story role well enough; opening cuts should feel stable and scene-faithful, middle cuts should sustain development, and ending cuts should land resolution or lingering aftertaste."))
-        if entry.story_role != "opening" and rubric_scores["anti_redundancy"] < RUBRIC_THRESHOLDS["anti_redundancy"]:
+        distance_policy = _effective_distance_policy(entry)
+        if distance_policy != "stay_close" and entry.story_role != "opening" and rubric_scores["anti_redundancy"] < RUBRIC_THRESHOLDS["anti_redundancy"]:
             findings.append(Finding(code="narration_too_visual_redundant", message="narration text overlaps too much with the visual prompt and reads like a visual description."))
         if rubric_scores["pacing_fit"] < RUBRIC_THRESHOLDS["pacing_fit"]:
             findings.append(Finding(code="narration_pacing_mismatch", message="narration density looks mismatched to the cut duration or pause structure."))
@@ -707,6 +799,10 @@ def apply_review_statuses(entries: list[NarrationEntry], outcomes: list[ReviewOu
                 agent_review_reason_messages=reason_messages_from_findings(findings),
                 rubric_scores=dict(outcome.rubric_scores) if outcome else {},
                 overall_score=float(outcome.overall_score) if outcome else 1.0,
+                ending_mode=entry.ending_mode,
+                narration_distance_policy=entry.narration_distance_policy,
+                narrative_value_mode=entry.narrative_value_mode,
+                narrative_value_targets=entry.narrative_value_targets,
             )
         )
     return updated
@@ -744,6 +840,10 @@ def apply_human_review_updates(entries: list[NarrationEntry], selectors: list[st
                 agent_review_reason_messages=entry.agent_review_reason_messages,
                 rubric_scores=entry.rubric_scores,
                 overall_score=entry.overall_score,
+                ending_mode=entry.ending_mode,
+                narration_distance_policy=entry.narration_distance_policy,
+                narrative_value_mode=entry.narrative_value_mode,
+                narrative_value_targets=entry.narrative_value_targets,
             )
         )
     return updated
@@ -757,7 +857,7 @@ def narration_node_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
-        scene_id = _as_int(scene.get("scene_id"))
+        scene_id = _as_dotted_id(scene.get("scene_id"))
         if scene_id is None:
             continue
         cuts = scene.get("cuts")
@@ -765,16 +865,16 @@ def narration_node_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cut_id = _as_int(cut.get("cut_id"))
+                cut_id = _as_dotted_id(cut.get("cut_id"))
                 if cut_id is None:
                     continue
                 narration = ((cut.get("audio") or {}).get("narration")) if isinstance(cut.get("audio"), dict) else None
                 if isinstance(narration, dict):
-                    out[f"scene{scene_id:02d}_cut{cut_id:02d}"] = narration
+                    out[_selector_label(scene_id, cut_id)] = narration
             continue
         narration = ((scene.get("audio") or {}).get("narration")) if isinstance(scene.get("audio"), dict) else None
         if isinstance(narration, dict):
-            out[f"scene{scene_id:02d}"] = narration
+            out[_selector_label(scene_id)] = narration
     return out
 
 

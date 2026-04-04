@@ -273,3 +273,163 @@ class TestNarrationTextReview(unittest.TestCase):
             state = parse_state_file(run_dir / "state.txt")
             self.assertIn("eval.narration.score", state)
             self.assertIn("eval.narration.unresolved_entries", state)
+
+    def test_load_script_context_preserves_ending_mode_and_distance_policy(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        with tempfile.TemporaryDirectory(prefix="toc_narration_script_context_") as td:
+            script_path = Path(td) / "script.md"
+            script_path.write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "script_metadata:",
+                        "  ending_mode: \"bittersweet\"",
+                        "scenes:",
+                        "  - scene_id: 15",
+                        "    phase: \"ending\"",
+                        "    scene_summary: \"たろうが むらへ もどる。\"",
+                        "    narration_distance_policy: \"meaning_first\"",
+                        "    narrative_value_goal:",
+                        "      mode: \"meaning\"",
+                        "      leave_viewer_with: [\"なにを うしなったのか\"]",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        narration: \"たろうが むらへ もどる。\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            context = mod.load_script_context(script_path)
+            self.assertEqual(context["scene15_cut01"]["ending_mode"], "bittersweet")
+            self.assertEqual(context["scene15_cut01"]["narration_distance_policy"], "meaning_first")
+            self.assertEqual(context["scene15_cut01"]["narrative_value_mode"], "meaning")
+            self.assertEqual(context["scene15_cut01"]["narrative_value_targets"], ("なにを うしなったのか",))
+
+    def test_manifest_entries_thread_ending_mode_and_distance_policy_into_narration_entry(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        with tempfile.TemporaryDirectory(prefix="toc_narration_entry_context_") as td:
+            script_path = Path(td) / "script.md"
+            script_path.write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "script_metadata:",
+                        "  ending_mode: \"happy\"",
+                        "scenes:",
+                        "  - scene_id: 15",
+                        "    phase: \"ending\"",
+                        "    scene_summary: \"たろうが むらへ もどる。\"",
+                        "    narration_distance_policy: \"stay_close\"",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        narration: \"たろうが むらへ もどる。\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manifest = {
+                "scenes": [
+                    {
+                        "scene_id": 15,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "image_generation": {"prompt": "たろうが むらへ もどる。"},
+                                "video_generation": {"duration_seconds": 8, "motion_prompt": "ゆっくりあるく。"},
+                                "audio": {
+                                    "narration": {
+                                        "text": "たろうが むらへ もどる。",
+                                        "tts_text": "たろうが むらへ もどる。",
+                                        "tool": "elevenlabs",
+                                        "output": "assets/audio/scene15_cut01.mp3",
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            script_context = mod.load_script_context(script_path)
+            entry = mod.manifest_narration_entries(manifest, script_context=script_context)[0]
+            self.assertEqual(entry.ending_mode, "happy")
+            self.assertEqual(entry.narration_distance_policy, "stay_close")
+
+    def test_meaning_first_bittersweet_ending_accepts_value_led_line(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        entry = mod.NarrationEntry(
+            scene_id=15,
+            cut_id=1,
+            selector="scene15_cut01",
+            text="うしなった ひびの おもさだけが、しずかに のこります。",
+            tts_text="うしなった ひびの おもさだけが、しずかに のこります。",
+            tool="elevenlabs",
+            output="assets/audio/scene15_cut01.mp3",
+            duration_seconds=8,
+            image_prompt="たろうが むらへ もどる。",
+            motion_prompt="たろうが たちどまる。",
+            story_role="ending",
+            phase="resolution",
+            scene_summary="たろうが むらへ もどる。",
+            script_narration="たろうが むらへ もどる。",
+            contract={},
+            agent_review_ok=True,
+            human_review_ok=False,
+            human_review_reason="",
+            agent_review_reason_keys=[],
+            agent_review_reason_messages=[],
+            rubric_scores={},
+            overall_score=1.0,
+            ending_mode="bittersweet",
+            narration_distance_policy="meaning_first",
+            narrative_value_mode="meaning",
+            narrative_value_targets=("うしなった もの",),
+        )
+
+        results = mod.review_entries([entry])
+        codes = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertNotIn("narration_story_role_mismatch", codes)
+        self.assertGreaterEqual(results[0].rubric_scores["story_role_fit"], 0.55)
+        self.assertGreaterEqual(results[0].rubric_scores["anti_redundancy"], 0.62)
+
+    def test_stay_close_happy_ending_allows_scene_faithful_line_without_redundancy_penalty(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        entry = mod.NarrationEntry(
+            scene_id=15,
+            cut_id=1,
+            selector="scene15_cut01",
+            text="たろうが むらへ もどり、みんなの えがおが ひろがります。",
+            tts_text="たろうが むらへ もどり、みんなの えがおが ひろがります。",
+            tool="elevenlabs",
+            output="assets/audio/scene15_cut01.mp3",
+            duration_seconds=8,
+            image_prompt="たろうが むらへ もどり、みんなが むかえる。",
+            motion_prompt="みんなが かけよる。",
+            story_role="ending",
+            phase="resolution",
+            scene_summary="たろうが むらへ もどり、みんなに むかえられる。",
+            script_narration="たろうが むらへ もどり、みんなに むかえられる。",
+            contract={},
+            agent_review_ok=True,
+            human_review_ok=False,
+            human_review_reason="",
+            agent_review_reason_keys=[],
+            agent_review_reason_messages=[],
+            rubric_scores={},
+            overall_score=1.0,
+            ending_mode="happy",
+            narration_distance_policy="stay_close",
+            narrative_value_mode="immersion",
+            narrative_value_targets=(),
+        )
+
+        results = mod.review_entries([entry])
+        codes = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertNotIn("narration_story_role_mismatch", codes)
+        self.assertNotIn("narration_too_visual_redundant", codes)
+        self.assertGreaterEqual(results[0].rubric_scores["anti_redundancy"], 0.78)

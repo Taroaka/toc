@@ -116,6 +116,16 @@ output/<topic>_<timestamp>/
 - 画像生成の review 正本は `video_manifest.md` 自体
 - `review-image-prompt-story-consistency.py` は manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む
 - `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
+- ナレーション文面の human review 正本は `script.md`
+  - `script.md` の `narration` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する
+  - 同期コマンド:
+
+```bash
+python scripts/sync-narration-from-script.py \
+  --script output/<topic>_<timestamp>/script.md \
+  --manifest output/<topic>_<timestamp>/video_manifest.md
+```
+
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
   - research は `research.md.evaluation_contract`
   - script は `script.md.evaluation_contract`
@@ -145,6 +155,7 @@ output/<topic>_<timestamp>/
   - **両方 `false` の cut が残っていると画像生成は止まる**
 - `audio.narration.review` は `agent_review_ok` / `agent_review_reason_keys` / `agent_review_reason_messages` / `human_review_ok` / `human_review_reason` を持つ
   - `audio.narration.contract` は `target_function` / `must_cover` / `must_avoid` / `done_when` を持てる
+  - human review は先に `script.md` 側で行い、manifest 側は同期結果を gate する
   - criterion score は `rubric_scores`、加重合計は `overall_score` に入る
   - review 実行後に subagent が `agent_review_ok` を更新する
   - `human_review_ok` は初期値 `false`
@@ -197,6 +208,7 @@ python scripts/generate-assets-from-manifest.py \
 # - provider 音声は sound off（別途 narration/BGM を render で合成）
 # - 画像生成前に story/script review を自動実行し、missing character_ids は補完してから進む
 # - 音声生成前に narration review を自動実行し、未正規化 text や v2 非対応 tag を止める
+# - 追加した無音 cut は `audio.narration.tool: "silent"` だけでなく `audio.narration.silence_contract` がないと止まる
 # - story still は `still_image_plan.mode: generate_still` だけを既定で生成する
 # - 両方 false の cut が残っていると画像生成は止まる
 # - 両方 false の narration node が残っていると音声生成は止まる

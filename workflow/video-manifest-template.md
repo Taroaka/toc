@@ -50,6 +50,17 @@ assets:
   # 主役級アイテム / 舞台装置（任意だが推奨）
   # 竜宮城/玉手箱のような要素は character bible と同じく固定して扱う。
   object_bible: []
+  location_bible: []
+  # - location_id: "sea_temple"
+  #   reference_images:
+  #     - "assets/locations/sea_temple.png"
+  #   reference_variants: []
+  #   fixed_prompts:
+  #     - "stone temple deep undersea"
+  #   review_aliases: ["海底神殿"]
+  #   continuity_notes:
+  #     - "後続 cut でも同じ祭壇配置を維持する"
+  #   notes: ""
   # - object_id: "tamatebako"
   #   kind: "artifact"  # setpiece|artifact|phenomenon
   #   reference_images:
@@ -65,16 +76,26 @@ assets:
   #       - "封印が呼吸するように発光する"
 
 # === シーン別素材 ===
+human_change_requests: []
+
 scenes:
-  - scene_id: 1
+  - scene_id: 1   # dotted numeric string も可: 3.1
     timestamp: "00:00-00:10"
+    implementation_trace:
+      source_request_ids: []
+      status: "implemented|verified|waived"
+      notes: ""
     # カット設計ルール（推奨）:
     # - 1カット = 1ナレーション
     # - メインカット（最低1つ）: 5–15秒（ナレーションの実秒ベース）
     # - サブカット（任意）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
     cuts:
-      - cut_id: 1
+      - cut_id: 1  # dotted numeric string も可: 2.1
         cut_role: "main"  # main|sub
+        implementation_trace:
+          source_request_ids: []
+          status: "implemented|verified|waived"
+          notes: ""
         scene_contract:
           target_beat: "string"     # この cut で何を伝えるか
           must_show: ["string"]     # image prompt / motion / narration のどこかで必ず見せる
@@ -97,9 +118,23 @@ scenes:
           #   overall_score: 0.0
           #   human_review_ok: false
           #   human_review_reason: ""
+          # human_review:
+          #   status: "pending|approved|changes_requested"
+          #   notes: ""
+          #   change_requests:
+          #     - request_id: "hr-001"
+          #       status: "open|accepted|rejected|deferred|resolved"
+          #       category: "story_alignment|reveal|subject_specificity|continuity|craft|other"
+          #       requested_change: ""
+          #       rationale: ""
+          #       proposed_patch: ""
+          #       requested_at: "ISO8601"
+          #       resolved_at: ""
+          #       resolution_notes: ""
           # 現行表記で agent_review_reason_codes を使っていても、意味は reason_keys と同じに保つ。
           # subagent は不足 entry を false にし、fix 後に再 review して true へ戻す。
           # human_review_ok は finding を理解して例外許容した記録であり、subagent false を上書きしない。
+          # human_review は通常の修正要求フローの正本であり、override の代替にしない。
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           # 1 つでも欠けていれば subagent review は false にする。
@@ -110,6 +145,9 @@ scenes:
           character_variant_ids: []         # Optional: ["protagonist_battle_damaged"] when a specific state/time variant is needed
           object_ids: []                    # Use [] when no setpiece / prop anchor is required
           object_variant_ids: []            # Optional: choose a specific object/setpiece variant when defined in assets.object_bible[]
+          location_ids: []                  # Optional: reusable location anchors from assets.location_bible[]
+          location_variant_ids: []          # Optional: location state/time variant
+          applied_request_ids: []
           prompt: |
             [全体 / 不変条件]
             シネマティック。暖色寄り。自然な照明。画面内テキストなし、字幕なし、ウォーターマークなし。
@@ -122,6 +160,26 @@ scenes:
           output: "assets/scenes/scene1_cut1_base.png"
           iterations: 4
           selected: 1
+        still_assets:
+          - asset_id: "scene1_cut1_base"
+            role: "primary"
+            output: "assets/scenes/scene1_cut1_base.png"
+            derived_from_asset_ids: []
+            reference_asset_ids: []
+            reference_usage: []
+            direction_notes: []
+            applied_request_ids: []
+            implementation_trace:
+              source_request_ids: []
+              status: "implemented|verified|waived"
+              notes: ""
+            image_generation:
+              tool: "google_nanobanana_pro"
+              character_ids: ["protagonist"]
+              object_ids: []
+              location_ids: []
+              prompt: "same as primary image prompt"
+              output: "assets/scenes/scene1_cut1_base.png"
         video_generation:
           # tool: "google_veo_3_1"  # disabled; routed to Kling for safety
           # tool: "kling_3_0"
@@ -130,6 +188,13 @@ scenes:
           tool: "kling_3_0"
           duration_seconds: 10
           input_image: "assets/scenes/scene1_cut1_base.png"
+          input_asset_id: "scene1_cut1_base"
+          first_frame_asset_id: ""
+          last_frame_asset_id: ""
+          reference_asset_ids: []
+          direction_notes: []
+          continuity_notes: []
+          applied_request_ids: []
           motion_prompt: "ゆっくりパン（落ち着いた速度、微細な視差）"
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
@@ -139,6 +204,13 @@ scenes:
               must_cover: ["桃から生まれた"]
               must_avoid: ["カメラ", "ズーム"]
               done_when: ["物語の導入として自然に読める", "scene/script の出来事を素直に伝える"]
+            # 映像価値を優先する追加 cut で narration を入れない場合は
+            # tool: "silent" と silence_contract を必ずセットで持たせる:
+            # silence_contract:
+            #   intentional: true
+            #   kind: "visual_value_hold"
+            #   confirmed_by_human: true
+            #   reason: "映像で見せる価値が大きい追加カット"
             # review metadata は audio.narration.review 側で持つ:
             # review:
             #   agent_review_ok: true
@@ -146,9 +218,28 @@ scenes:
             #   agent_review_reason_messages: []
             #   human_review_ok: false
             #   human_review_reason: ""
+            # human_review:
+            #   status: "pending|approved|changes_requested"
+            #   notes: ""
+            #   change_requests:
+            #     - request_id: "hr-001"
+            #       status: "open|accepted|rejected|deferred|resolved"
+            #       category: "naturality|reveal|pronunciation|story_alignment|timing|other"
+            #       requested_change: ""
+            #       rationale: ""
+            #       suggested_text: ""
+            #       suggested_tts_text: ""
+            #       requested_at: "ISO8601"
+            #       resolved_at: ""
+            #       resolution_notes: ""
             text: "むかし、ある むらに ももから うまれた しょうねんが いました。"
             tts_text: "むかし、ある むらに ももから うまれた しょうねんが いました。"
             tool: "elevenlabs"
+            applied_request_ids: []
+            implementation_trace:
+              source_request_ids: []
+              status: "implemented|verified|waived"
+              notes: ""
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false
           bgm:

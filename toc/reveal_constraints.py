@@ -4,8 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
-SELECTOR_RE = re.compile(r"scene(?P<scene_id>\d+)(?:_cut(?P<cut_id>\d+))?", re.I)
+from toc.immersive_manifest import dotted_id_sort_key, normalize_dotted_id
+SELECTOR_RE = re.compile(r"scene(?P<scene_id>\d+(?:\.\d+)?)(?:_cut(?P<cut_id>\d+(?:\.\d+)?))?", re.I)
 REFERENCE_OUTPUT_PREFIXES = ("assets/characters/", "assets/objects/")
 SUPPORTED_RULES = {"must_not_appear_before"}
 
@@ -25,45 +25,55 @@ class RevealViolation:
     subject_id: str
     rule: str
     selector: str
-    scene_id: int
-    cut_id: int
+    scene_id: str
+    cut_id: str
     evidence: tuple[str, ...]
     rationale: str = ""
 
 
-def parse_selector(selector: str) -> tuple[int, int] | None:
+def parse_selector(selector: str) -> tuple[str, str] | None:
     match = SELECTOR_RE.fullmatch(str(selector or "").strip())
     if not match:
         return None
-    scene_id = int(match.group("scene_id"))
-    cut_id = int(match.group("cut_id") or 0)
+    scene_id = normalize_dotted_id(match.group("scene_id"))
+    cut_id = normalize_dotted_id(match.group("cut_id") or 0)
+    if not scene_id or not cut_id:
+        return None
     return scene_id, cut_id
 
 
-def build_manifest_cut_order_map(manifest: dict[str, Any]) -> dict[tuple[int, int], int]:
-    order: dict[tuple[int, int], int] = {}
+def build_manifest_cut_order_map(manifest: dict[str, Any]) -> dict[tuple[str, str], int]:
+    order: dict[tuple[str, str], int] = {}
     index = 0
     scenes = manifest.get("scenes")
     if not isinstance(scenes, list):
         return order
-    for scene in scenes:
+    sorted_scenes = sorted(
+        [scene for scene in scenes if isinstance(scene, dict)],
+        key=lambda scene: dotted_id_sort_key(scene.get("scene_id")),
+    )
+    for scene in sorted_scenes:
         if not isinstance(scene, dict):
             continue
-        scene_id = scene.get("scene_id")
-        if not isinstance(scene_id, int):
+        scene_id = normalize_dotted_id(scene.get("scene_id"))
+        if not scene_id:
             continue
         cuts = scene.get("cuts")
         if isinstance(cuts, list) and cuts:
-            for cut in cuts:
+            sorted_cuts = sorted(
+                [cut for cut in cuts if isinstance(cut, dict)],
+                key=lambda cut: dotted_id_sort_key(cut.get("cut_id")),
+            )
+            for cut in sorted_cuts:
                 if not isinstance(cut, dict):
                     continue
-                cut_id = cut.get("cut_id")
-                if not isinstance(cut_id, int):
+                cut_id = normalize_dotted_id(cut.get("cut_id"))
+                if not cut_id:
                     continue
                 order[(scene_id, cut_id)] = index
                 index += 1
             continue
-        order[(scene_id, 0)] = index
+        order[(scene_id, "0")] = index
         index += 1
     return order
 

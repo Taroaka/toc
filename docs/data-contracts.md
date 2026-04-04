@@ -261,6 +261,23 @@ output/<topic>_<timestamp>/
   - `must_avoid`
   - `done_when`
   - `reveal_constraints`
+- `script.md.human_review_criteria.narration[]`
+  - 人間レビュー時の固定観点
+- `script.md.script_metadata.ending_mode`（optional）
+  - `happy|bittersweet|tragic|cautionary|ambiguous`
+- `script.md.scenes[].narration_distance_policy`（optional）
+  - `stay_close|contextual|meaning_first`
+- `script.md.scenes[].narrative_value_goal`（optional）
+  - `mode: immersion|meaning|mixed`
+  - `leave_viewer_with: [string, ...]`
+- `script.md.scenes[].cuts[].tts_text`
+  - spoken form の正本
+- `script.md.scenes[].cuts[].human_review`
+  - `status`
+  - `notes`
+  - `change_requests`
+  - `approved_narration`
+  - `approved_tts_text`
 - `video_manifest.md.scenes[].cuts[].scene_contract`
   - `target_beat`
   - `must_show`
@@ -319,6 +336,10 @@ rubric_scores: {}
 overall_score: 0.0-1.0
 human_review_ok: true|false
 human_review_reason: ""
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests: []
 ```
 
 補足:
@@ -347,6 +368,10 @@ Semantics:
 - `human_review_reason`
   - 人間 override の理由
   - `human_review_ok: true` のときは必須
+- `human_review`
+  - 通常の human feedback loop の記録
+  - `human_review_ok` とは別物
+  - `change_requests[]` を持つ場合、個別要求の正本はこちらに置く
 
 Canonical reason key:
 
@@ -378,6 +403,20 @@ Lifecycle:
 3. fix を source manifest に反映する
 4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
 5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
+
+Optional `human_review.change_requests[]` item:
+
+```yaml
+- request_id: "hr-001"
+  status: "open|accepted|rejected|deferred|resolved"
+  category: "story_alignment|reveal|subject_specificity|continuity|craft|other"
+  requested_change: ""
+  rationale: ""
+  proposed_patch: ""
+  requested_at: "ISO8601"
+  resolved_at: ""
+  resolution_notes: ""
+```
 
 Image contract:
 
@@ -428,6 +467,10 @@ human_review_ok: true|false
 human_review_reason: ""
 rubric_scores: {}
 overall_score: 0.0-1.0
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests: []
 ```
 
 Semantics:
@@ -447,6 +490,10 @@ Semantics:
 - `human_review_reason`
   - 人間 override の理由
   - `human_review_ok: true` のときは必須
+- `human_review`
+  - 通常の human review loop の記録
+  - narration 文面の source of truth は `script.md` だが、manifest 側にも同期された review 状態を持てる
+  - `change_requests[]` は override ではなく修正要求の本文
 - `rubric_scores`
   - criterion ごとの score
 - `overall_score`
@@ -474,6 +521,26 @@ Canonical reason key:
 - `narration_pacing_mismatch`
 - `narration_spoken_japanese_weak`
 
+Intentional silent cut contract:
+
+```yaml
+audio:
+  narration:
+    tool: "silent"
+    text: ""
+    tts_text: ""
+    silence_contract:
+      intentional: true
+      kind: "visual_value_hold|transition_hold|reaction_hold|breathing_room|other"
+      confirmed_by_human: true
+      reason: "映像で見せる価値が大きい追加カット"
+```
+
+- `tool: "silent"` だけでは不十分
+- renderable cut で narration を空にする場合は `silence_contract` を必須にする
+- `confirmed_by_human: true` は、人レビューで「この cut は無音でよい」と確定した印
+- 最終連結では、この cut の `video_generation.duration_seconds` 分の無音 mp3 をつなぐ
+
 Lifecycle:
 
 1. subagent が narration text を review し、finding がある node を `agent_review_ok: false` にする
@@ -481,3 +548,160 @@ Lifecycle:
 3. fix を source manifest に反映する
 4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
 5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
+
+## 7. Script → Manifest narration sync
+
+ナレーション文面の human review 正本は `script.md` とする。
+
+- source: `script.md`
+- sink: `video_manifest.md`
+- sync target:
+  - `audio.narration.text`
+  - `audio.narration.tts_text`
+
+現行 ElevenLabs 運用では manifest 側の `audio.narration.text` と `audio.narration.tts_text` は、どちらも **spoken form** を同期する。
+
+spoken form の優先順位:
+
+1. `scenes[].cuts[].human_review.approved_tts_text`
+2. `scenes[].cuts[].tts_text`
+3. `scenes[].cuts[].human_review.approved_narration`
+4. `scenes[].cuts[].narration`
+
+Narration human review contract:
+
+```yaml
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests:
+    - request_id: "hr-001"
+      status: "open|accepted|rejected|deferred|resolved"
+      category: "naturality|reveal|pronunciation|story_alignment|timing|other"
+      requested_change: ""
+      rationale: ""
+      suggested_narration: ""
+      suggested_tts_text: ""
+      requested_at: "ISO8601"
+      resolved_at: ""
+      resolution_notes: ""
+  approved_narration: ""
+  approved_tts_text: ""
+```
+
+- `status: changes_requested` のときは `change_requests[]` を空にしない
+- `approved_*` は open request を隠すために使わない
+- manifest 側の `human_review_ok` は例外許容 override であり、この block の代替ではない
+
+同期コマンド:
+
+```bash
+python scripts/sync-narration-from-script.py \
+  --script output/<topic>_<timestamp>/script.md \
+  --manifest output/<topic>_<timestamp>/video_manifest.md
+```
+
+## 8. Narration distance policy
+
+`narration` と `visual_beat` の距離は固定ルールではなく、scene 文脈で判断する。
+
+- `stay_close`
+  - 物語への没入を優先
+  - 序盤 / 中盤の標準
+- `contextual`
+  - close でも meaning add でもよい
+  - 終盤の標準
+- `meaning_first`
+  - 映像のあとに意味が残る一文を優先
+  - cautionary / tragic / bittersweet の重要 cut で使いやすい
+
+Evaluator の意図:
+
+- `stay_close` の cut では、`narration` と `visual_beat` が近いこと自体を減点しない
+- `contextual` / `meaning_first` の cut では、必要なときだけ映像のあとに意味が残る一文を許可する
+
+## 9. Human review change-request expansion
+
+`script.md` は narration だけでなく visual / asset / image / video 指示を含む human review の正本でもある。
+
+Top-level:
+
+```yaml
+human_change_requests:
+  - request_id: "hr-001"
+    source: "human_script_review"
+    created_at: "ISO8601"
+    raw_request: "string"
+    original_selectors: ["scene3_cut2"]
+    current_selectors: ["scene3.1_cut2.1"]
+    normalized_actions: []
+    status: "pending|normalized|applied|verified|waived"
+    resolution_notes: ""
+    applied_manifest_targets: []
+```
+
+Canonical `normalized_actions[].action`:
+
+- `add_scene`, `delete_scene`, `add_cut`, `delete_cut`, `renumber_scene`, `renumber_cut`
+- `update_scene_summary`, `update_story_visual`
+- `update_narration`, `clear_narration`, `set_silent_cut`
+- `update_visual_beat`, `update_scene_contract`
+- `add_location_asset`, `add_object_asset`, `add_character_variant`
+- `create_still_asset`, `derive_still_asset`, `reference_asset`
+- `set_image_direction`, `set_video_direction`
+
+`script.md.scenes[].human_review`:
+
+- `status`
+- `notes`
+- `approved_scene_summary`
+- `approved_story_visual`
+- `change_request_ids[]`
+
+`script.md.scenes[].cuts[].human_review` add:
+
+- `approved_visual_beat`
+- `approved_image_notes[]`
+- `approved_video_notes[]`
+- `change_request_ids[]`
+
+`video_manifest.md` execution additions:
+
+- `assets.location_bible[]`
+  - `location_id`, `reference_images`, `reference_variants[]`, `fixed_prompts`, `review_aliases[]`, `continuity_notes[]`, `notes`
+- `image_generation.location_ids[]`
+- `image_generation.location_variant_ids[]`
+- `still_assets[]`
+  - `asset_id`, `role`, `output`, `image_generation`, `derived_from_asset_ids[]`, `reference_asset_ids[]`, `reference_usage[]`, `direction_notes[]`, `applied_request_ids[]`
+- `reference_usage[]`
+  - `asset_id`, `mode`, `placement`, `keep[]`, `change[]`, `notes`
+- `video_generation.input_asset_id`
+- `video_generation.first_frame_asset_id`
+- `video_generation.last_frame_asset_id`
+- `video_generation.reference_asset_ids[]`
+- `video_generation.direction_notes[]`
+- `video_generation.continuity_notes[]`
+- `video_generation.applied_request_ids[]`
+- `audio.narration.applied_request_ids[]`
+- `implementation_trace`
+  - `source_request_ids[]`, `status`, `notes`
+
+ID policy:
+
+- `scene_id` / `cut_id` は dotted numeric string を許可する
+- canonical selector は `scene<scene_id>_cut<cut_id>`
+- sort は numeric token sort
+- 出力 file slug は `.` を `_` に変える
+- stable UID は導入しない
+
+Canonical reason key:
+
+- `human_change_request_unresolved`
+- `human_change_request_trace_missing`
+- `location_asset_missing`
+- `still_asset_missing`
+- `still_asset_dependency_missing`
+- `video_asset_reference_missing`
+- `reference_usage_target_missing`
+- `dotted_selector_invalid`
+- `renumber_trace_missing`

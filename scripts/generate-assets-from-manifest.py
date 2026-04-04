@@ -34,7 +34,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.env import load_env_files
 from toc.http import HttpError, request_bytes
-from toc.immersive_manifest import parse_scene_selectors, scene_selector_tokens, selector_matches
+from toc.immersive_manifest import (
+    dotted_id_slug,
+    make_scene_cut_selector,
+    normalize_dotted_id,
+    parse_scene_selectors,
+    scene_selector_tokens,
+    selector_matches,
+)
 from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID, ElevenLabsClient, ElevenLabsConfig
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
@@ -48,8 +55,9 @@ ALLOWED_VEO_DURATIONS = (4, 6, 8)
 
 @dataclass
 class SceneSpec:
-    scene_id: int
-    manifest_scene_id: int
+    scene_id: str
+    manifest_scene_id: str
+    selector: str
     kind: str | None
     reference_id: str | None
     timestamp: str | None
@@ -67,6 +75,10 @@ class SceneSpec:
     image_object_ids_present: bool
     image_object_variant_ids: list[str]
     image_object_variant_ids_present: bool
+    image_location_ids: list[str]
+    image_location_ids_present: bool
+    image_location_variant_ids: list[str]
+    image_location_variant_ids_present: bool
     image_aspect_ratio: str | None
     image_size: str | None
     video_tool: str | None
@@ -80,6 +92,11 @@ class SceneSpec:
     narration_tts_text: str | None
     narration_output: str | None
     narration_normalize_to_scene_duration: bool
+    narration_silence_intentional: bool
+    narration_silence_confirmed_by_human: bool
+    narration_silence_kind: str | None
+    narration_silence_reason: str | None
+    still_assets: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -337,6 +354,42 @@ def _parse_assets_spec(assets: Any) -> AssetGuides:
     return AssetGuides(character_bible=character_bible, style_guide=style_guide, object_bible=object_bible)
 
 
+def _coerce_still_assets(raw_node: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_node, dict):
+        return []
+    raw_assets = raw_node.get("still_assets")
+    if not isinstance(raw_assets, list):
+        return []
+    return [item for item in raw_assets if isinstance(item, dict)]
+
+
+def _select_primary_still_asset(still_assets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not still_assets:
+        return None
+    for preferred_role in ("primary", "first_frame", "reference_anchor"):
+        for item in still_assets:
+            if str(item.get("role") or "").strip() == preferred_role:
+                return item
+    return still_assets[0]
+
+
+def _effective_image_generation(raw_node: dict[str, Any], still_assets: list[dict[str, Any]]) -> tuple[dict[str, Any], str | None]:
+    image_generation = raw_node.get("image_generation") if isinstance(raw_node.get("image_generation"), dict) else {}
+    output = _as_opt_str((image_generation or {}).get("output"))
+    if image_generation:
+        return image_generation, output
+    primary_still = _select_primary_still_asset(still_assets)
+    if not primary_still:
+        return {}, None
+    derived = primary_still.get("image_generation") if isinstance(primary_still.get("image_generation"), dict) else {}
+    return derived, _as_opt_str(primary_still.get("output"))
+
+
+def _scene_log_slug(scene: SceneSpec) -> str:
+    base = scene.selector or scene.scene_id or scene.manifest_scene_id
+    return dotted_id_slug(base)
+
+
 def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
     metadata: dict = {}
     scenes: list[SceneSpec] = []
@@ -421,13 +474,11 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
         if key == "scene_id" and "scenes" in context_keys:
             if current:
                 scenes.append(current)
-            try:
-                scene_id = int(_parse_yaml_scalar(value) or "0")
-            except ValueError:
-                scene_id = len(scenes) + 1
+            scene_id = normalize_dotted_id(_parse_yaml_scalar(value)) or str(len(scenes) + 1)
             current = SceneSpec(
                 scene_id=scene_id,
                 manifest_scene_id=scene_id,
+                selector=make_scene_cut_selector(scene_id),
                 kind=None,
                 reference_id=None,
                 timestamp=None,
@@ -445,6 +496,10 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 image_object_ids_present=False,
                 image_object_variant_ids=[],
                 image_object_variant_ids_present=False,
+                image_location_ids=[],
+                image_location_ids_present=False,
+                image_location_variant_ids=[],
+                image_location_variant_ids_present=False,
                 image_aspect_ratio=None,
                 image_size=None,
                 video_tool=None,
@@ -455,8 +510,14 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 video_output=None,
                 narration_tool=None,
                 narration_text=None,
+                narration_tts_text=None,
                 narration_output=None,
                 narration_normalize_to_scene_duration=True,
+                narration_silence_intentional=False,
+                narration_silence_confirmed_by_human=False,
+                narration_silence_kind=None,
+                narration_silence_reason=None,
+                still_assets=[],
             )
             continue
 
@@ -508,6 +569,12 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
             elif key == "object_variant_ids":
                 current.image_object_variant_ids_present = True
                 current.image_object_variant_ids = _parse_inline_yaml_list(value)
+            elif key == "location_ids":
+                current.image_location_ids_present = True
+                current.image_location_ids = _parse_inline_yaml_list(value)
+            elif key == "location_variant_ids":
+                current.image_location_variant_ids_present = True
+                current.image_location_variant_ids = _parse_inline_yaml_list(value)
             continue
 
         # video generation
@@ -539,6 +606,8 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 current.narration_tool = _parse_yaml_scalar(value)
             elif key == "text":
                 current.narration_text = value if "\n" in value else (_parse_yaml_scalar(value) or value)
+            elif key == "tts_text":
+                current.narration_tts_text = value if "\n" in value else (_parse_yaml_scalar(value) or value)
             elif key == "output":
                 current.narration_output = _parse_yaml_scalar(value)
             elif key == "normalize_to_scene_duration":
@@ -578,9 +647,8 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         if not isinstance(raw_scene, dict):
             continue
 
-        try:
-            scene_id = int(raw_scene.get("scene_id"))
-        except Exception:
+        scene_id = normalize_dotted_id(raw_scene.get("scene_id"))
+        if scene_id is None:
             continue
 
         timestamp = _as_opt_str(raw_scene.get("timestamp"))
@@ -594,23 +662,17 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             except Exception:
                 scene_duration_seconds = None
 
+        scene_still_assets = _coerce_still_assets(raw_scene)
         raw_cuts = raw_scene.get("cuts")
         if isinstance(raw_cuts, list) and raw_cuts:
             for idx, raw_cut in enumerate(raw_cuts, start=1):
                 if not isinstance(raw_cut, dict):
                     continue
 
-                cut_id_raw = raw_cut.get("cut_id")
-                try:
-                    cut_id = int(cut_id_raw) if cut_id_raw is not None else int(idx)
-                except Exception:
-                    cut_id = int(idx)
-
-                # Expand cut ids into a stable synthetic scene id.
-                # scene10 cut1 -> 1001, scene10 cut2 -> 1002.
-                cut_scene_id = int(scene_id) * 100 + int(cut_id)
-
-                ig = raw_cut.get("image_generation") if isinstance(raw_cut.get("image_generation"), dict) else {}
+                cut_id = normalize_dotted_id(raw_cut.get("cut_id")) or str(idx)
+                selector = make_scene_cut_selector(scene_id, cut_id)
+                cut_still_assets = _coerce_still_assets(raw_cut)
+                ig, image_output = _effective_image_generation(raw_cut, cut_still_assets)
                 vg = raw_cut.get("video_generation") if isinstance(raw_cut.get("video_generation"), dict) else {}
                 cut_duration_seconds: int | None = None
                 cut_duration_raw = raw_cut.get("duration_seconds")
@@ -624,10 +686,8 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         cut_duration_seconds = int(vg.get("duration_seconds"))
                     except Exception:
                         cut_duration_seconds = None
-
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
-                image_output = _as_opt_str(ig.get("output")) if isinstance(ig, dict) else None
                 cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
                 still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
                 image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
@@ -639,6 +699,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_object_ids = _ensure_str_list(ig.get("object_ids")) if isinstance(ig, dict) else []
                 image_object_variant_ids_present = isinstance(ig, dict) and ("object_variant_ids" in ig)
                 image_object_variant_ids = _ensure_str_list(ig.get("object_variant_ids")) if isinstance(ig, dict) else []
+                image_location_ids_present = isinstance(ig, dict) and ("location_ids" in ig)
+                image_location_ids = _ensure_str_list(ig.get("location_ids")) if isinstance(ig, dict) else []
+                image_location_variant_ids_present = isinstance(ig, dict) and ("location_variant_ids" in ig)
+                image_location_variant_ids = _ensure_str_list(ig.get("location_variant_ids")) if isinstance(ig, dict) else []
                 image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
                 image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
 
@@ -654,6 +718,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 narration_tts_text = None
                 narration_output = None
                 narration_normalize = True
+                narration_silence_intentional = False
+                narration_silence_confirmed_by_human = False
+                narration_silence_kind = None
+                narration_silence_reason = None
 
                 audio = raw_cut.get("audio")
                 narration = None
@@ -666,6 +734,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                     narration_text = _as_opt_str(narration.get("text"))
                     narration_tts_text = _as_opt_str(narration.get("tts_text"))
                     narration_output = _as_opt_str(narration.get("output"))
+                    (
+                        narration_silence_intentional,
+                        narration_silence_confirmed_by_human,
+                        narration_silence_kind,
+                        narration_silence_reason,
+                    ) = _silence_contract_fields(narration)
                     normalize_raw = narration.get("normalize_to_scene_duration")
                     if isinstance(normalize_raw, bool):
                         narration_normalize = bool(normalize_raw)
@@ -676,8 +750,9 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
                 scenes.append(
                     SceneSpec(
-                        scene_id=cut_scene_id,
+                        scene_id=selector,
                         manifest_scene_id=scene_id,
+                        selector=selector,
                         kind=scene_kind,
                         reference_id=reference_id,
                         timestamp=timestamp,
@@ -695,6 +770,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         image_object_ids_present=image_object_ids_present,
                         image_object_variant_ids=image_object_variant_ids,
                         image_object_variant_ids_present=image_object_variant_ids_present,
+                        image_location_ids=image_location_ids,
+                        image_location_ids_present=image_location_ids_present,
+                        image_location_variant_ids=image_location_variant_ids,
+                        image_location_variant_ids_present=image_location_variant_ids_present,
                         image_aspect_ratio=image_aspect_ratio,
                         image_size=image_size,
                         video_tool=video_tool,
@@ -708,11 +787,16 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         narration_tts_text=narration_tts_text,
                         narration_output=narration_output,
                         narration_normalize_to_scene_duration=narration_normalize,
+                        narration_silence_intentional=narration_silence_intentional,
+                        narration_silence_confirmed_by_human=narration_silence_confirmed_by_human,
+                        narration_silence_kind=narration_silence_kind,
+                        narration_silence_reason=narration_silence_reason,
+                        still_assets=cut_still_assets,
                     )
                 )
             continue
 
-        ig = raw_scene.get("image_generation") if isinstance(raw_scene.get("image_generation"), dict) else {}
+        ig, image_output = _effective_image_generation(raw_scene, scene_still_assets)
         vg = raw_scene.get("video_generation") if isinstance(raw_scene.get("video_generation"), dict) else {}
         if scene_duration_seconds is None and isinstance(vg, dict) and ("duration_seconds" in vg):
             try:
@@ -722,7 +806,6 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
-        image_output = _as_opt_str(ig.get("output")) if isinstance(ig, dict) else None
         scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
         still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
         image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
@@ -734,6 +817,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_object_ids = _ensure_str_list(ig.get("object_ids")) if isinstance(ig, dict) else []
         image_object_variant_ids_present = isinstance(ig, dict) and ("object_variant_ids" in ig)
         image_object_variant_ids = _ensure_str_list(ig.get("object_variant_ids")) if isinstance(ig, dict) else []
+        image_location_ids_present = isinstance(ig, dict) and ("location_ids" in ig)
+        image_location_ids = _ensure_str_list(ig.get("location_ids")) if isinstance(ig, dict) else []
+        image_location_variant_ids_present = isinstance(ig, dict) and ("location_variant_ids" in ig)
+        image_location_variant_ids = _ensure_str_list(ig.get("location_variant_ids")) if isinstance(ig, dict) else []
         image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
         image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
 
@@ -750,6 +837,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         narration_tts_text = None
         narration_output = None
         narration_normalize = True
+        narration_silence_intentional = False
+        narration_silence_confirmed_by_human = False
+        narration_silence_kind = None
+        narration_silence_reason = None
 
         audio = raw_scene.get("audio")
         narration = None
@@ -762,6 +853,12 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             narration_text = _as_opt_str(narration.get("text"))
             narration_tts_text = _as_opt_str(narration.get("tts_text"))
             narration_output = _as_opt_str(narration.get("output"))
+            (
+                narration_silence_intentional,
+                narration_silence_confirmed_by_human,
+                narration_silence_kind,
+                narration_silence_reason,
+            ) = _silence_contract_fields(narration)
             normalize_raw = narration.get("normalize_to_scene_duration")
             if isinstance(normalize_raw, bool):
                 narration_normalize = bool(normalize_raw)
@@ -774,6 +871,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             SceneSpec(
                 scene_id=scene_id,
                 manifest_scene_id=scene_id,
+                selector=make_scene_cut_selector(scene_id),
                 kind=scene_kind,
                 reference_id=reference_id,
                 timestamp=timestamp,
@@ -791,6 +889,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_object_ids_present=image_object_ids_present,
                 image_object_variant_ids=image_object_variant_ids,
                 image_object_variant_ids_present=image_object_variant_ids_present,
+                image_location_ids=image_location_ids,
+                image_location_ids_present=image_location_ids_present,
+                image_location_variant_ids=image_location_variant_ids,
+                image_location_variant_ids_present=image_location_variant_ids_present,
                 image_aspect_ratio=image_aspect_ratio,
                 image_size=image_size,
                 video_tool=video_tool,
@@ -804,6 +906,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 narration_tts_text=narration_tts_text,
                 narration_output=narration_output,
                 narration_normalize_to_scene_duration=narration_normalize,
+                narration_silence_intentional=narration_silence_intentional,
+                narration_silence_confirmed_by_human=narration_silence_confirmed_by_human,
+                narration_silence_kind=narration_silence_kind,
+                narration_silence_reason=narration_silence_reason,
+                still_assets=scene_still_assets,
             )
         )
 
@@ -1378,6 +1485,18 @@ def validate_scene_narration(
             )
 
         narration_source = scene.narration_tts_text or scene.narration_text
+        if tool == "silent":
+            if not scene.narration_silence_intentional or not scene.narration_silence_confirmed_by_human:
+                raise SystemExit(
+                    f"scene{scene.scene_id}: silent narration requires "
+                    "audio.narration.silence_contract.intentional=true and confirmed_by_human=true."
+                )
+            if not scene.narration_silence_kind or not scene.narration_silence_reason:
+                raise SystemExit(
+                    f"scene{scene.scene_id}: silent narration requires "
+                    "audio.narration.silence_contract.kind and reason."
+                )
+            continue
         if tool == "elevenlabs" and not (narration_source and narration_source.strip()):
             raise SystemExit(
                 f"scene{scene.scene_id}: missing audio.narration.tts_text/text for ElevenLabs (required). "
@@ -2297,6 +2416,114 @@ def normalize_tool_name(tool: str | None) -> str:
     return normalized
 
 
+def _silence_contract_fields(narration: dict[str, Any] | None) -> tuple[bool, bool, str | None, str | None]:
+    if not isinstance(narration, dict):
+        return False, False, None, None
+    raw = narration.get("silence_contract")
+    if not isinstance(raw, dict):
+        return False, False, None, None
+    intentional = bool(raw.get("intentional"))
+    confirmed = bool(raw.get("confirmed_by_human"))
+    kind = _as_opt_str(raw.get("kind"))
+    reason = _as_opt_str(raw.get("reason"))
+    return intentional, confirmed, kind, reason
+
+
+def _node_selector(scene_id: Any, cut_id: Any | None = None) -> str:
+    return make_scene_cut_selector(scene_id, cut_id)
+
+
+def validate_human_change_requests(*, manifest: dict[str, Any], scene_filter: set[str] | None) -> None:
+    raw_requests = manifest.get("human_change_requests")
+    if not isinstance(raw_requests, list):
+        return
+
+    unresolved: list[str] = []
+    for raw in raw_requests:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "").strip().lower()
+        request_id = str(raw.get("request_id") or "<unknown>").strip()
+        if status not in {"verified", "waived"}:
+            unresolved.append(request_id)
+    if unresolved:
+        raise SystemExit(
+            "Unresolved human change requests remain. Resolve or waive them before generation: "
+            + ", ".join(unresolved)
+        )
+
+    scenes = manifest.get("scenes")
+    if not isinstance(scenes, list):
+        return
+
+    issues: list[str] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_id = normalize_dotted_id(scene.get("scene_id"))
+        if scene_id is None:
+            issues.append("dotted_selector_invalid: scene_id is missing or invalid.")
+            continue
+        cuts = scene.get("cuts")
+        nodes = cuts if isinstance(cuts, list) and cuts else [scene]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            cut_id = normalize_dotted_id(node.get("cut_id")) if node is not scene else None
+            selector = _node_selector(scene_id, cut_id)
+            if scene_filter and selector not in scene_filter and scene_id not in scene_filter:
+                continue
+
+            impl = node.get("implementation_trace") if isinstance(node.get("implementation_trace"), dict) else {}
+            source_request_ids = _ensure_str_list(impl.get("source_request_ids")) if isinstance(impl, dict) else []
+            trace_status = str(impl.get("status") or "").strip().lower() if isinstance(impl, dict) else ""
+            if source_request_ids and trace_status not in {"implemented", "verified", "waived"}:
+                issues.append(f"{selector}: human_change_request_trace_missing")
+
+            for section_key, id_path in (
+                ("audio", ("narration", "applied_request_ids")),
+                ("image_generation", ("applied_request_ids",)),
+                ("video_generation", ("applied_request_ids",)),
+            ):
+                section = node.get(section_key) if isinstance(node.get(section_key), dict) else {}
+                if not section:
+                    continue
+                cur: Any = section
+                for key in id_path:
+                    if not isinstance(cur, dict):
+                        cur = None
+                        break
+                    cur = cur.get(key)
+                applied = _ensure_str_list(cur)
+                if source_request_ids and not set(source_request_ids).issubset(set(applied)):
+                    issues.append(f"{selector}: human_change_request_trace_missing in {section_key}")
+
+            still_assets = _coerce_still_assets(node)
+            known_asset_ids = {
+                str(item.get("asset_id") or "").strip()
+                for item in still_assets
+                if str(item.get("asset_id") or "").strip()
+            }
+            for asset in still_assets:
+                asset_id = str(asset.get("asset_id") or "<unknown>").strip()
+                for dep_key, reason_key in (
+                    ("derived_from_asset_ids", "still_asset_dependency_missing"),
+                    ("reference_asset_ids", "still_asset_dependency_missing"),
+                ):
+                    for dep in _ensure_str_list(asset.get(dep_key)):
+                        if dep not in known_asset_ids:
+                            issues.append(f"{selector}:{asset_id}: {reason_key}")
+                for usage in asset.get("reference_usage") if isinstance(asset.get("reference_usage"), list) else []:
+                    if not isinstance(usage, dict):
+                        continue
+                    target_asset_id = str(usage.get("asset_id") or "").strip()
+                    if target_asset_id and target_asset_id not in known_asset_ids:
+                        issues.append(f"{selector}:{asset_id}: reference_usage_target_missing")
+
+    if issues:
+        raise SystemExit("Human review contract validation failed:\n- " + "\n- ".join(issues))
+
+
 def resolve_path(base_dir: Path, maybe_path: str | None) -> Path | None:
     if not maybe_path:
         return None
@@ -2608,6 +2835,9 @@ def main() -> None:
 
     md = manifest_path.read_text(encoding="utf-8")
     yaml_text = extract_yaml_block(md)
+    manifest_data = yaml.safe_load(yaml_text) if yaml is not None else {}
+    if not isinstance(manifest_data, dict):
+        manifest_data = {}
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
 
     char_views = sorted(_parse_csv_set(args.character_reference_views))
@@ -2703,6 +2933,10 @@ def main() -> None:
         raise SystemExit("No scenes found in manifest YAML.")
 
     scene_filter = parse_scene_selectors(args.scene_ids)
+    validate_human_change_requests(
+        manifest=manifest_data,
+        scene_filter=scene_filter,
+    )
 
     validate_scene_character_ids(
         scenes=scenes,
@@ -3152,7 +3386,7 @@ def main() -> None:
             continue
         video_scenes_in_order.append(s)
 
-    video_scene_index_by_id: dict[int, int] = {int(s.scene_id): idx for idx, s in enumerate(video_scenes_in_order)}
+    video_scene_index_by_id: dict[str, int] = {str(s.scene_id): idx for idx, s in enumerate(video_scenes_in_order)}
 
     prev_chain_first_frame: Path | None = None
     for scene in scenes:
@@ -3179,7 +3413,7 @@ def main() -> None:
         elif args.chain_first_frame_from_prev_video and prev_chain_first_frame is None:
             # If the user is regenerating only later scenes, we may have skipped the previous video generation.
             # Don't assume contiguous numeric IDs; use manifest order to find the previous video scene.
-            idx = video_scene_index_by_id.get(int(scene.scene_id))
+            idx = video_scene_index_by_id.get(str(scene.scene_id))
             if idx is not None and idx > 0:
                 prev_scene = video_scenes_in_order[idx - 1]
                 prev_video = resolve_path(base_dir, prev_scene.video_output)

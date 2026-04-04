@@ -6,6 +6,42 @@ script_metadata:
   created_at: "ISO8601"
   target_duration: 60
   aspect_ratio: "9:16"
+  narration_source_of_truth: "script.md"
+
+human_change_requests:
+  - request_id: "hr-001"
+    source: "human_script_review"
+    created_at: "ISO8601"
+    raw_request: "string"
+    original_selectors: ["scene3_cut2"]
+    current_selectors: ["scene3.1_cut2.1"]
+    normalized_actions:
+      - action: "update_visual_beat"
+        target:
+          scene_id: "3.1"
+          cut_id: "2.1"
+        payload:
+          visual_beat: "string"
+      - action: "update_scene_contract"
+        target:
+          scene_id: "3.1"
+          cut_id: "2.1"
+        payload:
+          target_beat: "string"
+          must_show: ["string"]
+          must_avoid: []
+          done_when: ["string"]
+    status: "pending|normalized|applied|verified|waived"
+    resolution_notes: ""
+    applied_manifest_targets: ["scene3.1_cut2.1:image_generation"]
+
+human_review_criteria:
+  narration:
+    - "昔話/作品文脈として自然か"
+    - "reveal 順序を壊していないか"
+    - "ひらがな読みで違和感がないか"
+    - "映像より先走っていないか"
+    - "説明過多になっていないか"
 
 characters:
   - character_id: "protagonist"
@@ -19,10 +55,16 @@ timeline:
   total_duration: 60
 
 scenes:
-  - scene_id: 1
+  - scene_id: 1   # dotted numeric string も可: 3.1
     timing:
       duration_seconds: 6
       timestamp: "00:00-00:06"
+    human_review:
+      status: "pending|approved|changes_requested"
+      notes: ""
+      approved_scene_summary: ""
+      approved_story_visual: ""
+      change_request_ids: []
     narrative:
       phase: "ordinary_world"
       purpose: "string"
@@ -32,9 +74,21 @@ scenes:
       narration_policy: "spoken|silent"
     visual:
       generation_prompt: "string"
-    audio:
-      narration:
-        text: "string"
+    cuts:
+      - cut_id: 1  # dotted numeric string も可: 2.1
+        narration: "string"
+        tts_text: "string"
+        visual_beat: "string"
+        human_review:
+          status: "pending|approved|changes_requested"
+          notes: ""
+          approved_narration: ""
+          approved_tts_text: ""
+          approved_visual_beat: ""
+          approved_image_notes: []
+          approved_video_notes: []
+          change_request_ids: []
+        image_output: "assets/scenes/scene01_cut01.png"
 
 quality_check:
   timing:

@@ -8,6 +8,11 @@
 - `audio.narration.text` は manifest 上の原稿でも、現行の elevenlabs 運用では **ひらがなだけ** を基本にする。
 - `audio.narration.tts_text` は TTS に送る読み上げ専用原稿として扱う。
 - `audio.narration.tts_text` は elevenlabs 用に、できるだけ **ひらがなだけ** で書く。`TODO:` などのメタ情報を書かない。
+- `narration` と `visual_beat` の距離は固定ではない。
+  - 序盤 / 中盤は原則 `stay_close`
+  - 終盤は `contextual`
+  - 代償や余韻を残す cut だけ `meaning_first` を許容する
+- 目標は「常に差を作る」ことではなく、必要な cut にだけ **映像のあとに意味が残る一文** を置くこと
 - 共有ファイル（`video_manifest.md`）は **同時編集しない**（single-writer で統合）。
 - 並列化は「scene別 scratch」→「1人がマージ」で実現する。
 

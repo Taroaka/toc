@@ -275,6 +275,12 @@ class TestVerifyPipeline(unittest.TestCase):
                         "          narration:",
                         "            tool: \"silent\"",
                         "            text: \"\"",
+                        "            tts_text: \"\"",
+                        "            silence_contract:",
+                        "              intentional: true",
+                        "              kind: \"visual_value_hold\"",
+                        "              confirmed_by_human: true",
+                        "              reason: \"映像で見せる価値が大きい追加カット\"",
                         "            output: \"assets/audio/scene40_1.mp3\"",
                         "```",
                         "",
@@ -303,6 +309,86 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
             self.assertTrue(payload["overall"]["passed"], msg=payload)
+
+    def test_verify_pipeline_standard_rejects_silent_cut_without_contract(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_") as td:
+            run_dir = Path(td) / "out" / "urashimataro_20990101_0001"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "timestamp=2099-01-01T00:00:00+09:00",
+                        "job_id=JOB_2099-01-01_000001",
+                        "topic=浦島太郎",
+                        "status=DONE",
+                        "runtime.stage=done",
+                        "runtime.render.status=success",
+                        "review.video.status=pending",
+                        "---",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "research.md").write_text("```yaml\ntopic: \"浦島太郎\"\nstory_baseline:\n  canonical_synopsis:\n    one_liner: \"浦島太郎\"\n    short_summary: \"summary\"\n    beat_sheet:\n      - beat: \"b\"\n        scene_ids: [1]\n        confidence: 0.9\n        sources: [\"S1\"]\nscene_plan:\n  min_scene_count: 1\n  scenes:\n    - scene_id: 1\n      role: \"opening\"\n      beat_summary: \"b\"\n      desired_emotion: \"c\"\n      key_visuals: [\"v\"]\n      key_dialogue_or_voiceover: \"k\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\"\nsources:\n  - source_id: \"S1\"\n    title: \"s\"\n    url: \"https://example.com\"\n    type: \"primary\"\n    reliability: \"high\"\n    accessed_at: \"2099-01-01T00:00:00+09:00\"\n    notes: \"\"\nconflicts: []\nmetadata:\n  confidence_score: 0.9\n```\n", encoding="utf-8")
+            (run_dir / "story.md").write_text("```yaml\nselection:\n  candidates:\n    - candidate_id: \"A\"\n      logline: \"x\"\n      why_it_scores: [\"x\"]\n      score_hint:\n        engagement: 0.9\n        coherence: 0.9\n        production_fit: 0.9\n      requires_hybridization_approval: false\n  chosen_candidate_id: \"A\"\n  rationale: \"x\"\nhybridization:\n  approval_status: \"not_needed\"\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      narration: \"x\"\n      visual: \"y\"\n      research_refs: [\"research.story_baseline.beat_sheet[0]\"]\n```\n", encoding="utf-8")
+            (run_dir / "script.md").write_text("# Script\n\nok", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "video_metadata:",
+                        "  topic: \"浦島太郎\"",
+                        "  experience: \"cinematic_story\"",
+                        "scenes:",
+                        "  - scene_id: 40",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        cut_role: \"sub\"",
+                        "        image_generation:",
+                        "          tool: \"google_nanobanana_pro\"",
+                        "          character_ids: []",
+                        "          object_ids: [\"ryugu_palace\"]",
+                        "          prompt: |",
+                        "            画面内テキストなし。",
+                        "          output: \"assets/scenes/scene40_1.png\"",
+                        "        video_generation:",
+                        "          tool: \"kling_3_0\"",
+                        "          duration_seconds: 4",
+                        "          output: \"assets/scenes/scene40_1.mp4\"",
+                        "        audio:",
+                        "          narration:",
+                        "            tool: \"silent\"",
+                        "            text: \"\"",
+                        "            output: \"assets/audio/scene40_1.mp3\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "video.mp4").write_bytes(b"placeholder")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/verify-pipeline.py",
+                    "--run-dir",
+                    str(run_dir),
+                    "--flow",
+                    "immersive",
+                    "--profile",
+                    "standard",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

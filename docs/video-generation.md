@@ -177,6 +177,32 @@ Step 3: 品質確認
 
 **理由**: 動画生成は画像生成の10-100倍のコスト。静止画での事前検証が最も効率的。
 
+### 2.2.1 Human Review Change-Request Loop
+
+人間レビューは `approved|changes_requested` の二値だけで終わらせない。
+
+- `changes_requested` になったら、正本 artifact 側の `human_review.change_requests[]` に要求を分解して残す
+- `human_review_ok` は evaluator finding の例外許容であり、通常の修正要求フローとは分ける
+- narration の正本は `script.md`
+- image / manifest / video の review feedback は `video_manifest.md` または stage artifact に残す
+
+最小 contract:
+
+```yaml
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests:
+    - request_id: "hr-001"
+      status: "open|accepted|rejected|deferred|resolved"
+      category: "story_alignment|reveal|continuity|timing|audio|other"
+      requested_change: ""
+      rationale: ""
+      requested_at: "ISO8601"
+      resolved_at: ""
+      resolution_notes: ""
+```
+
 ### 2.3 一貫性を保つ手法
 
 #### キャラクターバイブル（Character Bible）
@@ -617,3 +643,23 @@ scripts/build-clip-lists.py \
   --dir output \
   --pattern "*_manifest.md"
 ```
+
+## Human Change Request Expansion
+
+script review で image / video まで踏み込む修正要求が来る前提では、`script.md` の `human_change_requests[]` を正本にし、`video_manifest.md` には実行用の trace を materialize する。
+
+- `assets.location_bible[]`
+  - 場所の再利用 anchor
+- `still_assets[]`
+  - 1 cut で複数 still を作る canonical field
+- `reference_usage[]`
+  - 背景として見せる、同カメラで派生する、状態遷移に使う、を明示する
+- `implementation_trace`
+  - どの人レビュー request を反映したかを node ごとに残す
+
+generation 前 gate は次を止める。
+
+- unresolved `human_change_requests[]`
+- `applied_request_ids[]` 欠落
+- `still_assets[]` の dependency 未解決
+- `reference_usage` の target asset 不在

@@ -224,3 +224,322 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertEqual(result.returncode, 1, msg=result.stderr)
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["eval.manifest.status"], "changes_requested")
+
+    def test_manifest_evaluator_ignores_reference_scenes_for_narration_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_reference_") as td:
+            run_dir = Path(td) / "output" / "urashima_20990101_0005"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000003\ntopic=浦島太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\n"
+                "evaluation_contract:\n"
+                "  target_arc: \"opening,development\"\n"
+                "  must_cover: [\"竜宮城\"]\n"
+                "  must_avoid: []\n"
+                "  done_when: [\"manifest が scene/cut の契約を満たす\"]\n"
+                "scenes:\n"
+                "  - scene_id: 4\n"
+                "    phase: \"development\"\n"
+                "    scene_summary: \"門が開く。\"\n"
+                "    cuts:\n"
+                "      - cut_id: 1\n"
+                "        narration: \"もんが ひらきます。\"\n"
+                "        tts_text: \"もんが ひらきます。\"\n"
+                "        visual_beat: \"門が開く\"\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "scenes:",
+                        "  - scene_id: 4",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        scene_contract:",
+                        "          target_beat: \"門が開く\"",
+                        "          must_show: [\"門\"]",
+                        "          must_avoid: []",
+                        "          done_when: [\"到着が読める\"]",
+                        "        image_generation:",
+                        "          prompt: \"門が開く瞬間。竜宮城の巨大な門がゆっくり開き、金の扉、珊瑚の柱、海底の青い反射光、石畳の前景まで明確に見える。門の前で浦島太郎が立ち止まり、これから内部へ入ることが一目で分かる。\"",
+                        "          character_ids: [\"urashima\"]",
+                        "          object_ids: []",
+                        "        video_generation:",
+                        "          duration_seconds: 5",
+                        "          motion_prompt: \"門へ進む。\"",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"もんが ひらきます。\"",
+                        "            tool: \"elevenlabs\"",
+                        "  - scene_id: \"otohime_reference\"",
+                        "    kind: \"character_reference\"",
+                        "    image_generation:",
+                        "      prompt: \"乙姫のキャラクター参照。\"",
+                        "      character_ids: [\"otohime\"]",
+                        "      object_ids: []",
+                        "      output: \"assets/characters/otohime/reference.png\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["eval.manifest.status"], "approved")
+            self.assertEqual(state["eval.manifest.reason_keys"], "")
+
+    def test_manifest_evaluator_fails_unexpanded_human_change_request_with_dotted_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_hcr_") as td:
+            run_dir = Path(td) / "output" / "urashima_20990101_0003"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000001\ntopic=浦島太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\n"
+                "human_change_requests:\n"
+                "  - request_id: \"REQ-1\"\n"
+                "    status: \"pending\"\n"
+                "    normalized_actions:\n"
+                "      - action: \"update_narration\"\n"
+                "        target:\n"
+                "          scene_id: \"10.1\"\n"
+                "          cut_id: \"2.3\"\n"
+                "        payload:\n"
+                "          text: \"あたらしい ないようです。\"\n"
+                "evaluation_contract:\n"
+                "  target_arc: \"opening,development\"\n"
+                "  must_cover: [\"竜宮城\"]\n"
+                "  must_avoid: []\n"
+                "  done_when: [\"human review request が manifest へ反映される\"]\n"
+                "scenes:\n"
+                "  - scene_id: \"10.1\"\n"
+                "    phase: \"development\"\n"
+                "    scene_summary: \"竜宮城へ足を踏み入れる。\"\n"
+                "    cuts:\n"
+                "      - cut_id: \"2.3\"\n"
+                "        narration: \"げんこうの ないようです。\"\n"
+                "        tts_text: \"げんこうの ないようです。\"\n"
+                "        human_review:\n"
+                "          status: \"changes_requested\"\n"
+                "          notes: \"言い回しを変える\"\n"
+                "          approved_narration: \"\"\n"
+                "          approved_tts_text: \"\"\n"
+                "          change_request_ids: [\"REQ-1\"]\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "scenes:",
+                        "  - scene_id: \"10.1\"",
+                        "    cuts:",
+                        "      - cut_id: \"2.3\"",
+                        "        scene_contract:",
+                        "          target_beat: \"竜宮城\"",
+                        "          must_show: [\"竜宮城\"]",
+                        "          must_avoid: []",
+                        "          done_when: [\"到着が読める\"]",
+                        "        image_generation:",
+                        "          prompt: \"竜宮城の回廊へ浦島太郎が足を踏み入れる。珊瑚の柱、青い水光、金の欄干、奥へ続く広い通路、床へ反射する波紋、静かな歓迎の空気まで具体的に見える。\"",
+                        "          character_ids: [\"urashima\"]",
+                        "          object_ids: []",
+                        "        video_generation:",
+                        "          duration_seconds: 5",
+                        "          motion_prompt: \"回廊を進む。\"",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"げんこうの ないようです。\"",
+                        "            tool: \"elevenlabs\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1, msg=result.stderr)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["eval.manifest.status"], "changes_requested")
+            self.assertIn("manifest.human_change_request_missing_from_manifest", state["eval.manifest.reason_keys"])
+            self.assertIn("manifest.human_change_request_trace_missing", state["eval.manifest.reason_keys"])
+            review = (run_dir / "manifest_review.md").read_text(encoding="utf-8")
+            self.assertIn("scene10.1_cut2.3", review)
+            self.assertIn("manifest.human_change_request_missing_from_manifest", review)
+
+    def test_manifest_evaluator_accepts_verified_human_change_request_with_dotted_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_hcr_ok_") as td:
+            run_dir = Path(td) / "output" / "urashima_20990101_0004"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000002\ntopic=浦島太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\n"
+                "human_change_requests:\n"
+                "  - request_id: \"REQ-1\"\n"
+                "    status: \"verified\"\n"
+                "    normalized_actions:\n"
+                "      - action: \"update_narration\"\n"
+                "        target:\n"
+                "          scene_id: \"10.1\"\n"
+                "          cut_id: \"2.3\"\n"
+                "        payload:\n"
+                "          text: \"あたらしい ないようです。\"\n"
+                "evaluation_contract:\n"
+                "  target_arc: \"opening,development\"\n"
+                "  must_cover: [\"竜宮城\"]\n"
+                "  must_avoid: []\n"
+                "  done_when: [\"human review request が manifest へ反映される\"]\n"
+                "scenes:\n"
+                "  - scene_id: \"10.1\"\n"
+                "    phase: \"development\"\n"
+                "    scene_summary: \"竜宮城へ足を踏み入れる。\"\n"
+                "    cuts:\n"
+                "      - cut_id: \"2.3\"\n"
+                "        narration: \"あたらしい ないようです。\"\n"
+                "        tts_text: \"あたらしい ないようです。\"\n"
+                "        human_review:\n"
+                "          status: \"changes_requested\"\n"
+                "          notes: \"言い回しを変える\"\n"
+                "          approved_narration: \"\"\n"
+                "          approved_tts_text: \"\"\n"
+                "          change_request_ids: [\"REQ-1\"]\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "human_change_requests:",
+                        "  - request_id: \"REQ-1\"",
+                        "    status: \"verified\"",
+                        "scenes:",
+                        "  - scene_id: \"10.1\"",
+                        "    cuts:",
+                        "      - cut_id: \"2.3\"",
+                        "        implementation_trace:",
+                        "          source_request_ids: [\"REQ-1\"]",
+                        "          status: \"implemented\"",
+                        "        scene_contract:",
+                        "          target_beat: \"竜宮城\"",
+                        "          must_show: [\"竜宮城\"]",
+                        "          must_avoid: []",
+                        "          done_when: [\"到着が読める\"]",
+                        "        image_generation:",
+                        "          prompt: \"竜宮城の回廊へ浦島太郎が足を踏み入れる。珊瑚の柱、青い水光、金の欄干、奥へ続く広い通路、床へ反射する波紋、静かな歓迎の空気まで具体的に見える。\"",
+                        "          character_ids: [\"urashima\"]",
+                        "          object_ids: []",
+                        "          applied_request_ids: [\"REQ-1\"]",
+                        "        video_generation:",
+                        "          duration_seconds: 5",
+                        "          motion_prompt: \"回廊を進む。\"",
+                        "          applied_request_ids: [\"REQ-1\"]",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"あたらしい ないようです。\"",
+                        "            tool: \"elevenlabs\"",
+                        "            applied_request_ids: [\"REQ-1\"]",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["eval.manifest.status"], "approved")
+            self.assertEqual(state["eval.manifest.reason_keys"], "")
+
+    def test_manifest_evaluator_fails_unresolved_human_change_request(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_human_change_") as td:
+            run_dir = Path(td) / "output" / "urashima_20990101_0003"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-03-29T00:00:00+09:00\njob_id=JOB_2026-03-29_000001\ntopic=浦島太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "human_change_requests:",
+                        "  - request_id: \"req-7\"",
+                        "    status: \"pending\"",
+                        "scenes:",
+                        "  - scene_id: 3.1",
+                        "    cuts:",
+                        "      - cut_id: 2.1",
+                        "        implementation_trace:",
+                        "          source_request_ids: [\"req-7\"]",
+                        "          status: \"pending\"",
+                        "        scene_contract:",
+                        "          target_beat: \"神殿へ向かう\"",
+                        "          must_show: [\"神殿\"]",
+                        "          must_avoid: []",
+                        "          done_when: [\"神殿が映る\"]",
+                        "        image_generation:",
+                        "          prompt: \"神殿の入口。\"",
+                        "          character_ids: []",
+                        "          object_ids: []",
+                        "          applied_request_ids: []",
+                        "        video_generation:",
+                        "          duration_seconds: 5",
+                        "          motion_prompt: \"前進する。\"",
+                        "          applied_request_ids: []",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"しんでんへ むかいます。\"",
+                        "            tool: \"elevenlabs\"",
+                        "            applied_request_ids: []",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1, msg=result.stderr)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["eval.manifest.status"], "changes_requested")

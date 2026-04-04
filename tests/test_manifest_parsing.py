@@ -102,7 +102,9 @@ scenes:
         yaml_text = mod.extract_yaml_block(md)
         _, scenes = mod.parse_manifest_yaml(yaml_text)
 
-        self.assertEqual([s.scene_id for s in scenes], [1001, 1002])
+        self.assertEqual([s.scene_id for s in scenes], ["scene10_cut1", "scene10_cut2"])
+        self.assertEqual([s.selector for s in scenes], ["scene10_cut1", "scene10_cut2"])
+        self.assertEqual([s.manifest_scene_id for s in scenes], ["10", "10"])
         self.assertEqual(scenes[0].timestamp, "00:00-00:24")
         self.assertEqual(scenes[0].image_output, "assets/scenes/scene10_1.png")
         self.assertEqual(scenes[0].video_output, "assets/scenes/scene10_1_to_2.mp4")
@@ -138,7 +140,7 @@ scenes:
         yaml_text = mod.extract_yaml_block(md)
         _, scenes = mod.parse_manifest_yaml(yaml_text)
 
-        self.assertEqual([s.scene_id for s in scenes], [1001, 1002])
+        self.assertEqual([s.scene_id for s in scenes], ["scene10_cut1", "scene10_cut2"])
         self.assertEqual([s.duration_seconds for s in scenes], [12, 7])
 
     def test_parse_manifest_supports_character_reference_id_selectors(self) -> None:
@@ -169,8 +171,9 @@ scenes:
         yaml_text = mod.extract_yaml_block(md)
         _, scenes = mod.parse_manifest_yaml(yaml_text)
 
-        self.assertEqual(scenes[0].scene_id, 0)
-        self.assertEqual(scenes[0].manifest_scene_id, 0)
+        self.assertEqual(scenes[0].scene_id, "0")
+        self.assertEqual(scenes[0].manifest_scene_id, "0")
+        self.assertEqual(scenes[0].selector, "scene0")
         self.assertEqual(scenes[0].reference_id, "protagonist_front_ref")
         self.assertEqual(scenes[0].kind, "character_reference")
         self.assertTrue(mod._scene_matches_filter(scenes[0], {"protagonist_front_ref"}))
@@ -315,13 +318,51 @@ scenes:
 
         self.assertEqual([s.still_image_plan_mode for s in scenes], ["generate_still", "reuse_anchor"])
 
+    def test_parse_manifest_supports_dotted_ids_and_still_assets(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 3.1
+    cuts:
+      - cut_id: 2.1
+        still_assets:
+          - asset_id: "temple_day"
+            role: "primary"
+            output: "assets/scenes/temple_day.png"
+            image_generation:
+              tool: "google_nanobanana_pro"
+              prompt: "temple"
+              output: "assets/scenes/temple_day.png"
+              references: []
+              location_ids: ["sea_temple"]
+              location_variant_ids: ["altar_day"]
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, scenes = mod.parse_manifest_yaml(yaml_text)
+
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(scenes[0].scene_id, "scene3.1_cut2.1")
+        self.assertEqual(scenes[0].selector, "scene3.1_cut2.1")
+        self.assertEqual(scenes[0].manifest_scene_id, "3.1")
+        self.assertEqual(scenes[0].image_location_ids, ["sea_temple"])
+        self.assertEqual(scenes[0].image_location_variant_ids, ["altar_day"])
+        self.assertEqual(scenes[0].still_assets[0]["asset_id"], "temple_day")
+        self.assertEqual(scenes[0].image_output, "assets/scenes/temple_day.png")
+
     def test_story_image_generation_defaults_to_generate_still_only(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_generate_assets_module(repo_root)
 
         ref_scene = mod.SceneSpec(
-            scene_id=0,
-            manifest_scene_id=0,
+            scene_id="0",
+            manifest_scene_id="0",
+            selector="scene0",
             kind="character_reference",
             reference_id="hero_ref",
             timestamp=None,
@@ -339,6 +380,10 @@ scenes:
             image_object_ids_present=False,
             image_object_variant_ids=[],
             image_object_variant_ids_present=False,
+            image_location_ids=[],
+            image_location_ids_present=False,
+            image_location_variant_ids=[],
+            image_location_variant_ids_present=False,
             image_aspect_ratio=None,
             image_size=None,
             video_tool=None,
@@ -352,15 +397,44 @@ scenes:
             narration_tts_text=None,
             narration_output=None,
             narration_normalize_to_scene_duration=True,
+            narration_silence_intentional=False,
+            narration_silence_confirmed_by_human=False,
+            narration_silence_kind=None,
+            narration_silence_reason=None,
+            still_assets=[],
         )
         generate_scene = mod.SceneSpec(
-            **{**ref_scene.__dict__, "scene_id": 1001, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_1.png", "still_image_plan_mode": "generate_still"}
+            **{
+                **ref_scene.__dict__,
+                "scene_id": "scene10_cut1",
+                "manifest_scene_id": "10",
+                "selector": "scene10_cut1",
+                "kind": None,
+                "image_output": "assets/scenes/scene10_1.png",
+                "still_image_plan_mode": "generate_still",
+            }
         )
         reuse_scene = mod.SceneSpec(
-            **{**ref_scene.__dict__, "scene_id": 1002, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_2.png", "still_image_plan_mode": "reuse_anchor"}
+            **{
+                **ref_scene.__dict__,
+                "scene_id": "scene10_cut2",
+                "manifest_scene_id": "10",
+                "selector": "scene10_cut2",
+                "kind": None,
+                "image_output": "assets/scenes/scene10_2.png",
+                "still_image_plan_mode": "reuse_anchor",
+            }
         )
         bridge_scene = mod.SceneSpec(
-            **{**ref_scene.__dict__, "scene_id": 1003, "manifest_scene_id": 10, "kind": None, "image_output": "assets/scenes/scene10_3.png", "still_image_plan_mode": "no_dedicated_still"}
+            **{
+                **ref_scene.__dict__,
+                "scene_id": "scene10_cut3",
+                "manifest_scene_id": "10",
+                "selector": "scene10_cut3",
+                "kind": None,
+                "image_output": "assets/scenes/scene10_3.png",
+                "still_image_plan_mode": "no_dedicated_still",
+            }
         )
 
         allowed_modes = {"generate_still"}

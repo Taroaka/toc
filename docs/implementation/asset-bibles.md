@@ -128,3 +128,21 @@ assets:
 - 検証ゲート:
   - `--require-object-ids`（object_bibleがある場合、各sceneで `object_ids: []` を必須）
   - `--require-object-reference-scenes`（reference_images が必ずどこかの scene output として生成されること）
+- 人間レビュー:
+  - setpiece / artifact に対する修正要求は、口頭メモで流さず `human_review.change_requests[]` に残す
+  - reveal 順序、spectacle 不足、continuity drift のように論点が複数ある場合は request を分ける
+  - `human_review_ok` は evaluator finding の例外許容であり、asset bible 改稿要求の正本には使わない
+
+### 5.1 location_bible
+
+場所そのものを再利用する修正要求は `object_bible` へ押し込まず、`assets.location_bible[]` を使う。
+
+- `location_id`
+- `reference_images`
+- `reference_variants[]`
+- `fixed_prompts`
+- `review_aliases[]`
+- `continuity_notes[]`
+- `notes`
+
+人レビューで「同じ神殿を別 cut でも参照する」「宴会エリアを奥に見せる」ような要求が来た場合は、まず `location_bible` に格上げしてから cut 側で `location_ids[]` / `reference_usage[]` へつなぐ。

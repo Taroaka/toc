@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import re
 from pathlib import Path
 from typing import Any
 
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
+from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
 
 
 STAGE_RUBRIC_WEIGHTS = {
@@ -98,6 +98,10 @@ def as_int(value: Any) -> int | None:
         return None
 
 
+def as_dotted_str(value: Any) -> str | None:
+    return normalize_dotted_id(value)
+
+
 def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
     cur: Any = data
     for key in path:
@@ -172,6 +176,7 @@ def make_stage(
         "score": score,
         "overall_rubric": overall_rubric,
         "rubric_scores": rubric_scores,
+        "reason_keys": [check["id"] for check in checks if not check["passed"]],
         "checks": checks,
         "details": details or {},
     }
@@ -415,6 +420,8 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
 def _iter_manifest_nodes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     for scene in as_list(manifest.get("scenes")):
+        if isinstance(scene, dict) and str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
         cuts = as_list(scene.get("cuts")) if isinstance(scene, dict) else []
         if cuts:
             nodes.extend([cut for cut in cuts if isinstance(cut, dict)])
@@ -428,7 +435,9 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
     for scene in as_list(manifest.get("scenes")):
         if not isinstance(scene, dict):
             continue
-        scene_id = as_int(scene.get("scene_id"))
+        if str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id"))
         if scene_id is None:
             continue
         cuts = as_list(scene.get("cuts"))
@@ -436,20 +445,28 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cut_id = as_int(cut.get("cut_id"))
+                cut_id = as_dotted_str(cut.get("cut_id"))
                 if cut_id is None:
                     continue
-                items.append((f"scene{int(scene_id):02d}_cut{int(cut_id):02d}", cut))
+                items.append((make_scene_cut_selector(scene_id, cut_id), cut))
         else:
-            items.append((f"scene{int(scene_id):02d}", scene))
+            items.append((make_scene_cut_selector(scene_id), scene))
     return items
 
 
-def _selector_sort_key(selector: str) -> tuple[int, int]:
-    match = re.match(r"scene(?P<scene>\d+)(?:_cut(?P<cut>\d+))?$", selector.strip())
-    if not match:
-        return (10**9, 10**9)
-    return (int(match.group("scene")), int(match.group("cut") or 0))
+def _selector_sort_key(selector: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    raw = str(selector or "").strip()
+    if not raw.startswith("scene"):
+        return ((10**9,), (10**9,))
+    body = raw[len("scene") :]
+    if "_cut" in body:
+        scene_part, cut_part = body.split("_cut", 1)
+    else:
+        scene_part, cut_part = body, None
+    return (
+        dotted_id_sort_key(scene_part),
+        dotted_id_sort_key(cut_part) if cut_part is not None else (0,),
+    )
 
 
 def _load_script_reveal_constraints(run_dir: Path) -> list[dict[str, str]]:
@@ -476,6 +493,178 @@ def _load_script_reveal_constraints(run_dir: Path) -> list[dict[str, str]]:
         if all(item.values()):
             constraints.append(item)
     return constraints
+
+
+def _load_script_change_request_contract(run_dir: Path) -> dict[str, Any]:
+    script_path = run_dir / "script.md"
+    if not script_path.exists():
+        return {"expected_request_ids": set(), "request_ids_by_selector": {}, "issues": []}
+    _, data = load_structured_document(script_path)
+    if not isinstance(data, dict):
+        return {"expected_request_ids": set(), "request_ids_by_selector": {}, "issues": []}
+
+    issues: list[str] = []
+    expected_request_ids: set[str] = set()
+    request_ids_by_selector: dict[str, set[str]] = {}
+
+    for scene in as_list(data.get("scenes")):
+        if not isinstance(scene, dict):
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id"))
+        if scene_id is None:
+            continue
+
+        scene_review = scene.get("human_review") if isinstance(scene.get("human_review"), dict) else {}
+        scene_status = str(scene_review.get("status") or "").strip().lower() if isinstance(scene_review, dict) else ""
+        scene_request_ids = {str(item).strip() for item in as_list(scene_review.get("change_request_ids")) if str(item).strip()}
+        if scene_status == "changes_requested":
+            selector = make_scene_cut_selector(scene_id)
+            if not scene_request_ids:
+                issues.append(f"human_change_request_missing_request_id:{selector}")
+            expected_request_ids.update(scene_request_ids)
+            request_ids_by_selector.setdefault(selector, set()).update(scene_request_ids)
+
+        for cut in as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            cut_id = as_dotted_str(cut.get("cut_id"))
+            if cut_id is None:
+                continue
+            review = cut.get("human_review") if isinstance(cut.get("human_review"), dict) else {}
+            status = str(review.get("status") or "").strip().lower() if isinstance(review, dict) else ""
+            request_ids = {str(item).strip() for item in as_list(review.get("change_request_ids")) if str(item).strip()}
+            if status != "changes_requested":
+                continue
+            selector = make_scene_cut_selector(scene_id, cut_id)
+            if not request_ids:
+                issues.append(f"human_change_request_missing_request_id:{selector}")
+                continue
+            expected_request_ids.update(request_ids)
+            request_ids_by_selector.setdefault(selector, set()).update(request_ids)
+
+    request_map = {
+        str(item.get("request_id") or "").strip(): item
+        for item in as_list(data.get("human_change_requests"))
+        if isinstance(item, dict) and str(item.get("request_id") or "").strip()
+    }
+    for selector, request_ids in request_ids_by_selector.items():
+        for request_id in sorted(request_ids):
+            if request_id not in request_map:
+                issues.append(f"human_change_request_missing_definition:{selector}:{request_id}")
+
+    return {
+        "expected_request_ids": expected_request_ids,
+        "request_ids_by_selector": request_ids_by_selector,
+        "issues": issues,
+    }
+
+
+def _human_change_request_issues(manifest: dict[str, Any], *, run_dir: Path | None = None) -> list[str]:
+    issues: list[str] = []
+    script_contract = _load_script_change_request_contract(run_dir) if run_dir else {"expected_request_ids": set(), "request_ids_by_selector": {}, "issues": []}
+    issues.extend(list(script_contract.get("issues") or []))
+    raw_requests = manifest.get("human_change_requests")
+    manifest_request_map: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_requests, list):
+        for raw in raw_requests:
+            if not isinstance(raw, dict):
+                continue
+            status = str(raw.get("status") or "").strip().lower()
+            request_id = str(raw.get("request_id") or "<unknown>").strip()
+            manifest_request_map[request_id] = raw
+            if status not in {"verified", "waived"}:
+                issues.append(f"human_change_request_unresolved:{request_id}")
+    for request_id in sorted(script_contract.get("expected_request_ids") or set()):
+        if request_id not in manifest_request_map:
+            issues.append(f"human_change_request_missing_from_manifest:{request_id}")
+
+    for selector, node in _iter_manifest_nodes_with_selectors(manifest):
+        implementation_trace = node.get("implementation_trace") if isinstance(node.get("implementation_trace"), dict) else {}
+        source_request_ids = [str(item).strip() for item in as_list(implementation_trace.get("source_request_ids")) if str(item).strip()]
+        trace_status = str(implementation_trace.get("status") or "").strip().lower()
+        expected_request_ids = set((script_contract.get("request_ids_by_selector") or {}).get(selector, set()))
+        combined_request_ids = sorted(set(source_request_ids) | expected_request_ids)
+        if expected_request_ids and not source_request_ids:
+            issues.append(f"human_change_request_trace_missing:{selector}")
+        if source_request_ids and trace_status not in {"implemented", "verified", "waived"}:
+            issues.append(f"human_change_request_trace_missing:{selector}")
+
+        for key, path in (
+            ("audio", ["narration", "applied_request_ids"]),
+            ("image_generation", ["applied_request_ids"]),
+            ("video_generation", ["applied_request_ids"]),
+        ):
+            cur: Any = node.get(key) if isinstance(node.get(key), dict) else {}
+            for part in path:
+                if not isinstance(cur, dict):
+                    cur = None
+                    break
+                cur = cur.get(part)
+            applied_ids = [str(item).strip() for item in as_list(cur) if str(item).strip()]
+            if combined_request_ids and not set(combined_request_ids).issubset(set(applied_ids)):
+                issues.append(f"human_change_request_trace_missing:{selector}:{key}")
+
+        image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
+        if image_generation:
+            if "location_ids" in image_generation and not isinstance(image_generation.get("location_ids"), list):
+                issues.append(f"dotted_selector_invalid:{selector}:location_ids")
+            if "location_variant_ids" in image_generation and not isinstance(image_generation.get("location_variant_ids"), list):
+                issues.append(f"dotted_selector_invalid:{selector}:location_variant_ids")
+
+        still_assets = node.get("still_assets")
+        if still_assets is None:
+            continue
+        if not isinstance(still_assets, list):
+            issues.append(f"still_asset_missing:{selector}")
+            continue
+        known_asset_ids = {
+            str(asset.get("asset_id") or "").strip()
+            for asset in still_assets
+            if isinstance(asset, dict) and str(asset.get("asset_id") or "").strip()
+        }
+        for asset in still_assets:
+            if not isinstance(asset, dict):
+                issues.append(f"still_asset_missing:{selector}")
+                continue
+            asset_id = str(asset.get("asset_id") or "<unknown>").strip()
+            if not isinstance(asset.get("image_generation"), dict):
+                issues.append(f"still_asset_missing:{selector}:{asset_id}")
+            for dep_key in ("derived_from_asset_ids", "reference_asset_ids"):
+                for dep in [str(item).strip() for item in as_list(asset.get(dep_key)) if str(item).strip()]:
+                    if dep not in known_asset_ids:
+                        issues.append(f"still_asset_dependency_missing:{selector}:{asset_id}:{dep}")
+            for usage in as_list(asset.get("reference_usage")):
+                if not isinstance(usage, dict):
+                    continue
+                target_asset_id = str(usage.get("asset_id") or "").strip()
+                if target_asset_id and target_asset_id not in known_asset_ids:
+                    issues.append(f"reference_usage_target_missing:{selector}:{asset_id}:{target_asset_id}")
+
+        video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
+        referenced_video_asset_ids = [
+            str(item).strip()
+            for item in as_list(video_generation.get("reference_asset_ids"))
+            if str(item).strip()
+        ]
+        for key in ("input_asset_id", "first_frame_asset_id", "last_frame_asset_id"):
+            value = str(video_generation.get(key) or "").strip()
+            if value and value not in known_asset_ids:
+                issues.append(f"video_asset_reference_missing:{selector}:{key}:{value}")
+        for ref_id in referenced_video_asset_ids:
+            if ref_id not in known_asset_ids:
+                issues.append(f"video_asset_reference_missing:{selector}:reference_asset_ids:{ref_id}")
+
+    return sorted(set(issues))
+
+
+def _group_issue_messages(issues: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for issue in issues:
+        code = str(issue).split(":", 1)[0].strip()
+        if not code:
+            continue
+        grouped.setdefault(code, []).append(issue)
+    return grouped
 
 
 def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[str, Any], *, profile: str, flow: str, path_label: str) -> None:
@@ -520,13 +709,23 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             narration_text_ok = False
             continue
         narration_tool = str(narration.get("tool") or "").strip().lower()
-        if profile == "standard" and narration_tool != "silent" and not non_empty(narration.get("text")):
+        silence_contract = narration.get("silence_contract") if isinstance(narration, dict) else None
+        if narration_tool == "silent":
+            if not (
+                isinstance(silence_contract, dict)
+                and bool(silence_contract.get("intentional"))
+                and bool(silence_contract.get("confirmed_by_human"))
+                and non_empty(silence_contract.get("kind"))
+                and non_empty(silence_contract.get("reason"))
+            ):
+                narration_text_ok = False
+        elif profile == "standard" and not non_empty(narration.get("text")):
             narration_text_ok = False
 
     add_check(checks, f"{path_label}.cut_duration", duration_ok, "cut duration is <= 15 seconds", kind="rubric")
     add_check(checks, f"{path_label}.narration_field", narration_field_ok, "each renderable node has audio.narration.text", kind="rubric")
     if profile == "standard":
-        add_check(checks, f"{path_label}.narration_text", narration_text_ok, "narration text is non-empty for final manifests unless tool is silent", kind="rubric")
+        add_check(checks, f"{path_label}.narration_text", narration_text_ok, "spoken cuts have non-empty narration text and silent cuts declare silence_contract", kind="rubric")
     add_check(checks, f"{path_label}.asset_ids", ids_ok, "image_generation includes explicit character_ids/object_ids", kind="rubric")
 
     if flow == "immersive":
@@ -550,6 +749,7 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
     reveal_constraints = _load_script_reveal_constraints(run_dir)
+    human_change_issues = _human_change_request_issues(data, run_dir=run_dir)
     contract_missing = False
     must_show_failed = False
     must_avoid_failed = False
@@ -599,6 +799,15 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         add_check(checks, "manifest.contract_target_beat_unmet", False, "scene/cut contract target_beat is not clearly represented.", kind="rubric")
     if reveal_failed:
         add_check(checks, "manifest.reveal_constraints_violated", False, "one or more scene/cut nodes violate script reveal_constraints.", kind="rubric")
+    if human_change_issues:
+        for reason_key, grouped_issues in sorted(_group_issue_messages(human_change_issues).items()):
+            add_check(
+                checks,
+                f"manifest.{reason_key}",
+                False,
+                f"{reason_key} remains unresolved: " + ", ".join(sorted(grouped_issues)[:8]),
+                kind="rubric",
+            )
     rubric_scores = _manifest_rubric(nodes, body_text)
     _append_rubric_findings(checks=checks, stage="manifest", rubric_scores=rubric_scores)
     updates["eval.manifest.score"] = f"{score_from_checks(checks):.4f}"
@@ -804,6 +1013,7 @@ def append_stage_review_state(*, run_dir: Path, stage: str, stage_result: dict[s
     state_updates = dict(updates)
     state_updates[f"eval.{stage}.status"] = "approved" if stage_result["passed"] else "changes_requested"
     state_updates[f"eval.{stage}.findings"] = str(finding_count)
+    state_updates[f"eval.{stage}.reason_keys"] = ",".join(stage_result.get("reason_keys") or [])
     state_updates[f"eval.{stage}.overall_rubric"] = f"{float(stage_result.get('overall_rubric', 0.0)):.4f}"
     for key, value in dict(stage_result.get("rubric_scores") or {}).items():
         state_updates[f"eval.{stage}.rubric.{key}"] = f"{float(value):.4f}"

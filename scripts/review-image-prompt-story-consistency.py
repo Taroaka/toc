@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, extract_yaml_block, load_structured_document  # noqa: E402
+from toc.immersive_manifest import normalize_dotted_id  # noqa: E402
 from toc.reveal_constraints import (  # noqa: E402
     RevealConstraint,
     build_manifest_cut_order_map,
@@ -30,8 +31,8 @@ from toc.reveal_constraints import (  # noqa: E402
 
 
 PROMPT_ENTRY_RE = re.compile(
-    r"^##\s+scene(?P<scene_id>\d+)_cut(?P<cut_id>\d+)\n"
-    r"(?P<body>.*?)(?=^##\s+scene\d+_cut\d+\n|\Z)",
+    r"^##\s+scene(?P<scene_id>\d+(?:\.\d+)?)_cut(?P<cut_id>\d+(?:\.\d+)?)\n"
+    r"(?P<body>.*?)(?=^##\s+scene\d+(?:\.\d+)?_cut\d+(?:\.\d+)?\n|\Z)",
     re.M | re.S,
 )
 TEXT_BLOCK_RE = re.compile(r"```text\n(?P<prompt>.*?)\n```", re.S)
@@ -187,10 +188,18 @@ IMAGE_TARGET_FOCUS_TERMS = {
 }
 
 
+def _selector_label(scene_id: Any, cut_id: Any) -> str:
+    scene = str(normalize_dotted_id(scene_id) or "unknown")
+    cut = str(normalize_dotted_id(cut_id) or "unknown")
+    scene_label = f"{int(scene):02d}" if re.fullmatch(r"\d+", scene) else scene
+    cut_label = f"{int(cut):02d}" if re.fullmatch(r"\d+", cut) else cut
+    return f"scene{scene_label}_cut{cut_label}"
+
+
 @dataclass
 class PromptEntry:
-    scene_id: int
-    cut_id: int
+    scene_id: str
+    cut_id: str
     output: str
     narration: str
     rationale: str
@@ -231,8 +240,8 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
         rationale = _extract_backtick_bullet(body, "rationale")
         entries.append(
             PromptEntry(
-                scene_id=int(match.group("scene_id")),
-                cut_id=int(match.group("cut_id")),
+                scene_id=str(normalize_dotted_id(match.group("scene_id")) or match.group("scene_id")),
+                cut_id=str(normalize_dotted_id(match.group("cut_id")) or match.group("cut_id")),
                 output=output,
                 narration="" if narration == "(silent)" else narration,
                 rationale=rationale,
@@ -334,8 +343,8 @@ def find_prompt_independence_issues(prompt: str) -> list[str]:
     return issues
 
 
-def extract_scene_context_map(data: dict[str, Any]) -> dict[int, str]:
-    context: dict[int, str] = {}
+def extract_scene_context_map(data: dict[str, Any]) -> dict[str, str]:
+    context: dict[str, str] = {}
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
         scenes = ((data.get("script") or {}).get("scenes") if isinstance(data.get("script"), dict) else None)
@@ -344,8 +353,8 @@ def extract_scene_context_map(data: dict[str, Any]) -> dict[int, str]:
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
-        sid = scene.get("scene_id")
-        if not isinstance(sid, int):
+        sid = normalize_dotted_id(scene.get("scene_id"))
+        if not sid:
             continue
         context[sid] = flatten_scene_text(scene)
     return context
@@ -444,43 +453,43 @@ def find_alias_hits(text: str, aliases: dict[str, set[str]]) -> dict[str, set[st
     return hits
 
 
-def manifest_cut_map(manifest: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
-    cuts: dict[tuple[int, int], dict[str, Any]] = {}
+def manifest_cut_map(manifest: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    cuts: dict[tuple[str, str], dict[str, Any]] = {}
     for scene in manifest.get("scenes", []):
         if not isinstance(scene, dict):
             continue
-        sid = scene.get("scene_id")
-        if not isinstance(sid, int):
+        sid = normalize_dotted_id(scene.get("scene_id"))
+        if not sid:
             continue
         for cut in scene.get("cuts", []) if isinstance(scene.get("cuts"), list) else []:
             if not isinstance(cut, dict):
                 continue
-            cid = cut.get("cut_id")
-            if isinstance(cid, int):
+            cid = normalize_dotted_id(cut.get("cut_id"))
+            if cid:
                 cuts[(sid, cid)] = cut
         if not isinstance(scene.get("cuts"), list) or not scene.get("cuts"):
-            cuts[(sid, 0)] = scene
+            cuts[(sid, "0")] = scene
     return cuts
 
 
-def manifest_image_node_map(manifest: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
-    nodes: dict[tuple[int, int], dict[str, Any]] = {}
+def manifest_image_node_map(manifest: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    nodes: dict[tuple[str, str], dict[str, Any]] = {}
     for scene in manifest.get("scenes", []):
         if not isinstance(scene, dict):
             continue
-        sid = scene.get("scene_id")
-        if not isinstance(sid, int):
+        sid = normalize_dotted_id(scene.get("scene_id"))
+        if not sid:
             continue
         cuts = scene.get("cuts")
         if isinstance(cuts, list):
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cid = cut.get("cut_id")
-                if isinstance(cid, int):
+                cid = normalize_dotted_id(cut.get("cut_id"))
+                if cid:
                     nodes[(sid, cid)] = cut
             continue
-        nodes[(sid, 0)] = scene
+        nodes[(sid, "0")] = scene
     return nodes
 
 
@@ -488,6 +497,16 @@ def _parse_csv_set(value: str | None) -> set[str]:
     if not value:
         return set()
     return {part.strip().lower() for part in str(value).split(",") if part.strip()}
+
+
+def _scene_context_lookup(context: dict[Any, str], scene_id: str) -> str:
+    if scene_id in context:
+        return str(context.get(scene_id) or "")
+    try:
+        integer_scene_id = int(scene_id)
+    except Exception:
+        return ""
+    return str(context.get(integer_scene_id) or "")
 
 
 def _is_reference_output(output: str) -> bool:
@@ -513,20 +532,20 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
     for scene in manifest.get("scenes", []):
         if not isinstance(scene, dict):
             continue
-        sid = scene.get("scene_id")
-        if not isinstance(sid, int):
+        sid = normalize_dotted_id(scene.get("scene_id"))
+        if not sid:
             continue
         cuts = scene.get("cuts")
-        candidate_nodes: list[tuple[int, dict[str, Any]]] = []
+        candidate_nodes: list[tuple[str, dict[str, Any]]] = []
         if isinstance(cuts, list):
             for cut in cuts:
                 if not isinstance(cut, dict):
                     continue
-                cid = cut.get("cut_id")
-                if isinstance(cid, int):
+                cid = normalize_dotted_id(cut.get("cut_id"))
+                if cid:
                     candidate_nodes.append((cid, cut))
         else:
-            candidate_nodes.append((0, scene))
+            candidate_nodes.append(("0", scene))
 
         for cid, node in candidate_nodes:
             image_generation = node.get("image_generation")
@@ -703,10 +722,10 @@ def _score_prompt_entry(
 
 def _suppressed_subject_ids_for_entry(
     *,
-    scene_id: int,
-    cut_id: int,
+    scene_id: str,
+    cut_id: str,
     reveal_constraints: list[RevealConstraint],
-    cut_order_map: dict[tuple[int, int], int],
+    cut_order_map: dict[tuple[str, str], int],
 ) -> tuple[set[str], set[str]]:
     suppressed_characters: set[str] = set()
     suppressed_objects: set[str] = set()
@@ -733,8 +752,8 @@ def review_entries(
     entries: list[PromptEntry],
     *,
     manifest: dict[str, Any],
-    story_scene_map: dict[int, str],
-    script_scene_map: dict[int, str],
+    story_scene_map: dict[str, str],
+    script_scene_map: dict[str, str],
     story_text: str,
     script_text: str,
     reveal_constraints: list[RevealConstraint] | None = None,
@@ -751,8 +770,8 @@ def review_entries(
         audio = cut.get("audio") if isinstance(cut, dict) else {}
         is_reference_entry = _is_reference_output(entry.output)
         narration_text = entry.narration or (((audio or {}).get("narration") or {}).get("text") or "")
-        local_story = story_scene_map.get(entry.scene_id, "")
-        local_script = script_scene_map.get(entry.scene_id, "")
+        local_story = _scene_context_lookup(story_scene_map, entry.scene_id)
+        local_script = _scene_context_lookup(script_scene_map, entry.scene_id)
         local_source_text = "\n".join(part for part in [narration_text, local_story, local_script] if part)
 
         prompt_terms = extract_terms(entry.prompt)
@@ -804,7 +823,7 @@ def review_entries(
                     code="script_reveal_constraint_violated",
                     message=(
                         f"script reveal constraint forbids `{violation.subject_id}` before `{violation.selector}`, "
-                        f"but scene{entry.scene_id:02d}_cut{entry.cut_id:02d} already reveals it via {', '.join(violation.evidence)}."
+                        f"but {_selector_label(entry.scene_id, entry.cut_id)} already reveals it via {', '.join(violation.evidence)}."
                     ),
                 )
             )
@@ -1065,9 +1084,10 @@ def render_prompt_collection(entries: list[PromptEntry]) -> str:
         "",
     ]
     for entry in entries:
+        selector = _selector_label(entry.scene_id, entry.cut_id)
         lines.extend(
             [
-                f"## scene{entry.scene_id:02d}_cut{entry.cut_id:02d}",
+                f"## {selector}",
                 "",
                 f"- output: `{entry.output}`",
                 f"- narration: `{entry.narration}`" if entry.narration else "- narration: `(silent)`",
@@ -1134,12 +1154,12 @@ def apply_review_statuses(entries: list[PromptEntry], results: list[ReviewOutcom
 def apply_human_review_updates(entries: list[PromptEntry], selectors: list[str], value: bool) -> list[PromptEntry]:
     if not selectors:
         return entries
-    targets: set[tuple[int, int]] = set()
+    targets: set[tuple[str, str]] = set()
     for selector in selectors:
-        match = re.fullmatch(r"scene(?P<scene_id>\d+)_cut(?P<cut_id>\d+)", selector.strip())
-        if not match:
+        parsed = parse_selector(selector.strip())
+        if not parsed:
             raise SystemExit(f"Invalid --set-human-review selector: {selector}")
-        targets.add((int(match.group("scene_id")), int(match.group("cut_id"))))
+        targets.add(parsed)
     updated: list[PromptEntry] = []
     for entry in entries:
         human_review_ok = value if (entry.scene_id, entry.cut_id) in targets else entry.human_review_ok
@@ -1195,9 +1215,10 @@ def render_report(
     for outcome in results:
         entry = outcome.entry
         findings = outcome.findings
+        selector = _selector_label(entry.scene_id, entry.cut_id)
         lines.extend(
             [
-                f"## scene{entry.scene_id:02d}_cut{entry.cut_id:02d}",
+                f"## {selector}",
                 "",
                 f"- output: `{entry.output}`",
                 f"- narration: `{entry.narration}`" if entry.narration else "- narration: `(silent)`",
@@ -1336,7 +1357,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-on-findings", action="store_true", help="Exit non-zero when review findings exist.")
     parser.add_argument("--fix-character-ids", action="store_true", help="Autofix missing image_generation.character_ids in the manifest.")
     parser.add_argument("--fix-object-ids", action="store_true", help="Autofix missing image_generation.object_ids in the manifest.")
-    parser.add_argument("--set-human-review", action="append", default=[], help='Mark scene/cut as human-reviewed, e.g. "scene02_cut01" (repeatable).')
+    parser.add_argument("--set-human-review", action="append", default=[], help='Mark scene/cut as human-reviewed, e.g. "scene02_cut01" or "scene3.5_cut04" (repeatable).')
     parser.add_argument("--human-review-value", choices=["true", "false"], default="true", help="Value used with --set-human-review.")
     parser.add_argument(
         "--image-plan-modes",

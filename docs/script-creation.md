@@ -109,6 +109,142 @@ evaluator は少なくとも次を確認する。
 - `reveal_constraints` に反する初出 / 早出しが scene plan 上で起きていないか
 - scene ごとの具体性と research grounding が十分か
 
+### 1.6 Human Review Source Of Truth
+
+ナレーション文面の human review は `script.md` を正本にする。
+
+- reviewer はまず `script.md` を見る
+- 確定後、`video_manifest.md` の `audio.narration.*` へ一方向同期する
+- manifest 側で直接ナレーション文面を育てない
+
+現行 ElevenLabs 運用では、manifest へ同期する値は `tts_text` 系の spoken form を優先し、`audio.narration.text` と `audio.narration.tts_text` の両方へ反映する。
+
+cut ごとに少なくとも次を持てる。
+
+```yaml
+tts_text: "string"
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests:
+    - request_id: "hr-001"
+      status: "open|accepted|rejected|deferred|resolved"
+      category: "naturality|reveal|pronunciation|story_alignment|timing|other"
+      requested_change: ""
+      rationale: ""
+      suggested_narration: ""
+      suggested_tts_text: ""
+      requested_at: "ISO8601"
+      resolved_at: ""
+      resolution_notes: ""
+  approved_narration: ""
+  approved_tts_text: ""
+```
+
+- `narration`
+  - 作品として読ませる台本文面
+- `tts_text`
+  - 読み上げ用 spoken form
+- `human_review.approved_narration`
+  - 人間が確定した文面。空なら `narration` を使う
+- `human_review.approved_tts_text`
+  - 人間が確定した読み上げ文面。空なら `tts_text` を使う
+- `human_review.change_requests[]`
+  - reviewer が出した個別の修正要求
+  - `status: open` が残っている間は `human_review.status` を `approved` にしない
+  - `approved_*` field は open request の代替ではなく、解消後に採用した値を残す
+
+運用ルール:
+
+- reviewer が差し戻すときは、`notes` だけで終わらせず `change_requests[]` に分解して残す
+- reveal 順序、かな読み、意味距離、説明過多のように論点が複数ある場合は request を分ける
+- `changes_requested` はレビューの結果、`change_requests[]` は要求の本文であり、役割を混同しない
+
+人間 review の観点は固定しておく。
+
+- 昔話 / 作品文脈として自然か
+- reveal 順序を壊していないか
+- ひらがな読みで違和感がないか
+- 映像より先走っていないか
+- 説明過多になっていないか
+
+human review が visual / asset / image / video まで踏み込む場合は、`script.md` top-level の `human_change_requests[]` を正本にする。
+
+```yaml
+human_change_requests:
+  - request_id: "hr-001"
+    source: "human_script_review"
+    created_at: "ISO8601"
+    raw_request: "scene 追加、asset 参照、video direction 変更"
+    original_selectors: ["scene3_cut2"]
+    current_selectors: ["scene3.1_cut2.1"]
+    normalized_actions: []
+    status: "pending|normalized|applied|verified|waived"
+    resolution_notes: ""
+    applied_manifest_targets: []
+```
+
+- raw request は削らない
+- 後段で扱うために `normalized_actions[]` へ分解する
+- `update_scene_contract` を使って `target_beat / must_show / must_avoid / done_when` を追従更新してよい
+- `scene_id` / `cut_id` は dotted numeric string を許可する
+- renumber しても `original_selectors[]` と `current_selectors[]` を残す
+
+### 1.7 Narration Distance Policy
+
+`narration` と `visual_beat` は、常に差を作るのでも、常に一致させるのでもなく、**scene の役割**で距離を決める。
+
+基本方針:
+
+- 序盤 / 中盤
+  - 視聴者を物語の中へ入れることを優先
+  - `narration` は `visual_beat` に基本的に沿ってよい
+- 終盤
+  - 必ず差を作る必要はない
+  - まだ没入維持が必要なら、近いままでよい
+  - 意味や代償を残したい cut だけ、`narration` が `visual_beat` を少し超えてよい
+
+理想は「映像のあとに意味が残る一文」が入ることだが、それは **常時必須ではなく、文脈依存** とする。
+
+#### 結末型の考慮
+
+作品ごとに終わり方は違うため、script 設計では結末型も意識する。
+
+- `happy`
+- `bittersweet`
+- `tragic`
+- `cautionary`
+- `ambiguous`
+
+たとえば浦島太郎は、単純な happy end ではなく、代償や喪失の重さが残る物語として扱う。
+この場合、帰還以後の narration は必要に応じて次を価値化してよい。
+
+- 何を失ったのか
+- なぜそれが重いのか
+
+#### 推奨 field
+
+必要なら script に次の補助 field を置いてよい。
+
+```yaml
+script_metadata:
+  ending_mode: "happy|bittersweet|tragic|cautionary|ambiguous"
+
+scenes:
+  - scene_id: 15
+    narration_distance_policy: "stay_close|contextual|meaning_first"
+    narrative_value_goal:
+      mode: "immersion|meaning|mixed"
+      leave_viewer_with: ["何を失ったのか", "なぜそれが重いのか"]
+```
+
+- `stay_close`
+  - `narration` は `visual_beat` に沿う
+- `contextual`
+  - 沿ってもよいし、少し意味を足してもよい
+- `meaning_first`
+  - 映像を見たあとに意味が残る一文を優先する
+
 ---
 
 ## 第2章：キャラクター設計（ペルソナ）

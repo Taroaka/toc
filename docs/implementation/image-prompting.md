@@ -55,6 +55,10 @@ rubric_scores: {}
 overall_score: 0.0
 human_review_ok: false
 human_review_reason: ""
+human_review:
+  status: "pending|approved|changes_requested"
+  notes: ""
+  change_requests: []
 ```
 
 補足:
@@ -82,6 +86,10 @@ human_review_reason: ""
 - `human_review_reason`
   - 人間 override の理由
   - `human_review_ok: true` のときは必須
+- `human_review`
+  - 通常の human feedback loop の記録
+  - `change_requests[]` は reviewer が prompt 修正を要求した本文
+  - `human_review_ok` の代替にしない
 
 既定の reason key:
 
@@ -113,6 +121,40 @@ human_review_reason: ""
 3. fix 可能なものは manifest 側へ反映する
 4. fix 後に subagent が再 review し、解消した entry は `agent_review_ok: true` に戻す
 5. 未解消 finding を人間判断で許容する場合だけ、人間が `human_review_ok: true` と `human_review_reason` を記録する
+6. reviewer が差し戻す場合は `human_review.status=changes_requested` とし、論点ごとに `human_review.change_requests[]` を残す
+
+推奨 `human_review.change_requests[]`:
+
+```yaml
+- request_id: "hr-001"
+  status: "open|accepted|rejected|deferred|resolved"
+  category: "story_alignment|reveal|subject_specificity|continuity|craft|other"
+  requested_change: ""
+  rationale: ""
+  proposed_patch: ""
+  requested_at: "ISO8601"
+  resolved_at: ""
+  resolution_notes: ""
+```
+
+高度な修正要求は `still_assets[]` と `reference_usage[]` へ materialize する。
+
+- `still_assets[]`
+  - `asset_id`, `role`, `output`, `image_generation`
+  - `derived_from_asset_ids[]`, `reference_asset_ids[]`
+  - `reference_usage[]`, `direction_notes[]`, `applied_request_ids[]`
+- `reference_usage[]`
+  - `mode: same_subject|same_camera|background_glimpse|foreground_anchor|style_anchor|lighting_anchor|state_transition`
+  - `placement: foreground|midground|background|offscreen_implied`
+
+例:
+
+- 「1枚目を作って、その画像を参照して 2 枚目を作る」
+  - `derive_still_asset`
+- 「宴会エリアを奥に見える背景として使う」
+  - `reference_usage.mode=background_glimpse`
+- 「同じ場所 asset を別 cut でも使う」
+  - `assets.location_bible[]` + `image_generation.location_ids[]`
 
 subagent review の必須 criterion:
 

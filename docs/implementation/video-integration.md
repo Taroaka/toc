@@ -116,14 +116,19 @@
 silent cut の扱い:
 
 - `audio.narration.tool: "silent"` の cut は、Narration Writer の対象外としてよい
+- ただし renderable cut では、`audio.narration.silence_contract.intentional: true` と `confirmed_by_human: true` を必須にする
+- 追加カットで narration を入れない場合は、この `silence_contract` を使って「意図的に無音」と明示する
 - その場合でも `audio.narration.output` は持たせ、無音 mp3 を生成できる状態にする
 - `video_generation.duration_seconds` は `4` 秒を基本にする
+- 最終音声連結では、その cut の `duration_seconds` 分の無音 mp3 が `video_narration_list.txt` 経由で連結される
 
 ### 尺の決め方（音声実秒 + 余白）
 
 - 原則として、**`映像尺 = 音声実秒 + 余白`** とする
 - `音声秒 = 映像秒` にぴったり合わせるのは標準運用にしない
 - 余白は、話し始め前の入りと、話し終わり後の余韻の合計として扱う
+- 例外として、人レビューで追加した intentional silent cut だけは **`video duration > narration duration`** を許可する
+- この例外では narration は空のままにし、最終連結では無音がその秒数ぶん入る
 
 推奨レンジ:
 - 通常 cut:
