@@ -75,14 +75,26 @@ scenes:
     cuts:
       - cut_id: 1
         cut_role: "main"  # main|sub
+        scene_contract:
+          target_beat: "string"     # この cut で何を伝えるか
+          must_show: ["string"]     # image prompt / motion / narration のどこかで必ず見せる
+          must_avoid: ["string"]    # この cut に入れてはいけない drift
+          done_when: ["string"]     # evaluator と共有する完了条件
         image_generation:
           # 新規の静止画は、連続性アンカーが必要なときだけ優先して作る。
           # 既存の参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
           # review metadata は image_generation.review 側で持つ:
+          # contract:
+          #   target_focus: "character"
+          #   must_include: []
+          #   must_avoid: []
+          #   done_when: []
           # review:
           #   agent_review_ok: true
           #   agent_review_reason_keys: []
           #   agent_review_reason_messages: []
+          #   rubric_scores: {}
+          #   overall_score: 0.0
           #   human_review_ok: false
           #   human_review_reason: ""
           # 現行表記で agent_review_reason_codes を使っていても、意味は reason_keys と同じに保つ。
@@ -122,7 +134,20 @@ scenes:
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
           narration:
-            text: "昔、ある村に桃から生まれた少年がいました。"
+            contract:
+              target_function: "opening_setup"
+              must_cover: ["桃から生まれた"]
+              must_avoid: ["カメラ", "ズーム"]
+              done_when: ["物語の導入として自然に読める", "scene/script の出来事を素直に伝える"]
+            # review metadata は audio.narration.review 側で持つ:
+            # review:
+            #   agent_review_ok: true
+            #   agent_review_reason_keys: []
+            #   agent_review_reason_messages: []
+            #   human_review_ok: false
+            #   human_review_reason: ""
+            text: "むかし、ある むらに ももから うまれた しょうねんが いました。"
+            tts_text: "むかし、ある むらに ももから うまれた しょうねんが いました。"
             tool: "elevenlabs"
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false
@@ -138,6 +163,11 @@ final_output:
 
 # === 品質チェック ===
 quality_check:
+  review_contract:
+    target_outcome: "publishable_short|draft_review|internal_preview"
+    must_have_artifacts: ["video.mp4"]
+    must_avoid: ["string"]
+    done_when: ["string"]
   visual_consistency: false
   audio_sync: false
   subtitle_readable: false

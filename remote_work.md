@@ -180,6 +180,7 @@ scripts/ai/commandmate-stop-pinggy.sh
 - Pinggy free tunnel は未認証だと 60 分制限
 - `~/.commandmate/pinggy-urls.txt` に公開 URL を保存する
 - トンネル側は HTTPS なので、外出先では Pinggy の `https://...` URL を使う
+- automation から叩く場合は相対 path ではなく絶対 path を使う
 
 ## Phase 4: スマホ接続
 
@@ -217,6 +218,40 @@ scripts/ai/commandmate-stop-pinggy.sh
 cd /Users/kantaro/Downloads/toc
 scripts/ai/session-bootstrap.sh
 ```
+
+### 週末だけ常時稼働する場合
+
+- [x] `pmset` 恒久変更ではなく `caffeinate` で止める方式にする
+- [ ] 金曜夜か土曜朝に keep-awake を開始する
+- [ ] 日曜夜に keep-awake を停止する
+
+開始:
+
+```bash
+cd /Users/kantaro/Downloads/toc
+scripts/ai/weekend-keepawake-start.sh
+```
+
+状態確認:
+
+```bash
+cd /Users/kantaro/Downloads/toc
+scripts/ai/weekend-keepawake-status.sh
+```
+
+停止:
+
+```bash
+cd /Users/kantaro/Downloads/toc
+scripts/ai/weekend-keepawake-stop.sh
+```
+
+補足:
+
+- `caffeinate -dimsu` を使うので、終了すれば通常の省電力設定に戻る
+- 再起動後は自動復帰しない
+- 週末運用では電源接続を前提にする
+- 画面消灯は別で起きうるが、スリープは抑止できる
 
 worktree を使う場合の考え方:
 

@@ -47,6 +47,7 @@ scenes:
       narration:
         tool: "elevenlabs"
         text: "n"
+        tts_text: "えぬ"
         output: "assets/audio/n.mp3"
         normalize_to_scene_duration: false
 ```
@@ -59,6 +60,7 @@ scenes:
         self.assertEqual(scenes[0].image_references, ["assets/characters/c.png", "assets/styles/s.png"])
         self.assertEqual(scenes[0].video_first_frame, "assets/scenes/scene1.png")
         self.assertEqual(scenes[0].video_last_frame, "assets/scenes/scene2.png")
+        self.assertEqual(scenes[0].narration_tts_text, "えぬ")
         self.assertIs(scenes[0].narration_normalize_to_scene_duration, False)
 
     def test_parse_manifest_supports_cuts(self) -> None:
@@ -347,6 +349,7 @@ scenes:
             video_output=None,
             narration_tool=None,
             narration_text=None,
+            narration_tts_text=None,
             narration_output=None,
             narration_normalize_to_scene_duration=True,
         )

@@ -83,6 +83,32 @@
 これは本筋を止める寄り道ではなく、
 視聴者に「この題材だからこそ見たいもの」を与えるための設計とする。
 
+### 1.5 Script Evaluator Contract
+
+台本にも evaluator と共有する契約を置く。
+
+```yaml
+evaluation_contract:
+  target_arc: "opening,development,climax"
+  must_cover: ["主人公の目的", "転機"]
+  must_avoid: ["TODO", "未定"]
+  done_when: ["主要 phase が揃う", "各 scene が research を参照する"]
+  reveal_constraints:
+    - subject_type: "character"
+      subject_id: "guide_princess"
+      rule: "must_not_appear_before"
+      selector: "scene12_cut01"
+      rationale: "驚きや登場の効果を守るため、初出タイミングを script 側で固定する"
+```
+
+evaluator は少なくとも次を確認する。
+
+- `must_cover` が script に現れているか
+- `must_avoid` が残っていないか
+- `target_arc` に指定した phase が scene に存在するか
+- `reveal_constraints` に反する初出 / 早出しが scene plan 上で起きていないか
+- scene ごとの具体性と research grounding が十分か
+
 ---
 
 ## 第2章：キャラクター設計（ペルソナ）

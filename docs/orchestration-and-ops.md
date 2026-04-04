@@ -72,6 +72,65 @@ audit:
 - **自動再試行**: 失敗原因が機械的（APIエラー、品質低下）の場合のみ
 - **人間レビュー**: 重要テーマ（時事、政治、医療、法律）は強制
 
+### 1.4.1 canonical state の書き分け
+
+`state.txt` では、`status=` と `stage.*.status=` を分けて扱う。
+
+- `status=`
+  - 粗い現在地
+- `stage.*.status=`
+  - 作業単位の完了状況
+  - `awaiting_approval` は、作業は終わったが承認待ちで停止している状態
+
+標準 stage:
+
+- `stage.research`
+- `stage.story`
+- `stage.visual_value`
+- `stage.script`
+- `stage.image_prompt_review`
+- `stage.image_generation`
+- `stage.video_generation`
+- `stage.narration`
+- `stage.render`
+- `stage.qa`
+
+各作業は **開始時** と **完了時** に append する:
+
+1. 開始時:
+   - `stage.<name>.status=in_progress`
+   - `stage.<name>.started_at=...`
+2. 完了時:
+   - 承認不要なら `stage.<name>.status=done`
+   - 承認待ちが必要なら `stage.<name>.status=awaiting_approval`
+   - `stage.<name>.finished_at=...`
+3. 失敗時:
+   - `stage.<name>.status=failed`
+   - `last_error=...`
+
+標準で承認待ちを挟む stage:
+
+- `stage.script`
+- `stage.image_generation`
+- `stage.narration`
+
+この 3 つが `awaiting_approval` の間は、**次工程へ進まない**。
+
+対応 review:
+
+- `review.script.status`
+- `review.image.status`
+- `review.narration.status`
+
+これにより、`state.txt` だけで
+
+- 調査は終わった
+- 物語は終わった
+- ナレーションは終わった
+- render はまだ
+
+のような読み方ができる。
+
 ### 1.5 VIDEOステージの内部サブフロー
 
 ```

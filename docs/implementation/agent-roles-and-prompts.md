@@ -38,12 +38,18 @@
 
 ### Narration Writer（TTS原稿）
 - 入力: `story.md` / `script.md` / `video_manifest.md`
-- 出力: `video_manifest.md` の `audio.narration.text`
-- 原則: `audio.narration.text` は TTS にそのまま送られるため、`TODO:` 等のメタ情報を書かない（空文字は可。未記入は生成時にエラー）
+- 出力: `video_manifest.md` の `audio.narration.text` と `audio.narration.tts_text`
+- 原則:
+  - `audio.narration.text` は manifest 上の正本でも、現行の ElevenLabs 運用では **ひらがなだけ** を基本にする
+  - `audio.narration.tts_text` は ElevenLabs に送る読み上げ専用原稿
+  - `audio.narration.tts_text` も **ひらがなだけ** で書く
+  - どちらにも `TODO:` 等のメタ情報を書かない（空文字は可。未記入は生成時にエラー）
 - 品質基準:
-  - 各行で、映像だけでは分かりにくい情報を最低1つ追加する
-  - 物理行動の説明より、時間 / 内面 / 因果 / 視点 / 禁忌 / 軽い意味づけを優先する
-  - 映像との関係は「説明」より「補完」を優先する
+  - narration は cut の物語上の役割に従う
+  - opening では、導入として安定した説明を優先し、scene/script に忠実であることを重視する
+  - middle では、進展 / トラブル / 揺れを支える
+  - ending では、解決 / 帰結 / 余韻を支える
+  - 序盤では「無理に抽象的な内面や意味づけを足す」より、物語の入り口として自然であることを優先する
 - エージェント定義: `.claude/agents/narration-writer.md`
 
 ### YouTube Thumbnail Prompt Writer
@@ -61,6 +67,14 @@
 ### Reviewer（Director兼務可）
 - 入力: scene draft / script
 - 出力: `accept | revise` + 理由
+
+### Stage Evaluator
+- 入力: `research.md` / `script.md` / `video_manifest.md` / `video.mp4`
+- 出力: stage review report + `state.txt` の `eval.<stage>.*`
+- 役割:
+  - generator の出力を rubic/check 単位で採点する
+  - `approved|changes_requested` を返す
+  - fail reason を次の修正 action に分解する
 
 ### QA / Compliance
 - 入力: `research.md`, `story.md`, `script.md`, `video.mp4`

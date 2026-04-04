@@ -126,6 +126,12 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
+        contract:
+          target_function: ""
+          must_cover: []
+          must_avoid: []
+          done_when: []
+        # review metadata は audio.narration.review に保持する。
         text: "TODO: ナレーション全文"
         tool: "elevenlabs"
         output: "assets/audio/narration.mp3"

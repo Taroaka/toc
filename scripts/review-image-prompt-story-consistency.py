@@ -19,7 +19,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import extract_yaml_block, load_structured_document  # noqa: E402
+from toc.harness import append_state_snapshot, extract_yaml_block, load_structured_document  # noqa: E402
+from toc.reveal_constraints import (  # noqa: E402
+    RevealConstraint,
+    build_manifest_cut_order_map,
+    find_reveal_violations_for_surface,
+    load_reveal_constraints,
+    parse_selector,
+)
 
 
 PROMPT_ENTRY_RE = re.compile(
@@ -155,6 +162,30 @@ PROMPT_SELF_CONTAINED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"rideable", re.I), "prompt uses English term `rideable`; use Japanese such as `騎乗可能` instead."),
 )
 
+IMAGE_REVIEW_RUBRIC_WEIGHTS = {
+    "story_alignment": 0.30,
+    "subject_specificity": 0.25,
+    "prompt_craft": 0.15,
+    "continuity_readiness": 0.15,
+    "production_readiness": 0.15,
+}
+
+IMAGE_REVIEW_RUBRIC_THRESHOLDS = {
+    "story_alignment": 0.60,
+    "subject_specificity": 0.60,
+    "prompt_craft": 0.65,
+    "continuity_readiness": 0.60,
+    "production_readiness": 0.60,
+}
+
+IMAGE_TARGET_FOCUS_TERMS = {
+    "character": ("人物", "主人公", "表情", "顔", "視線", "立ち姿", "しぐさ"),
+    "relationship": ("向き合う", "見つめる", "距離感", "やり取り", "手渡す", "支える", "並ぶ"),
+    "setpiece": ("小道具", "舞台装置", "象徴", "鍵", "乗り物", "玉手箱", "道具"),
+    "blocking": ("動き", "導線", "姿勢", "またがる", "歩く", "振り向く", "差し出す", "進む"),
+    "environment": ("背景", "風景", "空気感", "地形", "建築", "天候", "海", "森"),
+}
+
 
 @dataclass
 class PromptEntry:
@@ -168,6 +199,9 @@ class PromptEntry:
     human_review_reason: str
     agent_review_reason_keys: list[str]
     agent_review_reason_messages: list[str]
+    rubric_scores: dict[str, float]
+    overall_score: float
+    contract: dict[str, Any]
     prompt: str
 
 
@@ -183,6 +217,8 @@ class ReviewOutcome:
     findings: list[Finding]
     suggested_character_ids: list[str]
     suggested_object_ids: list[str]
+    rubric_scores: dict[str, float]
+    overall_score: float
 
 
 def parse_prompt_collection(text: str) -> list[PromptEntry]:
@@ -205,6 +241,9 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
                 human_review_reason=_extract_backtick_bullet(body, "human_review_reason"),
                 agent_review_reason_keys=_extract_reason_keys(body),
                 agent_review_reason_messages=_extract_reason_messages(body),
+                rubric_scores={},
+                overall_score=0.0,
+                contract={},
                 prompt=(prompt_match.group("prompt").strip() if prompt_match else ""),
             )
         )
@@ -419,6 +458,8 @@ def manifest_cut_map(manifest: dict[str, Any]) -> dict[tuple[int, int], dict[str
             cid = cut.get("cut_id")
             if isinstance(cid, int):
                 cuts[(sid, cid)] = cut
+        if not isinstance(scene.get("cuts"), list) or not scene.get("cuts"):
+            cuts[(sid, 0)] = scene
     return cuts
 
 
@@ -452,6 +493,19 @@ def _parse_csv_set(value: str | None) -> set[str]:
 def _is_reference_output(output: str) -> bool:
     normalized = (output or "").replace("\\", "/")
     return normalized.startswith("assets/characters/") or normalized.startswith("assets/objects/")
+
+
+def _coerce_score_map(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    scores: dict[str, float] = {}
+    for key, raw in value.items():
+        try:
+            score = float(raw)
+        except (TypeError, ValueError):
+            continue
+        scores[str(key)] = max(0.0, min(1.0, score))
+    return scores
 
 
 def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: set[str]) -> list[PromptEntry]:
@@ -493,6 +547,7 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
             if isinstance(narration_data, dict):
                 narration = str(narration_data.get("text") or "").strip()
             review = image_generation.get("review") if isinstance(image_generation.get("review"), dict) else {}
+            contract = image_generation.get("contract") if isinstance(image_generation.get("contract"), dict) else {}
             entries.append(
                 PromptEntry(
                     scene_id=sid,
@@ -505,6 +560,9 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
                     human_review_reason=str(review.get("human_review_reason") or ""),
                     agent_review_reason_keys=[str(v).strip() for v in list(review.get("agent_review_reason_keys") or review.get("agent_review_reason_codes") or []) if str(v).strip()],
                     agent_review_reason_messages=[str(v).strip() for v in list(review.get("agent_review_reason_messages") or []) if str(v).strip()],
+                    rubric_scores=_coerce_score_map(review.get("rubric_scores")),
+                    overall_score=float(review.get("overall_score") or 0.0),
+                    contract=dict(contract),
                     prompt=prompt,
                 )
             )
@@ -515,6 +573,162 @@ def find_missing_required_blocks(prompt: str) -> list[str]:
     return missing_required_prompt_blocks(prompt)
 
 
+def _score_from_count(*, total: int, missing: int) -> float:
+    if total <= 0:
+        return 1.0
+    return max(0.0, min(1.0, (total - missing) / total))
+
+
+def _contract_string_list(contract: dict[str, Any], key: str) -> list[str]:
+    value = contract.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _text_contains_any(text: str, needles: list[str] | tuple[str, ...]) -> bool:
+    probe = text or ""
+    return any(needle and needle in probe for needle in needles)
+
+
+def _score_story_alignment(local_source_text: str, prompt_terms: set[str], missing_source_terms: list[str]) -> float:
+    source_terms = extract_terms(local_source_text)
+    coverage_score = _score_from_count(total=len(source_terms), missing=len(missing_source_terms))
+    return round(coverage_score, 3)
+
+
+def _score_subject_specificity(
+    *,
+    character_alias_hits: dict[str, set[str]],
+    object_alias_hits: dict[str, set[str]],
+    prompt_character_hits: dict[str, set[str]],
+    prompt_object_hits: dict[str, set[str]],
+) -> float:
+    expected = len(character_alias_hits) + len(object_alias_hits)
+    covered = len(prompt_character_hits) + len(prompt_object_hits)
+    if expected <= 0:
+        return 1.0 if covered > 0 else 0.7
+    return round(_score_from_count(total=expected, missing=max(0, expected - covered)), 3)
+
+
+def _score_prompt_craft(prompt: str, missing_blocks: list[str], independence_issues: list[str]) -> float:
+    block_score = _score_from_count(total=len(REQUIRED_PROMPT_BLOCKS), missing=len(missing_blocks))
+    issue_penalty = min(0.45, 0.15 * len(independence_issues))
+    length_bonus = 0.05 if len((prompt or "").splitlines()) >= 8 else 0.0
+    return round(max(0.0, min(1.0, block_score - issue_penalty + length_bonus)), 3)
+
+
+def _score_continuity_readiness(
+    *,
+    declared_character_ids: set[str],
+    declared_object_ids: set[str],
+    suggested_character_ids: set[str],
+    suggested_object_ids: set[str],
+    blocking_missing: bool,
+) -> float:
+    total = len(declared_character_ids | declared_object_ids | suggested_character_ids | suggested_object_ids)
+    id_score = _score_from_count(total=total or 1, missing=len(suggested_character_ids) + len(suggested_object_ids))
+    blocking_penalty = 0.2 if blocking_missing else 0.0
+    return round(max(0.0, min(1.0, id_score - blocking_penalty)), 3)
+
+
+def _score_production_readiness(findings: list[Finding]) -> float:
+    severe_codes = {
+        "missing_required_prompt_block",
+        "prompt_not_self_contained",
+        "image_contract_must_avoid_violated",
+        "image_contract_missing",
+        "image_reveal_constraint_violated",
+    }
+    medium_codes = {
+        "non_japanese_prompt_term",
+        "prompt_only_local_mismatch",
+        "prompt_subject_drift",
+        "blocking_drift",
+    }
+    score = 1.0
+    for finding in findings:
+        if finding.code in severe_codes:
+            score -= 0.2
+        elif finding.code in medium_codes:
+            score -= 0.1
+        else:
+            score -= 0.05
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _score_prompt_entry(
+    *,
+    local_source_text: str,
+    prompt: str,
+    prompt_terms: set[str],
+    missing_source_terms: list[str],
+    missing_blocks: list[str],
+    independence_issues: list[str],
+    character_alias_hits: dict[str, set[str]],
+    object_alias_hits: dict[str, set[str]],
+    prompt_character_hits: dict[str, set[str]],
+    prompt_object_hits: dict[str, set[str]],
+    declared_character_ids: set[str],
+    declared_object_ids: set[str],
+    suggested_character_ids: set[str],
+    suggested_object_ids: set[str],
+    blocking_missing: bool,
+    findings: list[Finding],
+) -> tuple[dict[str, float], float]:
+    rubric_scores = {
+        "story_alignment": _score_story_alignment(local_source_text, prompt_terms, missing_source_terms),
+        "subject_specificity": _score_subject_specificity(
+            character_alias_hits=character_alias_hits,
+            object_alias_hits=object_alias_hits,
+            prompt_character_hits=prompt_character_hits,
+            prompt_object_hits=prompt_object_hits,
+        ),
+        "prompt_craft": _score_prompt_craft(prompt, missing_blocks, independence_issues),
+        "continuity_readiness": _score_continuity_readiness(
+            declared_character_ids=declared_character_ids,
+            declared_object_ids=declared_object_ids,
+            suggested_character_ids=suggested_character_ids,
+            suggested_object_ids=suggested_object_ids,
+            blocking_missing=blocking_missing,
+        ),
+        "production_readiness": _score_production_readiness(findings),
+    }
+    overall_score = round(
+        sum(rubric_scores[key] * IMAGE_REVIEW_RUBRIC_WEIGHTS[key] for key in IMAGE_REVIEW_RUBRIC_WEIGHTS),
+        3,
+    )
+    return rubric_scores, overall_score
+
+
+def _suppressed_subject_ids_for_entry(
+    *,
+    scene_id: int,
+    cut_id: int,
+    reveal_constraints: list[RevealConstraint],
+    cut_order_map: dict[tuple[int, int], int],
+) -> tuple[set[str], set[str]]:
+    suppressed_characters: set[str] = set()
+    suppressed_objects: set[str] = set()
+    node_order = cut_order_map.get((scene_id, cut_id))
+    if node_order is None:
+        return suppressed_characters, suppressed_objects
+    for constraint in reveal_constraints:
+        if constraint.rule != "must_not_appear_before":
+            continue
+        selector_key = parse_selector(constraint.selector)
+        if selector_key is None:
+            continue
+        selector_order = cut_order_map.get(selector_key)
+        if selector_order is None or node_order >= selector_order:
+            continue
+        if constraint.subject_type == "character":
+            suppressed_characters.add(constraint.subject_id)
+        elif constraint.subject_type == "object":
+            suppressed_objects.add(constraint.subject_id)
+    return suppressed_characters, suppressed_objects
+
+
 def review_entries(
     entries: list[PromptEntry],
     *,
@@ -523,15 +737,19 @@ def review_entries(
     script_scene_map: dict[int, str],
     story_text: str,
     script_text: str,
+    reveal_constraints: list[RevealConstraint] | None = None,
 ) -> list[ReviewOutcome]:
     cuts = manifest_cut_map(manifest)
     aliases = build_asset_aliases(manifest)
+    cut_order_map = build_manifest_cut_order_map(manifest)
+    reveal_constraints = reveal_constraints or []
     results: list[ReviewOutcome] = []
 
     for entry in entries:
         cut = cuts.get((entry.scene_id, entry.cut_id), {})
         image_generation = cut.get("image_generation") if isinstance(cut, dict) else {}
         audio = cut.get("audio") if isinstance(cut, dict) else {}
+        is_reference_entry = _is_reference_output(entry.output)
         narration_text = entry.narration or (((audio or {}).get("narration") or {}).get("text") or "")
         local_story = story_scene_map.get(entry.scene_id, "")
         local_script = script_scene_map.get(entry.scene_id, "")
@@ -543,11 +761,90 @@ def review_entries(
         object_alias_hits = find_alias_hits(local_source_text, aliases["object"])
         prompt_character_hits = find_alias_hits(entry.prompt, aliases["character"])
         prompt_object_hits = find_alias_hits(entry.prompt, aliases["object"])
+        suppressed_character_ids, suppressed_object_ids = _suppressed_subject_ids_for_entry(
+            scene_id=entry.scene_id,
+            cut_id=entry.cut_id,
+            reveal_constraints=reveal_constraints,
+            cut_order_map=cut_order_map,
+        )
+        if suppressed_character_ids:
+            character_alias_hits = {
+                asset_id: matched
+                for asset_id, matched in character_alias_hits.items()
+                if asset_id not in suppressed_character_ids
+            }
+        if suppressed_object_ids:
+            object_alias_hits = {
+                asset_id: matched
+                for asset_id, matched in object_alias_hits.items()
+                if asset_id not in suppressed_object_ids
+            }
 
         declared_character_ids = set(image_generation.get("character_ids") or []) if isinstance(image_generation, dict) else set()
         declared_object_ids = set(image_generation.get("object_ids") or []) if isinstance(image_generation, dict) else set()
+        contract = entry.contract if isinstance(entry.contract, dict) and entry.contract else {}
+        if not contract and isinstance(image_generation, dict) and isinstance(image_generation.get("contract"), dict):
+            contract = dict(image_generation.get("contract") or {})
 
         findings: list[Finding] = []
+
+        for violation in find_reveal_violations_for_surface(
+            scene_id=entry.scene_id,
+            cut_id=entry.cut_id,
+            output=entry.output,
+            text_fragments=[entry.prompt],
+            declared_character_ids=declared_character_ids,
+            declared_object_ids=declared_object_ids,
+            constraints=reveal_constraints,
+            aliases=aliases,
+            cut_order_map=cut_order_map,
+        ):
+            findings.append(
+                Finding(
+                    code="script_reveal_constraint_violated",
+                    message=(
+                        f"script reveal constraint forbids `{violation.subject_id}` before `{violation.selector}`, "
+                        f"but scene{entry.scene_id:02d}_cut{entry.cut_id:02d} already reveals it via {', '.join(violation.evidence)}."
+                    ),
+                )
+            )
+
+        if not contract:
+            findings.append(
+                Finding(
+                    code="image_contract_missing",
+                    message="image_generation.contract is missing; define target_focus, must_include, must_avoid, and done_when before generation.",
+                )
+            )
+        else:
+            must_include = _contract_string_list(contract, "must_include")
+            must_avoid = _contract_string_list(contract, "must_avoid")
+            target_focus = str(contract.get("target_focus") or "").strip().lower()
+
+            missing_include = [item for item in must_include if item not in entry.prompt]
+            for item in missing_include:
+                findings.append(
+                    Finding(
+                        code="image_contract_must_include_unmet",
+                        message=f"contract requires `{item}` but the prompt does not clearly include it.",
+                    )
+                )
+            violated_avoid = [item for item in must_avoid if item in entry.prompt]
+            for item in violated_avoid:
+                findings.append(
+                    Finding(
+                        code="image_contract_must_avoid_violated",
+                        message=f"contract forbids `{item}` but the prompt still includes it.",
+                    )
+                )
+            focus_terms = IMAGE_TARGET_FOCUS_TERMS.get(target_focus, ())
+            if target_focus and focus_terms and not _text_contains_any(entry.prompt, focus_terms):
+                findings.append(
+                    Finding(
+                        code="image_contract_target_focus_unmet",
+                        message=f"contract target_focus `{target_focus}` is not clearly represented in the prompt body.",
+                    )
+                )
 
         missing_blocks = find_missing_required_blocks(entry.prompt)
         for block in missing_blocks:
@@ -607,6 +904,8 @@ def review_entries(
                 continue
             if asset_id in character_alias_hits or asset_id in object_alias_hits:
                 continue
+            if is_reference_entry:
+                continue
             findings.append(
                 Finding(
                     code="prompt_only_local_mismatch",
@@ -659,6 +958,7 @@ def review_entries(
         }
         source_relation_hits = sorted(term for term in relation_terms if term in local_source_text)
         prompt_relation_hits = sorted(term for term in relation_terms if term in entry.prompt)
+        blocking_missing = bool(source_relation_hits and not prompt_relation_hits)
         if source_relation_hits and not prompt_relation_hits:
             findings.append(
                 Finding(
@@ -667,15 +967,74 @@ def review_entries(
                 )
             )
 
+        missing_source_terms = sorted(term for term in important_source_terms if not term_is_covered(term, prompt_terms))
+        suggested_character_ids = set(character_alias_hits.keys()) - declared_character_ids
+        suggested_object_ids = set(object_alias_hits.keys()) - declared_object_ids
+        rubric_scores, overall_score = _score_prompt_entry(
+            local_source_text=local_source_text,
+            prompt=entry.prompt,
+            prompt_terms=prompt_terms,
+            missing_source_terms=missing_source_terms,
+            missing_blocks=missing_blocks,
+            independence_issues=find_prompt_independence_issues(entry.prompt),
+            character_alias_hits=character_alias_hits,
+            object_alias_hits=object_alias_hits,
+            prompt_character_hits=prompt_character_hits,
+            prompt_object_hits=prompt_object_hits,
+            declared_character_ids=declared_character_ids,
+            declared_object_ids=declared_object_ids,
+            suggested_character_ids=suggested_character_ids,
+            suggested_object_ids=suggested_object_ids,
+            blocking_missing=blocking_missing,
+            findings=findings,
+        )
+        if rubric_scores["story_alignment"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["story_alignment"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_story_alignment_weak",
+                    message="prompt does not preserve enough of the local story/script intent.",
+                )
+            )
+        if rubric_scores["subject_specificity"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["subject_specificity"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_subject_specificity_weak",
+                    message="prompt is too generic about the main subject, character, or setpiece.",
+                )
+            )
+        if rubric_scores["continuity_readiness"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["continuity_readiness"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_continuity_weak",
+                    message="prompt is not specific enough to preserve asset continuity and blocking across cuts.",
+                )
+            )
+        if rubric_scores["production_readiness"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["production_readiness"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_production_readiness_weak",
+                    message="prompt still contains structural or operational issues likely to hurt image generation.",
+                )
+            )
+
         results.append(
             ReviewOutcome(
                 entry=entry,
                 findings=dedupe_findings(findings),
-                suggested_character_ids=sorted(set(character_alias_hits.keys()) - declared_character_ids),
-                suggested_object_ids=sorted(set(object_alias_hits.keys()) - declared_object_ids),
+                suggested_character_ids=sorted(suggested_character_ids),
+                suggested_object_ids=sorted(suggested_object_ids),
+                rubric_scores=rubric_scores,
+                overall_score=overall_score,
             )
         )
     return results
+
+
+def load_script_reveal_constraints(script_path: Path) -> list[RevealConstraint]:
+    if not script_path.exists():
+        return []
+    _, data = load_structured_document(script_path)
+    return load_reveal_constraints(data if isinstance(data, dict) else {})
 
 
 def dedupe_findings(findings: list[Finding]) -> list[Finding]:
@@ -716,8 +1075,12 @@ def render_prompt_collection(entries: list[PromptEntry]) -> str:
                 f"- agent_review_ok: `{'true' if entry.agent_review_ok else 'false'}`",
                 f"- human_review_ok: `{'true' if entry.human_review_ok else 'false'}`",
                 f"- human_review_reason: `{entry.human_review_reason}`",
+                f"- overall_score: `{entry.overall_score:.3f}`",
             ]
         )
+        lines.append(f"- rubric_scores: `{entry.rubric_scores}`")
+        if entry.contract:
+            lines.append(f"- contract: `{entry.contract}`")
         if entry.agent_review_reason_keys:
             lines.append(f"- agent_review_reason_keys: `{', '.join(entry.agent_review_reason_keys)}`")
         else:
@@ -759,6 +1122,9 @@ def apply_review_statuses(entries: list[PromptEntry], results: list[ReviewOutcom
                 human_review_reason=entry.human_review_reason,
                 agent_review_reason_keys=reason_keys,
                 agent_review_reason_messages=reason_messages,
+                rubric_scores=dict(outcome.rubric_scores) if outcome else dict(entry.rubric_scores),
+                overall_score=outcome.overall_score if outcome else entry.overall_score,
+                contract=dict(entry.contract),
                 prompt=entry.prompt,
             )
         )
@@ -792,6 +1158,9 @@ def apply_human_review_updates(entries: list[PromptEntry], selectors: list[str],
                 human_review_reason=human_review_reason,
                 agent_review_reason_keys=entry.agent_review_reason_keys,
                 agent_review_reason_messages=entry.agent_review_reason_messages,
+                rubric_scores=dict(entry.rubric_scores),
+                overall_score=entry.overall_score,
+                contract=dict(entry.contract),
                 prompt=entry.prompt,
             )
         )
@@ -832,6 +1201,8 @@ def render_report(
                 "",
                 f"- output: `{entry.output}`",
                 f"- narration: `{entry.narration}`" if entry.narration else "- narration: `(silent)`",
+                f"- overall_score: `{entry.overall_score:.3f}`",
+                f"- rubric_scores: `{entry.rubric_scores}`",
             ]
         )
         if not findings:
@@ -920,6 +1291,8 @@ def apply_review_metadata_to_manifest(*, manifest_path: Path, manifest: dict[str
             "agent_review_ok": bool(entry.agent_review_ok),
             "agent_review_reason_keys": list(entry.agent_review_reason_keys),
             "agent_review_reason_messages": list(entry.agent_review_reason_messages),
+            "rubric_scores": dict(entry.rubric_scores),
+            "overall_score": round(float(entry.overall_score), 3),
             "human_review_ok": bool(entry.human_review_ok),
             "human_review_reason": entry.human_review_reason or "",
         }
@@ -932,9 +1305,30 @@ def apply_review_metadata_to_manifest(*, manifest_path: Path, manifest: dict[str
         manifest_path.write_text(_replace_yaml_block(original, new_yaml), encoding="utf-8")
 
 
+def append_evaluator_state(*, run_dir: Path, outcomes: list[ReviewOutcome], unresolved_entries: int) -> None:
+    state_path = run_dir / "state.txt"
+    if not state_path.exists() or not outcomes:
+        return
+    rubric_keys = tuple(IMAGE_REVIEW_RUBRIC_WEIGHTS.keys())
+    averages = {
+        key: sum(outcome.rubric_scores.get(key, 0.0) for outcome in outcomes) / len(outcomes)
+        for key in rubric_keys
+    }
+    overall_score = sum(outcome.overall_score for outcome in outcomes) / len(outcomes)
+    findings_count = sum(len(outcome.findings) for outcome in outcomes)
+    updates = {
+        "eval.image_prompt.score": f"{overall_score:.4f}",
+        "eval.image_prompt.findings": str(findings_count),
+        "eval.image_prompt.unresolved_entries": str(unresolved_entries),
+    }
+    for key, value in averages.items():
+        updates[f"eval.image_prompt.rubric.{key}"] = f"{value:.4f}"
+    append_state_snapshot(state_path, updates)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review manifest image prompts for story/script consistency.")
-    parser.add_argument("--manifest", required=True, help="Path to video_manifest.md")
+    parser.add_argument("--manifest", required=False, help="Path to video_manifest.md")
     parser.add_argument("--prompt-collection", default=None, help="Deprecated compatibility input. When omitted, entries are read directly from the manifest.")
     parser.add_argument("--story", default=None, help="Path to story.md (default: sibling of manifest)")
     parser.add_argument("--script", default=None, help="Path to script.md (default: sibling of manifest)")
@@ -954,23 +1348,32 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    manifest_path = Path(args.manifest)
-    run_dir = manifest_path.parent
+    if not args.manifest and not args.prompt_collection:
+        raise SystemExit("--manifest is required unless --prompt-collection is provided.")
+    manifest_path = Path(args.manifest) if args.manifest else Path(args.prompt_collection).parent / "video_manifest.md"
+    prompt_collection_path = Path(args.prompt_collection) if args.prompt_collection else None
+    run_dir = manifest_path.parent if args.manifest or manifest_path.exists() else prompt_collection_path.parent
     story_path = Path(args.story) if args.story else run_dir / "story.md"
     script_path = Path(args.script) if args.script else run_dir / "script.md"
     out_path = Path(args.out) if args.out else run_dir / "image_prompt_story_review.md"
-    manifest = load_manifest(manifest_path)
-    if args.prompt_collection:
-        prompt_collection = Path(args.prompt_collection)
-        entries = parse_prompt_collection(prompt_collection.read_text(encoding="utf-8"))
+    manifest = load_manifest(manifest_path) if manifest_path.exists() else {"scenes": [], "assets": {}}
+    if prompt_collection_path:
+        entries = parse_prompt_collection(prompt_collection_path.read_text(encoding="utf-8"))
     else:
         entries = manifest_prompt_entries(manifest, allowed_story_modes=_parse_csv_set(args.image_plan_modes))
     if args.set_human_review:
         entries = apply_human_review_updates(entries, args.set_human_review, args.human_review_value == "true")
-        apply_review_metadata_to_manifest(manifest_path=manifest_path, manifest=manifest, entries=entries)
-        manifest = load_manifest(manifest_path)
+        if manifest_path.exists():
+            apply_review_metadata_to_manifest(manifest_path=manifest_path, manifest=manifest, entries=entries)
+            manifest = load_manifest(manifest_path)
+        if prompt_collection_path:
+            prompt_collection_path.write_text(render_prompt_collection(entries) + "\n", encoding="utf-8")
+        if prompt_collection_path and not manifest_path.exists():
+            print(prompt_collection_path)
+            return 0
     story_text, story_data = load_structured_document(story_path) if story_path.exists() else ("", {})
     script_text, script_data = load_structured_document(script_path) if script_path.exists() else ("", {})
+    reveal_constraints = load_script_reveal_constraints(script_path)
 
     results = review_entries(
         entries,
@@ -979,6 +1382,7 @@ def main() -> int:
         script_scene_map=extract_scene_context_map(script_data),
         story_text=story_text,
         script_text=script_text,
+        reveal_constraints=reveal_constraints,
     )
     fixed_character_ids = 0
     fixed_object_ids = 0
@@ -999,10 +1403,14 @@ def main() -> int:
                 script_scene_map=extract_scene_context_map(script_data),
                 story_text=story_text,
                 script_text=script_text,
+                reveal_constraints=reveal_constraints,
             )
     entries = apply_review_statuses(entries, results)
-    apply_review_metadata_to_manifest(manifest_path=manifest_path, manifest=manifest, entries=entries)
-    manifest = load_manifest(manifest_path)
+    if manifest_path.exists():
+        apply_review_metadata_to_manifest(manifest_path=manifest_path, manifest=manifest, entries=entries)
+        manifest = load_manifest(manifest_path)
+    if prompt_collection_path:
+        prompt_collection_path.write_text(render_prompt_collection(entries) + "\n", encoding="utf-8")
     outcome_map = {(outcome.entry.scene_id, outcome.entry.cut_id): outcome for outcome in results}
     unresolved_entries = sum(
         1
@@ -1020,6 +1428,8 @@ def main() -> int:
                 findings=outcome.findings,
                 suggested_character_ids=outcome.suggested_character_ids,
                 suggested_object_ids=outcome.suggested_object_ids,
+                rubric_scores=outcome.rubric_scores,
+                overall_score=outcome.overall_score,
             )
         )
     report = render_report(
@@ -1030,6 +1440,7 @@ def main() -> int:
         unresolved_entries=unresolved_entries,
     )
     out_path.write_text(report + "\n", encoding="utf-8")
+    append_evaluator_state(run_dir=run_dir, outcomes=hydrated_results, unresolved_entries=unresolved_entries)
     print(out_path)
     findings = sum(len(outcome.findings) for outcome in hydrated_results)
     if args.fail_on_findings and findings and unresolved_entries:

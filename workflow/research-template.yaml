@@ -125,3 +125,10 @@ metadata:
   collected_at: "ISO8601"
   sources_used: ["string"]
   confidence_score: 0.0
+
+# Evaluator contract（推奨）
+evaluation_contract:
+  target_questions: ["string"]          # この調査で必ず答える問い
+  must_cover: ["string"]                # synopsis / beat / setting など必須アンカー
+  must_resolve_conflicts: ["string"]    # conflicts.topic として必ず扱う論点
+  done_when: ["string"]                 # evaluator と共有する完了条件

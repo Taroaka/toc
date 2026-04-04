@@ -20,18 +20,63 @@ timestamp=ISO8601
 job_id=JOB_YYYY-MM-DD_0001
 topic=string
 status=INIT|RESEARCH|STORY|SCRIPT|VIDEO|QA|DONE
+stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.story.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.render.status=pending|in_progress|awaiting_approval|done|failed|skipped
 gate.research_review=required|optional|skipped
 gate.story_review=required|optional|skipped
+gate.script_review=required|optional|skipped
+gate.image_review=required|optional|skipped
+gate.narration_review=required|optional|skipped
 gate.video_review=required|optional|skipped
 artifact.research=output/<topic>_<timestamp>/research.md
+artifact.research_review=output/<topic>_<timestamp>/research_review.md
 artifact.story=output/<topic>_<timestamp>/story.md
 artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 artifact.script=output/<topic>_<timestamp>/script.md
+artifact.script_review=output/<topic>_<timestamp>/script_review.md
+artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 artifact.video=output/<topic>_<timestamp>/video.mp4
+artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
+eval.research.status=approved|changes_requested
+eval.image_prompt.score=0.0-1.0
+eval.image_prompt.findings=0
+eval.image_prompt.unresolved_entries=0
+eval.script.status=approved|changes_requested
+eval.script.findings=0
+eval.manifest.status=approved|changes_requested
+eval.manifest.findings=0
+eval.video.status=approved|changes_requested
+eval.video.findings=0
+eval.narration.score=0.0-1.0
+eval.narration.findings=0
+eval.narration.unresolved_entries=0
 ---
 ```
 
 対応テンプレート: `workflow/state-schema.txt`
+
+Evaluator summary:
+
+- `eval.research.*`
+  - research evaluator の run 単位 summary
+  - `status` は `approved|changes_requested`
+- `eval.script.*`
+  - script evaluator の run 単位 summary
+- `eval.manifest.*`
+  - scene/cut evaluator の run 単位 summary
+- `eval.video.*`
+  - video generation 後の evaluator summary
+- `eval.image_prompt.*`
+  - 画像 prompt evaluator の run 単位 summary
+  - `score` は average overall score
+  - `findings` と `unresolved_entries` は gate 状況の把握用
+  - `rubric.*` に criterion average を持てる
+- `eval.narration.*`
+  - ナレーション evaluator の run 単位 summary
+  - `rubric.tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持てる
 
 派生物（machine-facing）:
 
@@ -43,6 +88,72 @@ output/<topic>_<timestamp>/run_status.json
 - artifact inventory
 - pending gate
 - `eval_report.json`（あれば埋め込む）
+
+### 1.1 `status` と `stage.*.status` の役割分担
+
+- `status`
+  - 粗い現在地を示す
+  - `RESEARCH` / `STORY` / `SCRIPT` / `VIDEO` / `QA` / `DONE`
+- `stage.<name>.status`
+  - 実務上の完了状況を示す
+  - `state.txt` を見るだけで「調査済み」「ナレーション済み」「render 済み」が読める粒度
+  - `awaiting_approval` は「作業自体は終わったが、ユーザー承認待ちで次工程に進めない」を意味する
+
+標準 stage:
+
+- `stage.research`
+- `stage.story`
+- `stage.visual_value`
+- `stage.script`
+- `stage.image_prompt_review`
+- `stage.image_generation`
+- `stage.video_generation`
+- `stage.narration`
+- `stage.render`
+- `stage.qa`
+
+各 stage は少なくとも次の key を持てる:
+
+```text
+stage.<name>.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.<name>.started_at=ISO8601
+stage.<name>.finished_at=ISO8601
+```
+
+承認待ちが標準発生する stage:
+
+- `stage.script`
+- `stage.image_generation`
+- `stage.narration`
+
+この 3 つが `awaiting_approval` の間は、**次のフローに進んではならない**。
+
+対応 gate / review:
+
+- `stage.script` → `gate.script_review` / `review.script.*`
+- `stage.image_generation` → `gate.image_review` / `review.image.*`
+- `stage.narration` → `gate.narration_review` / `review.narration.*`
+
+### 1.2 読み方
+
+例えば最新 block が次なら、`state.txt` だけで状況が分かる。
+
+```text
+status=VIDEO
+stage.research.status=done
+stage.story.status=done
+stage.script.status=awaiting_approval
+review.script.status=pending
+gate.script_review=required
+```
+
+この場合は:
+
+- 調査は終わった
+- 物語は終わった
+- 台本作成は終わった
+- ただしユーザー承認待ち
+- まだナレーションや render に進めない
 
 ---
 
@@ -137,6 +248,57 @@ output/<topic>_<timestamp>/
 シーンを「複数カット（3〜5枚）」で表現したい場合、`scenes[]` の各要素に `cuts[]` を持たせる。
 生成スクリプトは `cuts[]` を展開して画像/動画を生成する（cutごとに `image_generation` / `video_generation` を持つ）。
 
+### 4.4 Stage evaluator contracts
+
+- `research.md.evaluation_contract`
+  - `target_questions`
+  - `must_cover`
+  - `must_resolve_conflicts`
+  - `done_when`
+- `script.md.evaluation_contract`
+  - `target_arc`
+  - `must_cover`
+  - `must_avoid`
+  - `done_when`
+  - `reveal_constraints`
+- `video_manifest.md.scenes[].cuts[].scene_contract`
+  - `target_beat`
+  - `must_show`
+  - `must_avoid`
+  - `done_when`
+- `video_manifest.md.quality_check.review_contract`
+  - `target_outcome`
+  - `must_have_artifacts`
+  - `must_avoid`
+  - `done_when`
+
+### 4.5 Stage evaluator rubric families
+
+- research
+  - `source_grounding`
+  - `coverage`
+  - `conflict_readiness`
+  - `structure_readiness`
+  - `scene_mapping`
+- script
+  - `arc_coverage`
+  - `scene_specificity`
+  - `reference_grounding`
+  - `anti_todo`
+  - `production_readiness`
+- manifest(scene/cut)
+  - `beat_clarity`
+  - `visual_specificity`
+  - `continuity_readiness`
+  - `narration_alignment`
+  - `production_readiness`
+- video
+  - `render_integrity`
+  - `asset_completeness`
+  - `review_readiness`
+  - `audio_packaging`
+  - `publish_readiness`
+
 ---
 
 ## 5. `image_generation.review` contract
@@ -146,8 +308,15 @@ output/<topic>_<timestamp>/
 各 `scenes[].image_generation.review` または `scenes[].cuts[].image_generation.review` は、少なくとも次の review field を持つ。
 
 ```yaml
+contract:
+  target_focus: "character|relationship|setpiece|blocking|environment"
+  must_include: []
+  must_avoid: []
+  done_when: []
 agent_review_ok: true|false
 agent_review_reason_keys: []
+rubric_scores: {}
+overall_score: 0.0-1.0
 human_review_ok: true|false
 human_review_reason: ""
 ```
@@ -166,6 +335,12 @@ Semantics:
   - `agent_review_ok: false` の理由 key
   - false のときは空にしない
   - fix 後に subagent が `true` に戻したら空配列でよい
+- `rubric_scores`
+  - criterion score
+  - canonical 軸は `story_alignment` / `subject_specificity` / `prompt_craft` / `continuity_readiness` / `production_readiness`
+- `overall_score`
+  - rubric score の加重合計
+  - 単独では gate にせず、criterion 単位の弱点把握に使う
 - `human_review_ok`
   - 人間が finding を理解したうえで例外許容した記録
   - subagent finding 自体の解消を意味しない
@@ -175,15 +350,26 @@ Semantics:
 
 Canonical reason key:
 
-- `missing_character_ids`
-- `missing_object_ids`
-- `environment_only_prompt`
-- `missing_story_action`
-- `missing_story_relationship`
-- `continuity_anchor_missing`
-- `reference_missing`
+- `source_anchor_missing_from_prompt`
+- `missing_character_id`
+- `missing_object_id`
+- `prompt_only_local_mismatch`
+- `prompt_missing_expected_character_anchor`
+- `prompt_missing_expected_object_anchor`
+- `prompt_subject_drift`
+- `blocking_drift`
 - `missing_required_prompt_block`
-- `camera_or_composition_under_specified`
+- `prompt_not_self_contained`
+- `non_japanese_prompt_term`
+- `prompt_mentions_character_but_character_ids_empty`
+- `image_contract_missing`
+- `image_contract_must_include_unmet`
+- `image_contract_must_avoid_violated`
+- `image_contract_target_focus_unmet`
+- `image_prompt_story_alignment_weak`
+- `image_prompt_subject_specificity_weak`
+- `image_prompt_continuity_weak`
+- `image_prompt_production_readiness_weak`
 
 Lifecycle:
 
@@ -192,6 +378,18 @@ Lifecycle:
 3. fix を source manifest に反映する
 4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
 5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
+
+Image contract:
+
+- `target_focus`
+  - その cut で evaluator が最優先で読む軸
+  - `character|relationship|setpiece|blocking|environment`
+- `must_include`
+  - prompt に必ず含める anchor
+- `must_avoid`
+  - prompt に入れてはいけない drift source
+- `done_when`
+  - 生成前に満たしたい具体条件
 
 Required prompt blocks:
 
@@ -203,3 +401,83 @@ Required prompt blocks:
 - `[禁止]`
 
 subagent review は上記 6 block を必須 criterion とする。1 つでも欠けていれば `agent_review_ok: false` とし、`missing_required_prompt_block` を reason key に含める。
+
+---
+
+## 6. `audio.narration.review` contract
+
+音声生成前 gate の review 状態は `video_manifest.md` の各 renderable narration node に直接保持する。
+
+各 narration node は review の前提として `audio.narration.contract` を持てる。
+
+```yaml
+contract:
+  target_function: "opening_setup|middle_complication|ending_resolution|time|causality|inner_state|viewpoint|rule|meaning"
+  must_cover: []
+  must_avoid: []
+  done_when: []
+```
+
+各 `scenes[].audio.narration.review` または `scenes[].cuts[].audio.narration.review` は、少なくとも次の review field を持つ。
+
+```yaml
+agent_review_ok: true|false
+agent_review_reason_keys: []
+agent_review_reason_messages: []
+human_review_ok: true|false
+human_review_reason: ""
+rubric_scores: {}
+overall_score: 0.0-1.0
+```
+
+Semantics:
+
+- `agent_review_ok`
+  - narration text / tts_text が gate を満たしているかを subagent が判定した結果
+  - 未修正の finding がある間は `false`
+- `agent_review_reason_keys`
+  - `agent_review_ok: false` の理由 key
+  - false のときは空にしない
+  - fix 後に subagent が `true` に戻したら空配列でよい
+- `agent_review_reason_messages`
+  - false 理由の短い説明
+- `human_review_ok`
+  - 人間が finding を理解したうえで例外許容した記録
+  - subagent finding 自体の解消を意味しない
+- `human_review_reason`
+  - 人間 override の理由
+  - `human_review_ok: true` のときは必須
+- `rubric_scores`
+  - criterion ごとの score
+- `overall_score`
+  - weighted overall score
+
+Canonical reason key:
+
+- `narration_contract_missing`
+- `narration_contract_must_cover_unmet`
+- `narration_contract_must_avoid_violated`
+- `narration_contract_target_function_unmet`
+- `narration_empty`
+- `narration_tts_text_missing`
+- `narration_text_not_hiragana_only`
+- `tts_text_not_hiragana_only`
+- `narration_contains_meta_marker`
+- `tts_unfriendly_literal`
+- `unsupported_audio_tag_for_v2`
+- `needs_text_normalization`
+- `sentence_too_long_for_tts`
+- `missing_pause_punctuation`
+- `visual_direction_leaked_into_narration`
+- `narration_story_role_mismatch`
+- `narration_too_visual_redundant`
+- `narration_pacing_mismatch`
+- `narration_spoken_japanese_weak`
+
+Lifecycle:
+
+1. subagent が narration text を review し、finding がある node を `agent_review_ok: false` にする
+2. subagent が `agent_review_reason_keys` / `agent_review_reason_messages` を残す
+3. fix を source manifest に反映する
+4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
+5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する

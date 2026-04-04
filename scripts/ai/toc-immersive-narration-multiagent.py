@@ -103,9 +103,22 @@ def main() -> None:
             continue
         skeleton = {
             "scene_id": int(sid),
-            "cuts": [{"cut_id": i, "narration_text": ""} for i in range(1, int(args.min_cuts) + 1)],
+            "cuts": [
+                {
+                    "cut_id": i,
+                    "target_function": "",
+                    "must_cover": [],
+                    "must_avoid": [],
+                    "done_when": [],
+                    "narration_text": "",
+                    "tts_text": "",
+                }
+                for i in range(1, int(args.min_cuts) + 1)
+            ],
             "notes": [
-                "narration_text は TTS にそのまま送られる。TODO/メタ情報を書かない。",
+                "narration_text は物語用、tts_text は TTS に送るひらがな原稿として使う。",
+                "tts_text は elevenlabs 向けに、できるだけひらがなだけで書く。TODO/メタ情報を書かない。",
+                "先に target_function / must_cover / must_avoid / done_when を埋め、done 条件を明確にする。",
                 "1カット=1ナレーション。main=5–15秒、sub=3–15秒を目安に短く。",
             ],
         }
@@ -114,7 +127,15 @@ def main() -> None:
             lines.append(f"scene_id: {sid}")
             lines.append("cuts:")
             for i in range(1, int(args.min_cuts) + 1):
-                lines += [f"  - cut_id: {i}", "    narration_text: \"\""]
+                lines += [
+                    f"  - cut_id: {i}",
+                    "    target_function: \"\"",
+                    "    must_cover: []",
+                    "    must_avoid: []",
+                    "    done_when: []",
+                    "    narration_text: \"\"",
+                    "    tts_text: \"\"",
+                ]
             p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         else:
             p.write_text(yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8")

@@ -44,18 +44,41 @@ Review rule:
 
 Canonical reason key:
 
-- `missing_character_ids`
-- `missing_object_ids`
-- `environment_only_prompt`
-- `missing_story_action`
-- `missing_story_relationship`
-- `continuity_anchor_missing`
-- `reference_missing`
+- `source_anchor_missing_from_prompt`
+- `missing_character_id`
+- `missing_object_id`
+- `prompt_only_local_mismatch`
+- `prompt_missing_expected_character_anchor`
+- `prompt_missing_expected_object_anchor`
+- `prompt_subject_drift`
+- `blocking_drift`
 - `missing_required_prompt_block`
 - `prompt_not_self_contained`
 - `non_japanese_prompt_term`
 - `prompt_mentions_character_but_character_ids_empty`
-- `camera_or_composition_under_specified`
+- `image_contract_missing`
+- `image_contract_must_include_unmet`
+- `image_contract_must_avoid_violated`
+- `image_contract_target_focus_unmet`
+- `image_prompt_story_alignment_weak`
+- `image_prompt_subject_specificity_weak`
+- `image_prompt_continuity_weak`
+- `image_prompt_production_readiness_weak`
+
+Rubric:
+
+- `story_alignment`
+- `subject_specificity`
+- `prompt_craft`
+- `continuity_readiness`
+- `production_readiness`
+
+Prompt contract:
+
+- `image_generation.contract.target_focus`
+- `image_generation.contract.must_include`
+- `image_generation.contract.must_avoid`
+- `image_generation.contract.done_when`
 
 Required block review rule:
 

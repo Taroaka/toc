@@ -1,0 +1,5 @@
+- [ ] Add reusable stage evaluator helper module
+- [ ] Add research/script/manifest/video evaluator CLIs
+- [ ] Append evaluator summaries into state.txt
+- [ ] Update state schema and docs
+- [ ] Add CLI tests

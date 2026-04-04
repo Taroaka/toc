@@ -77,7 +77,7 @@ run root:
 - 音声:
   - ElevenLabs（voice/model は運用で確定）
   - **1カット=1ナレーション**（`audio.narration.output` は cut/clip ごとに分割）
-  - `audio.narration.text` は Narration Writer が確定する（`TODO:` 等のメタ情報は入れない）
+  - `audio.narration.text` は物語原稿、`audio.narration.tts_text` は ElevenLabs に送るひらがな原稿として Narration Writer が確定する（`TODO:` 等のメタ情報は入れない）
   - 先に音声だけ生成し、実秒から `duration_seconds` / `timestamp` を同期してから映像生成に進む
   - 反復中に意図的に音声を省略してサイレントで進める場合のみ `--skip-audio` を使う
   - 例外として、`visual_value.md` に基づく silent cut は `audio.narration.tool: "silent"` と `text: ""` を許可する

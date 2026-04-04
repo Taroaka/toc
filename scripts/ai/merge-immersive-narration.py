@@ -61,7 +61,7 @@ def _as_str(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _load_scratch_file(path: Path) -> tuple[int, dict[int, str]] | None:
+def _load_scratch_file(path: Path) -> tuple[int, dict[int, dict[str, Any]]] | None:
     if yaml is None:
         raise SystemExit("PyYAML is required. Install with: pip install pyyaml")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -73,17 +73,23 @@ def _load_scratch_file(path: Path) -> tuple[int, dict[int, str]] | None:
     raw_cuts = data.get("cuts")
     if not isinstance(raw_cuts, list) or not raw_cuts:
         return None
-    out: dict[int, str] = {}
+    out: dict[int, dict[str, Any]] = {}
     for c in raw_cuts:
         if not isinstance(c, dict):
             continue
         cid = _as_int(c.get("cut_id"))
         if cid is None:
             continue
-        txt = _as_str(c.get("narration_text")).strip()
-        if txt == "":
-            continue
-        out[int(cid)] = txt
+        out[int(cid)] = {
+            "text": _as_str(c.get("narration_text")).strip(),
+            "tts_text": _as_str(c.get("tts_text")).strip(),
+            "contract": {
+                "target_function": _as_str(c.get("target_function")).strip(),
+                "must_cover": [str(v).strip() for v in list(c.get("must_cover") or []) if str(v).strip()],
+                "must_avoid": [str(v).strip() for v in list(c.get("must_avoid") or []) if str(v).strip()],
+                "done_when": [str(v).strip() for v in list(c.get("done_when") or []) if str(v).strip()],
+            },
+        }
     if not out:
         return int(sid), {}
     return int(sid), out
@@ -109,7 +115,19 @@ def _ensure_audio_narration(cut_or_scene: dict, *, scene_id: int, cut_id: int | 
         narration["normalize_to_scene_duration"] = False
     if "text" not in narration:
         narration["text"] = ""
+    if "tts_text" not in narration:
+        narration["tts_text"] = ""
     return narration
+
+
+def _normalize_contract(raw: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw or {}
+    return {
+        "target_function": _as_str(raw.get("target_function")).strip(),
+        "must_cover": [str(v).strip() for v in list(raw.get("must_cover") or []) if str(v).strip()],
+        "must_avoid": [str(v).strip() for v in list(raw.get("must_avoid") or []) if str(v).strip()],
+        "done_when": [str(v).strip() for v in list(raw.get("done_when") or []) if str(v).strip()],
+    }
 
 
 def main() -> None:
@@ -145,7 +163,7 @@ def main() -> None:
         raise SystemExit(f"No scratch files found in: {scratch_dir}")
 
     available_story_scene_ids = set(story_scene_ids(raw_scenes))
-    by_scene: dict[int, dict[int, str]] = {}
+    by_scene: dict[int, dict[int, dict[str, Any]]] = {}
     for f in scratch_files:
         parsed = _load_scratch_file(f)
         if parsed is None:
@@ -179,11 +197,27 @@ def main() -> None:
                     continue
                 narration = _ensure_audio_narration(cut, scene_id=int(sid), cut_id=int(cid))
                 prev = _as_str(narration.get("text")).strip()
-                nxt = wanted[int(cid)].strip()
+                prev_tts = _as_str(narration.get("tts_text")).strip()
+                payload = wanted[int(cid)]
+                nxt = _as_str(payload.get("text")).strip()
+                nxt_tts = _as_str(payload.get("tts_text")).strip()
+                contract = _normalize_contract(payload.get("contract"))
                 if prev and not args.force:
+                    if prev_tts != nxt_tts and nxt_tts:
+                        narration["tts_text"] = nxt_tts
+                        changed_any = True
+                    if contract != _normalize_contract(narration.get("contract") if isinstance(narration.get("contract"), dict) else {}):
+                        narration["contract"] = contract
+                        changed_any = True
                     continue
                 if prev != nxt:
                     narration["text"] = nxt
+                    changed_any = True
+                if prev_tts != nxt_tts:
+                    narration["tts_text"] = nxt_tts
+                    changed_any = True
+                if contract != _normalize_contract(narration.get("contract") if isinstance(narration.get("contract"), dict) else {}):
+                    narration["contract"] = contract
                     changed_any = True
             if changed_any:
                 changed_scenes.append(int(sid))
@@ -197,12 +231,30 @@ def main() -> None:
             raise SystemExit(f"scene{sid}: no cuts in manifest; scratch must have exactly one cut_id: 1")
         narration = _ensure_audio_narration(s, scene_id=int(sid), cut_id=None)
         prev = _as_str(narration.get("text")).strip()
-        nxt = wanted[1].strip()
+        prev_tts = _as_str(narration.get("tts_text")).strip()
+        payload = wanted[1]
+        nxt = _as_str(payload.get("text")).strip()
+        nxt_tts = _as_str(payload.get("tts_text")).strip()
+        contract = _normalize_contract(payload.get("contract"))
         if prev and not args.force:
+            if prev_tts != nxt_tts and nxt_tts:
+                narration["tts_text"] = nxt_tts
+                changed_scenes.append(int(sid))
+            if contract != _normalize_contract(narration.get("contract") if isinstance(narration.get("contract"), dict) else {}):
+                narration["contract"] = contract
+                changed_scenes.append(int(sid))
             continue
         if prev != nxt:
             narration["text"] = nxt
             changed_scenes.append(int(sid))
+        if prev_tts != nxt_tts:
+            narration["tts_text"] = nxt_tts
+            if int(sid) not in changed_scenes:
+                changed_scenes.append(int(sid))
+        if contract != _normalize_contract(narration.get("contract") if isinstance(narration.get("contract"), dict) else {}):
+            narration["contract"] = contract
+            if int(sid) not in changed_scenes:
+                changed_scenes.append(int(sid))
 
     if not changed_scenes:
         print("No scenes changed.")

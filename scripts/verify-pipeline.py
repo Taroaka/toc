@@ -286,13 +286,14 @@ def _manifest_checks(checks: list[dict[str, Any]], text: str, data: dict[str, An
             narration_text_ok = False
             continue
         narration_tool = str(narration.get("tool") or "").strip().lower()
-        if profile == "standard" and narration_tool != "silent" and not non_empty(narration.get("text")):
+        rendered_text = narration.get("tts_text") if narration_tool == "elevenlabs" and "tts_text" in narration else narration.get("text")
+        if profile == "standard" and narration_tool != "silent" and not non_empty(rendered_text):
             narration_text_ok = False
 
     add_check(checks, f"{path_label}.cut_duration", duration_ok, "cut duration is <= 15 seconds", kind="rubric")
     add_check(checks, f"{path_label}.narration_field", narration_field_ok, "each renderable node has audio.narration.text", kind="rubric")
     if profile == "standard":
-        add_check(checks, f"{path_label}.narration_text", narration_text_ok, "narration text is non-empty for final manifests unless tool is silent", kind="rubric")
+        add_check(checks, f"{path_label}.narration_text", narration_text_ok, "narration text/tts_text is non-empty for final manifests unless tool is silent", kind="rubric")
     add_check(checks, f"{path_label}.asset_ids", ids_ok, "image_generation includes explicit character_ids/object_ids", kind="rubric")
 
     if flow == "immersive":

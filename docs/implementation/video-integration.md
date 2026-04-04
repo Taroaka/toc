@@ -13,15 +13,16 @@
 ## 正本ルール
 
 - **`script.md` を言語情報の正本**とする
-- `audio.narration.text` は `script.md` の narration を平易化したものであり、別の話を足さない
+- `audio.narration.text` は `script.md` の narration を平易化したものであり、別の話を足さない。現行の ElevenLabs 運用では **ひらがなだけ** を基本にする
+- `audio.narration.tts_text` は `audio.narration.text` を ElevenLabs 向けに読みへ寄せた専用字段とする
 - `image_generation.prompt` / `video_generation.motion_prompt` は `script.md` の visual beat を生成向けに翻訳したものであり、新しい物語情報を足さない
 - `scene_conte.md` は橋渡し資料であり、`script.md` と矛盾してはならない
 
 ## 映像とナレーションの役割分担
 
 - 原則: **見えることは映像にやらせる**
-- ナレーションは **見えないが重要なこと** を補う
-- 目標は、ナレーションが無くても scene の大意が通ること。その上で音声が理解の方向・因果・内面・時間を足すこと
+- ナレーションは cut の役割に応じて、必要なら **見えないが重要なこと** を補う
+- 目標は、ナレーションが無くても scene の大意が通ること。その上で音声が opening / middle / ending の役割に応じた理解を支えること
 - ナレーションは映像の説明文ではなく、観客の認知の導線を整える層として扱う
 
 ナレーションが優先して運ぶ情報:
@@ -80,20 +81,36 @@
 
 運用（例）:
 1) `video_manifest.md` を cuts 前提で書く（`scenes[].cuts[]` でも、sceneをカットとして扱ってもよい）
-   - `audio.narration.text` は **空文字**でよい（未記入）。`TODO:` のようなメタ情報は入れない（TTSで喋られて事故る）
-2) Narration Writer が `audio.narration.text`（読み上げ原稿）を確定する
-  - 原稿は平易で寄り添う話し言葉を優先し、文末は原則 `です・ます調` にする
-  - 各行は、映像だけでは取り切れない情報を最低1つ足す
-    - 例: 時間 / 内面 / 因果 / 視点 / 禁忌 / 軽い意味づけ
-  - 画面に見えている行動の単純な言い換えは避け、映像との関係は「説明」より「補完」を優先する
+   - `audio.narration.text` / `audio.narration.tts_text` は **空文字**でよい（未記入）。`TODO:` のようなメタ情報は入れない（TTSで喋られて事故る）
+2) Narration Writer が `audio.narration.text` と `audio.narration.tts_text` を確定する
+  - 先に `audio.narration.contract` を定義する
+    - `target_function`: この cut で narration が主に担う役割
+    - `must_cover`: 必ず触れる概念
+    - `must_avoid`: 直接言わない語や避けたい説明
+    - `done_when`: evaluator と共有する完了条件
+  - `audio.narration.text` は平易で寄り添う話し言葉を優先し、現行運用では **ひらがなだけ** を基本にする
+  - `audio.narration.tts_text` も ElevenLabs に送る専用字段として **ひらがなだけ** を基本にする
+  - 原稿は cut の物語上の役割に合わせる
+    - opening: 物語の入口として自然で安定した説明を優先
+    - middle: 展開 / 不安 / 因果 / 揺れを支える
+    - ending: 解決 / 帰結 / 余韻を支える
+  - opening では、画面の見えていることに近くても scene/script に忠実なら許容する
   - `script.md` の `scene_summary` は先の展開を匂わせすぎず、今その scene で起きることを素直に要約する
   - `script.md` の `visual_beat` は概要確認用の平文とし、カメラ/レンズ/構図などの制作語は入れない
    - 深い設計意図や抽象テーマは、基本的にナレーションで説明せず映像側へ置く
    - 終盤の学び/余韻パートだけ、満足感のために軽く言語化してよい
    - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
-3) 先に音声だけ生成して秒数を確定する（audio-only）
+3) Narration review を実行し、finding を source manifest に書き戻す
+  - `python scripts/review-narration-text-quality.py --manifest output/<run>/video_manifest.md`
+  - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
+  - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
+  - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
+  - `eleven_multilingual_v2` の運用前提として、`[whispers]` のような audio tag、raw な URL / 数字 / 英字略語、句読点不足、長すぎる文、`TODO` / カメラ語の混入、`tts_text` 未設定、ひらがな以外が混じった `text` / `tts_text` を false にできる
+  - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
+   - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
+4) 先に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
-4) `video_generation.duration_seconds` をナレーション秒数に合わせて更新し、その後に画像/動画生成に進む
+5) `video_generation.duration_seconds` をナレーション秒数に合わせて更新し、その後に画像/動画生成に進む
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
 
 silent cut の扱い:

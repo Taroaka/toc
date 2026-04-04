@@ -7,8 +7,15 @@ SYNC_PATH="${IMMICH_SYNC_PATH:-$DEFAULT_SYNC_PATH}"
 IMMICH_URL="${IMMICH_URL:-}"
 IMMICH_API_KEY="${IMMICH_API_KEY:-}"
 IMMICH_ALBUM="${IMMICH_ALBUM:-ToC Output}"
+IMMICH_CLI_PATH="${IMMICH_CLI_PATH:-$(command -v immich 2>/dev/null || true)}"
 
-if ! command -v immich >/dev/null 2>&1; then
+# Immich CLI 2.6.x requires Node 20+, while this machine defaults to nvm Node 18.
+# Prepending Homebrew keeps the existing global `immich` install but runs it with a newer Node.
+if [ -x "/opt/homebrew/bin/node" ]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
+
+if [ -z "$IMMICH_CLI_PATH" ] || [ ! -x "$IMMICH_CLI_PATH" ]; then
   echo "immich CLI is not installed. Run: npm install -g @immich/cli" >&2
   exit 1
 fi
@@ -28,11 +35,22 @@ if [ ! -d "$SYNC_PATH" ]; then
   exit 1
 fi
 
+IMMICH_URL="${IMMICH_URL%/}"
+if [[ "$IMMICH_URL" != */api ]]; then
+  IMMICH_API_URL="${IMMICH_URL}/api"
+else
+  IMMICH_API_URL="$IMMICH_URL"
+fi
+
 echo "Immich URL: $IMMICH_URL"
+echo "Immich API URL: $IMMICH_API_URL"
 echo "Sync path: $SYNC_PATH"
 echo "Album: $IMMICH_ALBUM"
 
-mapfile -t media_files < <(
+media_files=()
+while IFS= read -r file; do
+  media_files+=("$file")
+done < <(
   rg --files "$SYNC_PATH" \
     -g '*.png' \
     -g '*.jpg' \
@@ -51,9 +69,9 @@ if [ "${#media_files[@]}" -eq 0 ]; then
   exit 0
 fi
 
-IMMICH_INSTANCE_URL="$IMMICH_URL" \
+IMMICH_INSTANCE_URL="$IMMICH_API_URL" \
 IMMICH_API_KEY="$IMMICH_API_KEY" \
-immich upload \
+"$IMMICH_CLI_PATH" upload \
   --album "$IMMICH_ALBUM" \
   --recursive \
   "${media_files[@]}"

@@ -77,6 +77,7 @@ class SceneSpec:
     video_output: str | None
     narration_tool: str | None
     narration_text: str | None
+    narration_tts_text: str | None
     narration_output: str | None
     narration_normalize_to_scene_duration: bool
 
@@ -650,6 +651,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
                 narration_tool = None
                 narration_text = None
+                narration_tts_text = None
                 narration_output = None
                 narration_normalize = True
 
@@ -662,6 +664,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 if isinstance(narration, dict):
                     narration_tool = _as_opt_str(narration.get("tool"))
                     narration_text = _as_opt_str(narration.get("text"))
+                    narration_tts_text = _as_opt_str(narration.get("tts_text"))
                     narration_output = _as_opt_str(narration.get("output"))
                     normalize_raw = narration.get("normalize_to_scene_duration")
                     if isinstance(normalize_raw, bool):
@@ -702,6 +705,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         video_output=video_output,
                         narration_tool=narration_tool,
                         narration_text=narration_text,
+                        narration_tts_text=narration_tts_text,
                         narration_output=narration_output,
                         narration_normalize_to_scene_duration=narration_normalize,
                     )
@@ -743,6 +747,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         # narration can be nested under audio.narration or directly under narration (legacy)
         narration_tool = None
         narration_text = None
+        narration_tts_text = None
         narration_output = None
         narration_normalize = True
 
@@ -755,6 +760,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         if isinstance(narration, dict):
             narration_tool = _as_opt_str(narration.get("tool"))
             narration_text = _as_opt_str(narration.get("text"))
+            narration_tts_text = _as_opt_str(narration.get("tts_text"))
             narration_output = _as_opt_str(narration.get("output"))
             normalize_raw = narration.get("normalize_to_scene_duration")
             if isinstance(normalize_raw, bool):
@@ -795,6 +801,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 video_output=video_output,
                 narration_tool=narration_tool,
                 narration_text=narration_text,
+                narration_tts_text=narration_tts_text,
                 narration_output=narration_output,
                 narration_normalize_to_scene_duration=narration_normalize,
             )
@@ -1370,9 +1377,10 @@ def validate_scene_narration(
                 "To intentionally generate assets without narration, pass --skip-audio."
             )
 
-        if tool == "elevenlabs" and not (scene.narration_text and scene.narration_text.strip()):
+        narration_source = scene.narration_tts_text or scene.narration_text
+        if tool == "elevenlabs" and not (narration_source and narration_source.strip()):
             raise SystemExit(
-                f"scene{scene.scene_id}: missing audio.narration.text for ElevenLabs (required). "
+                f"scene{scene.scene_id}: missing audio.narration.tts_text/text for ElevenLabs (required). "
                 'For intentionally silent cuts, use audio.narration.tool: "silent" with text: "".'
             )
 
@@ -2314,6 +2322,11 @@ def main() -> None:
         help="Skip the pre-image-generation story consistency review gate.",
     )
     parser.add_argument(
+        "--skip-narration-review",
+        action="store_true",
+        help="Skip the pre-audio-generation narration text review gate.",
+    )
+    parser.add_argument(
         "--image-prompt-review-fix-character-ids",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -2581,6 +2594,16 @@ def main() -> None:
         ]
         if args.image_prompt_review_fix_character_ids:
             review_cmd.append("--fix-character-ids")
+        subprocess.run(review_cmd, check=True)
+
+    if not args.skip_audio and not args.skip_narration_review:
+        review_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/review-narration-text-quality.py"),
+            "--manifest",
+            str(manifest_path),
+            "--fail-on-findings",
+        ]
         subprocess.run(review_cmd, check=True)
 
     md = manifest_path.read_text(encoding="utf-8")
@@ -3391,9 +3414,10 @@ def main() -> None:
 
         tool = normalize_tool_name((args.override_narration_tool or "").strip() or scene.narration_tool)
         if tool == "elevenlabs":
-            if not scene.narration_text:
+            narration_source = scene.narration_tts_text or scene.narration_text
+            if not narration_source:
                 raise SystemExit(f"scene{scene.scene_id}: missing narration text for ElevenLabs TTS")
-            tts_text = scene.narration_text.strip()
+            tts_text = narration_source.strip()
             tprefix = (args.tts_prompt_prefix or "").strip()
             tsuffix = (args.tts_prompt_suffix or "").strip()
             if tprefix:
@@ -3414,9 +3438,10 @@ def main() -> None:
                 dry_run=args.dry_run,
             )
         elif tool in {"macos_say", "say"}:
-            if not scene.narration_text:
+            narration_source = scene.narration_tts_text or scene.narration_text
+            if not narration_source:
                 raise SystemExit(f"scene{scene.scene_id}: missing narration text for macos_say TTS")
-            tts_text = scene.narration_text.strip()
+            tts_text = narration_source.strip()
             tprefix = (args.tts_prompt_prefix or "").strip()
             tsuffix = (args.tts_prompt_suffix or "").strip()
             if tprefix:

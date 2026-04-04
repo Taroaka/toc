@@ -85,6 +85,19 @@ scenes:
     image_generation:
       # reference scene は continuity anchor を作るためのもの。毎sceneではない。
       # review metadata は image_generation.review 側で持つ。
+      # contract:
+      #   target_focus: "character"
+      #   must_include: []
+      #   must_avoid: []
+      #   done_when: []
+      # review:
+      #   agent_review_ok: true
+      #   agent_review_reason_keys: []
+      #   agent_review_reason_messages: []
+      #   rubric_scores: {}
+      #   overall_score: 0.0
+      #   human_review_ok: false
+      #   human_review_reason: ""
       # subagent は不足 entry を false にし、reason key を残し、fix 後に true へ戻す。
       # human override は human_review_ok / human_review_reason に記録する。
       # required block:
@@ -123,10 +136,17 @@ scenes:
       # 新規の静止画は、場所/物体/人物状態の continuity anchor が必要な scene で優先する。
       # 既存の anchor frame を再利用できる cut は、新規生成を強制しない。
       # review metadata は image_generation.review 側で持つ:
+      # contract:
+      #   target_focus: "character"
+      #   must_include: []
+      #   must_avoid: []
+      #   done_when: []
       # review:
       #   agent_review_ok: true
       #   agent_review_reason_keys: []
       #   agent_review_reason_messages: []
+      #   rubric_scores: {}
+      #   overall_score: 0.0
       #   human_review_ok: false
       #   human_review_reason: ""
       # required block:
@@ -176,7 +196,14 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
+        contract:
+          target_function: ""
+          must_cover: []
+          must_avoid: []
+          done_when: []
+        # review metadata は audio.narration.review に保持する。
         text: ""
+        tts_text: ""
         tool: "elevenlabs"
         output: "assets/audio/scene10_narration.mp3"
         normalize_to_scene_duration: false
@@ -231,6 +258,12 @@ scenes:
       output: "assets/scenes/scene20_to_30.mp4"
     audio:
       narration:
+        contract:
+          target_function: ""
+          must_cover: []
+          must_avoid: []
+          done_when: []
+        # review metadata は audio.narration.review に保持する。
         text: ""
         tool: "elevenlabs"
         output: "assets/audio/scene20_narration.mp3"

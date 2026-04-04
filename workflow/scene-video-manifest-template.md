@@ -47,10 +47,17 @@ scenes:
           # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
           # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
           # review metadata は image_generation.review 側で管理する:
+          # contract:
+          #   target_focus: "character"
+          #   must_include: []
+          #   must_avoid: []
+          #   done_when: []
           # review:
           #   agent_review_ok: true
           #   agent_review_reason_keys: []
           #   agent_review_reason_messages: []
+          #   rubric_scores: {}
+          #   overall_score: 0.0
           #   human_review_ok: false
           #   human_review_reason: ""
           # false reason は修正対象を示し、fix 後に subagent が true へ戻す。
@@ -94,6 +101,12 @@ scenes:
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
           narration:
+            contract:
+              target_function: ""
+              must_cover: []
+              must_avoid: []
+              done_when: []
+            # review metadata は audio.narration.review に保持する。
             text: "TODO: ナレーション（メイン=5–15秒。複数カットなら Part 1/2 等）"
             tool: "elevenlabs"
             output: "assets/audio/scene1_cut1_narration.mp3"
@@ -138,6 +151,12 @@ scenes:
           output: "assets/scenes/scene1_cut2_video.mp4"
         audio:
           narration:
+            contract:
+              target_function: ""
+              must_cover: []
+              must_avoid: []
+              done_when: []
+            # review metadata は audio.narration.review に保持する。
             text: "TODO: ナレーション（サブ=3–15秒。短尺3–4秒はサブカットとしてのみ使用）"
             tool: "elevenlabs"
             output: "assets/audio/scene1_cut2_narration.mp3"
