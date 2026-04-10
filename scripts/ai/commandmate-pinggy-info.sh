@@ -18,7 +18,7 @@ fi
 
 if [ -f "$URL_PATH" ]; then
   echo "URLs"
-  grep 'free.pinggy.link' "$URL_PATH" | while IFS= read -r url; do
+  grep 'pinggy' "$URL_PATH" | while IFS= read -r url; do
     echo "$url"
     echo "${url}/login"
   done

@@ -10,7 +10,49 @@
 
 ---
 
-## 1) データ契約（manifest-first）
+## 1) データ契約（asset stage → manifest）
+
+画像生成は 2 段で扱う。
+
+1. asset stage
+   - `asset_plan.md` を作り、人が review してから reusable asset を生成する
+2. cut stage
+   - 既存どおり `video_manifest.md` に materialize された bible / reference を使って各 cut を生成する
+
+asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに human review で
+
+- どの画像を参照するか
+- 背景としてだけ使うか
+- 先に別 asset を作ってから派生を作るか
+
+のような指示が入った場合は、まず `asset_plan.md` で受ける。
+
+### 1.0 `asset_plan.md`
+
+- asset 設計と review の正本
+- `workflow/asset-plan-template.yaml` を基準にする
+- approved 後に実 asset を作り、cut stage が参照する
+- 各 asset entry は `creation_status: planned|created|stale|missing` を持ち、すでに作成済みの asset は `existing_outputs[]` に実ファイルを記録する
+- asset を作る本筋目的は、複数 cut で同じ visual identity を再利用し、同一 cut 内でも関連 asset を派生させながら物語の視覚表現をブレさせないこと
+- つまり asset は「先に作ると便利な画像」ではなく、「後続 cut の continuity anchor」として扱う
+- 同一人物の state/time variant は、main の `character_reference` を基準に派生させる
+- variant entry では `generation_plan.reference_inputs[]` に main reference を入れ、`generation_plan.derived_from_asset_id` で元 asset を明示する
+- 例: `urashima_old` は `urashima` の front / side / back を参照して作り、別人としてゼロから起こさない
+- 同じ場所の昼夜差分、現在/未来差分、状態違いも同じで、main の `location_anchor` または `reusable_still` から派生させる
+- 例: 昼の浜辺 anchor を先に作り、夜の浜辺 anchor は `derived_from_asset_id` で昼 anchor を参照して作る
+- 例: 浜辺の現在と未来も、同じ場所として continuity を保ちたいなら main beach anchor を基準に派生させる
+- `source_script_selectors[]` は使用箇所の記録であり、`reference_inputs[]` とは別物
+- `reference_inputs[]` は同一人物 variant / 同一場所 variant / same-camera 派生のときだけ使う
+- 独立した location anchor は原則 `reference_inputs: []`
+- ただし、同じ建物の中でも物語上は別エリアなら、無理に派生させない
+- 例: 竜宮城の宴会エリアと foyer は別 `location_anchor` にしてよい
+- このとき「奥に宴会エリアが見える」のような関係は、派生ではなく `reference_usage.mode=background_glimpse` などで表す
+
+移行中 run の扱い:
+
+- 浦島 run のように設計試行錯誤の途中で、先に scene still ができてから asset に昇格される例外はありうる
+- これは移行中の互換運用であり、本来フローでは asset stage が先、cut stage が後
+- 将来の run では、scene still がそのまま asset 正本になる前提では進めない
 
 正本は `/toc-immersive-ride` の `video_manifest.md`（`assets` 内）:
 

@@ -1,6 +1,8 @@
 ---
 name: neta-collector
-description: ネタ収集の入口。カテゴリ（各国物語/自己啓発人物/AI発案/時代解説）を確認し、該当スキルで候補出し→1本深掘り（ToCに落とし込める形）まで出す。制作向けの“使えるネタ”を短時間で増やしたい時に使用。
+description: |
+  Route ToC idea collection across folklore, self-help figures, original AI concepts, and era explainers, then produce either a slate or a deep dive.
+  Use when: the user asks for video topic ideas, wants more candidate concepts, has not chosen a genre yet, or needs the right ToC idea-generation path selected quickly.
 ---
 
 # Neta Collector（ネタ収集: 入口/ルータ）
@@ -65,4 +67,3 @@ description: ネタ収集の入口。カテゴリ（各国物語/自己啓発人
 - 断定しない（特に固有名詞・年代・資産/収入・論争点）
 - 近代の再話/翻案や特定コンテンツの文章をなぞらない（骨格を自分の言葉で）
 - センシティブ領域（宗教/民族/植民地主義/医療/投資）は注意点を先に出す
-

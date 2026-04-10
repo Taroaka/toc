@@ -1,0 +1,5 @@
+- [x] manifest/template に deleted cut contract を追加する
+- [x] request materialization で deleted cut を除外し、除外レポートを出す
+- [x] concat list 生成で deleted cut を除外し、除外レポートを出す
+- [x] current run の scene5/6 review 差分を反映する
+- [x] 回帰テストを追加する

@@ -5,11 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${HOME}/.commandmate"
 LOG_PATH="${STATE_DIR}/pinggy.log"
 URL_PATH="${STATE_DIR}/pinggy-urls.txt"
+START_LOG_PATH="${STATE_DIR}/last-start.log"
+TOKEN_PATH="${STATE_DIR}/last-auth-token.txt"
 SESSION_NAME="commandmate-pinggy"
 
 mkdir -p "$STATE_DIR"
 
-"$SCRIPT_DIR/commandmate-start-lan-http.sh" >/dev/null
+"$SCRIPT_DIR/commandmate.sh" stop >/dev/null 2>&1 || true
+
+OUTPUT="$("$SCRIPT_DIR/commandmate.sh" start --auth --daemon --allow-http 2>&1)"
+printf '%s\n' "$OUTPUT" | tee "$START_LOG_PATH" >/dev/null
+
+TOKEN="$(printf '%s\n' "$OUTPUT" | LC_ALL=C perl -pe 's/\e\[[0-9;]*m//g' | awk '/Authentication token/{getline; gsub(/^[[:space:]]+/, "", $0); sub(/^\[INFO\][[:space:]]*/, "", $0); print $0}' | tail -1)"
+if [ -n "$TOKEN" ]; then
+  printf '%s\n' "$TOKEN" > "$TOKEN_PATH"
+fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   echo "Pinggy tunnel already running"

@@ -92,6 +92,8 @@ scenes:
     cuts:
       - cut_id: 1  # dotted numeric string も可: 2.1
         cut_role: "main"  # main|sub
+        cut_status: "active|deleted"
+        deletion_reason: ""
         implementation_trace:
           source_request_ids: []
           status: "implemented|verified|waived"
@@ -138,9 +140,9 @@ scenes:
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           # 1 つでも欠けていれば subagent review は false にする。
-          # tool: "google_nanobanana_pro"
+          # tool: "google_nanobanana_2"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           character_ids: ["protagonist"]  # Use [] when no character is visible
           character_variant_ids: []         # Optional: ["protagonist_battle_damaged"] when a specific state/time variant is needed
           object_ids: []                    # Use [] when no setpiece / prop anchor is required
@@ -160,6 +162,11 @@ scenes:
           output: "assets/scenes/scene1_cut1_base.png"
           iterations: 4
           selected: 1
+        still_image_plan:
+          mode: "generate_still|reuse_anchor|no_dedicated_still"
+          generation_status: "missing|created|recreate"
+          rationale: ""
+          source: ""
         still_assets:
           - asset_id: "scene1_cut1_base"
             role: "primary"
@@ -174,7 +181,7 @@ scenes:
               status: "implemented|verified|waived"
               notes: ""
             image_generation:
-              tool: "google_nanobanana_pro"
+              tool: "google_nanobanana_2"
               character_ids: ["protagonist"]
               object_ids: []
               location_ids: []

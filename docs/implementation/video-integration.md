@@ -18,6 +18,20 @@
 - `image_generation.prompt` / `video_generation.motion_prompt` は `script.md` の visual beat を生成向けに翻訳したものであり、新しい物語情報を足さない
 - `scene_conte.md` は橋渡し資料であり、`script.md` と矛盾してはならない
 
+補足:
+
+- `script.md` は **意味設計の正本**
+- `video_manifest.md` は **生成実装の正本**
+- `audio.narration.tts_text` は TTS 専用であり、image/video generation の主ソースにしない
+
+generator の既定参照順:
+
+1. `video_manifest.md`
+2. `script.md`
+3. narration / `tts_text` は補助参照
+
+特に image/video generation では、`script.md` の `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` を参照してよいが、実行前にそれらが `video_manifest.md` の contract へ materialize されていることを前提にする。
+
 ## 映像とナレーションの役割分担
 
 - 原則: **見えることは映像にやらせる**

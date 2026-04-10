@@ -189,6 +189,33 @@ human_change_requests:
 - `update_scene_contract` を使って `target_beat / must_show / must_avoid / done_when` を追従更新してよい
 - `scene_id` / `cut_id` は dotted numeric string を許可する
 - renumber しても `original_selectors[]` と `current_selectors[]` を残す
+- asset に関する指示は、後段の `asset_plan.md` で materialize される前提で `source_script_selectors[]` を辿れるように残す
+
+### 1.6.1 Script と Manifest の責務境界
+
+`script.md` は **物語と映像意図の正本**、`video_manifest.md` は **生成実装の正本** とする。
+
+- `script.md` が持つもの
+  - `scene_summary`
+  - `visual_beat`
+  - reveal 順序
+  - `narration`
+  - `tts_text`
+  - 人レビューで来た image/video 指示
+- `script.md` が持ちすぎないもの
+  - provider 固有 prompt 文法
+  - 実行パラメータ
+  - 依存解決済みの asset wiring 全体
+
+原則:
+
+- `script.md` は image/video をまったく語らない文書にはしない
+- ただし、image/video の **生成方法そのもの** を主責務にしない
+- `tts_text` は TTS 専用の spoken form であり、image/video generation の主ソースにしない
+
+したがって、`script.md` は「何を見せるか」「何をまだ見せてはいけないか」「人レビューでどの参照画像や演出意図が入ったか」を保持し、`video_manifest.md` がそれを prompt / asset / motion / continuity へ materialize する。
+
+ただし reusable asset の設計は cut stage より前に独立して扱ってよい。asset に関する human request は、まず `asset_plan.md` に集約し、その review / approve 後に asset を生成し、cut stage がそれを参照する。
 
 ### 1.7 Narration Distance Policy
 

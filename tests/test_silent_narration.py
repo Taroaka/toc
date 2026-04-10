@@ -25,7 +25,7 @@ class TestSilentNarration(unittest.TestCase):
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: []
       prompt: "scene"
@@ -64,7 +64,7 @@ scenes:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: []
       prompt: "scene"

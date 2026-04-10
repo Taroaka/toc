@@ -115,6 +115,15 @@ output/<topic>_<timestamp>/
 - 具体は `docs/implementation/video-integration.md` を参照
 - 画像生成の review 正本は `video_manifest.md` 自体
 - `review-image-prompt-story-consistency.py` は manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む
+- reusable asset が多い run では、cut 画像生成の前に `asset_plan.md` を作って review / approve してから asset を生成する
+- image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
+- provider 実行前に request file を materialize できる
+  - asset stage: `asset_generation_requests.md`
+  - cut image stage: `image_generation_requests.md`
+  - video stage: `video_generation_requests.md`
+- `python scripts/generate-assets-from-manifest.py --manifest ... --materialize-request-files-only` で request file だけ更新できる
+- 同時に `generation_exclusion_report.md` も更新され、`cut_status: deleted` の cut が request / generation / concat から外れることを確認できる
+- 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
 - `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
 - ナレーション文面の human review 正本は `script.md`
   - `script.md` の `narration` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する
@@ -168,6 +177,17 @@ python scripts/sync-narration-from-script.py \
 - story still の既定生成対象は `still_image_plan.mode: generate_still` のみ
   - `reuse_anchor` / `no_dedicated_still` は既定では生成しない
   - 例外的に広げるときだけ `--image-plan-modes generate_still,reuse_anchor` のように指定する
+- `image_generation_requests.md` には review 用に image prompt を持つ全 scene/cut を出す
+  - `still_mode` と `generation_status` を見れば、新規生成 / 再利用 / bridge の扱いが分かる
+  - `generation_status` は `missing|created|recreate`
+  - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
+  - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
+  - `recreate` を実際に回すときは `--force` を使う
+  - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする
+  - `--force --test-image-variants N` を併用すれば exploratory variant を複数出せる
+- `scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する
+  - `cut_status: deleted` の cut は `video_clips.txt` / `video_narration_list.txt` から自動で除外される
+  - 最終 render はこの concat list を正本として使う
 - `--apply-asset-guides --asset-guides-character-refs scene` で人物 still を回す場合、既存の `assets/characters/*_refstrip.png` は reference に自動で追加される
 
 例（`momotaro` のマニフェストから素材生成→結合）:

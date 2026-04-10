@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,10 @@ class SceneSpec:
     narration_silence_kind: str | None
     narration_silence_reason: str | None
     still_assets: list[dict[str, Any]]
+    still_image_generation_status: str | None = None
+    still_image_plan_source: str | None = None
+    cut_status: str | None = None
+    deletion_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,10 +154,21 @@ class ObjectBibleEntry:
 
 
 @dataclass(frozen=True)
+class LocationBibleEntry:
+    location_id: str | None
+    reference_images: list[str]
+    reference_variants: list[ReferenceVariantSpec]
+    fixed_prompts: list[str]
+    review_aliases: list[str]
+    notes: str | None
+
+
+@dataclass(frozen=True)
 class AssetGuides:
     character_bible: list[CharacterBibleEntry]
     style_guide: StyleGuideSpec | None
     object_bible: list[ObjectBibleEntry]
+    location_bible: list[LocationBibleEntry]
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -288,7 +304,7 @@ def _parse_physical_scale_spec(raw_scale: Any) -> PhysicalScaleSpec | None:
 
 def _parse_assets_spec(assets: Any) -> AssetGuides:
     if not isinstance(assets, dict):
-        return AssetGuides(character_bible=[], style_guide=None, object_bible=[])
+        return AssetGuides(character_bible=[], style_guide=None, object_bible=[], location_bible=[])
 
     # character bible
     character_bible: list[CharacterBibleEntry] = []
@@ -351,7 +367,29 @@ def _parse_assets_spec(assets: Any) -> AssetGuides:
                 )
             )
 
-    return AssetGuides(character_bible=character_bible, style_guide=style_guide, object_bible=object_bible)
+    location_bible: list[LocationBibleEntry] = []
+    raw_lb = assets.get("location_bible")
+    if isinstance(raw_lb, list):
+        for item in raw_lb:
+            if not isinstance(item, dict):
+                continue
+            location_bible.append(
+                LocationBibleEntry(
+                    location_id=_as_opt_str(item.get("location_id")),
+                    reference_images=_ensure_str_list(item.get("reference_images")),
+                    reference_variants=_parse_reference_variants(item.get("reference_variants") or item.get("variants")),
+                    fixed_prompts=_ensure_str_list(item.get("fixed_prompts")),
+                    review_aliases=_ensure_str_list(item.get("review_aliases")),
+                    notes=_as_opt_str(item.get("notes")),
+                )
+            )
+
+    return AssetGuides(
+        character_bible=character_bible,
+        style_guide=style_guide,
+        object_bible=object_bible,
+        location_bible=location_bible,
+    )
 
 
 def _coerce_still_assets(raw_node: Any) -> list[dict[str, Any]]:
@@ -518,6 +556,10 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 narration_silence_kind=None,
                 narration_silence_reason=None,
                 still_assets=[],
+                still_image_generation_status=None,
+                still_image_plan_source=None,
+                cut_status=None,
+                deletion_reason=None,
             )
             continue
 
@@ -541,6 +583,12 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                     current.duration_seconds = int(raw_dur)
                 except ValueError:
                     current.duration_seconds = None
+            continue
+        if key == "cut_status" and "scenes" in context_keys:
+            current.cut_status = _parse_yaml_scalar(value)
+            continue
+        if key == "deletion_reason" and "scenes" in context_keys:
+            current.deletion_reason = _parse_yaml_scalar(value)
             continue
 
         # image generation
@@ -633,7 +681,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
     vm = data.get("video_metadata")
     metadata = {}
     if isinstance(vm, dict):
-        for key in ("topic", "aspect_ratio", "resolution"):
+        for key in ("topic", "experience", "aspect_ratio", "resolution"):
             if key in vm:
                 metadata[key] = _as_opt_str(vm.get(key))
 
@@ -690,6 +738,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
                 cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
                 still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
+                still_image_generation_status = _normalize_generation_status(cut_still_plan.get("generation_status")) if isinstance(cut_still_plan, dict) else None
+                still_image_plan_source = _as_opt_str(cut_still_plan.get("source")) if isinstance(cut_still_plan, dict) else None
+                cut_status = _as_opt_str(raw_cut.get("cut_status"))
+                deletion_reason = _as_opt_str(raw_cut.get("deletion_reason"))
                 image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
                 image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
                 image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
@@ -792,6 +844,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         narration_silence_kind=narration_silence_kind,
                         narration_silence_reason=narration_silence_reason,
                         still_assets=cut_still_assets,
+                        still_image_generation_status=still_image_generation_status,
+                        still_image_plan_source=still_image_plan_source,
+                        cut_status=cut_status,
+                        deletion_reason=deletion_reason,
                     )
                 )
             continue
@@ -808,6 +864,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
         scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
         still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
+        still_image_generation_status = _normalize_generation_status(scene_still_plan.get("generation_status")) if isinstance(scene_still_plan, dict) else None
+        still_image_plan_source = _as_opt_str(scene_still_plan.get("source")) if isinstance(scene_still_plan, dict) else None
+        cut_status = _as_opt_str(raw_scene.get("cut_status"))
+        deletion_reason = _as_opt_str(raw_scene.get("deletion_reason"))
         image_references = _ensure_str_list(ig.get("references")) if isinstance(ig, dict) else []
         image_character_ids_present = isinstance(ig, dict) and ("character_ids" in ig)
         image_character_ids = _ensure_str_list(ig.get("character_ids")) if isinstance(ig, dict) else []
@@ -911,6 +971,10 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 narration_silence_kind=narration_silence_kind,
                 narration_silence_reason=narration_silence_reason,
                 still_assets=scene_still_assets,
+                still_image_generation_status=still_image_generation_status,
+                still_image_plan_source=still_image_plan_source,
+                cut_status=cut_status,
+                deletion_reason=deletion_reason,
             )
         )
 
@@ -922,7 +986,7 @@ def parse_manifest_yaml_full(yaml_text: str) -> tuple[dict, AssetGuides, list[Sc
         return _parse_manifest_yaml_pyyaml(yaml_text)
     except Exception:
         metadata, scenes = _parse_manifest_yaml_minimal(yaml_text)
-        return metadata, AssetGuides(character_bible=[], style_guide=None, object_bible=[]), scenes
+        return metadata, AssetGuides(character_bible=[], style_guide=None, object_bible=[], location_bible=[]), scenes
 
 
 def parse_manifest_yaml(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
@@ -941,11 +1005,37 @@ def _scene_matches_filter(scene: SceneSpec, scene_filter: set[str] | None) -> bo
     )
 
 
+def _scene_is_deleted(scene: SceneSpec) -> bool:
+    return (scene.cut_status or "").strip().lower() == "deleted"
+
+
 def _should_generate_story_still_by_plan(scene: SceneSpec, allowed_modes: set[str]) -> bool:
     mode = (scene.still_image_plan_mode or "").strip().lower()
     if not mode:
         return False
     return mode in allowed_modes
+
+
+def _normalize_generation_status(value: Any) -> str | None:
+    raw = _as_opt_str(value)
+    if not raw:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"missing", "created", "recreate"}:
+        return normalized
+    return None
+
+
+def _effective_still_generation_status(scene: SceneSpec, *, base_dir: Path) -> str:
+    explicit = _normalize_generation_status(scene.still_image_generation_status)
+    if explicit:
+        return explicit
+    outp = resolve_path(base_dir, scene.image_output) if scene.image_output else None
+    if outp and outp.exists():
+        return "created"
+    if (scene.still_image_plan_mode or "").strip().lower() == "no_dedicated_still":
+        return "created"
+    return "missing"
 
 
 def _should_generate_image_scene(scene: SceneSpec, *, allowed_story_modes: set[str], base_dir: Path) -> bool:
@@ -954,7 +1044,23 @@ def _should_generate_image_scene(scene: SceneSpec, *, allowed_story_modes: set[s
     outp = resolve_path(base_dir, scene.image_output)
     if outp and (_is_character_ref_path(outp) or _is_object_ref_path(outp)):
         return True
+    explicit_status = _normalize_generation_status(scene.still_image_generation_status)
+    if explicit_status == "created":
+        return False
+    if explicit_status in {"missing", "recreate"}:
+        return True
     return _should_generate_story_still_by_plan(scene, allowed_story_modes)
+
+
+def _archive_existing_image_for_recreate(*, out_path: Path, base_dir: Path, test_image_dir: str) -> Path | None:
+    if not out_path.exists():
+        return None
+    archive_dir = resolve_path(base_dir, test_image_dir) or (base_dir / "assets/test")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    archived = archive_dir / f"{out_path.stem}__recreate_backup_{timestamp}{out_path.suffix}"
+    shutil.move(str(out_path), str(archived))
+    return archived
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -1175,7 +1281,63 @@ def _expand_character_bible_with_existing_refstrips(
         character_bible=expanded_cb,
         style_guide=guides.style_guide,
         object_bible=guides.object_bible,
+        location_bible=guides.location_bible,
     )
+
+
+def merge_asset_references_into_scene(*, scene: SceneSpec, guides: AssetGuides, character_refs_mode: str) -> None:
+    style_refs = guides.style_guide.reference_images if guides.style_guide else []
+    merged_refs = _merge_refs(scene.image_references or [], style_refs, exclude=scene.image_output)
+
+    mode_norm = (character_refs_mode or "").strip().lower()
+    selected_character_variant_ids = set(scene.image_character_variant_ids or [])
+    selected_object_variant_ids = set(scene.image_object_variant_ids or [])
+    selected_location_variant_ids = set(scene.image_location_variant_ids or [])
+
+    if mode_norm == "scene":
+        chosen_character_ids = set(scene.image_character_ids or [])
+        char_refs: list[str] = []
+        for entry in guides.character_bible or []:
+            selected_variants = _selected_reference_variants(entry.reference_variants, selected_character_variant_ids)
+            if selected_variants:
+                for variant in selected_variants:
+                    char_refs.extend(variant.reference_images or [])
+                continue
+            if chosen_character_ids and entry.character_id in chosen_character_ids:
+                char_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
+        merged_refs = _merge_refs(merged_refs, _dedupe_keep_order(char_refs), exclude=scene.image_output)
+    else:
+        merged_refs = _merge_refs(
+            merged_refs,
+            _asset_guides_character_refs_to_add(guides, character_refs_mode),
+            exclude=scene.image_output,
+        )
+
+    chosen_object_ids = set(scene.image_object_ids or [])
+    obj_refs: list[str] = []
+    if chosen_object_ids or selected_object_variant_ids:
+        for entry in (guides.object_bible or []):
+            selected_variants = _selected_reference_variants(entry.reference_variants, selected_object_variant_ids)
+            if selected_variants:
+                for variant in selected_variants:
+                    obj_refs.extend(variant.reference_images or [])
+                continue
+            if chosen_object_ids and entry.object_id in chosen_object_ids:
+                obj_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
+    merged_refs = _merge_refs(merged_refs, _dedupe_keep_order(obj_refs), exclude=scene.image_output)
+
+    chosen_location_ids = set(scene.image_location_ids or [])
+    location_refs: list[str] = []
+    if chosen_location_ids or selected_location_variant_ids:
+        for entry in (guides.location_bible or []):
+            selected_variants = _selected_reference_variants(entry.reference_variants, selected_location_variant_ids)
+            if selected_variants:
+                for variant in selected_variants:
+                    location_refs.extend(variant.reference_images or [])
+                continue
+            if chosen_location_ids and entry.location_id in chosen_location_ids:
+                location_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
+    scene.image_references = _merge_refs(merged_refs, _dedupe_keep_order(location_refs), exclude=scene.image_output)
 
 
 def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, character_refs_mode: str) -> None:
@@ -1187,53 +1349,17 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
     This is an opt-in helper intended to reduce per-scene copy/paste while keeping prompts structured.
     """
 
-    # references
-    style_refs = []
-    if guides.style_guide:
-        style_refs = guides.style_guide.reference_images or []
-
-    mode_norm = (character_refs_mode or "").strip().lower()
-    selected_character_variant_ids = set(scene.image_character_variant_ids or [])
-    selected_object_variant_ids = set(scene.image_object_variant_ids or [])
-    if mode_norm == "scene":
-        chosen_character_ids = set(scene.image_character_ids or [])
-        char_refs: list[str] = []
-        for entry in guides.character_bible:
-            selected_variants = _selected_reference_variants(entry.reference_variants, selected_character_variant_ids)
-            if selected_variants:
-                for variant in selected_variants:
-                    char_refs.extend(variant.reference_images or [])
-                continue
-            if chosen_character_ids and entry.character_id in chosen_character_ids:
-                char_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
-        char_refs = _dedupe_keep_order(char_refs)
-    else:
-        char_refs = _asset_guides_character_refs_to_add(guides, character_refs_mode)
-
-    merged_refs = _merge_refs(scene.image_references or [], style_refs, exclude=scene.image_output)
-    merged_refs = _merge_refs(merged_refs, char_refs, exclude=scene.image_output)
-
-    # Add object/setpiece reference images based on explicit per-scene object_ids.
-    obj_refs: list[str] = []
-    chosen_object_ids = set(scene.image_object_ids or [])
-    if chosen_object_ids or selected_object_variant_ids:
-        for entry in (guides.object_bible or []):
-            selected_variants = _selected_reference_variants(entry.reference_variants, selected_object_variant_ids)
-            if selected_variants:
-                for variant in selected_variants:
-                    obj_refs.extend(variant.reference_images or [])
-                continue
-            if chosen_object_ids and entry.object_id in chosen_object_ids:
-                obj_refs.extend(_default_reference_images(entry.reference_images, entry.reference_variants))
-        obj_refs = _dedupe_keep_order(obj_refs)
-    merged_refs = _merge_refs(merged_refs, obj_refs, exclude=scene.image_output)
-    scene.image_references = merged_refs
+    merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode=character_refs_mode)
 
     # prompt injection
     if not scene.image_prompt:
         return
 
     prompt = scene.image_prompt
+    merged_refs = list(scene.image_references or [])
+    mode_norm = (character_refs_mode or "").strip().lower()
+    selected_character_variant_ids = set(scene.image_character_variant_ids or [])
+    selected_object_variant_ids = set(scene.image_object_variant_ids or [])
 
     global_lines: list[str] = []
     if guides.style_guide and guides.style_guide.visual_style:
@@ -1466,6 +1592,8 @@ def validate_scene_narration(
         return
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
             continue
         # Narration is required only for scenes/cuts that participate in video generation.
         if not scene.video_tool and not scene.video_output:
@@ -2413,6 +2541,8 @@ def normalize_tool_name(tool: str | None) -> str:
     # Safety: treat Veo tool names as Kling to avoid accidental paid Google video calls.
     if normalized in {"google_veo_3_1", "veo", "veo_3_1", "veo3", "veo_3"}:
         return "kling_3_0_omni"
+    if normalized in {"google_nanobanana_pro", "nanobanana_pro", "google_nanobanana_2", "nanobanana_2"}:
+        return "google_nanobanana_2"
     return normalized
 
 
@@ -2531,6 +2661,210 @@ def resolve_path(base_dir: Path, maybe_path: str | None) -> Path | None:
     return p if p.is_absolute() else (base_dir / p)
 
 
+def _derive_test_variant_output_path(base_dir: Path, source_output: str | None, variant_index: int, test_dir: str) -> Path | None:
+    out_path = resolve_path(base_dir, source_output)
+    if out_path is None:
+        return None
+    stem = out_path.stem
+    suffix = out_path.suffix or ".png"
+    target_dir = resolve_path(base_dir, test_dir)
+    if target_dir is None:
+        return None
+    return target_dir / f"{stem}__test_v{variant_index:02d}{suffix}"
+
+
+def _compose_final_image_prompt(scene: SceneSpec, *, prefix: str, suffix: str) -> str:
+    prompt = (scene.image_prompt or "").strip()
+    if prefix:
+        prompt = prefix + "\n\n" + prompt if prompt else prefix
+    if suffix:
+        prompt = prompt + "\n\n" + suffix if prompt else suffix
+    return prompt.strip()
+
+
+def _compose_final_video_prompt(scene: SceneSpec, *, prefix: str, suffix: str) -> str:
+    prompt_parts: list[str] = []
+    if scene.video_motion_prompt:
+        prompt_parts.append(scene.video_motion_prompt.strip())
+    if scene.image_prompt:
+        prompt_parts.append("シーン説明:\n" + scene.image_prompt.strip())
+    prompt = "\n\n".join(prompt_parts).strip()
+    if prefix:
+        prompt = prefix + "\n\n" + prompt if prompt else prefix
+    if suffix:
+        prompt = prompt + "\n\n" + suffix if prompt else suffix
+    return prompt.strip()
+
+
+def _write_request_preview_md(
+    *,
+    out_path: Path,
+    title: str,
+    entries: list[dict[str, Any]],
+    topic: str = "",
+) -> None:
+    lines: list[str] = [f"# {title}", ""]
+    if not entries:
+        lines.extend(["該当エントリはありません。", ""])
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    for entry in entries:
+        lines.append(f"## {entry['selector']}")
+        lines.append("")
+        lines.append(f"- tool: `{entry['tool']}`")
+        if entry.get("still_mode"):
+            lines.append(f"- still_mode: `{entry['still_mode']}`")
+        if entry.get("generation_status"):
+            lines.append(f"- generation_status: `{entry['generation_status']}`")
+        if entry.get("plan_source"):
+            lines.append(f"- plan_source: `{entry['plan_source']}`")
+        lines.append(f"- output: `{entry['output']}`")
+        if entry.get("first_frame"):
+            lines.append(f"- first_frame: `{entry['first_frame']}`")
+        if entry.get("last_frame"):
+            lines.append(f"- last_frame: `{entry['last_frame']}`")
+        refs = entry.get("references") or []
+        if refs:
+            lines.append("- references:")
+            for ref in refs:
+                lines.append(f"  - `{ref}`")
+        else:
+            lines.append("- references: `[]`")
+        lines.append("")
+        lines.append("```text")
+        lines.append(
+            _rewrite_request_prompt_for_review(
+                prompt=entry.get("prompt") or "",
+                output=entry.get("output") or "",
+                references=list(entry.get("references") or []),
+                topic=topic,
+            ).rstrip()
+        )
+        lines.append("```")
+        lines.append("")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_generation_exclusion_report_md(*, out_path: Path, scenes: list[SceneSpec]) -> None:
+    deleted_scenes = [scene for scene in scenes if _scene_is_deleted(scene)]
+    lines: list[str] = ["# Generation Exclusion Report", ""]
+    if not deleted_scenes:
+        lines.extend(["除外対象はありません。", ""])
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    for scene in deleted_scenes:
+        lines.append(f"## {scene.selector or make_scene_cut_selector(scene.scene_id)}")
+        lines.append("")
+        lines.append("- status: `deleted`")
+        if scene.deletion_reason:
+            lines.append(f"- reason: {scene.deletion_reason}")
+        skipped: list[str] = []
+        if scene.image_output:
+            skipped.append(f"`{scene.image_output}`")
+        if scene.video_output:
+            skipped.append(f"`{scene.video_output}`")
+        if scene.narration_output:
+            skipped.append(f"`{scene.narration_output}`")
+        if skipped:
+            lines.append("- skipped_outputs:")
+            for item in skipped:
+                lines.append(f"  - {item}")
+        else:
+            lines.append("- skipped_outputs: `[]`")
+        lines.append("")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _rewrite_request_prompt_for_review(*, prompt: str, output: str, references: list[str], topic: str = "") -> str:
+    text = (prompt or "").strip()
+    if not text:
+        return ""
+
+    has_refs = bool(references)
+    output_norm = (output or "").replace("\\", "/")
+    is_character_asset = "/assets/characters/" in f"/{output_norm}"
+    is_object_asset = "/assets/objects/" in f"/{output_norm}"
+    is_location_asset = "/assets/locations/" in f"/{output_norm}"
+    is_story_scene = "/assets/scenes/" in f"/{output_norm}"
+    topic_norm = (topic or "").strip()
+
+    text = text.replace("（以後のsceneで一貫性を保つため）", "")
+    text = text.replace("（連続性アンカー）", "")
+    text = re.sub(r"[ \t]{2,}", " ", text)
+
+    if is_character_asset:
+        text = text.replace("の参照画像。", "のキャラクター基準画像。")
+        text = text.replace("参照画像のため", "基準画像のため")
+    elif is_object_asset:
+        text = text.replace("の参照画像。", "の小道具基準画像。")
+        text = text.replace("参照画像のため", "基準画像のため")
+
+    if has_refs:
+        text = re.sub(
+            r"参照画像と完全一致（(.+?)）",
+            r"参照画像に写っている\1をこの cut でも維持する",
+            text,
+        )
+        text = re.sub(
+            r"後続sceneでも(.+?)を変えないための基準画像にする。",
+            r"参照画像に写っている\1を読み取れる基準画像にする。",
+            text,
+        )
+        text = re.sub(
+            r"連続性アンカー:\s*(.+?)。",
+            r"参照画像に写っている\1を、この cut の画面内でも維持する。",
+            text,
+        )
+    else:
+        text = re.sub(
+            r"参照画像と完全一致（(.+?)）",
+            r"\1をこの cut でも維持する",
+            text,
+        )
+        text = re.sub(
+            r"後続sceneでも(.+?)を変えないための基準画像にする。",
+            r"\1を読み取れる基準画像にする。",
+            text,
+        )
+        text = re.sub(
+            r"連続性アンカー:\s*(.+?)。",
+            r"\1を、この cut の画面内でも維持する。",
+            text,
+        )
+        text = text.replace("参照画像のため", "この画像では")
+
+    text = text.replace("以後のscene", "この画像")
+    text = text.replace("後続scene", "この場面")
+    text = text.replace("この cut", "この場面")
+    text = text.replace("1カット内で", "この画像内で")
+    text = text.replace("カット目的:", "場面の目的:")
+    text = text.replace("カットしない", "途中で途切れさせない")
+    text = text.replace("入口カット", "入口場面")
+    text = text.replace("基準カット", "基準場面")
+    text = text.replace("この場面 単体", "この画像だけで")
+    if topic_norm:
+        if is_character_asset:
+            text = re.sub(
+                r"(?m)^([^\n]+のキャラクター基準画像。)",
+                rf"物語「{topic_norm}」に出てくる\1",
+                text,
+                count=1,
+            )
+        elif is_story_scene:
+            if "[物語の文脈]" not in text:
+                text = "[物語の文脈]\n" + f"この画像は物語「{topic_norm}」の一場面を視覚化する。\n\n" + text
+        elif is_location_asset:
+            basename = Path(output_norm).stem
+            synthetic_location_ids = {"sea_temple_interior", "clock_museum"}
+            if basename not in synthetic_location_ids and "[物語の文脈]" not in text:
+                text = "[物語の文脈]\n" + f"この画像は物語「{topic_norm}」に出てくる場所を表す。\n\n" + text
+    text = re.sub(r"この場面\s+でも", "この場面でも", text)
+    text = re.sub(r"この場面\s+の", "この場面の", text)
+    text = re.sub(r"この場面\s+単体", "この画像だけで", text)
+    text = text.replace("この画像だけでで", "この画像だけで")
+    return text
+
+
 def main() -> None:
     load_env_files(repo_root=REPO_ROOT)
 
@@ -2539,6 +2873,22 @@ def main() -> None:
     parser.add_argument("--base-dir", default=None, help="Resolve relative paths from this dir (default: manifest dir).")
     parser.add_argument("--force", action="store_true", help="Overwrite existing outputs.")
     parser.add_argument("--dry-run", action="store_true", help="Plan only (no API calls).")
+    parser.add_argument(
+        "--materialize-request-files-only",
+        action="store_true",
+        help="Write final asset/image/video request files and exit without calling provider APIs.",
+    )
+    parser.add_argument(
+        "--test-image-variants",
+        type=int,
+        default=0,
+        help="On forced reruns only, also generate N exploratory image variants into assets/test for each selected image scene.",
+    )
+    parser.add_argument(
+        "--test-image-dir",
+        default="assets/test",
+        help='Output directory for --test-image-variants (default: "assets/test").',
+    )
 
     parser.add_argument("--skip-images", action="store_true")
     parser.add_argument("--skip-videos", action="store_true")
@@ -2779,6 +3129,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.test_image_variants < 0:
+        raise SystemExit("--test-image-variants must be >= 0")
+    if args.test_image_variants and not args.force:
+        raise SystemExit("--test-image-variants requires --force")
 
     def _parse_optional_json_object(value: str | None, *, flag_name: str) -> dict[str, Any] | None:
         if value is None:
@@ -2912,7 +3266,12 @@ def main() -> None:
                         notes=entry.notes,
                     )
                 )
-        guides = AssetGuides(character_bible=expanded_cb, style_guide=guides.style_guide, object_bible=guides.object_bible)
+        guides = AssetGuides(
+            character_bible=expanded_cb,
+            style_guide=guides.style_guide,
+            object_bible=guides.object_bible,
+            location_bible=guides.location_bible,
+        )
 
     if args.apply_asset_guides:
         if yaml is None:
@@ -2928,6 +3287,9 @@ def main() -> None:
             )
         for scene in scenes:
             apply_asset_guides_to_scene(scene=scene, guides=guides, character_refs_mode=args.asset_guides_character_refs)
+    else:
+        for scene in scenes:
+            merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
 
     if not scenes:
         raise SystemExit("No scenes found in manifest YAML.")
@@ -2974,6 +3336,9 @@ def main() -> None:
         or "9:16"
     )
 
+    experience = str(metadata.get("experience") or "").strip().lower()
+    image_request_filename = "asset_generation_requests.md" if experience.startswith("asset_stage") else "image_generation_requests.md"
+
     log_dir = Path(args.log_dir) if args.log_dir else (base_dir / "logs/providers")
 
     def _scene_uses_tool(scene: Scene, tools: set[str]) -> bool:
@@ -2982,7 +3347,7 @@ def main() -> None:
     needs_gemini_image = (
         not args.skip_images
         and any(
-            _scene_uses_tool(scene, {"google_nanobanana_pro", "nanobanana_pro"})
+            _scene_uses_tool(scene, {"google_nanobanana_2", "nanobanana_2"})
             and scene.image_output
             and scene.image_prompt
             and _scene_matches_filter(scene, scene_filter)
@@ -3199,8 +3564,90 @@ def main() -> None:
         selected.extend(selected_story)
         image_scenes = selected
 
+    image_preview_entries: list[dict[str, Any]] = []
+    image_prefix = (args.image_prompt_prefix or "").strip()
+    image_suffix = (args.image_prompt_suffix or "").strip()
+    image_request_scenes: list[SceneSpec] = []
+    for scene in scenes:
+        if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
+            continue
+        if not scene.image_output or not scene.image_prompt:
+            continue
+        image_request_scenes.append(scene)
+    for scene in image_request_scenes:
+        out_path = resolve_path(base_dir, scene.image_output)
+        image_preview_entries.append(
+            {
+                "selector": scene.selector or make_scene_cut_selector(scene.scene_id),
+                "tool": normalize_tool_name(scene.image_tool) or "",
+                "still_mode": scene.still_image_plan_mode or "",
+                "generation_status": _effective_still_generation_status(scene, base_dir=base_dir),
+                "plan_source": scene.still_image_plan_source or "",
+                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                "references": list(scene.image_references or []),
+                "prompt": _compose_final_image_prompt(scene, prefix=image_prefix, suffix=image_suffix),
+            }
+        )
+    _write_request_preview_md(
+        out_path=base_dir / image_request_filename,
+        title="Asset Generation Requests" if image_request_filename == "asset_generation_requests.md" else "Image Generation Requests",
+        entries=image_preview_entries,
+        topic=str(metadata.get("topic") or ""),
+    )
+
+    video_scenes_preview: list[SceneSpec] = []
+    for s in scenes:
+        if not _scene_matches_filter(s, scene_filter):
+            continue
+        if _scene_is_deleted(s):
+            continue
+        if args.skip_videos or not s.video_output or not (s.video_motion_prompt or s.image_prompt):
+            continue
+        video_scenes_preview.append(s)
+
+    video_prefix = (args.video_prompt_prefix or "").strip()
+    video_suffix = (args.video_prompt_suffix or "").strip()
+    video_preview_entries: list[dict[str, Any]] = []
+    for scene in video_scenes_preview:
+        out_path = resolve_path(base_dir, scene.video_output)
+        first_frame = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
+        if first_frame is None and scene.image_output:
+            first_frame = resolve_path(base_dir, scene.image_output)
+        last_frame = resolve_path(base_dir, scene.video_last_frame)
+        video_preview_entries.append(
+            {
+                "selector": scene.selector or make_scene_cut_selector(scene.scene_id),
+                "tool": normalize_tool_name(scene.video_tool) or "",
+                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
+                "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
+                "references": list(scene.image_references or []),
+                "prompt": _compose_final_video_prompt(scene, prefix=video_prefix, suffix=video_suffix),
+            }
+        )
+    _write_request_preview_md(
+        out_path=base_dir / "video_generation_requests.md",
+        title="Video Generation Requests",
+        entries=video_preview_entries,
+        topic=str(metadata.get("topic") or ""),
+    )
+    _write_generation_exclusion_report_md(
+        out_path=base_dir / "generation_exclusion_report.md",
+        scenes=scenes,
+    )
+
+    if args.materialize_request_files_only:
+        print(f"[materialized] {base_dir / image_request_filename}")
+        print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
+        print(f"[materialized] {base_dir / 'generation_exclusion_report.md'}")
+        return
+
     for scene in image_scenes:
         if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
             continue
 
         if args.skip_images:
@@ -3216,6 +3663,13 @@ def main() -> None:
         out_path = resolve_path(base_dir, scene.image_output)
         if not out_path:
             raise SystemExit(f"scene{scene.scene_id}: missing image output path")
+        generation_status = _effective_still_generation_status(scene, base_dir=base_dir)
+        if generation_status == "recreate" and args.force and not args.dry_run:
+            _archive_existing_image_for_recreate(
+                out_path=out_path,
+                base_dir=base_dir,
+                test_image_dir=args.test_image_dir,
+            )
 
         scene_aspect_ratio = scene.image_aspect_ratio or aspect_ratio
         scene_image_size = scene.image_size or args.image_size
@@ -3231,7 +3685,7 @@ def main() -> None:
 
         is_char_ref = bool(out_path and _is_character_ref_path(out_path))
 
-        if tool in {"google_nanobanana_pro", "nanobanana_pro"}:
+        if tool in {"google_nanobanana_2", "nanobanana_2"}:
             prefix = (args.image_prompt_prefix or "").strip()
             suffix = (args.image_prompt_suffix or "").strip()
             prompt = scene.image_prompt.strip()
@@ -3321,6 +3775,34 @@ def main() -> None:
                 log_path=log_dir / f"scene{scene.scene_id}_image.json",
                 dry_run=args.dry_run,
             )
+            if args.test_image_variants > 0:
+                for variant_index in range(1, args.test_image_variants + 1):
+                    variant_out = _derive_test_variant_output_path(
+                        base_dir,
+                        scene.image_output,
+                        variant_index,
+                        args.test_image_dir,
+                    )
+                    if variant_out is None:
+                        continue
+                    if args.log_prompts:
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        (log_dir / f"scene{scene.scene_id}_image_prompt_test_v{variant_index:02d}.txt").write_text(
+                            prompt + "\n",
+                            encoding="utf-8",
+                        )
+                    generate_gemini_image(
+                        client=gemini_client,
+                        model=args.gemini_image_model,
+                        prompt=prompt,
+                        aspect_ratio=scene_aspect_ratio,
+                        image_size=scene_image_size,
+                        reference_images=refs,
+                        out_path=variant_out,
+                        force=args.force,
+                        log_path=log_dir / f"scene{scene.scene_id}_image_test_v{variant_index:02d}.json",
+                        dry_run=args.dry_run,
+                    )
         elif tool in {"seadream", "seedream", "seedream_4_5", "byteplus_seedream_4_5"}:
             base_prompt = scene.image_prompt.strip()
             if is_char_ref and (char_views or args.character_reference_strip):
@@ -3374,6 +3856,32 @@ def main() -> None:
                 log_path=log_dir / f"scene{scene.scene_id}_image.json",
                 dry_run=args.dry_run,
             )
+            if args.test_image_variants > 0:
+                for variant_index in range(1, args.test_image_variants + 1):
+                    variant_out = _derive_test_variant_output_path(
+                        base_dir,
+                        scene.image_output,
+                        variant_index,
+                        args.test_image_dir,
+                    )
+                    if variant_out is None:
+                        continue
+                    if args.log_prompts:
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        (log_dir / f"scene{scene.scene_id}_image_prompt_test_v{variant_index:02d}.txt").write_text(
+                            base_prompt + "\n",
+                            encoding="utf-8",
+                        )
+                    generate_seadream_image(
+                        client=seadream_client,
+                        model=args.seadream_model,
+                        prompt=base_prompt,
+                        size=args.seadream_size,
+                        out_path=variant_out,
+                        force=args.force,
+                        log_path=log_dir / f"scene{scene.scene_id}_image_test_v{variant_index:02d}.json",
+                        dry_run=args.dry_run,
+                    )
         else:
             raise SystemExit(f"scene{scene.scene_id}: unsupported image tool: {scene.image_tool}")
 
@@ -3382,15 +3890,50 @@ def main() -> None:
     for s in scenes:
         if not _scene_matches_filter(s, scene_filter):
             continue
+        if _scene_is_deleted(s):
+            continue
         if args.skip_videos or not s.video_output or not (s.video_motion_prompt or s.image_prompt):
             continue
         video_scenes_in_order.append(s)
+
+    video_prefix = (args.video_prompt_prefix or "").strip()
+    video_suffix = (args.video_prompt_suffix or "").strip()
+    video_preview_entries: list[dict[str, Any]] = []
+    for scene in video_scenes_in_order:
+        out_path = resolve_path(base_dir, scene.video_output)
+        first_frame = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
+        if first_frame is None and scene.image_output:
+            first_frame = resolve_path(base_dir, scene.image_output)
+        last_frame = resolve_path(base_dir, scene.video_last_frame)
+        video_preview_entries.append(
+            {
+                "selector": scene.selector or make_scene_cut_selector(scene.scene_id),
+                "tool": normalize_tool_name(scene.video_tool) or "",
+                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
+                "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
+                "references": list(scene.image_references or []),
+                "prompt": _compose_final_video_prompt(scene, prefix=video_prefix, suffix=video_suffix),
+            }
+        )
+    _write_request_preview_md(
+        out_path=base_dir / "video_generation_requests.md",
+        title="Video Generation Requests",
+        entries=video_preview_entries,
+    )
+
+    if args.materialize_request_files_only:
+        print(f"[materialized] {base_dir / image_request_filename}")
+        print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
+        return
 
     video_scene_index_by_id: dict[str, int] = {str(s.scene_id): idx for idx, s in enumerate(video_scenes_in_order)}
 
     prev_chain_first_frame: Path | None = None
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
             continue
 
         if args.skip_videos or not scene.video_output or not (scene.video_motion_prompt or scene.image_prompt):
@@ -3636,6 +4179,8 @@ def main() -> None:
     # Pass 3: audio (TTS)
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
             continue
 
         if args.skip_audio or not scene.narration_output:

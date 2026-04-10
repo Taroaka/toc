@@ -116,6 +116,8 @@ audit:
 
 この 3 つが `awaiting_approval` の間は、**次工程へ進まない**。
 
+承認待ちの stage を報告するときは、単に `awaiting_approval` と書くだけで終わらせず、次にユーザーがレビューすべき対象を短く明示して確認を促す。
+
 対応 review:
 
 - `review.script.status`

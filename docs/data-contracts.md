@@ -37,6 +37,7 @@ artifact.story=output/<topic>_<timestamp>/story.md
 artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 artifact.script=output/<topic>_<timestamp>/script.md
 artifact.script_review=output/<topic>_<timestamp>/script_review.md
+artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
 artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 artifact.video=output/<topic>_<timestamp>/video.mp4
 artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
@@ -120,9 +121,15 @@ stage.<name>.started_at=ISO8601
 stage.<name>.finished_at=ISO8601
 ```
 
+asset stage を分ける場合は次を追加する。
+
+- `stage.asset_plan_review`
+- `stage.asset_generation`
+
 承認待ちが標準発生する stage:
 
 - `stage.script`
+- `stage.asset_generation`
 - `stage.image_generation`
 - `stage.narration`
 
@@ -131,6 +138,7 @@ stage.<name>.finished_at=ISO8601
 対応 gate / review:
 
 - `stage.script` → `gate.script_review` / `review.script.*`
+- `stage.asset_generation` → `gate.asset_review` / `review.asset.*`
 - `stage.image_generation` → `gate.image_review` / `review.image.*`
 - `stage.narration` → `gate.narration_review` / `review.narration.*`
 
@@ -196,6 +204,7 @@ output/<topic>_<timestamp>/
 - `workflow/story-template.yaml`
 - `workflow/visual-value-template.yaml`
 - `workflow/script-template.yaml`
+- `workflow/asset-plan-template.yaml`
 - `workflow/scene-outline-template.yaml`（story → 画像/動画生成の橋渡し。未知トピックでモデル記憶に依存しないための asset brief）
 
 各テンプレートは `docs/information-gathering.md` / `docs/story-creation.md` /
@@ -261,6 +270,140 @@ output/<topic>_<timestamp>/
   - `must_avoid`
   - `done_when`
   - `reveal_constraints`
+
+### 4.5 `script.md` と `video_manifest.md` の正本境界
+
+境界は次で固定する。
+
+- `script.md`
+  - 物語と映像意図の正本
+  - `scene_summary`, `visual_beat`, reveal, `narration`, `tts_text`, human review 指示を持つ
+- `video_manifest.md`
+  - image/video/audio generation の実装正本
+  - `scene_contract`, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
+
+generator の読み順:
+
+- image generation
+  1. `video_manifest.md`
+  2. `script.md`
+  3. narration は補助参照
+- video generation
+  1. `video_manifest.md`
+  2. `script.md`
+  3. narration は補助参照
+
+制約:
+
+- `audio.narration.tts_text` は TTS 専用字段
+- `tts_text` を image/video generation の主ソースにしてはならない
+- `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
+
+### 4.6 `asset_plan.md`（asset stage 正本）
+
+画像生成の stage 1 では、`video_manifest.md` の前段として `asset_plan.md` を持てる。
+
+- 目的
+  - reusable asset の設計・review・承認
+- 入力
+  - `script.md`
+  - `story.md`
+  - 必要なら `video_manifest.md.assets.*`
+- 出力
+  - `assets/characters/*`
+  - `assets/objects/*`
+  - `assets/locations/*`
+  - reusable `assets/scenes/*`
+
+最低限の top-level:
+
+- `asset_plan_metadata`
+- `review_contract`
+- `assets.characters[]`
+- `assets.objects[]`
+- `assets.locations[]`
+- `assets.reusable_stills[]`
+
+各 asset entry の必須 field:
+
+- `asset_id`
+- `asset_type`
+- `source_script_selectors[]`
+- `story_purpose`
+- `visual_spec`
+- `generation_plan`
+- `creation_status`
+- `existing_outputs[]`
+- `review`
+
+asset stage の character variant ルール:
+
+- 同一人物の variant は、必ず main の `character_reference` を基準参照にする
+- `generation_plan.reference_inputs[]` には main reference の front / side / back などを入れる
+- `generation_plan.derived_from_asset_id` で、どの main asset から派生するかを明示する
+- 例: `urashima_old` は `urashima` から派生し、別人として新規設計しない
+
+asset stage の location / still variant ルール:
+
+- 同じ場所の昼夜差分、現在/未来差分、状態違いは、main の `location_anchor` または `reusable_still` を基準に派生させる
+- `generation_plan.reference_inputs[]` には main anchor を入れる
+- `generation_plan.derived_from_asset_id` で、どの base location / still から派生するかを明示する
+- 例: `scene15_cut03_night_anchor` は `scene15_cut03_day_anchor` から派生する
+- 例: `future beach` が `present beach` の時間差分である場合は、同一ロケーションの base anchor から派生させる
+
+`source_script_selectors[]` と `generation_plan.reference_inputs[]` は意味が違う:
+
+- `source_script_selectors[]`
+  - その asset が物語上どこで使われるか
+  - 生成時の参照画像を意味しない
+- `generation_plan.reference_inputs[]`
+  - 生成時に本当に参照する既存 visual source
+  - 同一人物 variant、同一場所の状態差分、same-camera 派生のときだけ使う
+- つまり、scene/cut で使われるからといって、その scene still を location asset の `reference_inputs[]` に入れてよいわけではない
+
+location の例外ルール:
+
+- 同じ建物の中でも、物語上は別エリアとして扱う場所は `derived_from_asset_id` で派生させなくてよい
+- 例: 竜宮城の宴会エリアと、その手前の foyer は別 `location_anchor` にしてよい
+- 独立した location anchor は `reference_inputs: []` を基本にする
+- 例: `clock_museum` は終盤の独立空間であり、浜辺や別ロケーションの参照を不要とする
+- ただし、別エリアから主エリアが見える、遠景にだけ映る、背景としてだけ存在する場合は `reference_usage[]` で参照関係を残す
+- この場合の典型は `mode: background_glimpse` または `mode: foreground_anchor`
+- つまり `derived_from` は「同じ場所の状態差分」、`reference_usage` は「別の場所から見える/一部だけ参照する」の表現に使い分ける
+
+運用:
+
+- asset stage document は human review を通してから asset 生成へ進む
+- character asset は front / side / back 等の既存 multi-view 運用を維持する
+- object / location / setpiece / reusable still は単体 still を基本にする
+- asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内の関連 asset 派生も含めて continuity を守ること
+- したがって asset contract は reuse と continuity を優先し、単発 cut 専用画像を増やすためには使わない
+- 例外的に既存 scene still を asset へ昇格することはあるが、それは移行中 run の互換措置であり、標準フローではない
+- provider 実行直前に request file を materialize する
+  - asset stage: `artifact.asset_generation_requests`
+  - cut image stage: `artifact.image_generation_requests`
+  - video stage: `artifact.video_generation_requests`
+- request file は selector ごとの final prompt / references / output を記録し、人レビューの対象にできる
+- image request file は review 用に image prompt を持つ全 scene/cut を載せる
+  - `still_mode`
+  - `generation_status: missing|created|recreate`
+  - `plan_source`
+- story から落とした cut は `cut_status: deleted` と `deletion_reason` を残して監査痕跡にする
+  - deleted cut は request / image generation / video generation / audio generation / final concat から除外する
+  - 除外対象は `generation_exclusion_report.md` と `*_generation_exclusions.md` に記録する
+- request には prompt 以外の判断材料も十分に残す
+  - explicit `references`
+  - `character_ids` / `object_ids` / `location_ids` から解決される asset reference
+  - つまり request review 時点で「何を参照して作るか」が人間に見えている状態を正とする
+- `plan` は AI/実装側の設計用文書、`request` は人間が最終確認する凍結文書として役割を分ける
+- 人レビューの既定対象は `request` 側とし、`plan` 側は必要時だけ参照する
+- image/video request は stateful な前提を置かない
+- 他 cut / 他 scene との関係性は、原則として `references` に入った画像を通してのみ担保する
+- request 本文では「参照画像の誰/場所/小道具が、この場面でどう見えるか」を明記する
+- `後続する scene` / `前の prompt を引き継ぐ` のような、画像参照を伴わない continuity 指示は request では使わない
+- request 本文では `cut` のような運用メタ語を使わない
+- 物語に実在する人物 / 場所 / 場面を扱う request では、必要に応じて `物語「<topic>」` の文脈を明示する
+- cut stage は既存どおり `video_manifest.md` を使う
 - `script.md.human_review_criteria.narration[]`
   - 人間レビュー時の固定観点
 - `script.md.script_metadata.ending_mode`（optional）

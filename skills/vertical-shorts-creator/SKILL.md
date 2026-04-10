@@ -1,6 +1,8 @@
 ---
 name: vertical-shorts-creator
-description: 承認済み（state.txt: review.video.status=approved）の横動画（16:9）から、刺激の強いsceneだけを選んで中心cropで縦ショート（9:16, ~60秒）を作る。`scripts/make-vertical-short.py` の実行コマンドを組み立てる時に使用。
+description: |
+  Select high-impact scenes from an approved 16:9 ToC run and prepare the command for a centered 9:16 short.
+  Use when: the user asks for a vertical short, short-form recut, highlight clip, or a way to turn an approved horizontal ToC run into a 9:16 short without regenerating scenes.
 ---
 
 # Vertical Shorts Creator（縦ショート生成）
@@ -50,4 +52,3 @@ python scripts/make-vertical-short.py \
 
 - この方式は “既存の横動画を中心cropして縦化” するため、重要被写体が中央にないsceneは不利。
 - うまくいかない場合は scene_id を選び直す（まずはここで反復する）。
-

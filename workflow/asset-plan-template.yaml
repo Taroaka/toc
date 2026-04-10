@@ -1,0 +1,104 @@
+# Asset plan template
+asset_plan_metadata:
+  topic: "string"
+  source_story: "output/<topic>_<timestamp>/story.md"
+  source_script: "output/<topic>_<timestamp>/script.md"
+  created_at: "ISO8601"
+  purpose: "reusable asset design before cut image generation"
+
+review_contract:
+  must_cover:
+    - "script.md の該当 scene/cut と矛盾しない"
+    - "再利用時の visual identity が固定できる"
+  must_avoid:
+    - "provider 固有 prompt syntax"
+    - "story/script に無い新情報の追加"
+  done_when:
+    - "human review が approved"
+    - "asset generation に必要な reference / view plan が揃う"
+
+assets:
+  characters:
+    - asset_id: "protagonist"
+      asset_type: "character_reference"
+      source_script_selectors: ["scene1_cut1", "scene2_cut3"]
+      story_purpose: "主人公の基準参照"
+      visual_spec:
+        identity: ["string"]
+        fixed_details: ["string"]
+        must_avoid: ["string"]
+      generation_plan:
+        output_dir: "assets/characters"
+        required_views: ["front", "side", "back"]
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "planned|created|stale|missing"
+      existing_outputs: []
+      review:
+        status: "pending|approved|changes_requested"
+        notes: ""
+
+  objects:
+    - asset_id: "tamatebako"
+      asset_type: "object_reference"
+      source_script_selectors: ["scene14_cut1", "scene15_cut1"]
+      story_purpose: "禁忌の贈与"
+      visual_spec:
+        identity: ["string"]
+        fixed_details: ["string"]
+        must_avoid: ["string"]
+      generation_plan:
+        output_dir: "assets/objects"
+        required_views: ["hero"]
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "planned|created|stale|missing"
+      existing_outputs: []
+      review:
+        status: "pending|approved|changes_requested"
+        notes: ""
+
+  locations:
+    - asset_id: "sea_temple_interior"
+      asset_type: "location_anchor"
+      source_script_selectors: ["scene3.5_cut4", "scene6_cut2"]
+      story_purpose: "海底神殿の再利用アンカー"
+      visual_spec:
+        identity: ["string"]
+        fixed_details: ["string"]
+        must_avoid: ["string"]
+      generation_plan:
+        output_dir: "assets/locations"
+        required_views: ["hero"]
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "planned|created|stale|missing"
+      existing_outputs: []
+      review:
+        status: "pending|approved|changes_requested"
+        notes: ""
+
+  reusable_stills:
+    - asset_id: "scene15_cut03_day_anchor"
+      asset_type: "reusable_still"
+      source_script_selectors: ["scene15_cut3"]
+      story_purpose: "昼夜切替の基準 still"
+      visual_spec:
+        identity: ["string"]
+        fixed_details: ["string"]
+        must_avoid: ["string"]
+      generation_plan:
+        output_dir: "assets/scenes"
+        required_views: ["single"]
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "planned|created|stale|missing"
+      existing_outputs: []
+      review:
+        status: "pending|approved|changes_requested"
+        notes: ""
+
+# rule:
+# - source_script_selectors は「どこで使うか」
+# - generation_plan.reference_inputs は「何を参照して生成するか」
+# - reference_inputs を使うのは same character / same location / same camera 派生だけ

@@ -443,6 +443,33 @@ scenes:
         self.assertFalse(mod._should_generate_image_scene(reuse_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
         self.assertFalse(mod._should_generate_image_scene(bridge_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
 
+        recreate_scene = mod.SceneSpec(
+            **{
+                **ref_scene.__dict__,
+                "scene_id": "scene10_cut4",
+                "manifest_scene_id": "10",
+                "selector": "scene10_cut4",
+                "kind": None,
+                "image_output": "assets/scenes/scene10_4.png",
+                "still_image_plan_mode": "reuse_anchor",
+                "still_image_generation_status": "recreate",
+            }
+        )
+        created_scene = mod.SceneSpec(
+            **{
+                **ref_scene.__dict__,
+                "scene_id": "scene10_cut5",
+                "manifest_scene_id": "10",
+                "selector": "scene10_cut5",
+                "kind": None,
+                "image_output": "assets/scenes/scene10_5.png",
+                "still_image_plan_mode": "generate_still",
+                "still_image_generation_status": "created",
+            }
+        )
+        self.assertTrue(mod._should_generate_image_scene(recreate_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+        self.assertFalse(mod._should_generate_image_scene(created_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+
 
 if __name__ == "__main__":
     unittest.main()

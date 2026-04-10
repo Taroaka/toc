@@ -16,11 +16,11 @@ if [ -f "$LOG_PATH" ]; then
 fi
 
 echo "CommandMate URLs"
-echo "  Local: ${SCHEME}://127.0.0.1:${PORT}/login"
+echo "  Local: ${SCHEME}://127.0.0.1:${PORT}/"
 if [ -n "$LAN_IP" ]; then
-  echo "  LAN HTTP: http://${LAN_IP}:${PORT}/login"
+  echo "  LAN HTTP: http://${LAN_IP}:${PORT}/"
   if [ -f "${CERT_DIR}/localhost+2.pem" ] && [ -f "${CERT_DIR}/localhost+2-key.pem" ]; then
-    echo "  LAN HTTPS: https://${LAN_IP}:${PORT}/login"
+    echo "  LAN HTTPS: https://${LAN_IP}:${PORT}/"
   fi
 fi
 

@@ -103,7 +103,7 @@ scenes:
       # required block:
       # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
       # 1 つでも欠けていれば subagent review は false にする。
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["protagonist"]
       character_variant_ids: []  # Optional: ["protagonist_wet_ref"] のように、そのscene専用のvariantを選ぶ
       object_ids: []
@@ -151,7 +151,7 @@ scenes:
       #   human_review_reason: ""
       # required block:
       # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["protagonist"]
       character_variant_ids: []
       object_ids: []
@@ -212,7 +212,7 @@ scenes:
     timestamp: "00:08-00:16"
     image_generation:
       # 同上: ここでは新規生成を前提にしない。必要なときだけ anchor を更新する。
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["protagonist"]
       character_variant_ids: []
       object_ids: []
@@ -273,7 +273,7 @@ scenes:
     timestamp: "00:16-00:24"
     image_generation:
       # 同上
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["protagonist"]
       character_variant_ids: []
       object_ids: []
@@ -311,7 +311,7 @@ scenes:
     timestamp: "00:24-00:32"
     image_generation:
       # B-roll でも新規静止画は必須ではない。連続性が保てるなら anchor を再利用する。
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       character_variant_ids: []
       object_ids: []

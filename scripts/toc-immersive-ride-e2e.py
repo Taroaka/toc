@@ -131,7 +131,7 @@ def build_manifest_from_script(
             "timestamp": "00:00-00:08",
             "kind": "character_reference",
             "image_generation": {
-                "tool": "google_nanobanana_pro",
+                "tool": "google_nanobanana_2",
                 "prompt": (
                     "Photorealistic cinematic full-body character reference for the story protagonist.\n"
                     "Head-to-toe, feet visible, neutral background, neutral pose. No text in image."
@@ -183,7 +183,7 @@ def build_manifest_from_script(
             "scene_id": scene_id,
             "timestamp": f"00:{(idx-1)*8:02d}-00:{idx*8:02d}",
             "image_generation": {
-                "tool": "google_nanobanana_pro",
+                "tool": "google_nanobanana_2",
                 "prompt": gen_prompt,
                 "output": f"assets/scenes/scene{scene_id}.png",
                 "aspect_ratio": "16:9",

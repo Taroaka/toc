@@ -1,19 +1,23 @@
 ---
 name: improve-workflow
-description: Structured coding workflow for Codex CLI that mirrors the improve_claude_code command pack (plan/tdd/verify/code-review/build-fix/e2e/test-coverage/update-docs). Use when you want Codex to run a tight loop: restate requirements, make a step plan, implement minimal changes, run validations, and summarize results; or when you want Codex to help you run multi-agent tmux sessions with claude/codex.
+description: |
+  Run a structured development loop for this repo: restate scope, plan, make the smallest safe change, verify, and summarize.
+  Use when: the user asks for a coding workflow, implementation plan, TDD loop, verification pass, code review cleanup, or help running the repo's multi-agent tmux workflow.
 ---
 
 # Improve Workflow
 
+This skill is shared across Claude Code and Codex. Prefer the current agent's planning and verification primitives when they exist.
+
 ## Default loop (plan → implement → verify)
 
 1) Restate requirements and constraints (what is in/out)
-2) If the change is non-trivial, create/update a plan (use `update_plan`)
+2) If the change is non-trivial, create/update a plan using the current agent's planning primitive
 3) Implement smallest safe change set (avoid unrelated refactors)
 4) Validate (prefer fast, local checks before full test suite)
 5) Summarize what changed + how to run/verify
 
-## Command-pack equivalents (Codex)
+## Common sub-modes
 
 - `plan`: Restate requirements + risks + step plan; WAIT if user wants approval gates
 - `tdd`: Write/adjust tests first (if repo has tests), then implement, then re-run

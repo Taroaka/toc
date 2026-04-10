@@ -203,6 +203,67 @@ human_review:
       resolution_notes: ""
 ```
 
+### 2.2.2 Script と Manifest の参照優先順位
+
+画像生成と動画生成では、`script.md` と `video_manifest.md` の役割を分けて読む。
+
+- `script.md`
+  - 意味の参照元
+  - 物語進行、`visual_beat`、reveal、human review の意図を持つ
+- `video_manifest.md`
+  - 実装の参照元
+  - prompt、asset、reference、motion、continuity を持つ
+
+既定の読み順:
+
+1. `video_manifest.md` で実行契約を読む
+2. `script.md` で scene/cut の意味を読む
+3. narration は補助参照として読む
+
+重要:
+
+- `audio.narration.tts_text` は TTS 専用字段であり、image/video generation の主ソースにしない
+- image/video prompt は `tts_text` を基準に組み立てない
+- human review がナレーション review 段階で image/video まで踏み込んだ場合は、`script.md.human_change_requests[]` と `approved_image_notes[]` / `approved_video_notes[]` を参照し、その内容が `video_manifest.md` に materialize されていることを前提に生成へ進む
+
+### 2.2.3 画像生成は 2 段に分ける
+
+画像生成は次の 2 段で扱う。
+
+1. asset stage
+   - `asset_plan.md` を作る
+   - human review を通す
+   - reusable asset を生成する
+   - provider 実行前に `asset_generation_requests.md` を materialize して review できる
+   - rerun で比較案が必要なときだけ `--force --test-image-variants N` で `assets/test/` に追加候補を出す
+2. cut stage
+   - 既存どおり `video_manifest.md` を使って各 cut 画像を生成する
+   - provider 実行前に `image_generation_requests.md` / `video_generation_requests.md` を materialize して review できる
+
+stage 1 の原則:
+
+- `asset_plan.md` は asset 設計の正本
+- 作成時に `script.md` の該当箇所を必ず参照する
+- character は従来どおり複数 view 運用を維持する
+- object / location / setpiece / reusable still は単体 anchor still を基本にする
+- asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内でも関連 asset を派生させながら物語の視覚表現をブレさせないこと
+- 人間レビューで通るまで asset 生成に進まない
+- asset stage 完了時は、次が human review 待ちであることを明示してユーザーへ確認を促す
+- 浦島 run のように scene still を後から asset に昇格する例外はあるが、それは設計移行中の互換運用であり、今後の標準フローでは asset stage を先に置く
+- request file は「最終的にこの prompt / reference / output で投げる」を確認するための凍結成果物として扱う
+- `plan` は設計用、`request` は人レビュー用と割り切る
+- 人が review する既定の対象は request file
+- request 本文では、参照画像に写っている人物/場所/小道具が、この場面でどう使われるかを書く
+- `後続sceneでも一致させる` のような、参照画像を伴わない stateful 前提の文は request としては弱い
+- request 本文では `cut` のような運用メタ語を使わない
+- 物語に実在する人物 / 場所 / 場面を扱う request では、必要に応じて `物語「<topic>」` の文脈を添える
+
+stage 2 の原則:
+
+- 今までどおり `video_manifest.md` ベース
+- 今回は cut stage の設計は変えない
+- cut stage 側でも human review が gate の場合は、次にどのレビューが必要かを完了報告に含める
+
 ### 2.3 一貫性を保つ手法
 
 #### キャラクターバイブル（Character Bible）
@@ -643,6 +704,8 @@ scripts/build-clip-lists.py \
   --dir output \
   --pattern "*_manifest.md"
 ```
+
+`scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する。`cut_status: deleted` の cut は動画・ナレーションの concat list に入らない。
 
 ## Human Change Request Expansion
 
