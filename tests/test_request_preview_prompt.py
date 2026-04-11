@@ -118,6 +118,7 @@ scenes:
             )
 
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
+            self.assertTrue((tmp_path / "p000_index.md").exists())
             self.assertIn("## scene1_cut2", request_text)
             self.assertIn("- still_mode: `reuse_anchor`", request_text)
             self.assertIn("- generation_status: `recreate`", request_text)
@@ -207,6 +208,7 @@ scenes:
             )
 
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
+            self.assertTrue((tmp_path / "p000_index.md").exists())
             self.assertIn("assets/characters/urashima.png", request_text)
             self.assertIn("assets/objects/tamatebako.png", request_text)
             self.assertIn("assets/locations/banquet_hall_main.png", request_text)
@@ -270,6 +272,7 @@ scenes:
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
             self.assertNotIn("scene6_cut1", request_text)
             self.assertIn("scene6_cut2", request_text)
+            self.assertTrue((tmp_path / "p000_index.md").exists())
 
             exclusion_text = (tmp_path / "generation_exclusion_report.md").read_text(encoding="utf-8")
             self.assertIn("scene6_cut1", exclusion_text)

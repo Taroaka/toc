@@ -13,6 +13,12 @@
 output/<topic>_<timestamp>/state.txt
 ```
 
+人間向けの run navigation は別に持つ：
+
+```
+output/<topic>_<timestamp>/p000_index.md
+```
+
 更新方式は **追記型**（最新のブロックが現在状態）。
 
 ```text
@@ -89,6 +95,27 @@ output/<topic>_<timestamp>/run_status.json
 - artifact inventory
 - pending gate
 - `eval_report.json`（あれば埋め込む）
+
+### 1.0.1 Run navigation index
+
+`p000_index.md` は run 直下の人間向け入口で、少なくとも次を含む。
+
+- current stage
+- next required human review
+- stage table
+- current run inventory
+- file-to-stage mapping
+
+番号運用は navigation layer として扱う。
+
+- `100` 番台ごとに大工程を割り当てる
+- `10` 番台刻みは default meaning を持つが固定契約ではない
+- stage ごとの actual slot meaning は `p000_index.md` を正とする
+- 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
+- narration は
+  - `p400`: narration text / `tts_text` / script review / human changes
+  - `p800`: TTS 実行 / audio outputs / narration runtime checks
+  に分けて扱う
 
 ### 1.1 `status` と `stage.*.status` の役割分担
 

@@ -6,6 +6,7 @@ script_metadata:
   created_at: "ISO8601"
   target_duration: 60
   aspect_ratio: "9:16"
+  affect_design_reference: "docs/affect-design.md"
   narration_source_of_truth: "script.md"
   visual_intent_source_of_truth: "script.md"
   generation_execution_source_of_truth: "video_manifest.md"
@@ -71,6 +72,13 @@ scenes:
     narrative:
       phase: "ordinary_world"
       purpose: "string"
+    affect:
+      intended:
+        valence: 0.0
+        arousal: 0.5
+        label_hint: "string"
+        audience_job: "hook|bond|strain|release|aftertaste"
+        contrast_from_previous: "lift|drop|spike|settle|invert"
     visual_value:
       source_part_id: ""
       role: "none|visual_payoff"

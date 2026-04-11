@@ -133,6 +133,19 @@ audit:
 
 のような読み方ができる。
 
+### 1.4.2 run navigation layer
+
+run 直下には `p000_index.md` を置き、人間向けの入口にする。
+
+- `100` 番台ごとに大工程を割り当てる
+- `10` 番台刻みは default meaning を持つが、stage ごとに変更可能
+- 実際の slot meaning は `p000_index.md` の stage table を正とする
+- 第1段階では binary / logs / scratch の物理 rename は行わず、navigation layer として番号を導入する
+- narration は
+  - `p400`: narration text / `tts_text` / human changes
+  - `p800`: TTS 実行 / audio outputs
+  の 2 層で扱う
+
 ### 1.5 VIDEOステージの内部サブフロー
 
 ```

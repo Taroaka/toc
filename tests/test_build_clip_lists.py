@@ -58,6 +58,7 @@ scenes:
             clips_text = (tmp_path / "video_clips.txt").read_text(encoding="utf-8")
             narration_text = (tmp_path / "video_narration_list.txt").read_text(encoding="utf-8")
             exclusions_text = (tmp_path / "video_generation_exclusions.md").read_text(encoding="utf-8")
+            self.assertTrue((tmp_path / "p000_index.md").exists())
 
             self.assertIn("scene06_cut02.mp4", clips_text)
             self.assertNotIn("scene06_cut01.mp4", clips_text)

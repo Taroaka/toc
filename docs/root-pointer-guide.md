@@ -17,6 +17,7 @@
 ## Read Next
 
 - 調査: `docs/information-gathering.md`
+- 感情設計: `docs/affect-design.md`
 - 物語化: `docs/story-creation.md`
 - 台本: `docs/script-creation.md`
 - 動画生成: `docs/video-generation.md`
@@ -38,6 +39,7 @@
 
 ## State
 
+- human-facing run navigation: `output/<topic>_<timestamp>/p000_index.md`
 - canonical state: `output/<topic>_<timestamp>/state.txt`
 - derived state: `output/<topic>_<timestamp>/run_status.json`
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`

@@ -49,6 +49,7 @@ from toc.providers.gemini import GeminiClient, GeminiConfig
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
+from toc.run_index import write_run_index
 
 
 ALLOWED_VEO_DURATIONS = (4, 6, 8)
@@ -3639,6 +3640,7 @@ def main() -> None:
     )
 
     if args.materialize_request_files_only:
+        write_run_index(base_dir)
         print(f"[materialized] {base_dir / image_request_filename}")
         print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
         print(f"[materialized] {base_dir / 'generation_exclusion_report.md'}")
@@ -3923,6 +3925,7 @@ def main() -> None:
     )
 
     if args.materialize_request_files_only:
+        write_run_index(base_dir)
         print(f"[materialized] {base_dir / image_request_filename}")
         print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
         return
@@ -4242,6 +4245,7 @@ def main() -> None:
         else:
             raise SystemExit(f"scene{scene.scene_id}: unsupported narration tool: {scene.narration_tool}")
 
+    write_run_index(base_dir)
     print("Done.")
 
 

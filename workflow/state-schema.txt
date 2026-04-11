@@ -116,6 +116,7 @@
 #   artifact.human_change_log=output/<topic>_<timestamp>/human_change_requests.md
 #   artifact.image_generation_requests=output/<topic>_<timestamp>/image_generation_requests.md
 #   artifact.video_generation_requests=output/<topic>_<timestamp>/video_generation_requests.md
+#   artifact.run_index=output/<topic>_<timestamp>/p000_index.md
 #   artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 #   artifact.video=output/<topic>_<timestamp>/video.mp4
 #   artifact.video_review_report=output/<topic>_<timestamp>/video_review.md

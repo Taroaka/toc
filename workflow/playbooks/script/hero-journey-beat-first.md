@@ -9,13 +9,15 @@
 1. `research.story_baseline.beat_sheet` を scene へ割当
 2. opening/development/turn/climax/ending に再編
 3. 各sceneに `narration` / `visual` / `research_refs` を埋める
-4. まずは通しで読める `story.md` を作る（完璧を目指さない）
+4. 各sceneに `intended_affect`（最低でも `label_hint`、可能なら `valence/arousal`）を仮置きする
+5. まずは通しで読める `story.md` を作る（完璧を目指さない）
 
 ### Stage 2: Polish (英雄の旅で推敲)
 1. 下記チェックで「英雄の旅」に沿っているか確認する
 2. 弱い箇所を scene 単位で書き直す（不足要素を補強）
 3. 感情カーブが前半→中盤→後半で自然につながるよう調整する
-4. 文章を読み手目線で磨く（冗長削減、論理飛躍修正）
+4. `valence/arousal` の変化が唐突すぎないか、必要な peak/release が置けているか確認する
+5. 文章を読み手目線で磨く（冗長削減、論理飛躍修正）
 
 ## Hero Journey check (推敲用)
 - Call to Adventure: 冒険への呼びかけが明確か
@@ -28,6 +30,7 @@
 - 読んで「何が起きたか」が一読で追える
 - 各sceneの役割が重複しすぎていない
 - `research_refs` が主要sceneに紐づいている
+- `intended_affect` が scene の仕事と一致している
 - 結末が `governing_thought` と矛盾しない
 
 ## Output contract

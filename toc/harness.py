@@ -13,6 +13,8 @@ try:
 except Exception:  # pragma: no cover - optional import fallback
     yaml = None
 
+from toc.run_index import write_run_index
+
 
 def now_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -174,6 +176,15 @@ def artifact_inventory(run_dir: Path, state: dict[str, str]) -> dict[str, dict[s
             "path": str(resolved if resolved is not None else value),
             "exists": bool(resolved and resolved.exists()),
         }
+    run_index = run_dir / "p000_index.md"
+    inventory.setdefault(
+        "run_index",
+        {
+            "path": str(run_index.resolve()),
+            "exists": run_index.exists(),
+            "derived": True,
+        },
+    )
     return inventory
 
 
@@ -182,7 +193,10 @@ def pending_gates(state: dict[str, str]) -> list[str]:
     gate_pairs = [
         ("research_review", "review.research.status"),
         ("story_review", "review.story.status"),
+        ("script_review", "review.script.status"),
+        ("asset_review", "review.asset.status"),
         ("image_prompt_review", "review.image_prompt.status"),
+        ("image_review", "review.image.status"),
         ("narration_review", "review.narration.status"),
         ("hybridization_review", "review.hybridization.status"),
         ("video_review", "review.video.status"),
@@ -213,6 +227,7 @@ def run_report_path(run_dir: Path) -> Path:
 def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
     state_path = run_dir / "state.txt"
     merged = state or parse_state_file(state_path)
+    write_run_index(run_dir, state=merged)
     payload = {
         "generated_at": now_iso(),
         "run_dir": str(run_dir.resolve()),
@@ -235,6 +250,7 @@ def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    write_run_index(run_dir, state=merged)
     return output_path
 
 
@@ -246,6 +262,7 @@ def append_state_snapshot(state_path: Path, updates: dict[str, str]) -> dict[str
         merged["job_id"] = new_job_id()
     if "status" not in merged or not merged["status"].strip():
         merged["status"] = "INIT"
+    merged.setdefault("artifact.run_index", str((state_path.parent / "p000_index.md").resolve()))
 
     cleaned = {key: value.replace("\n", " ").strip() for key, value in updates.items()}
     merged.update(cleaned)

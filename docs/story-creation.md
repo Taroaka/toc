@@ -8,6 +8,7 @@
 
 ### 関連ドキュメント
 
+- `docs/affect-design.md`（Russell 系の valence / arousal を使う補助的な感情設計）
 - `docs/orchestration-and-ops.md`（全体制御・品質保証・配信/改善ループ）
 - `docs/video-generation.md`（下流の汎用動画生成原則）
 - `workflow/playbooks/video-generation/kling.md`（`kling_3_0` / `kling_3_0_omni` を使う場合の provider 固有 prompt guide）
@@ -152,7 +153,12 @@
    感情 ↘ ↗ ↘ 下降、一時的希望、最終的悲劇
 ```
 
-**「Man in Hole」型が最も人気である理由**: 人間は逆境からの復活を見たいという根源的欲求を持つ。これは希望と回復力への普遍的な共感を反映している。
+**注意**:
+
+- 上の 6 arcs は作品全体の `macro` な感情曲線であり、scene / cut 単位の設計には粗い
+- scene / cut の狙いは `docs/affect-design.md` の `valence / arousal` layer で補う
+- `Man in Hole` は Del Vecchio et al. (2020) では produced movie の box office と強く結びついたが、
+  「最も好かれる」や「最も高評価」という意味ではない
 
 ### 緊張と弛緩のリズム
 
@@ -579,6 +585,15 @@ story_structure:
         - "string"
       release_trigger: "string"
 
+  affect_design:
+    model: "russell_valence_arousal"
+    scene_targets:
+      - scene_id: 1
+        valence: -1.0..1.0
+        arousal: 0.0..1.0
+        label_hint: "curiosity | awe | dread | relief"
+        audience_job: "hook | bond | strain | release | aftertaste"
+
 # === 脚本 ===
 script:
   scenes:
@@ -848,6 +863,11 @@ constraints:
 - Truby, John. *The Anatomy of Story: 22 Steps to Becoming a Master Storyteller*. 2007.
 - Dunne, Peter. *Emotional Structure: Creating the Story Beneath the Plot*. 2006.
 - Reagan, A.J. et al. "The emotional arcs of stories are dominated by six basic shapes." *EPJ Data Science*. 2016.
+- Russell, James A. "A circumplex model of affect." *Journal of Personality and Social Psychology*. 1980.
+- Russell, James A. "Core affect and the psychological construction of emotion." *Psychological Review*. 2003.
+- Posner, Jonathan, James A. Russell, and Bradley S. Peterson. "The circumplex model of affect." *Development and Psychopathology*. 2005.
+- Del Vecchio, M. et al. "Improving productivity in Hollywood." *Journal of the Operational Research Society*. 2020.
+- Thomsen, Morten and Lene Heiselberg. "Arousing the audience." *Journal of Scandinavian Cinema*. 2020.
 
 ### 応用ガイド
 

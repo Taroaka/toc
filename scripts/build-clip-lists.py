@@ -12,12 +12,20 @@ from __future__ import annotations
 import argparse
 import glob
 import re
+import sys
 from pathlib import Path
 
 try:
     import yaml  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.run_index import write_run_index
 
 
 def extract_yaml_block(text: str) -> str:
@@ -202,6 +210,8 @@ def main() -> None:
         write_concat_list(clips, clips_path, args.dry_run)
         write_concat_list(narrations, narration_path, args.dry_run)
         write_exclusion_report(exclusions, exclusions_path, args.dry_run)
+        if not args.dry_run:
+            write_run_index(out_dir)
 
         print(f"Manifest: {manifest}")
         print(f"  clips: {clips_path} ({len(clips)} entries)")

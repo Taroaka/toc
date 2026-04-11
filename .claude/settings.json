@@ -1,6 +1,22 @@
 {
   "model": "sonnet",
   "cleanupPeriodDays": 365,
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(/Users/kantaro/Downloads/toc/**)",
+      "Write(/Users/kantaro/Downloads/toc/**)",
+      "Edit(/Users/kantaro/Downloads/toc/**)",
+      "Glob(/Users/kantaro/Downloads/toc/**)",
+      "Grep(/Users/kantaro/Downloads/toc/**)",
+      "LS(/Users/kantaro/Downloads/toc/**)",
+      "WebFetch(*)",
+      "WebSearch(*)"
+    ],
+    "deny": [
+      "Read(/Users/kantaro/Downloads/toc/server/.env)"
+    ]
+  },
   "hooks": {
     "Stop": [
       {

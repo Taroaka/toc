@@ -51,11 +51,13 @@ class TestTocStateScript(unittest.TestCase):
 
             state_path = run_dir / "state.txt"
             self.assertTrue(state_path.exists())
+            self.assertTrue((run_dir / "p000_index.md").exists())
             self.assertTrue((run_dir / "run_status.json").exists())
             st = _merge_state(state_path)
             self.assertEqual(st.get("topic"), "テストトピック")
             self.assertEqual(st.get("runtime.stage"), "init")
             self.assertIn("artifact.video_manifest", st)
+            self.assertIn("artifact.run_index", st)
 
             subprocess.run(
                 [
@@ -164,6 +166,7 @@ class TestTocStateScript(unittest.TestCase):
             payload = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
             self.assertIn("eval_report", payload)
             self.assertEqual(payload["eval_report"]["overall"]["passed"], True)
+            self.assertTrue((run_dir / "p000_index.md").exists())
 
 
 if __name__ == "__main__":

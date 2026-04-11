@@ -18,6 +18,7 @@
 - `output/stories/{topic}_{timestamp}.md` - 物語スクリプト（story-creation.md出力）
 - `output/<topic>_<timestamp>/visual_value.md` - 中盤の視覚報酬パート設計（あれば参照）
 - 物語構造、感情曲線、エンゲージメント設計
+- `docs/affect-design.md` - Russell 系の valence / arousal 補助レイヤー
 - `docs/video-generation.md` - 汎用の動画生成原則
 - `workflow/playbooks/video-generation/kling.md` - `kling_3_0` / `kling_3_0_omni` 利用時の専用 prompt guide
 
@@ -437,6 +438,15 @@ scenes:
       hook_type: "question | statement | shock | emotion"
       emotional_target: "curiosity"  # この時点で狙う感情
 
+    # --- 感情座標（任意） ---
+    affect:
+      intended:
+        valence: -1.0..1.0
+        arousal: 0.0..1.0
+        label_hint: "curiosity | awe | dread | relief"
+        audience_job: "hook | bond | strain | release | aftertaste"
+        contrast_from_previous: "lift | drop | spike | settle | invert"
+
     # --- 視覚価値パート（任意）---
     visual_value:
       source_part_id: "optional"
@@ -707,6 +717,46 @@ pacing_guidelines:
   text_overlay:
     minimum_display: 2  # 最短表示秒数
     characters_per_second: 8  # 1秒あたりの読める文字数
+```
+
+### 4.2.1 Affect Coordinate Layer
+
+`6 arcs` や `emotional_peaks` は作品全体の大波形を扱う。
+台本ではさらに、scene ごとに「今どの感情座標を狙うか」を持てるようにする。
+
+原則:
+
+- `emotional_target`
+  - 人間が読みやすいラベル
+- `affect.intended`
+  - 比較可能な座標
+- script で正本にするのは `intended` のみ
+- 1 scene に複数の感情が混ざる場合は、scene に baseline を置き、必要な cut だけ override する
+
+推奨レンジ:
+
+- `valence`: `-1.0 .. 1.0`
+- `arousal`: `0.0 .. 1.0`
+
+使い方:
+
+- opening
+  - `curiosity` / `unease` / `awe` を早く立てる
+- middle
+  - `bond` と `strain` を交互に使い、ずっと高 arousal にしない
+- climax
+  - arousal を高くし、valence は ending mode に応じて決める
+- ending
+  - 多くの場合、最終印象は valence より arousal の落とし方で決まる
+
+```yaml
+affect:
+  intended:
+    valence: -0.4
+    arousal: 0.8
+    label_hint: "dread"
+    audience_job: "strain"
+    contrast_from_previous: "spike"
 ```
 
 ### 4.3 タイムラインビジュアライゼーション
@@ -1000,6 +1050,14 @@ scenes:
       purpose: "視聴者の注意を引く問いかけ"
       hook_type: "question"
       emotional_target: "curiosity"
+
+    affect:
+      intended:
+        valence: 0.2
+        arousal: 0.65
+        label_hint: "curiosity"
+        audience_job: "hook"
+        contrast_from_previous: "lift"
 
     visual_value:
       source_part_id: ""

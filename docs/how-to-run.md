@@ -73,6 +73,7 @@ python scripts/toc-scene-series.py "桃太郎" --run-dir output/桃太郎_<times
 
 ```
 output/<topic>_<timestamp>/
+  p000_index.md
   state.txt
   research.md
   story.md
@@ -87,6 +88,7 @@ output/<topic>_<timestamp>/
 
 ```
 output/<topic>_<timestamp>/
+  p000_index.md
   state.txt
   research.md
   story.md
@@ -121,6 +123,25 @@ output/<topic>_<timestamp>/
   - asset stage: `asset_generation_requests.md`
   - cut image stage: `image_generation_requests.md`
   - video stage: `video_generation_requests.md`
+- `p000_index.md` は run 直下の人間向け入口
+  - current stage
+  - next required human review
+  - stage table
+  - current run inventory
+  をまとめる
+  - 手動再生成: `python scripts/build-run-index.py --run-dir output/<topic>_<timestamp>`
+- `100` 番台ごとに大工程を割り当てる
+  - `p100`: research
+  - `p200`: story
+  - `p300`: visual planning
+  - `p400`: script / narration text / human changes
+  - `p500`: asset
+  - `p600`: image
+  - `p700`: video
+  - `p800`: audio generation
+  - `p900`: render / QA / runtime
+- `10` 番台刻みの意味は既定値を持つが固定契約ではない
+  - stage ごとの actual slot meaning は `p000_index.md` の stage table を正とする
 - `python scripts/generate-assets-from-manifest.py --manifest ... --materialize-request-files-only` で request file だけ更新できる
 - 同時に `generation_exclusion_report.md` も更新され、`cut_status: deleted` の cut が request / generation / concat から外れることを確認できる
 - 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
@@ -370,6 +391,7 @@ python scripts/verify-pipeline.py \
 - `run_status.json`
 - `eval_report.json`
 - `run_report.md`
+- `p000_index.md`
 
 画像生成前レビューの成果物:
 
