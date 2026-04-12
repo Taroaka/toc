@@ -1,6 +1,62 @@
 # Remote Work
 
-スマホから ToC の Codex セッションを監視、指示、軽微編集できる状態を作るための実行 TODO。
+スマホから ToC の Codex / Claude Code セッションを監視、指示、軽微編集できる状態を作るための実行 TODO。
+
+## Claude Code Remote Control（ネイティブ機能）
+
+Claude Code v2.1.51 以降に組み込まれた公式リモート接続機能。
+ポート開放不要・外部ツール不要で、`claude.ai/code` またはスマホの Claude アプリから直接接続できる。
+
+### 前提
+
+- `claude auth login` 済み（claude.ai アカウント認証が必要。API キー不可）
+- Claude Pro / Max / Team / Enterprise サブスクリプション
+
+### 起動方法
+
+**サーバーモード**（ローカル対話なし・バックグラウンド向き）:
+
+```bash
+scripts/ai/claude-remote-control.sh
+# または直接:
+claude remote-control --name "ToC"
+```
+
+**Interactive + リモート同時モード**（ローカルでも操作しながらスマホからも繋ぐ）:
+
+```bash
+scripts/ai/claude-remote-control.sh --interactive
+# または直接:
+claude --rc "ToC"
+```
+
+**既存セッション内からオンにする**:
+
+```
+/remote-control
+```
+
+### 接続方法
+
+1. ブラウザ: `claude.ai/code` を開き、セッション一覧から「ToC」を選ぶ
+2. スマホ: Claude モバイルアプリ → Sessions → 「ToC」
+
+### 特徴
+
+- ポート開放・トンネル不要（アウトバウンド HTTPS のみ）
+- ファイルシステム・MCP サーバー・ツールはすべてローカルのまま
+- 複数デバイスから同時接続、リアルタイム同期
+- ネットワーク切断後の自動再接続
+
+### CommandMate との役割分担
+
+| 機能 | Claude Code Remote Control | CommandMate |
+|------|---------------------------|-------------|
+| Claude Code セッション操作 | ◎ ネイティブ | △ 間接的 |
+| Codex セッション操作 | ✗ | ◎ |
+| ファイル編集（Markdown 等）| △ | ◎ |
+| セットアップコスト | 低（認証のみ） | 中（初期設定あり） |
+| トンネル設定 | 不要 | Pinggy が必要（外出先） |
 
 ## Current Status
 

@@ -1,0 +1,33 @@
+- generic [ref=e2]:
+  - img [ref=e6]
+  - generic [ref=e9]:
+    - generic [ref=e10]: 確認コードを入力する
+    - generic [ref=e12]: セキュリティのため、コードを携帯電話***-***-**30に送信しました。
+    - generic [ref=e14]:
+      - textbox [active] [ref=e20]
+      - generic [ref=e21]:
+        - link "コードを再送信する":
+          - /url: "#"
+      - generic [ref=e28]: 60 秒待ってから別のコードをリクエストしてください。
+      - generic [ref=e31] [cursor=pointer]:
+        - button "コードを送信する" [ref=e32]
+        - generic [ref=e33]: コードを送信する
+    - generic [ref=e34]:
+      - heading "別の方法で確認する" [level=5] [ref=e35]
+      - text: Amazonアプリに送信された通知を承認する
+    - generic [ref=e36]:
+      - heading "ヘルプが必要ですか?" [level=5] [ref=e37]
+      - generic [ref=e38]:
+        - text: コードが届かない場合や、Eメールアドレスや電話番号を変更した場合は、
+        - link "別の方法をお試しください" [ref=e39] [cursor=pointer]:
+          - /url: https://www.amazon.co.jp:443/ap/cvf/accountrecovery?arb=482ee305-538a-4bf8-82e5-f6d90c95f7f0&openid.assoc_handle=amzn_kindle_mykindle_jp&pageId=amzn_kindle_mykindle_jp&orig_return_to=https%3A%2F%2Fwww.amazon.co.jp%2Fap%2Fsignin%3Fie%3DUTF8%26clientContext%3D355-8429342-1843620%26openid.pape.max_auth_age%3D1209600%26use_global_authentication%3Dfalse%26openid.identity%3Dhttp%253A%252F%252Fspecs.openid.net%252Fauth%252F2.0%252Fidentifier_select%26language%3Dja_JP%26pageId%3Damzn_kindle_mykindle_jp%26useSHuMAWorkflow%3Dfalse%26arb%3D158dbf79-6e29-4e3e-a664-0d87b91e10a0%26openid.return_to%3Dhttps%253A%252F%252Fread.amazon.co.jp%252Fkindle-library%253Fref_%253Dkappspage_read_in_kfw_ja_JP%26openid.assoc_handle%3Damzn_kindle_mykindle_jp%26openid.mode%3Dcheckid_setup%26openid.claimed_id%3Dhttp%253A%252F%252Fspecs.openid.net%252Fauth%252F2.0%252Fidentifier_select%26openid.ns%3Dhttp%253A%252F%252Fspecs.openid.net%252Fauth%252F2.0&isResend=0&ref_=ch_tiv_approval_broadcast_to_account_recovery
+        - text: 。
+  - generic [ref=e42]:
+    - generic [ref=e43]:
+      - link "利用規約" [ref=e44] [cursor=pointer]:
+        - /url: /gp/help/customer/display.html/ref=ap_desktop_footer_cou?ie=UTF8&nodeId=643006
+      - link "プライバシー規約" [ref=e45] [cursor=pointer]:
+        - /url: /gp/help/customer/display.html/ref=ap_desktop_footer_privacy_notice?ie=UTF8&nodeId=643000
+      - link "ヘルプ" [ref=e46] [cursor=pointer]:
+        - /url: /help
+    - generic [ref=e47]: © 1996-2026, Amazon.com, Inc. またはその関連会社

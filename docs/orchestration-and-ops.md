@@ -71,6 +71,12 @@ audit:
 - **必須レビューゲート**: 事実性（Research）と最終納品（Video）
 - **自動再試行**: 失敗原因が機械的（APIエラー、品質低下）の場合のみ
 - **人間レビュー**: 重要テーマ（時事、政治、医療、法律）は強制
+- **grounding preflight**: stage 開始前に `scripts/resolve-stage-grounding.py` を実行し、必要 docs / templates / upstream artifact の解決結果を `logs/grounding/<stage>.json` と `state.txt` へ残す
+- **readset audit**: grounding 後に `scripts/audit-stage-grounding.py` を実行し、`logs/grounding/<stage>.readset.json` と `logs/grounding/<stage>.audit.json` を残す
+- **chat/manual stage helper**: chat で stage 作業を始めるときは `scripts/prepare-stage-context.py` を標準入口として使い、内部で `resolve -> audit -> readset確認` を直列で終えてから編集へ進む。返ってきた `readset_path` を起点に `global_docs -> stage_docs -> templates -> inputs` の順で読んでから編集する
+- **user-triggered subagent audit**: stage 完了後に `scripts/build-subagent-audit-prompt.py` を使って貼り付け用 prompt を生成し、ユーザーが contextless audit subagent を起動して独立検証してもよい。script は `logs/grounding/<stage>.subagent_prompt.md` も保存し、subagent は content artifact を編集しない
+- **user-triggered image judgment subagent**: image prompt の意味評価は `scripts/build-subagent-image-review-prompt.py` で貼り付け用 prompt を生成し、ユーザーが contextless subagent に渡してよい。script は `logs/review/image_prompt.subagent_prompt.md` を保存し、subagent は hard schema 判定ではなく story/script/manifest の意味整合と revision 優先度を見る
+- **review policy**: run 開始時に `review.policy.story|image|narration=required|optional` を固定し、grounding はこの policy に従って承認 gate を有効/無効化する
 
 ### 1.4.1 canonical state の書き分け
 
@@ -98,9 +104,12 @@ audit:
 各作業は **開始時** と **完了時** に append する:
 
 1. 開始時:
+   - `stage.<name>.grounding.status=ready`
+   - `stage.<name>.audit.status=passed`
    - `stage.<name>.status=in_progress`
    - `stage.<name>.started_at=...`
 2. 完了時:
+   - grounding が `ready` かつ audit が `passed` のときだけ stage 完了へ進める
    - 承認不要なら `stage.<name>.status=done`
    - 承認待ちが必要なら `stage.<name>.status=awaiting_approval`
    - `stage.<name>.finished_at=...`
@@ -124,6 +133,29 @@ audit:
 - `review.image.status`
 - `review.narration.status`
 
+grounding 状態と証跡:
+
+- `stage.<name>.grounding.status=ready|missing_docs|missing_inputs`
+- `stage.<name>.grounding.report=logs/grounding/<stage>.json`
+- `stage.<name>.readset.report=logs/grounding/<stage>.readset.json`
+- `stage.<name>.audit.status=passed|failed`
+- `stage.<name>.audit.report=logs/grounding/<stage>.audit.json`
+- `stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md`
+- `review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md`
+- canonical stage は `research`, `story`, `script`, `image_prompt`, `video_generation`
+- evaluator / verifier では互換 alias として `manifest=image_prompt`, `video=video_generation` を許可する
+
+run 開始時に固定する review policy:
+
+- `review.policy.story`
+  - `story.md` を `script` / `image_prompt` の upstream として使う前に承認が要るか
+- `review.policy.image`
+  - `video_generation` 前に `review.image.status=approved` を要求するか
+- `review.policy.narration`
+  - `video_generation` 前に `review.narration.status=approved` を要求するか
+
+default は `required` だが、script draft まで一気に進めたい run では開始時に `optional` を選べる。
+
 これにより、`state.txt` だけで
 
 - 調査は終わった
@@ -138,13 +170,30 @@ audit:
 run 直下には `p000_index.md` を置き、人間向けの入口にする。
 
 - `100` 番台ごとに大工程を割り当てる
-- `10` 番台刻みは default meaning を持つが、stage ごとに変更可能
-- 実際の slot meaning は `p000_index.md` の stage table を正とする
+- 細番号も全作品共通の fixed slot contract とする
+- story ごとの差は slot meaning を変えず、`slot.<code>.status` / `slot.<code>.requirement` / `slot.<code>.skip_reason` / `slot.<code>.note` で表す
+- `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - 第1段階では binary / logs / scratch の物理 rename は行わず、navigation layer として番号を導入する
 - narration は
   - `p400`: narration text / `tts_text` / human changes
   - `p800`: TTS 実行 / audio outputs
   の 2 層で扱う
+- 画像生成の request 改稿は、scene 単位で自然言語エージェントへ割り当てる
+  - 各 scene agent は `script.md`、`video_manifest.md`、現在の request draft を読む
+  - その scene の `visual_beat` を semantic source として、stateless な request 文へ落とす
+  - 出力はまず scene-specific scratch rewrite に置き、main agent が統合する
+  - この手順を固定しておくと、毎回の image generation run で再現できる
+
+標準 slot override 例:
+
+```bash
+python scripts/toc-state.py set-slot \
+  --run-dir output/<topic>_<timestamp> \
+  --slot p540 \
+  --status skipped \
+  --requirement optional \
+  --skip-reason "asset stage not needed for this run"
+```
 
 ### 1.5 VIDEOステージの内部サブフロー
 

@@ -36,13 +36,14 @@ model: inherit
 
 ## 作業手順
 
-1) `docs/story-creation.md` を読み、構成・パターン・出力スキーマを把握  
-2) research を読み、以下を抽出  
+1) 開始前に `python scripts/resolve-stage-grounding.py --stage story --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` を実行し、続けて `python scripts/audit-stage-grounding.py --stage story --run-dir output/<topic>_<timestamp>` を実行して `stage.story.grounding.status=ready` と `stage.story.audit.status=passed` を確認する  
+2) `docs/system-architecture.md` と `docs/story-creation.md` を読み、全体設計と構成・パターン・出力スキーマを把握  
+3) research を読み、以下を抽出  
    - governing thought / SCQA / hooks / tension points  
-3) **物語案を2–4個作る**（短い logline + 何がスコアに効くか）。必要なら `research.conflicts` を参照  
-4) 物語案を比較し、**採用案を1つ選ぶ**（理由を短く残す）  
-5) 選んだ案に沿ってシーンを設計する（必ずしも Hero's Journey 3フェーズに固定しない）  
-6) `story.md` を作成し、`sources` セクションで根拠を付与  
+4) **物語案を2–4個作る**（短い logline + 何がスコアに効くか）。必要なら `research.conflicts` を参照  
+5) 物語案を比較し、**採用案を1つ選ぶ**（理由を短く残す）  
+6) 選んだ案に沿ってシーンを設計する（必ずしも Hero's Journey 3フェーズに固定しない）  
+7) `story.md` を作成し、`sources` セクションで根拠を付与  
 
 ## 混成（ハイブリッド）を提案する場合の確認（必須）
 

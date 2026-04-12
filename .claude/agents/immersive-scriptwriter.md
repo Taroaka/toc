@@ -19,6 +19,14 @@ model: inherit
 - `output/<topic>_<timestamp>/visual_value.md`（存在する場合は必ず参照）
 - `output/<topic>_<timestamp>/research.md`（または `output/research/<topic>_*.md`）
 
+## Grounding Preflight（必須）
+
+- 開始前に `python scripts/resolve-stage-grounding.py --stage script --run-dir output/<topic>_<timestamp> --flow immersive` を実行し、続けて `python scripts/audit-stage-grounding.py --stage script --run-dir output/<topic>_<timestamp>` を実行する
+- 画像 prompt の設計へ進む前に `--stage image_prompt` も通す
+- 動画生成へ進む前に `--stage video_generation` を通す
+- `docs/system-architecture.md` を全体設計として先に読む
+- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない場合は、その stage を開始しない
+
 ## 出力（必須）
 
 - `output/<topic>_<timestamp>/script.md`

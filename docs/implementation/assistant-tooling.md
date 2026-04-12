@@ -97,6 +97,33 @@ scripts/ai/install-codex-skills.sh
 
 補助資料や共通ナレッジを shared skills 間で使い回す場合は `skills/_shared/` に置き、installer の対象外にする。
 
+### Marketing scoped guidance
+
+この repo の marketing 領域は `marketing/SNS/` のみを対象にし、**通常の ToC 制作スキル群とは分離**して扱う。
+
+- 対象範囲:
+  - `marketing/` 配下の作業
+  - 特に `marketing/SNS/` の確認・設計・更新
+- 対象外:
+  - `docs/story-creation.md`
+  - `docs/script-creation.md`
+  - `docs/video-generation.md`
+  - 通常の research / story / script / image / video generation
+
+Codex 側では vendor skills を repo 全体の default skill set としては登録しない。
+代わりに、repo-local skill `.codex/skills/marketing-skills-router/` を入口にし、
+必要なときだけ `marketing/README.md` と `marketing/SNS/` を読む。
+
+ルール:
+
+- `marketing/` を触っていない限り、この scoped guidance は参照しない
+- marketing 作業でも、まず `marketing/README.md` と `marketing/SNS/` の正本を読む
+- story/script/video 系タスクでは絶対に呼ばない
+
+Codex の durable rules は長い都度プロンプトではなく、`AGENTS.md` または scoped skill に寄せる。
+project-scoped config は `.codex/config.toml` で持てるが、この repo では marketing 用の常時有効 skill set は作らず、
+誤起動を防ぐために docs と router skill で運用境界を固定する。
+
 ## Session bootstrap / verify
 
 日常運用の最小ルーチン:

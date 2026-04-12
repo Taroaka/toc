@@ -1,0 +1,71 @@
+- generic [ref=e1]:
+  - generic:
+    - generic [ref=e67]:
+      - generic:
+        - img
+    - generic [ref=e10]:
+      - banner [ref=e11]:
+        - generic [ref=e13]: ジェームズ・クリアー式 複利で伸びる1つの習慣 (Japanese Edition)
+        - generic [ref=e16]:
+          - generic "Kindle Library" [ref=e18]:
+            - button "Kindle Library" [ref=e19] [cursor=pointer]:
+              - generic [ref=e20]:
+                - generic:
+                  - img:
+                    - generic:
+                      - img
+                  - text: Kindle Library
+          - generic [ref=e24]:
+            - generic: ジェームズ・クリアー式 複利で伸びる1つの習慣 (Japanese Edition)
+          - generic [ref=e25]:
+            - generic "Table of Contents" [ref=e26]:
+              - button "Table of Contents" [ref=e27] [cursor=pointer]:
+                - generic [ref=e28]:
+                  - generic:
+                    - img:
+                      - generic:
+                        - img
+            - generic "Reader settings" [ref=e29]:
+              - button "Reader settings" [ref=e30] [cursor=pointer]:
+                - generic [ref=e31]:
+                  - generic:
+                    - img:
+                      - generic:
+                        - img
+            - generic "Annotations" [ref=e32]:
+              - button "Annotations" [ref=e33] [cursor=pointer]:
+                - generic [ref=e34]:
+                  - generic:
+                    - img:
+                      - generic:
+                        - img
+            - generic "Fullscreen" [ref=e35]:
+              - button "Fullscreen" [ref=e36] [cursor=pointer]:
+                - generic [ref=e37]:
+                  - generic:
+                    - img:
+                      - generic:
+                        - img "Fullscreen"
+            - generic "Reader menu" [ref=e38]:
+              - button "Reader menu" [ref=e39] [cursor=pointer]:
+                - generic [ref=e40]:
+                  - generic:
+                    - img:
+                      - generic:
+                        - img
+        - checkbox "Add Bookmark" [ref=e41] [cursor=pointer]:
+          - img [ref=e42]:
+            - img "Bookmark" [ref=e44]
+      - generic [ref=e48]:
+        - button "Next page" [active] [ref=e50] [cursor=pointer]
+        - button "Previous page" [ref=e301] [cursor=pointer]
+      - generic [ref=e51]:
+        - generic "Page 1" [ref=e302]:
+          - slider "Page 273" [ref=e57]: Page 1
+        - button "Back to 273" [ref=e58] [cursor=pointer]
+        - contentinfo [ref=e59]:
+          - generic [ref=e61]:
+            - generic:
+              - generic:
+                - generic [ref=e304]: Page 1 of 339 ● 0%
+                - generic [ref=e306]: Learning reading speed...

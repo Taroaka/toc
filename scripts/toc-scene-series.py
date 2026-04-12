@@ -29,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
 from toc.harness import append_state_snapshot
 
 
@@ -87,6 +88,10 @@ def parse_state_file(state_path: Path) -> dict[str, str]:
         if k:
             merged[k] = v
     return merged
+
+
+def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
+    run_stage_grounding(run_dir, stage, flow=flow, retries=1)
 
 
 def detect_hybridization_pending(md_text: str) -> bool:
@@ -565,6 +570,10 @@ def main() -> None:
         default="kling-omni",
         help='Video generation tool in manifests ("kling"=kling_3_0, "kling-omni"=kling_3_0_omni, "seedance"=seedance). "veo" is mapped to Kling for safety.',
     )
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default="strict")
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
 
     args = parser.parse_args()
 
@@ -574,6 +583,13 @@ def main() -> None:
 
     run_dir = Path(args.run_dir) if args.run_dir else (Path(args.base) / f"{topic_slug}_{ts}")
     ensure_dir(run_dir)
+    ensure_dir(run_dir / "logs" / "grounding")
+    review_policy = resolve_review_policy(
+        preset=args.review_policy,
+        story_review=args.story_review,
+        image_review=args.image_review,
+        narration_review=args.narration_review,
+    )
     if args.video_tool == "kling":
         video_tool = "kling_3_0"
     elif args.video_tool == "kling-omni":
@@ -596,11 +612,15 @@ def main() -> None:
                 "status": "INIT",
                 "runtime.stage": "scene_series",
                 "gate.video_review": "required",
+                "runtime.review_policy": args.review_policy,
+                **review_policy_state_entries(review_policy),
             },
         )
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", force=False)
+    maybe_run_stage_grounding(run_dir, "research", flow="scene-series")
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", force=False)
+    maybe_run_stage_grounding(run_dir, "story", flow="scene-series")
 
     source_script = run_dir / "script.md"
     source_story = run_dir / "story.md"
@@ -665,6 +685,8 @@ def main() -> None:
         default_target_seconds=default_target_seconds,
     )
     write_text(series_plan_path, series_plan_md, force=args.force)
+    if source_script.exists():
+        maybe_run_stage_grounding(run_dir, "script", flow="scene-series")
 
     scenes_root = run_dir / "scenes"
     ensure_dir(scenes_root)
@@ -683,6 +705,7 @@ def main() -> None:
         ensure_dir(scene_dir / "assets" / "scenes")
         ensure_dir(scene_dir / "assets" / "audio")
         ensure_dir(scene_dir / "logs")
+        ensure_dir(scene_dir / "logs" / "grounding")
 
         write_text(scene_dir / "evidence.md", render_evidence_md(scene_id, question), force=args.force)
         write_text(
@@ -703,8 +726,10 @@ def main() -> None:
             ),
             force=args.force,
         )
+        maybe_run_stage_grounding(scene_dir, "image_prompt", flow="scene-series")
 
         if args.placeholder_e2e and not args.dry_run:
+            maybe_run_stage_grounding(scene_dir, "video_generation", flow="scene-series")
             manifest_path = scene_dir / "video_manifest.md"
             run(["python", "scripts/generate-placeholder-assets.py", "--manifest", str(manifest_path), "--force"])
             run(

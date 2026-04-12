@@ -21,6 +21,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
 | Providers | LLM via LangChain; image=Google Nano Banana Pro; video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Claude Code entrypoint (slash command) | Keep surface area small |
+| Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
 
 ## Component diagram
 
@@ -86,6 +87,78 @@ graph TD
 
 - 状態は `output/<topic>_<timestamp>/state.txt` に **追記型** で記録する。
 - 最新ブロックが現在状態、過去ブロックをコピーして擬似的にロールバック可能。
+- run 進行は固定の `p100` 〜 `p900` slot contract で管理する。
+  - slot の意味は全 story で共通で、story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す。
+  - `p000_index.md` はこの固定 contract を run progress の source of truth として要約する。
+- review 要否も run 開始時に固定する。
+  - `review.policy.story=required|optional`
+  - `review.policy.image=required|optional`
+  - `review.policy.narration=required|optional`
+- stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。
+- したがって「script draft までは人承認なしで進める」のような運用差分は、prompt の解釈ではなく run 初期 state で表現する。
+- チャット起点の stage 実行も同じ state / grounding 契約の上で扱う。
+  - `resolve-stage-grounding.py` で contract を解決
+  - `audit-stage-grounding.py` で readset を監査
+  - `logs/grounding/<stage>.readset.json` を「読むべき対象の正本」とする
+  - これにより slash command とチャット実行の前提を揃える
+
+## Fixed P-Slot Contract
+
+- `p100` ごとに大工程を固定する。
+- `p110` 以降の細番号も全作品で固定契約として扱う。
+- 作品差分は slot meaning を変えず、`slot.<code>.status` / `slot.<code>.requirement` / `slot.<code>.skip_reason` / `slot.<code>.note` で表す。
+- `p000_index.md` は fixed slot contract に基づく run-local source-of-truth とする。
+
+標準 slot:
+
+- `p100`: research
+  - `p110`: grounding
+  - `p120`: authoring
+  - `p130`: review
+- `p200`: story
+  - `p210`: grounding
+  - `p220`: authoring
+  - `p230`: review
+- `p300`: visual planning
+  - `p310`: visual value
+  - `p320`: visual planning review
+  - `p330`: appendix
+- `p400`: script / narration text / human changes
+  - `p410`: grounding
+  - `p420`: authoring
+  - `p430`: review
+  - `p440`: human changes / narration sync
+- `p500`: asset
+  - `p510`: grounding
+  - `p520`: reusable asset inventory
+  - `p530`: asset plan authoring
+  - `p540`: asset review
+  - `p550`: asset plan fixes
+  - `p560`: asset requests
+  - `p570`: asset generation
+  - `p580`: asset continuity check
+- `p600`: image
+  - `p610`: grounding
+  - `p620`: manifest / prompt authoring
+  - `p630`: hard review
+  - `p640`: judgment review
+  - `p650`: generation ready
+  - `p660`: image generation
+  - `p670`: image QA / fix loop
+- `p700`: video
+  - `p710`: grounding
+  - `p720`: motion / video review
+  - `p730`: video requests
+  - `p740`: video generation
+  - `p750`: video review / exclusions
+- `p800`: audio
+  - `p810`: narration text review
+  - `p820`: TTS request / generation
+  - `p830`: audio QA
+- `p900`: render / QA / runtime
+  - `p910`: render inputs
+  - `p920`: final render
+  - `p930`: QA / runtime summary
 
 ## Model/providers
 

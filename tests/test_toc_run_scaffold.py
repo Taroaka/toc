@@ -23,6 +23,8 @@ class TestTocRunScaffold(unittest.TestCase):
                     "--base",
                     str(base),
                     "--force",
+                    "--review-policy",
+                    "drafts",
                 ],
                 check=True,
                 capture_output=True,
@@ -39,6 +41,13 @@ class TestTocRunScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "script.md").exists())
             self.assertTrue((run_dir / "video_manifest.md").exists())
             self.assertTrue((run_dir / "assets" / "objects").is_dir())
+            self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "script.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "image_prompt.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "video_generation.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "research.readset.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "research.audit.json").exists())
 
 
 if __name__ == "__main__":

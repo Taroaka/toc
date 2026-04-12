@@ -1,0 +1,277 @@
+{
+  "version": 1,
+  "run_dir": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527",
+  "status": "partial",
+  "created_at": "2026-04-12T21:05:27+09:00",
+  "updated_at": "2026-04-12T21:08:52+09:00",
+  "resume_mode": false,
+  "login_mode": "manual",
+  "transcription_source": "codex vision from local images (per-page codex exec --image)",
+  "port": 59708,
+  "codex_workdir": "/Users/kantaro/Downloads/toc",
+  "codex_reasoning_effort": "medium",
+  "reader": {
+    "url": "https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2",
+    "title": "Kindle",
+    "current_page": 7,
+    "total_pages": 339
+  },
+  "page_turn_method": "cdp-mouse-next-button",
+  "completed_pages": 5,
+  "last_completed_page_index": 5,
+  "last_completed_kindle_page": 7,
+  "pages": [
+    {
+      "page_index": 1,
+      "kindle_page_number": 3,
+      "kindle_total_pages": 339,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/pages/0001.png",
+      "image_sha256": "f8285d0ac9a5a6c8eb489dc29968f714396cdf28175d31e6408c5f4450ba0d2a",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0001.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0001.log",
+      "vision_status": "completed",
+      "vision_text": "小さな変化が驚くべき成果をもたらす\nTiny Changes, Remarkable Results",
+      "quality_status": "flagged",
+      "quality_flags": [
+        "short_transcription"
+      ],
+      "started_at": "2026-04-12T21:06:05+09:00",
+      "completed_at": "2026-04-12T21:06:05+09:00"
+    },
+    {
+      "page_index": 2,
+      "kindle_page_number": 4,
+      "kindle_total_pages": 339,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/pages/0002.png",
+      "image_sha256": "b3dc95f39a31de7c37724cd8e83523d2269b954e925762f6689c7c09014e2d2c",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0002.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0002.log",
+      "vision_status": "completed",
+      "vision_text": "原子的（アトミック）とは\n一、ごく小さなもの。より大きな組織内の、それ以上分割できない構成単位。\n二、膨大なエネルギーや力の源。\n習慣（ハビッツ）とは\n一、日常の決まりきった行い。特定の状況に対する無意識の反応。",
+      "quality_status": "flagged",
+      "quality_flags": [
+        "short_transcription"
+      ],
+      "started_at": "2026-04-12T21:06:30+09:00",
+      "completed_at": "2026-04-12T21:06:30+09:00"
+    },
+    {
+      "page_index": 3,
+      "kindle_page_number": 5,
+      "kindle_total_pages": 339,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/pages/0003.png",
+      "image_sha256": "7f0e829a3c101ee5c67b0f98c6a02b82e4c534a20873c32fb6b2daa04793daa4",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0003.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0003.log",
+      "vision_status": "completed",
+      "vision_text": "はじめに\nIntroduction\nわたし自身について\n\n高校二年生の最後の日、わたしは顔に野球バットの直撃を受けた。クラスメートがフルスイングしたとき、バットが滑って手から離れ、わたしのほうへ飛んできてまともに目に当たった。ぶつかった瞬間のことは覚えていない。衝突の力が激しかったので、わたしの鼻は砕けてU字型に曲がった。衝撃のせいで、柔らかい脳細胞が頭蓋の内側に叩きつけられた。たちどころに腫れが頭全体に広がっていく。一瞬のうちに鼻が折れ、頭蓋を複雑骨折し、両方の眼窩が砕けてしまった。\n\n目をあけると、みんながわたしを見つめたり、助けを呼びにいったりしているのが見えた。見おろすと、服に赤い染みがある。クラスメートのひとりがシャツを脱いで寄こした。わたしはそれで折れた鼻から流れてる血を止めようとした。ショックと戸惑いで、自分のけががどれほど深刻かわかっていなかった。\n\n担任の教師がわたしの肩に腕を回して立たせ、遠くにある保健室まで歩きはじめた。グラウンドを横切り、丘を下り、校舎内へ戻っていく。いろいろな人の手がわたしの脇腹に触れて、身体を支えようとする。わたしたちは時間をかけて、ゆっくり歩いていった。一刻を争う状況だということに誰も気づいていなかった。\n\n保健室に着くと、看護師が一連の質問をした。\n「今は何年？」",
+      "quality_status": "accepted",
+      "quality_flags": [],
+      "started_at": "2026-04-12T21:07:02+09:00",
+      "completed_at": "2026-04-12T21:07:02+09:00"
+    },
+    {
+      "page_index": 4,
+      "kindle_page_number": 6,
+      "kindle_total_pages": 339,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/pages/0004.png",
+      "image_sha256": "dbdaff620abbe4f4cbb4a32cc41a1efe440800426fa9c5589606e999dcf5bbb5",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0004.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0004.log",
+      "vision_status": "completed",
+      "vision_text": "「一九八八年」とわたしは答えた。本当は二〇〇二年だった。\n「アメリカ合衆国の大統領は？」正解はジョージ・W・ブッシュ。\n「お母さんの名前は？」\n「ああ、ええと」。わたしは口ごもった。十秒が過ぎる。\n「パティー」と何気なさそうに答えて、自分の母親の名前を思い出すのに十秒もかかったことは無視しようとする。\nそれが、覚えている最後の質問だ。わたしの身体は脳内の急速な腫れに耐えられなくなり、救急車が着くまえに意識を失った。数分後、学校から地元の病院へ搬送された。\n病院へ到着してまもなく、わたしの身体は機能を停止しはじめた。嚥下や呼吸のような基本的な機能も低下する。その日最初の発作が起きる。それから、完全に呼吸が止まった。医師たちは急いで酸素吸入しながら、地元の病院の設備では手に負えないと判断し、シンシナティの大きな病院へ運ぶため、ヘリコプターを要請した。\nわたしは緊急処置室のドアから運びだされ、通りを横切ってヘリポートへと向かった。ストレッチャーがでこぼこの歩道の上で揺れる。ひとりの看護師がストレッチャーを押し、もうひとりが手でポンプを押して、ひと呼吸ずつ酸素を入れる。つい先ほど病院に着いたばかりの母が、ヘリコプターのわたしのそばに乗りこむ。わたしは意識がないままで、自分で呼吸もできず、母がその手をずっと握っていた。\n母がわたしとヘリコプターに乗っているあいだ、父は弟と妹のようすを見に家へ戻り、事故のことを伝えた。そして涙をこらえながら、その夜の八年生の卒業式には出られないと妹に説明した。弟と妹を家族や友人に預けると、父は母と合流するためシンシナティへ車を飛ばした。\n母とわたしが病院の屋上に着陸すると、約二〇人の医師や看護師のチームがヘリポートに走り寄り、わたしを外科病棟へ運んだ。この頃には脳の腫れがひ",
+      "quality_status": "accepted",
+      "quality_flags": [],
+      "started_at": "2026-04-12T21:08:08+09:00",
+      "completed_at": "2026-04-12T21:08:08+09:00"
+    },
+    {
+      "page_index": 5,
+      "kindle_page_number": 7,
+      "kindle_total_pages": 339,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/pages/0005.png",
+      "image_sha256": "e61056c879fa3196cef7e805052a71baaf1fa6c7ae035bd067bb2fd553b52077",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0005.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527/vision/0005.log",
+      "vision_status": "partial",
+      "vision_text": "[[partial vision transcription]]\nどくなっていて、外傷発作を繰りかえしていた。骨折の治療が必要だが、手術できる状態ではない。さらにまた発作—その日三度目の発作—が起きた。\n術と、薬で昏睡状態にされて人工呼吸器につながれた。\n　両親はこの病院が初めてではなかった。その一〇年前、妹が三歳で白血病と診断されたあと、同じ建物の一階に入ったことがある。当時わたしは五歳で、弟はまだ生後六カ月だった。二年半の化学療法治療、脊髄穿刺、骨髄生検ののち、ついに妹はがんを克服し、元気に笑顔で退院した。なのにこの日、一〇年間のおだやかな暮らしののち、両親は別の子どもとともに同じ場所に戻っていた。\n　わたしが昏睡状態のあいだ、病院は両親を慰めようと、牧師とソーシャルワーカーを手配した。その牧師は、一〇年前、妹ががんとわかった夜に会った牧師と同じ人だった。\n　やがて夜になり、わたしはさまざまな機械のおかげでなんとか生きていた。\n　両親は病院のマットレスで眠れぬ夜を過ごした。一瞬、疲労で崩れるように眠りかけても、次の瞬間には不安で目が覚めてしまう。のちに母がよくこう話していた。「人生で最悪の夜だったわ」\n\n回復の過程\n\n　ありがたいことに翌朝には呼吸が安定し、昏睡状態から脱しても大丈夫と医師が判断した。ようやく意識が戻ったとき、匂いがわからないことに気づいた。試しに看護師が、鼻をかんでから、りんごジュースのパックを嗅いでみるようにと言った。すると嗅覚は戻ってきたが、みんな驚いたことに、鼻をかむと眼窩のひびから空気が入り、左の眼球を外へ押しだしてしまった。眼球が眼窩から突出し、瞼と、脳へ繋がる視神経でなんとか支えられている状態だ。\n　眼科医によれば、空気が抜けていくにつれて目もしだいに元の位置に戻るだ",
+      "quality_status": "flagged",
+      "quality_flags": [
+        "partial"
+      ],
+      "started_at": "2026-04-12T21:08:50+09:00",
+      "completed_at": "2026-04-12T21:08:50+09:00"
+    }
+  ],
+  "events": [
+    {
+      "ts": "2026-04-12T21:05:27+09:00",
+      "message": "Starting full-book Kindle transcription run."
+    },
+    {
+      "ts": "2026-04-12T21:05:27+09:00",
+      "message": "Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2"
+    },
+    {
+      "ts": "2026-04-12T21:05:27+09:00",
+      "message": "Exporting transcript page 1 from Kindle page 3."
+    },
+    {
+      "ts": "2026-04-12T21:05:27+09:00",
+      "message": "Image export completed for transcript page 1."
+    },
+    {
+      "ts": "2026-04-12T21:05:27+09:00",
+      "message": "Running Codex vision transcription for transcript page 1."
+    },
+    {
+      "ts": "2026-04-12T21:06:05+09:00",
+      "message": "Completed transcript page 1 with vision status `completed`."
+    },
+    {
+      "ts": "2026-04-12T21:06:05+09:00",
+      "message": "Queued transcript page 1 for review because the transcription is shorter than expected."
+    },
+    {
+      "ts": "2026-04-12T21:06:06+09:00",
+      "message": "Advanced to the next page via `cdp-mouse-next-button`."
+    },
+    {
+      "ts": "2026-04-12T21:06:07+09:00",
+      "message": "Exporting transcript page 2 from Kindle page 4."
+    },
+    {
+      "ts": "2026-04-12T21:06:07+09:00",
+      "message": "Image export completed for transcript page 2."
+    },
+    {
+      "ts": "2026-04-12T21:06:07+09:00",
+      "message": "Running Codex vision transcription for transcript page 2."
+    },
+    {
+      "ts": "2026-04-12T21:06:30+09:00",
+      "message": "Completed transcript page 2 with vision status `completed`."
+    },
+    {
+      "ts": "2026-04-12T21:06:30+09:00",
+      "message": "Queued transcript page 2 for review because the transcription is shorter than expected."
+    },
+    {
+      "ts": "2026-04-12T21:06:31+09:00",
+      "message": "Advanced to the next page via `cdp-mouse-next-button`."
+    },
+    {
+      "ts": "2026-04-12T21:06:32+09:00",
+      "message": "Exporting transcript page 3 from Kindle page 5."
+    },
+    {
+      "ts": "2026-04-12T21:06:32+09:00",
+      "message": "Image export completed for transcript page 3."
+    },
+    {
+      "ts": "2026-04-12T21:06:32+09:00",
+      "message": "Running Codex vision transcription for transcript page 3."
+    },
+    {
+      "ts": "2026-04-12T21:07:02+09:00",
+      "message": "Completed transcript page 3 with vision status `completed`."
+    },
+    {
+      "ts": "2026-04-12T21:07:03+09:00",
+      "message": "Advanced to the next page via `cdp-mouse-next-button`."
+    },
+    {
+      "ts": "2026-04-12T21:07:04+09:00",
+      "message": "Exporting transcript page 4 from Kindle page 6."
+    },
+    {
+      "ts": "2026-04-12T21:07:04+09:00",
+      "message": "Image export completed for transcript page 4."
+    },
+    {
+      "ts": "2026-04-12T21:07:04+09:00",
+      "message": "Running Codex vision transcription for transcript page 4."
+    },
+    {
+      "ts": "2026-04-12T21:08:08+09:00",
+      "message": "Completed transcript page 4 with vision status `completed`."
+    },
+    {
+      "ts": "2026-04-12T21:08:09+09:00",
+      "message": "Advanced to the next page via `cdp-mouse-next-button`."
+    },
+    {
+      "ts": "2026-04-12T21:08:10+09:00",
+      "message": "Exporting transcript page 5 from Kindle page 7."
+    },
+    {
+      "ts": "2026-04-12T21:08:10+09:00",
+      "message": "Image export completed for transcript page 5."
+    },
+    {
+      "ts": "2026-04-12T21:08:10+09:00",
+      "message": "Running Codex vision transcription for transcript page 5."
+    },
+    {
+      "ts": "2026-04-12T21:08:50+09:00",
+      "message": "Completed transcript page 5 with vision status `partial`."
+    },
+    {
+      "ts": "2026-04-12T21:08:50+09:00",
+      "message": "Queued transcript page 5 for review because vision_status=partial."
+    },
+    {
+      "ts": "2026-04-12T21:08:51+09:00",
+      "message": "Advanced to the next page via `cdp-mouse-next-button`."
+    },
+    {
+      "ts": "2026-04-12T21:08:52+09:00",
+      "message": "Stopped at safety cap after 5 transcript pages."
+    },
+    {
+      "ts": "2026-04-12T21:08:52+09:00",
+      "message": "Run marked partial."
+    }
+  ],
+  "review_items": [
+    {
+      "page_index": 1,
+      "kindle_page_number": 3,
+      "severity": "warn",
+      "reason": "short_transcription",
+      "evidence": "normalized_length=50",
+      "suggested_action": "Check whether this is an intentionally sparse page or a weak transcription.",
+      "artifact_links": [
+        "pages/0001.png",
+        "vision/0001.txt",
+        "vision/0001.log"
+      ]
+    },
+    {
+      "page_index": 2,
+      "kindle_page_number": 4,
+      "severity": "warn",
+      "reason": "short_transcription",
+      "evidence": "normalized_length=106",
+      "suggested_action": "Check whether this is an intentionally sparse page or a weak transcription.",
+      "artifact_links": [
+        "pages/0002.png",
+        "vision/0002.txt",
+        "vision/0002.log"
+      ]
+    },
+    {
+      "page_index": 5,
+      "kindle_page_number": 7,
+      "severity": "warn",
+      "reason": "vision_partial",
+      "evidence": "vision_status=partial",
+      "suggested_action": "Inspect the screenshot and the matching vision log before trusting this page.",
+      "artifact_links": [
+        "pages/0005.png",
+        "vision/0005.txt",
+        "vision/0005.log"
+      ]
+    }
+  ]
+}

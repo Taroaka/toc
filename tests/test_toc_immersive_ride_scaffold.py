@@ -25,6 +25,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "--experience",
                     "cinematic_story",
                     "--force",
+                    "--review-policy",
+                    "drafts",
                 ],
                 check=True,
                 capture_output=True,
@@ -44,6 +46,13 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "assets" / "objects").is_dir())
             self.assertTrue((run_dir / "assets" / "scenes").is_dir())
             self.assertTrue((run_dir / "assets" / "audio").is_dir())
+            self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "script.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "image_prompt.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "video_generation.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "script.readset.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "script.audit.json").exists())
             manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             self.assertIn('reference_id: "protagonist_front_ref"', manifest)
             self.assertIn("全身（頭からつま先まで）", manifest)
@@ -69,6 +78,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "--experience",
                     "cloud_island_walk",
                     "--force",
+                    "--review-policy",
+                    "drafts",
                 ],
                 check=True,
                 capture_output=True,

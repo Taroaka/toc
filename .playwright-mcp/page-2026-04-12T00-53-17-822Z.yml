@@ -1,0 +1,86 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - heading "Amazon Kindle" [level=1] [ref=e3]:
+      - img "Amazon Kindle" [ref=e4]
+    - heading "Take your stories wherever you go" [level=2] [ref=e5]
+    - generic [ref=e6]:
+      - button "Create an Amazon account" [ref=e7] [cursor=pointer]
+      - button "AmazonSign in with your account" [ref=e8] [cursor=pointer]:
+        - img "Amazon"
+        - text: Sign in with your account
+    - img "Kindle on a web browser" [ref=e9]
+  - main [ref=e10]:
+    - generic [ref=e11]:
+      - heading "Explore what Kindle can do" [level=2] [ref=e12]
+      - generic [ref=e13]:
+        - article [ref=e14]:
+          - heading "Millions of titles at your fingertips" [level=3] [ref=e15]
+          - paragraph [ref=e16]:
+            - text: Browse books, magazines, and comics, and sample them before you buy.
+            - link "Shop now" [ref=e17] [cursor=pointer]:
+              - /url: https://www.amazon.com/Kindle-eBooks/b?ie=UTF8&node=154606011&ref_=kfw_landing_store
+        - article [ref=e18]:
+          - heading "Read on all your devices" [level=3] [ref=e19]
+          - paragraph [ref=e20]: Sign in with your account to access your books and other content on any device.
+        - article [ref=e21]:
+          - heading "Designed for every reader" [level=3] [ref=e22]
+          - paragraph [ref=e23]: Customize your Kindle experience to fit your reading needs and preferences.
+      - generic [ref=e25]:
+        - generic [ref=e26]:
+          - article [ref=e27]:
+            - heading "Read the way you want" [level=3] [ref=e28]
+            - paragraph [ref=e29]: Adjust text size, font, layout, margins, background color, and more so you can read comfortably.
+          - article [ref=e30]:
+            - heading "Record notable moments" [level=3] [ref=e31]
+            - paragraph [ref=e32]: Make notes and highlight your favorite lines. Kindle makes it easy to find and revisit your annotations.
+        - generic [ref=e33]:
+          - article [ref=e34]:
+            - heading "Search within your book" [level=3] [ref=e35]
+            - paragraph [ref=e36]: Search for words, phrases, or names to see where they’re mentioned and jump to that page.
+          - article [ref=e37]:
+            - heading "Look up words while you read" [level=3] [ref=e38]
+            - paragraph [ref=e39]: Quickly see dictionary definitions in your book. Press and hold a word, and then release for the definition.
+    - generic [ref=e40]:
+      - generic [ref=e41]:
+        - heading "Discover ways to read" [level=2] [ref=e42]
+        - paragraph [ref=e43]:
+          - text: Read on
+          - link "read.amazon.com" [ref=e44] [cursor=pointer]:
+            - /url: https://www.amazon.com/ap/signin?openid.pape.max_auth_age=1209600&openid.return_to=https%3A%2F%2Fread.amazon.com%2Fkindle-library&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=amzn_kindle_mykindle_us&openid.mode=checkid_setup&language=en_US&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&pageId=amzn_kindle_mykindle_us&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0
+          - text: or download Kindle on any device.
+        - paragraph [ref=e45]: Kindle Cloud Reader is now known as Kindle for Web.
+        - generic [ref=e46]:
+          - link "Download on the App store" [ref=e47] [cursor=pointer]:
+            - /url: https://apps.apple.com/us/app/id302584613
+            - img "Download on the App store" [ref=e48]
+          - link "Get it on Google Play" [ref=e49] [cursor=pointer]:
+            - /url: https://play.google.com/store/apps/details?hl=en_US&id=com.amazon.kindle
+            - img "Get it on Google Play" [ref=e50]
+          - link "Download for PC and Mac" [ref=e51] [cursor=pointer]:
+            - /url: https://www.amazon.com/kindlepcdownload?ref=kfw
+            - img "Download for PC and Mac" [ref=e52]
+        - paragraph [ref=e53]:
+          - link "Learn more about the Kindle app" [ref=e54] [cursor=pointer]:
+            - /url: https://www.amazon.com/b?node=16571048011&ref_=kfw_landing_learn_about
+      - generic [ref=e56]:
+        - heading "Get started with Kindle" [level=2] [ref=e57]
+        - generic [ref=e58]:
+          - button "Create an Amazon account" [ref=e59] [cursor=pointer]
+          - button "Amazon Sign in with your account" [ref=e60] [cursor=pointer]:
+            - img "Amazon"
+            - text: Sign in with your account
+  - contentinfo [ref=e61]:
+    - generic [ref=e62]:
+      - paragraph [ref=e63]: © 1996-2026, Amazon.com, Inc. or its affiliates.
+      - paragraph [ref=e64]:
+        - link "Terms of use" [ref=e65] [cursor=pointer]:
+          - /url: https://www.amazon.com/gp/help/customer/display.html/?nodeId=200699130&ref_=kfw_landing_tou
+        - text: "|"
+        - link "Legal notices" [ref=e66] [cursor=pointer]:
+          - /url: https://www.amazon.com/gp/help/customer/display.html?nodeId=200701450&ref_=kfw_landing_legal
+        - text: "|"
+        - link "Privacy notice" [ref=e67] [cursor=pointer]:
+          - /url: https://www.amazon.com/gp/help/customer/display.html?nodeId=GX7NJQ4ZB8MHFRNJ&ref_=kfw_landing_privacy
+        - text: "|"
+        - link "Help" [ref=e68] [cursor=pointer]:
+          - /url: https://www.amazon.com/gp/help/customer/display.html?ref_=kfw_landing_help&nodeId=GAJYEL5VJLU5KF6L

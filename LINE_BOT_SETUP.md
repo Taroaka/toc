@@ -12,6 +12,14 @@
 - ngrokインストール済み・認証済み（`ngrok config check` で確認）
 - LINEアカウント
 
+## 運用前提メモ
+
+- Mac本体では `sudo pmset -a sleep 0` と `sudo pmset -a disksleep 0` を実行して、AC・バッテリーともにスリープしない設定にしておく
+- スリープ設定を戻す場合は `sudo pmset -a restoredefaults`
+- Claude Code の TUI 入力欄が `Terminal.app` で不安定になる場合があるため、`iTerm2` の使用を推奨
+- Mac再起動後は `./start.sh` を手動で再実行する必要がある
+- ngrok 固定ドメインを使っている場合、再起動のたびに LINE Developers 側の Webhook URL を再設定する必要はない
+
 ---
 
 ## ステップ1: LINE Developers でチャネル作成
@@ -348,6 +356,24 @@ chmod +x start.sh
 ```bash
 ./start.sh
 ```
+
+Macを再起動した後も自動では復帰しないため、毎回手動で起動する。
+
+## 稼働確認
+
+```bash
+curl http://localhost:13000/
+```
+
+正常時は次が返る。
+
+```json
+{"status":"running"}
+```
+
+## 停止方法
+
+`./start.sh` を実行しているターミナルで `Ctrl+C` を押す。
 
 ## リセットコマンド（LINEから送信）
 

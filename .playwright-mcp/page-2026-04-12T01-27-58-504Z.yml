@@ -1,0 +1,45 @@
+- generic [ref=e3]:
+  - img [ref=e6]
+  - generic [ref=e8]:
+    - alert [ref=e11]:
+      - generic [ref=e12]:
+        - heading "There was a problem" [level=4] [ref=e13]
+        - generic [ref=e15]: We cannot find an account with that email address
+    - generic [ref=e17]:
+      - generic [ref=e22]:
+        - heading "Sign in" [level=1] [ref=e23]
+        - generic [ref=e24]:
+          - generic [ref=e25]: Enter mobile number or email
+          - textbox "Enter mobile number or email" [ref=e26]: babakantarou@icloud.com
+        - generic [ref=e27]:
+          - generic [ref=e29] [cursor=pointer]:
+            - button "Continue" [ref=e30]
+            - generic [ref=e31]: Continue
+          - generic [ref=e32]:
+            - text: By continuing, you agree to Amazon's
+            - link "Conditions of Use" [ref=e33] [cursor=pointer]:
+              - /url: /gp/help/customer/display.html/ref=ap_signin_notification_condition_of_use?ie=UTF8&nodeId=508088
+            - text: and
+            - link "Privacy Notice" [ref=e34] [cursor=pointer]:
+              - /url: /gp/help/customer/display.html/ref=ap_signin_notification_privacy_notice?ie=UTF8&nodeId=468496
+            - text: .
+        - generic [ref=e36]:
+          - button "Need help?" [active] [ref=e37] [cursor=pointer]: Need help?
+          - list:
+            - listitem
+            - listitem
+      - heading "New to Amazon?" [level=5] [ref=e40]
+      - link "Create your Amazon account" [ref=e43] [cursor=pointer]:
+        - /url: https://www.amazon.com/ap/register?openid.pape.max_auth_age=1209600&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&signInRedirectToFPPThreshold=5&language=en_US&pageId=amzn_kindle_mykindle_us&useSHuMAWorkflow=false&openid.return_to=https%3A%2F%2Fread.amazon.com%2Fkindle-library&prevRID=WEX2KTPYTJ7BA4MY41WK&openid.assoc_handle=amzn_kindle_mykindle_us&openid.mode=checkid_setup&prepopulatedLoginId=eyJjaXBoZXIiOiJrV3JOOU8xUHNmTUk2ZzBwUlQxNU91YmRaYWVuTXlHZnBRaW5VN0p3aEpZPSIsInZlcnNpb24iOjMsIklWIjoiRHBPdHRvcjBrSGFycjJoZFE0a3RqZz09In0%3D&failedSignInCount=1&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&timestamp=1775957101000
+  - generic [ref=e44]:
+    - list [ref=e48]:
+      - listitem [ref=e49]:
+        - link "Conditions of Use" [ref=e50] [cursor=pointer]:
+          - /url: /gp/help/customer/display.html/ref=ap_desktop_footer_cou?ie=UTF8&nodeId=508088
+      - listitem [ref=e51]:
+        - link "Privacy Notice" [ref=e52] [cursor=pointer]:
+          - /url: /gp/help/customer/display.html/ref=ap_desktop_footer_privacy_notice?ie=UTF8&nodeId=468496
+      - listitem [ref=e53]:
+        - link "Help" [ref=e54] [cursor=pointer]:
+          - /url: /help
+    - generic [ref=e55]: © 1996-2026, Amazon.com, Inc. or its affiliates

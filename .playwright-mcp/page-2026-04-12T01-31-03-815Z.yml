@@ -1,0 +1,460 @@
+- generic [ref=e1]:
+  - link "\"ライブラリーのコンテンツにスキップ\"" [ref=e2] [cursor=pointer]:
+    - /url: "#library"
+  - generic [ref=e5]:
+    - generic [ref=e7]:
+      - banner [ref=e9]:
+        - generic [ref=e10]:
+          - link "Kindle" [ref=e12] [cursor=pointer]:
+            - /url: /kindle-library
+          - searchbox "Kindle を検索" [ref=e17]
+          - generic [ref=e18]:
+            - generic [ref=e19]:
+              - button "フィルター" [ref=e21] [cursor=pointer]:
+                - generic [ref=e23]: フィルター
+              - 'button "並べ替え: 最近の読書または購入" [ref=e26] [cursor=pointer]':
+                - generic [ref=e28]: "並べ替え:"
+                - generic [ref=e29]: 最近の読書または購入
+              - button "表示" [ref=e32] [cursor=pointer]:
+                - generic [ref=e34]: 表示
+            - generic "Kindle ストアにアクセス" [ref=e36]
+            - button "設定" [ref=e39] [cursor=pointer]
+      - generic [ref=e40]:
+        - generic [ref=e42]:
+          - generic [ref=e43]:
+            - generic [ref=e44] [cursor=pointer]:
+              - tab "ライブラリ" [ref=e45]:
+                - heading "ライブラリ" [level=3] [ref=e47]:
+                  - generic [ref=e48]: ライブラリ
+              - button [ref=e50]
+            - list [ref=e52]:
+              - menuitem "すべての作品" [ref=e53]:
+                - menuitemradio "すべての作品" [checked] [ref=e54]:
+                  - generic [ref=e55]: すべての作品
+              - menuitem "本" [ref=e56]:
+                - menuitemradio "本" [ref=e57] [cursor=pointer]:
+                  - generic [ref=e58]: 本
+              - menuitem "コミック" [ref=e59]:
+                - menuitemradio "コミック" [ref=e60] [cursor=pointer]:
+                  - generic [ref=e61]: コミック
+              - menuitem "サンプル" [ref=e62]:
+                - menuitemradio "サンプル" [ref=e63] [cursor=pointer]:
+                  - generic [ref=e64]: サンプル
+          - tab "メモとハイライト" [ref=e67] [cursor=pointer]:
+            - heading "メモとハイライト" [level=3] [ref=e69]:
+              - generic [ref=e70]: メモとハイライト
+        - main [ref=e72]:
+          - list [ref=e74]:
+            - listitem [ref=e75] [cursor=pointer]:
+              - generic "プラネタリア (幻夏舎) (Japanese Edition) 佐藤航陽; 渡邉賢一" [ref=e76]:
+                - generic [ref=e77]:
+                  - generic [ref=e79]: プラネタリア (幻夏舎) (Japanese Edition)
+                  - generic [ref=e83]:
+                    - paragraph [ref=e85]: プラネタリア (幻夏舎) (Japanese Edition)
+                    - paragraph [ref=e87]: 佐藤航陽; 渡邉賢一
+            - listitem [ref=e88] [cursor=pointer]:
+              - generic "ジェームズ・クリアー式 複利で伸びる1つの習慣 (Japanese Edition) ジェームズ・クリアー" [ref=e89]:
+                - generic [ref=e90]:
+                  - generic [ref=e92]: ジェームズ・クリアー式 複利で伸びる1つの習慣 (Japanese Edition)
+                  - generic [ref=e96]:
+                    - paragraph [ref=e98]: ジェームズ・クリアー式 複利で伸びる1つの習慣 (Japanese Edition)
+                    - paragraph [ref=e100]: ジェームズ・クリアー
+            - listitem [ref=e101] [cursor=pointer]:
+              - generic "ものがわかるということ (Japanese Edition) 養老孟司" [ref=e102]:
+                - generic [ref=e103]:
+                  - generic [ref=e105]: ものがわかるということ (Japanese Edition)
+                  - generic [ref=e109]:
+                    - paragraph [ref=e111]: ものがわかるということ (Japanese Edition)
+                    - paragraph [ref=e113]: 養老孟司
+            - listitem [ref=e114] [cursor=pointer]:
+              - generic "Kindle Unlimited 最新ビジネスマナーと 今さら聞けない仕事の超基本 (Japanese Edition) 石川 和男; 宮本 ゆみ子" [ref=e115]:
+                - generic [ref=e116]:
+                  - generic [ref=e117]:
+                    - generic [ref=e118]: 最新ビジネスマナーと 今さら聞けない仕事の超基本 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e121]
+                  - generic [ref=e124]:
+                    - paragraph [ref=e126]: 最新ビジネスマナーと 今さら聞けない仕事の超基本 (Japanese Edition)
+                    - paragraph [ref=e128]: 石川 和男; 宮本 ゆみ子
+            - listitem [ref=e129] [cursor=pointer]:
+              - generic "Kindle Unlimited 集中力がすべてを解決する 精神科医が教える「ゾーン」に入る方法 (Japanese Edition) 樺沢 紫苑" [ref=e130]:
+                - generic [ref=e131]:
+                  - generic [ref=e132]:
+                    - generic [ref=e133]: 集中力がすべてを解決する 精神科医が教える「ゾーン」に入る方法 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e136]
+                  - generic [ref=e139]:
+                    - paragraph [ref=e141]: 集中力がすべてを解決する 精神科医が教える「ゾーン」に入る方法 (Japanese Edition)
+                    - paragraph [ref=e143]: 樺沢 紫苑
+            - listitem [ref=e144] [cursor=pointer]:
+              - 'generic "ファンダメンタルズ×テクニカル マーケティング: Webマーケティングの成果を最大化する83の方法 (Japanese Edition) 木下 勝寿" [ref=e145]':
+                - generic [ref=e146]:
+                  - generic [ref=e148]: "ファンダメンタルズ×テクニカル マーケティング: Webマーケティングの成果を最大化する83の方法 (Japanese Edition)"
+                  - generic [ref=e152]:
+                    - paragraph [ref=e154]: "ファンダメンタルズ×テクニカル マーケティング: Webマーケティングの成果を最大化する83の方法 (Japanese Edition)"
+                    - paragraph [ref=e156]: 木下 勝寿
+            - listitem [ref=e157] [cursor=pointer]:
+              - generic "オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）６【電子版限定特典付き】 (Japanese Edition) 樽見京一郎; 野上武志; THORES柴本" [ref=e158]:
+                - generic [ref=e159]:
+                  - generic [ref=e161]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）６【電子版限定特典付き】 (Japanese Edition)
+                  - generic [ref=e165]:
+                    - paragraph [ref=e167]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）６【電子版限定特典付き】 (Japanese Edition)
+                    - paragraph [ref=e169]: 樽見京一郎; 野上武志; THORES柴本
+            - listitem [ref=e170] [cursor=pointer]:
+              - generic "現場で役立つシステム設計の原則 〜変更を楽で安全にするオブジェクト指向の実践技法 (Japanese Edition) 増田 亨" [ref=e171]:
+                - generic [ref=e172]:
+                  - generic [ref=e174]: 現場で役立つシステム設計の原則 〜変更を楽で安全にするオブジェクト指向の実践技法 (Japanese Edition)
+                  - generic [ref=e178]:
+                    - paragraph [ref=e180]: 現場で役立つシステム設計の原則 〜変更を楽で安全にするオブジェクト指向の実践技法 (Japanese Edition)
+                    - paragraph [ref=e182]: 増田 亨
+            - listitem [ref=e183] [cursor=pointer]:
+              - generic "Kindle Unlimited 実践型クリティカルシンキング 21世紀スキル (Japanese Edition) 佐々木裕子" [ref=e184]:
+                - generic [ref=e185]:
+                  - generic [ref=e186]:
+                    - generic [ref=e187]: 実践型クリティカルシンキング 21世紀スキル (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e190]
+                  - generic [ref=e193]:
+                    - paragraph [ref=e195]: 実践型クリティカルシンキング 21世紀スキル (Japanese Edition)
+                    - paragraph [ref=e197]: 佐々木裕子
+            - listitem [ref=e198] [cursor=pointer]:
+              - generic "Kindle Unlimited GO OUT特別編集 GO OUT LIVIN’ Vol.20 (Japanese Edition) 三栄" [ref=e199]:
+                - generic [ref=e200]:
+                  - generic [ref=e201]:
+                    - generic [ref=e202]: GO OUT特別編集 GO OUT LIVIN’ Vol.20 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e205]
+                  - generic [ref=e208]:
+                    - paragraph [ref=e210]: GO OUT特別編集 GO OUT LIVIN’ Vol.20 (Japanese Edition)
+                    - paragraph [ref=e212]: 三栄
+            - listitem [ref=e213] [cursor=pointer]:
+              - generic "菌類が世界を救う キノコ・カビ・酵母たちの驚異の能力 (Japanese Edition) マーリン・シェルドレイク" [ref=e214]:
+                - generic [ref=e215]:
+                  - generic [ref=e217]: 菌類が世界を救う キノコ・カビ・酵母たちの驚異の能力 (Japanese Edition)
+                  - generic [ref=e221]:
+                    - paragraph [ref=e223]: 菌類が世界を救う キノコ・カビ・酵母たちの驚異の能力 (Japanese Edition)
+                    - paragraph [ref=e225]: マーリン・シェルドレイク
+            - listitem [ref=e226] [cursor=pointer]:
+              - generic "Kindle Unlimited YUMEGAKANAUNOU (Japanese Edition) HIDETO TOMABECHI" [ref=e227]:
+                - generic [ref=e228]:
+                  - generic [ref=e229]:
+                    - generic [ref=e230]: YUMEGAKANAUNOU (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e233]
+                  - generic [ref=e236]:
+                    - paragraph [ref=e238]: YUMEGAKANAUNOU (Japanese Edition)
+                    - paragraph [ref=e240]: HIDETO TOMABECHI
+            - listitem [ref=e241] [cursor=pointer]:
+              - generic "Kindle Unlimited 時短・効率化の前に 今さら聞けない時間の超基本 (Japanese Edition) 二間瀬 敏史; 吉武 麻子" [ref=e242]:
+                - generic [ref=e243]:
+                  - generic [ref=e244]:
+                    - generic [ref=e245]: 時短・効率化の前に 今さら聞けない時間の超基本 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e248]
+                  - generic [ref=e251]:
+                    - paragraph [ref=e253]: 時短・効率化の前に 今さら聞けない時間の超基本 (Japanese Edition)
+                    - paragraph [ref=e255]: 二間瀬 敏史; 吉武 麻子
+            - listitem [ref=e256] [cursor=pointer]:
+              - generic "Kindle Unlimited SEITOSHINOTORIATSUKAISETSUMEISHO (Japanese Edition) HIDETO TOMABECHI" [ref=e257]:
+                - generic [ref=e258]:
+                  - generic [ref=e259]:
+                    - generic [ref=e260]: SEITOSHINOTORIATSUKAISETSUMEISHO (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e263]
+                  - generic [ref=e266]:
+                    - paragraph [ref=e268]: SEITOSHINOTORIATSUKAISETSUMEISHO (Japanese Edition)
+                    - paragraph [ref=e270]: HIDETO TOMABECHI
+            - listitem [ref=e271] [cursor=pointer]:
+              - generic "Kindle Unlimited TOMABECHISHIKISHIKOUNOTOJUTU (Japanese Edition) HIDETO TOMABECHI" [ref=e272]:
+                - generic [ref=e273]:
+                  - generic [ref=e274]:
+                    - generic [ref=e275]: TOMABECHISHIKISHIKOUNOTOJUTU (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e278]
+                  - generic [ref=e281]:
+                    - paragraph [ref=e283]: TOMABECHISHIKISHIKOUNOTOJUTU (Japanese Edition)
+                    - paragraph [ref=e285]: HIDETO TOMABECHI
+            - listitem [ref=e286] [cursor=pointer]:
+              - generic "Kindle Unlimited 10倍成長 2倍より10倍が簡単だ (Japanese Edition) ダン・サリヴァン; ベンジャミン・ハーディ" [ref=e287]:
+                - generic [ref=e288]:
+                  - generic [ref=e289]:
+                    - generic [ref=e290]: 10倍成長 2倍より10倍が簡単だ (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e293]
+                  - generic [ref=e296]:
+                    - paragraph [ref=e298]: 10倍成長 2倍より10倍が簡単だ (Japanese Edition)
+                    - paragraph [ref=e300]: ダン・サリヴァン; ベンジャミン・ハーディ
+            - listitem [ref=e301] [cursor=pointer]:
+              - generic "教養としての認知科学 (Japanese Edition) 鈴木宏昭" [ref=e302]:
+                - generic [ref=e303]:
+                  - generic [ref=e305]: 教養としての認知科学 (Japanese Edition)
+                  - generic [ref=e309]:
+                    - paragraph [ref=e311]: 教養としての認知科学 (Japanese Edition)
+                    - paragraph [ref=e313]: 鈴木宏昭
+            - listitem [ref=e314] [cursor=pointer]:
+              - generic "Kindle Unlimited 成瀬は天下を取りにいく（新潮文庫） （「成瀬」シリーズ） (Japanese Edition) 宮島未奈" [ref=e315]:
+                - generic [ref=e316]:
+                  - generic [ref=e317]:
+                    - generic [ref=e318]: 成瀬は天下を取りにいく（新潮文庫） （「成瀬」シリーズ） (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e321]
+                  - generic [ref=e324]:
+                    - paragraph [ref=e326]: 成瀬は天下を取りにいく（新潮文庫） （「成瀬」シリーズ） (Japanese Edition)
+                    - paragraph [ref=e328]: 宮島未奈
+            - listitem [ref=e329] [cursor=pointer]:
+              - generic "Kindle Unlimited BRUTUS(ブルータス) 2026年 2月15日号 No.1047 [椅子と、居場所。] [雑誌] (Japanese Edition) BRUTUS編集部" [ref=e330]:
+                - generic [ref=e331]:
+                  - generic [ref=e332]:
+                    - generic [ref=e333]: BRUTUS(ブルータス) 2026年 2月15日号 No.1047 [椅子と、居場所。] [雑誌] (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e336]
+                  - generic [ref=e339]:
+                    - paragraph [ref=e341]: BRUTUS(ブルータス) 2026年 2月15日号 No.1047 [椅子と、居場所。] [雑誌] (Japanese Edition)
+                    - paragraph [ref=e343]: BRUTUS編集部
+            - listitem [ref=e344] [cursor=pointer]:
+              - generic "Kindle Unlimited 快眠法の前に 今さら聞けない 睡眠の超基本 (Japanese Edition) 柳沢 正史" [ref=e345]:
+                - generic [ref=e346]:
+                  - generic [ref=e347]:
+                    - generic [ref=e348]: 快眠法の前に 今さら聞けない 睡眠の超基本 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e351]
+                  - generic [ref=e354]:
+                    - paragraph [ref=e356]: 快眠法の前に 今さら聞けない 睡眠の超基本 (Japanese Edition)
+                    - paragraph [ref=e358]: 柳沢 正史
+            - listitem [ref=e359] [cursor=pointer]:
+              - generic "BLUE GIANT MOMENTUM（７） (ビッグコミックススペシャル) (Japanese Edition) 石塚真一" [ref=e360]:
+                - generic [ref=e361]:
+                  - generic [ref=e363]: BLUE GIANT MOMENTUM（７） (ビッグコミックススペシャル) (Japanese Edition)
+                  - generic [ref=e367]:
+                    - paragraph [ref=e369]: BLUE GIANT MOMENTUM（７） (ビッグコミックススペシャル) (Japanese Edition)
+                    - paragraph [ref=e371]: 石塚真一
+            - listitem [ref=e372] [cursor=pointer]:
+              - generic "Kindle Unlimited Casa BRUTUS特別編集 居心地のいい家具。 (Japanese Edition) マガジンハウス" [ref=e373]:
+                - generic [ref=e374]:
+                  - generic [ref=e375]:
+                    - generic [ref=e376]: Casa BRUTUS特別編集 居心地のいい家具。 (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e379]
+                  - generic [ref=e382]:
+                    - paragraph [ref=e384]: Casa BRUTUS特別編集 居心地のいい家具。 (Japanese Edition)
+                    - paragraph [ref=e386]: マガジンハウス
+            - listitem [ref=e387] [cursor=pointer]:
+              - generic "自分の中に孤独を抱け (Japanese Edition) 岡本 太郎" [ref=e388]:
+                - generic [ref=e389]:
+                  - generic [ref=e391]: 自分の中に孤独を抱け (Japanese Edition)
+                  - generic [ref=e395]:
+                    - paragraph [ref=e397]: 自分の中に孤独を抱け (Japanese Edition)
+                    - paragraph [ref=e399]: 岡本 太郎
+            - listitem [ref=e400] [cursor=pointer]:
+              - generic "Kindle Unlimited 生物から見た世界 (岩波文庫) (Japanese Edition) ユクスキュル; クリサート; 日高 敏隆; 羽田 節子" [ref=e401]:
+                - generic [ref=e402]:
+                  - generic [ref=e403]:
+                    - generic [ref=e404]: 生物から見た世界 (岩波文庫) (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e407]
+                  - generic [ref=e410]:
+                    - paragraph [ref=e412]: 生物から見た世界 (岩波文庫) (Japanese Edition)
+                    - paragraph [ref=e414]: ユクスキュル; クリサート; 日高 敏隆; 羽田 節子
+            - listitem [ref=e415] [cursor=pointer]:
+              - 'generic "Kindle Unlimited 2025 Latest Edition AI Image Complete Mastery From Beginner to Pro with MidJourney: Complete Mastery: From AI Image Generation to Monetization (Japanese Edition) YASUMA" [ref=e416]':
+                - generic [ref=e417]:
+                  - generic [ref=e418]:
+                    - generic [ref=e419]: "2025 Latest Edition AI Image Complete Mastery From Beginner to Pro with MidJourney: Complete Mastery: From AI Image Generation to Monetization (Japanese Edition)"
+                    - img "Kindle Unlimited" [ref=e422]
+                  - generic [ref=e425]:
+                    - paragraph [ref=e427]: "2025 Latest Edition AI Image Complete Mastery From Beginner to Pro with MidJourney: Complete Mastery: From AI Image Generation to Monetization (Japanese Edition)"
+                    - paragraph [ref=e429]: YASUMA
+            - listitem [ref=e430] [cursor=pointer]:
+              - generic "Kindle Unlimited 自分の時間―――１日２４時間でどう生きるか (三笠書房 電子書籍) (Japanese Edition) アーノルド・ベネット" [ref=e431]:
+                - generic [ref=e432]:
+                  - generic [ref=e433]:
+                    - generic [ref=e434]: 自分の時間―――１日２４時間でどう生きるか (三笠書房 電子書籍) (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e437]
+                  - generic [ref=e440]:
+                    - paragraph [ref=e442]: 自分の時間―――１日２４時間でどう生きるか (三笠書房 電子書籍) (Japanese Edition)
+                    - paragraph [ref=e444]: アーノルド・ベネット
+            - listitem [ref=e445] [cursor=pointer]:
+              - generic "実践Claude Code入門―現場で活用するためのAIコーディングの思考法 エンジニア選書 (Japanese Edition) 西見 公宏; 吉田 真吾; 大嶋 勇樹" [ref=e446]:
+                - generic [ref=e447]:
+                  - generic [ref=e449]: 実践Claude Code入門―現場で活用するためのAIコーディングの思考法 エンジニア選書 (Japanese Edition)
+                  - generic [ref=e453]:
+                    - paragraph [ref=e455]: 実践Claude Code入門―現場で活用するためのAIコーディングの思考法 エンジニア選書 (Japanese Edition)
+                    - paragraph [ref=e457]: 西見 公宏; 吉田 真吾; 大嶋 勇樹
+            - listitem [ref=e458] [cursor=pointer]:
+              - generic "Kindle Unlimited タックスヘイヴン Tax Haven (幻冬舎文庫) (Japanese Edition) 橘玲" [ref=e459]:
+                - generic [ref=e460]:
+                  - generic [ref=e461]:
+                    - generic [ref=e462]: タックスヘイヴン Tax Haven (幻冬舎文庫) (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e465]
+                  - generic [ref=e468]:
+                    - paragraph [ref=e470]: タックスヘイヴン Tax Haven (幻冬舎文庫) (Japanese Edition)
+                    - paragraph [ref=e472]: 橘玲
+            - listitem [ref=e473] [cursor=pointer]:
+              - generic "オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）５ (Japanese Edition) 樽見京一郎; 野上武志; THORES柴本" [ref=e474]:
+                - generic [ref=e475]:
+                  - generic [ref=e477]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）５ (Japanese Edition)
+                  - generic [ref=e481]:
+                    - paragraph [ref=e483]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）５ (Japanese Edition)
+                    - paragraph [ref=e485]: 樽見京一郎; 野上武志; THORES柴本
+            - listitem [ref=e486] [cursor=pointer]:
+              - generic "オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）４ (Japanese Edition) 樽見京一郎; 野上武志; THORES柴本" [ref=e487]:
+                - generic [ref=e488]:
+                  - generic [ref=e490]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）４ (Japanese Edition)
+                  - generic [ref=e494]:
+                    - paragraph [ref=e496]: オルクセン王国史～野蛮なオークの国は、如何にして平和なエルフの国を焼き払うに至ったか～（ノヴァコミックス）４ (Japanese Edition)
+                    - paragraph [ref=e498]: 樽見京一郎; 野上武志; THORES柴本
+            - listitem [ref=e499] [cursor=pointer]:
+              - generic "ライト、ついてますか 問題発見の人間学 (Japanese Edition) ドナルド・C・ゴース; ジェラルド・M・ワインバーグ" [ref=e500]:
+                - generic [ref=e501]:
+                  - generic [ref=e503]: ライト、ついてますか 問題発見の人間学 (Japanese Edition)
+                  - generic [ref=e507]:
+                    - paragraph [ref=e509]: ライト、ついてますか 問題発見の人間学 (Japanese Edition)
+                    - paragraph [ref=e511]: ドナルド・C・ゴース; ジェラルド・M・ワインバーグ
+            - listitem [ref=e512] [cursor=pointer]:
+              - generic "Kindle Unlimited 宮本武蔵「五輪書」 ビギナーズ 日本の思想 (角川ソフィア文庫) (Japanese Edition) 宮本 武蔵" [ref=e513]:
+                - generic [ref=e514]:
+                  - generic [ref=e515]:
+                    - generic [ref=e516]: 宮本武蔵「五輪書」 ビギナーズ 日本の思想 (角川ソフィア文庫) (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e519]
+                  - generic [ref=e522]:
+                    - paragraph [ref=e524]: 宮本武蔵「五輪書」 ビギナーズ 日本の思想 (角川ソフィア文庫) (Japanese Edition)
+                    - paragraph [ref=e526]: 宮本 武蔵
+            - listitem [ref=e527] [cursor=pointer]:
+              - 'generic "祝福のチェスカ: 2【電子限定描き下ろし付き】 (ZERO-SUMコミックス) (Japanese Edition) 乃原 美隆" [ref=e528]':
+                - generic [ref=e529]:
+                  - generic [ref=e531]: "祝福のチェスカ: 2【電子限定描き下ろし付き】 (ZERO-SUMコミックス) (Japanese Edition)"
+                  - generic [ref=e535]:
+                    - paragraph [ref=e537]: "祝福のチェスカ: 2【電子限定描き下ろし付き】 (ZERO-SUMコミックス) (Japanese Edition)"
+                    - paragraph [ref=e539]: 乃原 美隆
+            - listitem [ref=e540] [cursor=pointer]:
+              - generic "タフティ・ザ・プリーステス 世界が変わる現実創造のメソッド (Japanese Edition) ヴァジム・ゼランド" [ref=e541]:
+                - generic [ref=e542]:
+                  - generic [ref=e544]: タフティ・ザ・プリーステス 世界が変わる現実創造のメソッド (Japanese Edition)
+                  - generic [ref=e548]:
+                    - paragraph [ref=e550]: タフティ・ザ・プリーステス 世界が変わる現実創造のメソッド (Japanese Edition)
+                    - paragraph [ref=e552]: ヴァジム・ゼランド
+            - listitem [ref=e553] [cursor=pointer]:
+              - generic "ゾーンに入る技術 Forest2545新書 (Japanese Edition) 辻秀一" [ref=e554]:
+                - generic [ref=e555]:
+                  - generic [ref=e557]: ゾーンに入る技術 Forest2545新書 (Japanese Edition)
+                  - generic [ref=e561]:
+                    - paragraph [ref=e563]: ゾーンに入る技術 Forest2545新書 (Japanese Edition)
+                    - paragraph [ref=e565]: 辻秀一
+            - listitem [ref=e566] [cursor=pointer]:
+              - generic "Kindle Unlimited 人間の大地 (光文社古典新訳文庫) (Japanese Edition) サン＝テグジュペリ" [ref=e567]:
+                - generic [ref=e568]:
+                  - generic [ref=e569]:
+                    - generic [ref=e570]: 人間の大地 (光文社古典新訳文庫) (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e573]
+                  - generic [ref=e576]:
+                    - paragraph [ref=e578]: 人間の大地 (光文社古典新訳文庫) (Japanese Edition)
+                    - paragraph [ref=e580]: サン＝テグジュペリ
+            - listitem [ref=e581] [cursor=pointer]:
+              - generic "具体と抽象 (Japanese Edition) 細谷 功" [ref=e582]:
+                - generic [ref=e583]:
+                  - generic [ref=e585]: 具体と抽象 (Japanese Edition)
+                  - generic [ref=e589]:
+                    - paragraph [ref=e591]: 具体と抽象 (Japanese Edition)
+                    - paragraph [ref=e593]: 細谷 功
+            - listitem [ref=e594] [cursor=pointer]:
+              - generic "幸福について (Japanese Edition) ショーペンハウアー; Ｔｅａｍバンミカス; 伊佐義勇" [ref=e595]:
+                - generic [ref=e596]:
+                  - generic [ref=e598]: 幸福について (Japanese Edition)
+                  - generic [ref=e602]:
+                    - paragraph [ref=e604]: 幸福について (Japanese Edition)
+                    - paragraph [ref=e606]: ショーペンハウアー; Ｔｅａｍバンミカス; 伊佐義勇
+            - listitem [ref=e607] [cursor=pointer]:
+              - generic "日本転生 絶体絶命の国の変え方 (Japanese Edition) 苫米地英人" [ref=e608]:
+                - generic [ref=e609]:
+                  - generic [ref=e611]: 日本転生 絶体絶命の国の変え方 (Japanese Edition)
+                  - generic [ref=e615]:
+                    - paragraph [ref=e617]: 日本転生 絶体絶命の国の変え方 (Japanese Edition)
+                    - paragraph [ref=e619]: 苫米地英人
+            - listitem [ref=e620] [cursor=pointer]:
+              - generic "BLUE GIANT MOMENTUM（６） (ビッグコミックススペシャル) (Japanese Edition) 石塚真一" [ref=e621]:
+                - generic [ref=e622]:
+                  - generic [ref=e624]: BLUE GIANT MOMENTUM（６） (ビッグコミックススペシャル) (Japanese Edition)
+                  - generic [ref=e628]:
+                    - paragraph [ref=e630]: BLUE GIANT MOMENTUM（６） (ビッグコミックススペシャル) (Japanese Edition)
+                    - paragraph [ref=e632]: 石塚真一
+            - listitem [ref=e633] [cursor=pointer]:
+              - generic "BLUE GIANT MOMENTUM（５） (ビッグコミックススペシャル) (Japanese Edition) 石塚真一" [ref=e634]:
+                - generic [ref=e635]:
+                  - generic [ref=e637]: BLUE GIANT MOMENTUM（５） (ビッグコミックススペシャル) (Japanese Edition)
+                  - generic [ref=e641]:
+                    - paragraph [ref=e643]: BLUE GIANT MOMENTUM（５） (ビッグコミックススペシャル) (Japanese Edition)
+                    - paragraph [ref=e645]: 石塚真一
+            - listitem [ref=e646] [cursor=pointer]:
+              - generic "たった一人の分析から事業は成長する 実践 顧客起点マーケティング（MarkeZine BOOKS） (Japanese Edition) 西口 一希" [ref=e647]:
+                - generic [ref=e648]:
+                  - generic [ref=e650]: たった一人の分析から事業は成長する 実践 顧客起点マーケティング（MarkeZine BOOKS） (Japanese Edition)
+                  - generic [ref=e654]:
+                    - paragraph [ref=e656]: たった一人の分析から事業は成長する 実践 顧客起点マーケティング（MarkeZine BOOKS） (Japanese Edition)
+                    - paragraph [ref=e658]: 西口 一希
+            - listitem [ref=e659] [cursor=pointer]:
+              - generic "Kindle Unlimited 頭がよくなる思考術 頭がよくなるシリーズ (Japanese Edition) 白取春彦" [ref=e660]:
+                - generic [ref=e661]:
+                  - generic [ref=e662]:
+                    - generic [ref=e663]: 頭がよくなる思考術 頭がよくなるシリーズ (Japanese Edition)
+                    - img "Kindle Unlimited" [ref=e666]
+                  - generic [ref=e669]:
+                    - paragraph [ref=e671]: 頭がよくなる思考術 頭がよくなるシリーズ (Japanese Edition)
+                    - paragraph [ref=e673]: 白取春彦
+            - listitem [ref=e674] [cursor=pointer]:
+              - generic "NEXUS 情報の人類史 上下合本版 (Japanese Edition) ユヴァル・ノア・ハラリ" [ref=e675]:
+                - generic [ref=e676]:
+                  - generic [ref=e678]: NEXUS 情報の人類史 上下合本版 (Japanese Edition)
+                  - generic [ref=e682]:
+                    - paragraph [ref=e684]: NEXUS 情報の人類史 上下合本版 (Japanese Edition)
+                    - paragraph [ref=e686]: ユヴァル・ノア・ハラリ
+            - listitem [ref=e687] [cursor=pointer]:
+              - generic "BLUE GIANT MOMENTUM（４） (ビッグコミックススペシャル) (Japanese Edition) 石塚真一" [ref=e688]:
+                - generic [ref=e689]:
+                  - generic [ref=e691]: BLUE GIANT MOMENTUM（４） (ビッグコミックススペシャル) (Japanese Edition)
+                  - generic [ref=e695]:
+                    - paragraph [ref=e697]: BLUE GIANT MOMENTUM（４） (ビッグコミックススペシャル) (Japanese Edition)
+                    - paragraph [ref=e699]: 石塚真一
+            - listitem [ref=e700] [cursor=pointer]:
+              - generic "ゆるストイック――ノイズに邪魔されず１日を積み上げる思考 (Japanese Edition) 佐藤 航陽" [ref=e701]:
+                - generic [ref=e702]:
+                  - generic [ref=e704]: ゆるストイック――ノイズに邪魔されず１日を積み上げる思考 (Japanese Edition)
+                  - generic [ref=e708]:
+                    - paragraph [ref=e710]: ゆるストイック――ノイズに邪魔されず１日を積み上げる思考 (Japanese Edition)
+                    - paragraph [ref=e712]: 佐藤 航陽
+            - listitem [ref=e713] [cursor=pointer]:
+              - generic "女神のスプリンター（２） (ヤングマガジンコミックス) (Japanese Edition) 原田重光; かろちー" [ref=e714]:
+                - generic [ref=e715]:
+                  - generic [ref=e717]: 女神のスプリンター（２） (ヤングマガジンコミックス) (Japanese Edition)
+                  - generic [ref=e721]:
+                    - paragraph [ref=e723]: 女神のスプリンター（２） (ヤングマガジンコミックス) (Japanese Edition)
+                    - paragraph [ref=e725]: 原田重光; かろちー
+            - listitem [ref=e726] [cursor=pointer]:
+              - generic "サンプル ようこそ！FACT(東京S区第二支部)へ（２） (マンガワンコミックス) (Japanese Edition) 魚豊" [ref=e727]:
+                - generic [ref=e728]:
+                  - generic [ref=e729]:
+                    - generic [ref=e730]: ようこそ！FACT(東京S区第二支部)へ（２） (マンガワンコミックス) (Japanese Edition)
+                    - generic "サンプル" [ref=e732]
+                  - generic [ref=e736]:
+                    - paragraph [ref=e738]: ようこそ！FACT(東京S区第二支部)へ（２） (マンガワンコミックス) (Japanese Edition)
+                    - paragraph [ref=e740]: 魚豊
+            - listitem [ref=e741] [cursor=pointer]:
+              - generic "BLUE GIANT MOMENTUM（３） (ビッグコミックススペシャル) (Japanese Edition) 石塚真一" [ref=e742]:
+                - generic [ref=e743]:
+                  - generic [ref=e745]: BLUE GIANT MOMENTUM（３） (ビッグコミックススペシャル) (Japanese Edition)
+                  - generic [ref=e749]:
+                    - paragraph [ref=e751]: BLUE GIANT MOMENTUM（３） (ビッグコミックススペシャル) (Japanese Edition)
+                    - paragraph [ref=e753]: 石塚真一
+            - listitem [ref=e754] [cursor=pointer]:
+              - generic "星を編む (Japanese Edition) 凪良ゆう" [ref=e755]:
+                - generic [ref=e756]:
+                  - generic [ref=e758]: 星を編む (Japanese Edition)
+                  - generic [ref=e762]:
+                    - paragraph [ref=e764]: 星を編む (Japanese Edition)
+                    - paragraph [ref=e766]: 凪良ゆう
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+            - listitem
+    - generic [ref=e768]:
+      - generic [ref=e769]:
+        - generic [ref=e770]:
+          - generic "undefined" [active]
+          - list [ref=e771]:
+            - listitem "Kindle for Web が日本語の縦書き表示に対応しました。フォントの調整、ハイライト、コピー & ペーストなどのデジタル機能を使いながら、上から下、右から左へと、従来の日本語書籍の読み方でお楽しみいただけます。" [ref=e772]:
+              - generic [ref=e773]:
+                - generic [ref=e774]: Kindle for Web が日本語の縦書き表示に対応しました。フォントの調整、ハイライト、コピー & ペーストなどのデジタル機能を使いながら、上から下、右から左へと、従来の日本語書籍の読み方でお楽しみいただけます。
+                - link "縦書き表示の本を楽しむ" [ref=e775] [cursor=pointer]:
+                  - /url: https://www.amazon.co.jp/kindle-dbs/storefront?ref_=kfw
+        - button "OK" [ref=e777] [cursor=pointer]
+      - button "閉じる" [ref=e778] [cursor=pointer]

@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "run_dir": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204605",
+  "status": "failed",
+  "created_at": "2026-04-12T20:46:05+09:00",
+  "updated_at": "2026-04-12T21:04:05+09:00",
+  "resume_mode": true,
+  "login_mode": "manual",
+  "transcription_source": "codex vision from local images (per-page codex exec --image)",
+  "port": 59708,
+  "codex_workdir": "/Users/kantaro/Downloads/toc",
+  "codex_reasoning_effort": "medium",
+  "reader": {
+    "url": "https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2",
+    "title": "Kindle",
+    "current_page": 1,
+    "total_pages": 339
+  },
+  "page_turn_method": "unknown",
+  "completed_pages": 1,
+  "last_completed_page_index": 1,
+  "last_completed_kindle_page": 1,
+  "pages": [
+    {
+      "page_index": 1,
+      "kindle_page_number": 1,
+      "kindle_total_pages": 3776,
+      "image_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204605/pages/0001.png",
+      "image_sha256": "5a8575070bd407d12e166b895bcde3320eaf24c7be2f1cffe8963a7df1661658",
+      "vision_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204605/vision/0001.txt",
+      "vision_log_path": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204605/vision/0001.log",
+      "vision_status": "completed",
+      "vision_text": "ジェームズ・クリアー式\n複利で伸びる\n1つの習慣\n\nAtomic\nAn Easy & Proven Way to\nBuild Good Habits & Break Bad One\nby James Clear\nHabits\n\nジェームズ・クリアー 著　牛原眞弓 訳\n\nメルマガ\n購読者\n50万超\n\nアカデミー\n卒業生\n1万超\n\n達成！\n\nきっかけ\n欲求\n報酬\n反応",
+      "quality_status": "accepted",
+      "quality_flags": [],
+      "started_at": "2026-04-12T20:46:22+09:00",
+      "completed_at": "2026-04-12T20:46:22+09:00"
+    }
+  ],
+  "events": [
+    {
+      "ts": "2026-04-12T20:46:05+09:00",
+      "message": "Starting full-book Kindle transcription run."
+    },
+    {
+      "ts": "2026-04-12T20:46:05+09:00",
+      "message": "Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2"
+    },
+    {
+      "ts": "2026-04-12T20:46:05+09:00",
+      "message": "Exporting transcript page 1 from Kindle page 1."
+    },
+    {
+      "ts": "2026-04-12T20:46:05+09:00",
+      "message": "Image export completed for transcript page 1."
+    },
+    {
+      "ts": "2026-04-12T20:46:05+09:00",
+      "message": "Running Codex vision transcription for transcript page 1."
+    },
+    {
+      "ts": "2026-04-12T20:46:22+09:00",
+      "message": "Completed transcript page 1 with vision status `completed`."
+    },
+    {
+      "ts": "2026-04-12T20:46:32+09:00",
+      "message": "Page turn failed after transcript page 1: Page did not change after page-turn click. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T20:46:32+09:00",
+      "message": "Retrying page turn after transcript page 1 in 1.5s (attempt 2/3)."
+    },
+    {
+      "ts": "2026-04-12T20:46:44+09:00",
+      "message": "Page turn failed after transcript page 1: Page did not change after page-turn click. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T20:46:44+09:00",
+      "message": "Retrying page turn after transcript page 1 in 3.0s (attempt 3/3)."
+    },
+    {
+      "ts": "2026-04-12T20:46:57+09:00",
+      "message": "Page turn failed after transcript page 1: Page did not change after page-turn click. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T20:46:57+09:00",
+      "message": "Stopped after page-turn failure at transcript page 1: Page turn failed after transcript page 1 after 3 attempts: Page did not change after page-turn click. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T20:46:57+09:00",
+      "message": "Run marked partial."
+    },
+    {
+      "ts": "2026-04-12T20:54:30+09:00",
+      "message": "Starting full-book Kindle transcription run."
+    },
+    {
+      "ts": "2026-04-12T20:54:30+09:00",
+      "message": "Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2"
+    },
+    {
+      "ts": "2026-04-12T20:54:30+09:00",
+      "message": "Resume found the reader on the last completed page. Advancing once before continuing."
+    },
+    {
+      "ts": "2026-04-12T20:54:40+09:00",
+      "message": "Run aborted with an unexpected error: Page did not change after page-turn click. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T20:54:40+09:00",
+      "message": "Run marked failed."
+    },
+    {
+      "ts": "2026-04-12T21:03:54+09:00",
+      "message": "Starting full-book Kindle transcription run."
+    },
+    {
+      "ts": "2026-04-12T21:03:54+09:00",
+      "message": "Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2"
+    },
+    {
+      "ts": "2026-04-12T21:03:54+09:00",
+      "message": "Resume found the reader on the last completed page. Advancing once before continuing."
+    },
+    {
+      "ts": "2026-04-12T21:04:05+09:00",
+      "message": "Run aborted with an unexpected error: Page did not change after page-turn attempt. Previous page: 1"
+    },
+    {
+      "ts": "2026-04-12T21:04:05+09:00",
+      "message": "Run marked failed."
+    }
+  ],
+  "review_items": [
+    {
+      "page_index": 1,
+      "kindle_page_number": 1,
+      "severity": "blocker",
+      "reason": "page_turn_failed",
+      "evidence": "Page turn failed after transcript page 1 after 3 attempts: Page did not change after page-turn click. Previous page: 1",
+      "suggested_action": "Reopen the reader on the next unread page and resume the run.",
+      "artifact_links": [
+        "pages/0001.png",
+        "vision/0001.txt",
+        "vision/0001.log"
+      ]
+    }
+  ]
+}

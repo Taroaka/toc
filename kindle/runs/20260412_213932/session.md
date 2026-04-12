@@ -1,0 +1,64 @@
+# Kindle full-book session
+
+- run_dir: `/Users/kantaro/Downloads/toc/kindle/runs/20260412_213932`
+- target: `https://read.amazon.com`
+- login_mode: manual
+- transcription_source: codex vision from local images (per-page codex exec --image)
+- page_turn_method: `cdp-mouse-next-button-after-left-hover`
+- status: partial
+- completed_pages: `5`
+- review_items: `3`
+- last_completed_transcript_page: `5`
+- last_completed_book_page: `11`
+- reader_url: `https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2`
+- reader_title: `Kindle`
+- reader_total_pages: `339`
+- resume_mode: `False`
+- created_at: `2026-04-12T21:39:32+09:00`
+- updated_at: `2026-04-12T21:44:58+09:00`
+
+## Recent events
+
+- 2026-04-12T21:39:32+09:00: Starting full-book Kindle transcription run.
+- 2026-04-12T21:39:32+09:00: Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2
+- 2026-04-12T21:39:32+09:00: Exporting transcript page 1 from Kindle page 11.
+- 2026-04-12T21:39:32+09:00: Image export completed for transcript page 1.
+- 2026-04-12T21:39:33+09:00: Prepared padded vision input for transcript page 1.
+- 2026-04-12T21:39:33+09:00: Running Codex vision transcription for transcript page 1.
+- 2026-04-12T21:40:19+09:00: Completed transcript page 1 with vision status `completed`.
+- 2026-04-12T21:40:20+09:00: Page turn failed after transcript page 1: Reader moved backward after page-turn attempt. Previous page: 11, current page: 9
+- 2026-04-12T21:40:20+09:00: Retrying page turn after transcript page 1 in 1.5s (attempt 2/3).
+- 2026-04-12T21:40:22+09:00: Detected that the reader page had already advanced before the turn click after transcript page 1.
+- 2026-04-12T21:40:22+09:00: Advanced to the next page via `page-already-changed-verified`.
+- 2026-04-12T21:40:23+09:00: Exporting transcript page 2 from Kindle page 9.
+- 2026-04-12T21:40:23+09:00: Image export completed for transcript page 2.
+- 2026-04-12T21:40:24+09:00: Prepared padded vision input for transcript page 2.
+- 2026-04-12T21:40:24+09:00: Running Codex vision transcription for transcript page 2.
+- 2026-04-12T21:41:03+09:00: Completed transcript page 2 with vision status `completed`.
+- 2026-04-12T21:41:03+09:00: Duplicate or gap signal on transcript page 2: expected Kindle page number to advance by 1, got 11 -> 9
+- 2026-04-12T21:41:04+09:00: Page turn failed after transcript page 2: Reader moved backward after page-turn attempt. Previous page: 9, current page: 8
+- 2026-04-12T21:41:04+09:00: Retrying page turn after transcript page 2 in 1.5s (attempt 2/3).
+- 2026-04-12T21:41:06+09:00: Detected that the reader page had already advanced before the turn click after transcript page 2.
+- 2026-04-12T21:41:06+09:00: Advanced to the next page via `page-already-changed-verified`.
+- 2026-04-12T21:41:07+09:00: Exporting transcript page 3 from Kindle page 8.
+- 2026-04-12T21:41:07+09:00: Image export completed for transcript page 3.
+- 2026-04-12T21:41:08+09:00: Prepared padded vision input for transcript page 3.
+- 2026-04-12T21:41:08+09:00: Running Codex vision transcription for transcript page 3.
+- 2026-04-12T21:42:17+09:00: Completed transcript page 3 with vision status `completed`.
+- 2026-04-12T21:42:17+09:00: Duplicate or gap signal on transcript page 3: expected Kindle page number to advance by 1, got 9 -> 8
+- 2026-04-12T21:42:18+09:00: Advanced to the next page via `cdp-mouse-next-button-after-left-hover`.
+- 2026-04-12T21:42:20+09:00: Exporting transcript page 4 from Kindle page 9.
+- 2026-04-12T21:42:20+09:00: Image export completed for transcript page 4.
+- 2026-04-12T21:42:20+09:00: Prepared padded vision input for transcript page 4.
+- 2026-04-12T21:42:20+09:00: Running Codex vision transcription for transcript page 4.
+- 2026-04-12T21:43:09+09:00: Completed transcript page 4 with vision status `completed`.
+- 2026-04-12T21:43:10+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:43:11+09:00: Exporting transcript page 5 from Kindle page 11.
+- 2026-04-12T21:43:11+09:00: Image export completed for transcript page 5.
+- 2026-04-12T21:43:12+09:00: Prepared padded vision input for transcript page 5.
+- 2026-04-12T21:43:12+09:00: Running Codex vision transcription for transcript page 5.
+- 2026-04-12T21:44:56+09:00: Completed transcript page 5 with vision status `completed`.
+- 2026-04-12T21:44:56+09:00: Duplicate or gap signal on transcript page 5: expected Kindle page number to advance by 1, got 9 -> 11
+- 2026-04-12T21:44:57+09:00: Advanced to the next page via `cdp-mouse-next-button-after-left-hover`.
+- 2026-04-12T21:44:58+09:00: Stopped at safety cap after 5 transcript pages.
+- 2026-04-12T21:44:58+09:00: Run marked partial.

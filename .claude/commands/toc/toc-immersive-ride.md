@@ -50,6 +50,7 @@ ToC（TikTok Story Creator）で「没入型（実写シネマティック体験
 `output/<topic>_<timestamp>/` に以下が生成される:
 
 - `state.txt`（追記型）
+- `logs/grounding/<stage>.json`
 - `research.md`
 - `story.md`
 - `visual_value.md`
@@ -70,6 +71,8 @@ topic
   → Generate assets（API）
   → Render final video（ffmpeg）
 ```
+
+各 stage 開始前に `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow immersive` を実行し、その直後に `python scripts/audit-stage-grounding.py --stage <stage> --run-dir output/<topic>_<timestamp>` を実行する。`stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認してから進める。
 
 ## 方針メモ（創造と選択 / 混成承認）
 

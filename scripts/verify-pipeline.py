@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.grounding import grounding_validation  # noqa: E402
 from toc.harness import (  # noqa: E402
     append_state_snapshot,
     eval_report_path,
@@ -84,6 +85,72 @@ def make_stage(stage: str, artifact: str, checks: list[dict[str, Any]], *, detai
     }
 
 
+def append_grounding_checks(checks: list[dict[str, Any]], *, run_dir: Path, stage: str) -> None:
+    validation = grounding_validation(run_dir, stage)
+    report = validation.get("report") or {}
+    report_path = validation.get("report_path")
+    readset_path = validation.get("readset_path")
+    audit_path = validation.get("audit_path")
+    add_check(
+        checks,
+        f"{stage}.grounding_report",
+        bool(validation.get("report_exists")),
+        f"grounding report exists for {stage} (got {report_path or '(missing)'})",
+        kind="rubric",
+    )
+    if validation.get("report_exists"):
+        add_check(
+            checks,
+            f"{stage}.grounding_ready",
+            bool(validation.get("report_ready")),
+            f"grounding report status is ready (got {report.get('status', '(unset)')})",
+            kind="rubric",
+        )
+    add_check(
+        checks,
+        f"{stage}.grounding_state",
+        validation.get("state_status") == "ready",
+        f"state records stage grounding as ready (got {validation.get('state_status') or '(unset)'})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        f"{stage}.readset_report",
+        bool(validation.get("readset_exists")),
+        f"readset report exists for {stage} (got {readset_path or '(missing)'})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        f"{stage}.audit_report",
+        bool(validation.get("audit_exists")),
+        f"audit report exists for {stage} (got {audit_path or '(missing)'})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        f"{stage}.readset_state",
+        bool(validation.get("state_readset")),
+        f"state records readset report for {stage} (got {validation.get('state_readset') or '(unset)'})",
+        kind="rubric",
+    )
+    if validation.get("audit_exists"):
+        add_check(
+            checks,
+            f"{stage}.audit_passed",
+            bool(validation.get("audit_passed")),
+            f"audit report status is passed (got {(validation.get('audit') or {}).get('status', '(unset)')})",
+            kind="rubric",
+        )
+    add_check(
+        checks,
+        f"{stage}.audit_state",
+        validation.get("state_audit_status") == "passed",
+        f"state records stage audit as passed (got {validation.get('state_audit_status') or '(unset)'})",
+        kind="rubric",
+    )
+
+
 def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "research.md"
     checks: list[dict[str, Any]] = []
@@ -97,6 +164,7 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     text, data = load_structured_document(path)
     if profile == "standard":
         add_check(checks, "research.no_todo", not has_todo(text), "research.md does not contain TODO/TBD markers", kind="rubric")
+    append_grounding_checks(checks, run_dir=run_dir, stage="research")
 
     sources = as_list(data.get("sources"))
     scene_plan = nested_get(data, ["scene_plan", "scenes"], [])
@@ -145,6 +213,7 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     text, data = load_structured_document(path)
     if profile == "standard":
         add_check(checks, "story.no_todo", not has_todo(text), "story.md does not contain TODO/TBD markers", kind="rubric")
+    append_grounding_checks(checks, run_dir=run_dir, stage="story")
 
     selection = nested_get(data, ["selection"], {})
     candidates = as_list(selection.get("candidates")) if isinstance(selection, dict) else []
@@ -206,6 +275,7 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
         return make_stage("script", path.name, checks), updates
 
     text, data = load_structured_document(path)
+    append_grounding_checks(checks, run_dir=run_dir, stage="script")
     _script_text_quality_checks(checks, text, data, profile)
     updates["eval.script.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("script", path.name, checks), updates
@@ -218,6 +288,7 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
 
     add_check(checks, "script.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
     add_check(checks, "script.scene_files", all(path.exists() for path in script_paths), "each scene has script.md")
+    append_grounding_checks(checks, run_dir=run_dir, stage="script")
 
     all_no_todo = True
     for path in script_paths:
@@ -312,6 +383,7 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         return make_stage("manifest", path.name, checks), updates
 
     text, data = load_structured_document(path)
+    append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
     _manifest_checks(checks, text, data, profile=profile, flow=flow, path_label="manifest")
     updates["eval.manifest.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("manifest", path.name, checks), updates
@@ -324,6 +396,7 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
 
     add_check(checks, "manifest.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
     add_check(checks, "manifest.scene_files", all(path.exists() for path in manifest_paths), "each scene has video_manifest.md")
+    append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
     if not scene_dirs or not all(path.exists() for path in manifest_paths):
         return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), {
             "eval.manifest.score": f"{score_from_checks(checks):.4f}"
@@ -403,6 +476,7 @@ def _video_checks(checks: list[dict[str, Any]], *, video_path: Path, state: dict
 def check_video_single(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     state = parse_state_file(run_dir / "state.txt")
     checks: list[dict[str, Any]] = []
+    append_grounding_checks(checks, run_dir=run_dir, stage="video")
     _video_checks(checks, video_path=run_dir / "video.mp4", state=state, run_dir=run_dir)
     return make_stage("video", "video.mp4", checks), {}
 
@@ -413,6 +487,7 @@ def check_video_scene_series(run_dir: Path) -> tuple[dict[str, Any], dict[str, s
     add_check(checks, "video.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
     video_paths = [scene_dir / "video.mp4" for scene_dir in scene_dirs]
     add_check(checks, "video.scene_files", all(path.exists() for path in video_paths), "each scene has video.mp4")
+    append_grounding_checks(checks, run_dir=run_dir, stage="video")
     return make_stage("video", "scenes/*/video.mp4", checks, details={"scene_count": len(scene_dirs)}), {}
 
 

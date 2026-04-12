@@ -31,6 +31,7 @@ dry-run（外部APIは呼ばず、設計成果物まで）:
 `output/<topic>_<timestamp>/` に以下が生成される:
 
 - `state.txt`（追記型）
+- `logs/grounding/<stage>.json`
 - `research.md`
 - `story.md`（questionを含む）
 - `series_plan.md`（sceneごとの question 抽出）
@@ -54,6 +55,14 @@ dry-run（外部APIは呼ばず、設計成果物まで）:
   - Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story/Script でスコアが高い案を **選択**する
   - Hero's Journey への当てはめは必須ではない（フレームワークは道具）
   - 矛盾する複数ソースの要素を同一シーン/設定として **混成（ハイブリッド）**する必要が出た場合は、確定前にユーザー承認を取る（運用）
+
+## Grounding Preflight（必須）
+
+- run root の `research` / `story` / `script` 開始前に、対応する stage で `scripts/resolve-stage-grounding.py` を実行する
+- scene root の `image_prompt` / `video_generation` に進む前も同様に preflight を通す
+- 証跡は `logs/grounding/<stage>.json`
+- 各 resolve の直後に `scripts/audit-stage-grounding.py` で readset / audit を確定する
+- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` が確認できない場合は、その stage を開始しない
 
 ## 参照
 

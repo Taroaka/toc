@@ -1,0 +1,98 @@
+contract_version: 2
+
+global_required_docs:
+  - docs/system-architecture.md
+
+aliases:
+  manifest: image_prompt
+  video: video_generation
+
+stages:
+  research:
+    required_docs:
+      - docs/information-gathering.md
+    required_templates:
+      - workflow/research-template.yaml
+      - workflow/research-template.production.yaml
+    required_inputs: []
+    optional_playbooks:
+      - workflow/playbooks/research/deep-primary-first.md
+    requires_approved_input: []
+
+  story:
+    required_docs:
+      - docs/story-creation.md
+    required_templates:
+      - workflow/story-template.yaml
+    required_inputs:
+      - research.md
+    optional_playbooks: []
+    requires_approved_input: []
+
+  script:
+    required_docs:
+      - docs/script-creation.md
+    required_templates:
+      - workflow/script-template.yaml
+      - workflow/video-manifest-template.md
+    required_inputs:
+      - story.md
+    optional_playbooks:
+      - workflow/playbooks/script/hero-journey-beat-first.md
+      - workflow/playbooks/script/hero-journey-cinematic-setpieces.md
+      - workflow/playbooks/script/visual-value-midroll-pass.md
+    requires_approved_input:
+      - path: story.md
+        review_key: review.story.status
+        policy_key: review.policy.story
+        required_when:
+          - required
+        allowed_values:
+          - approved
+
+  image_prompt:
+    required_docs:
+      - docs/implementation/image-prompting.md
+      - docs/implementation/asset-bibles.md
+    required_templates:
+      - workflow/video-manifest-template.md
+    required_inputs:
+      - video_manifest.md
+      - story.md
+    optional_playbooks:
+      - workflow/playbooks/image-generation/reference-consistent-batch.md
+    requires_approved_input:
+      - path: story.md
+        review_key: review.story.status
+        policy_key: review.policy.story
+        required_when:
+          - required
+        allowed_values:
+          - approved
+
+  video_generation:
+    required_docs:
+      - docs/video-generation.md
+    required_templates:
+      - workflow/video-manifest-template.md
+    required_inputs:
+      - video_manifest.md
+    optional_playbooks:
+      - workflow/playbooks/video-generation/kling.md
+      - workflow/playbooks/video-generation/first-last-frame-chained.md
+      - workflow/playbooks/video-generation/first-last-frame-continuity.md
+    requires_approved_input:
+      - path: video_manifest.md
+        review_key: review.image.status
+        policy_key: review.policy.image
+        required_when:
+          - required
+        allowed_values:
+          - approved
+      - path: video_manifest.md
+        review_key: review.narration.status
+        policy_key: review.policy.narration
+        required_when:
+          - required
+        allowed_values:
+          - approved

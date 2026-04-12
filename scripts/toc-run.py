@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
 from toc.harness import append_state_snapshot, now_iso
 
 
@@ -39,6 +40,10 @@ def write_text(path: Path, content: str, force: bool) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
+    run_stage_grounding(run_dir, stage, flow=flow, retries=1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold a standard ToC run dir.")
     parser.add_argument("topic", help="Run topic.")
@@ -48,6 +53,10 @@ def main() -> None:
     parser.add_argument("--base", default="output")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default="strict")
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
     args = parser.parse_args()
 
     topic_raw = args.topic
@@ -55,6 +64,12 @@ def main() -> None:
     ts = args.timestamp or default_timestamp()
     run_dir = Path(args.run_dir) if args.run_dir else (Path(args.base) / f"{topic_slug}_{ts}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    review_policy = resolve_review_policy(
+        preset=args.review_policy,
+        story_review=args.story_review,
+        image_review=args.image_review,
+        narration_review=args.narration_review,
+    )
 
     append_state_snapshot(
         run_dir / "state.txt",
@@ -63,11 +78,15 @@ def main() -> None:
             "status": "INIT",
             "runtime.stage": "toc_run_scaffold",
             "gate.video_review": "required",
+            "runtime.review_policy": args.review_policy,
+            **review_policy_state_entries(review_policy),
         },
     )
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", args.force)
+    maybe_run_stage_grounding(run_dir, "research", flow="toc-run")
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", args.force)
+    maybe_run_stage_grounding(run_dir, "story", flow="toc-run")
     if VISUAL_VALUE_TEMPLATE.exists():
         visual_value = (
             VISUAL_VALUE_TEMPLATE.read_text(encoding="utf-8")
@@ -79,6 +98,7 @@ def main() -> None:
         visual_value = "# 視覚化価値パート（visual value）\n\nTODO\n"
     write_text(run_dir / "visual_value.md", visual_value, args.force)
     write_text(run_dir / "script.md", "# 台本（script）\n\nTODO\n", args.force)
+    maybe_run_stage_grounding(run_dir, "script", flow="toc-run")
 
     if MANIFEST_TEMPLATE.exists():
         manifest = (
@@ -90,6 +110,8 @@ def main() -> None:
     else:
         manifest = "# Video Manifest\n\nTODO\n"
     write_text(run_dir / "video_manifest.md", manifest, args.force)
+    maybe_run_stage_grounding(run_dir, "image_prompt", flow="toc-run")
+    maybe_run_stage_grounding(run_dir, "video_generation", flow="toc-run")
 
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "objects").mkdir(parents=True, exist_ok=True)
@@ -97,6 +119,7 @@ def main() -> None:
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
 
     append_state_snapshot(
         run_dir / "state.txt",

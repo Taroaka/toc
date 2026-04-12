@@ -1,0 +1,57 @@
+[
+  {
+    "slug": "baseline",
+    "title": "Baseline",
+    "output_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/baseline.txt",
+    "log_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/baseline.log",
+    "prompt_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/baseline.prompt.md",
+    "returncode": 0,
+    "length": 716,
+    "is_partial": false,
+    "is_failed": false
+  },
+  {
+    "slug": "vertical-columns",
+    "title": "Vertical Columns",
+    "output_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/vertical-columns.txt",
+    "log_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/vertical-columns.log",
+    "prompt_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/vertical-columns.prompt.md",
+    "returncode": 0,
+    "length": 721,
+    "is_partial": false,
+    "is_failed": false
+  },
+  {
+    "slug": "two-pass",
+    "title": "Two Pass Self Check",
+    "output_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/two-pass.txt",
+    "log_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/two-pass.log",
+    "prompt_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/two-pass.prompt.md",
+    "returncode": 0,
+    "length": 723,
+    "is_partial": false,
+    "is_failed": false
+  },
+  {
+    "slug": "edge-first",
+    "title": "Edge First",
+    "output_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/edge-first.txt",
+    "log_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/edge-first.log",
+    "prompt_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/edge-first.prompt.md",
+    "returncode": 0,
+    "length": 719,
+    "is_partial": false,
+    "is_failed": false
+  },
+  {
+    "slug": "literal-best-effort",
+    "title": "Literal Best Effort",
+    "output_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/literal-best-effort.txt",
+    "log_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/literal-best-effort.log",
+    "prompt_path": "/Users/kantaro/Downloads/toc/kindle/prompt-sweeps/20260412_210527_page5/literal-best-effort.prompt.md",
+    "returncode": 0,
+    "length": 722,
+    "is_partial": false,
+    "is_failed": false
+  }
+]

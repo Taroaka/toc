@@ -7,6 +7,16 @@
 - 日常運用は Codex 主軸。Claude Code は backup / accelerator として扱う。
 - 回答は必要なことを端的に書く。長い説明は正本ドキュメントへ寄せる。
 
+## Repo Scope
+
+- 動画生成
+  - 本 repo は、調査・物語・台本・画像/動画/音声生成・最終レンダリングまでの動画生成フローを扱う。
+  - 正本: `docs/video-generation.md`
+- マーケティング（SNS 限定）
+  - 本 repo で扱う marketing は、SNS 内の配信設計、投稿運用、反応分析、改善ループに限定する。
+  - 広義の marketing（広告運用、LP、CRM、オフライン施策）は対象外とする。
+  - 正本: `docs/orchestration-and-ops.md`
+
 ## Entrypoints
 
 - `/toc-run`
@@ -21,6 +31,7 @@
 - 物語化: `docs/story-creation.md`
 - 台本: `docs/script-creation.md`
 - 動画生成: `docs/video-generation.md`
+- marketing/SNS: `marketing/README.md`
 - 運用/QA: `docs/orchestration-and-ops.md`
 - エージェント運用: `docs/implementation/assistant-tooling.md`
 - 役割定義: `docs/implementation/agent-roles-and-prompts.md`
@@ -33,6 +44,7 @@
 - `workflow/research-template.production.yaml`
 - `workflow/story-template.yaml`
 - `workflow/video-manifest-template.md`
+- `workflow/stage-grounding.yaml`
 - `workflow/state-schema.txt`
 - `workflow/evaluation_criteria.md`
 - `workflow/evals/golden-topics.yaml`
@@ -42,13 +54,30 @@
 - human-facing run navigation: `output/<topic>_<timestamp>/p000_index.md`
 - canonical state: `output/<topic>_<timestamp>/state.txt`
 - derived state: `output/<topic>_<timestamp>/run_status.json`
+- grounding audit: `output/<topic>_<timestamp>/logs/grounding/<stage>.json`
+- grounding readset: `output/<topic>_<timestamp>/logs/grounding/<stage>.readset.json`
+- grounding audit result: `output/<topic>_<timestamp>/logs/grounding/<stage>.audit.json`
+- subagent audit prompt: `output/<topic>_<timestamp>/logs/grounding/<stage>.subagent_prompt.md`
+- image judgment subagent prompt: `output/<topic>_<timestamp>/logs/review/image_prompt.subagent_prompt.md`
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`
+- fixed slot workflow: `p100`-`p900` plus fine-grained slots (`p110`, `p120`, ... `p930`) are global across all stories
+- per-run differences are recorded with `slot.<code>.status`, `slot.<code>.requirement`, `slot.<code>.skip_reason`, `slot.<code>.note`
 
 ## Required Workflow
 
 - 非自明な変更は `.steering/YYYYMMDD-<title>/requirements.md -> design.md -> tasklist.md`
 - 実装は最小変更で進める
 - 変更後は verify を回す
+- stage 開始前に grounding preflight を通す
+  - manual/chat では `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を標準入口として使う
+  - 返ってきた JSON の `readset_path` を起点に、`global_docs -> stage_docs -> templates -> inputs` の順で読む
+- `scripts/resolve-stage-grounding.py` と `scripts/audit-stage-grounding.py` は `prepare-stage-context.py` の下位処理として扱う
+  - `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
+  - `stage.<name>.grounding.status=ready` を確認できない限り、当該 stage を開始しない
+  - stage 完了扱いに進めてよいのは grounding が `ready` のときだけ
+  - `python scripts/audit-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp>` を続けて実行し、`stage.<name>.audit.status=passed` を確認する
+  - slot を skip / optional として残したいときは `python scripts/toc-state.py set-slot --run-dir output/<topic>_<timestamp> --slot p540 --status skipped --requirement optional --skip-reason "<reason>"` を使う
+  - fixed `p-slot` contract を触ったら `python scripts/validate-slot-contract.py` を実行する
 
 ```bash
 python scripts/verify-pipeline.py --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive --profile fast|standard
@@ -60,11 +89,48 @@ python scripts/verify-pipeline.py --run-dir output/<topic>_<timestamp> --flow to
 scripts/ai/session-bootstrap.sh
 ```
 
+## Agent Stage Design Docs
+
+各エージェントステップは **作業開始前** に対応する設計書を読み、grounding preflight を通す。全 stage 共通で `docs/system-architecture.md` を読み、その上で stage ごとの設計書へ入る。install 可能な stage skill は `skills/toc-<stage>/SKILL.md` を正本とする。
+
+| ステージ | 正本ドキュメント | Playbooks |
+|---------|----------------|-----------|
+| research | `docs/information-gathering.md` | `workflow/playbooks/research/` |
+| scene_design | `docs/story-creation.md` `docs/affect-design.md` | `workflow/playbooks/scene/` |
+| script / narration | `docs/script-creation.md` | `workflow/playbooks/script/` |
+| image_prompt | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
+| video_generation | `docs/video-generation.md` | `workflow/playbooks/video-generation/` |
+
+grounding preflight の正本:
+
+- 契約: `workflow/stage-grounding.yaml`
+- resolver: `scripts/resolve-stage-grounding.py`
+- audit: `scripts/audit-stage-grounding.py`
+- 証跡: `output/<topic>_<timestamp>/logs/grounding/<stage>.json`
+- readset: `output/<topic>_<timestamp>/logs/grounding/<stage>.readset.json`
+- audit result: `output/<topic>_<timestamp>/logs/grounding/<stage>.audit.json`
+
+## Chat Stage Protocol
+
+ユーザーがこのチャットで `進めて` と言った場合も、slash command と同じ preflight を適用する。
+
+1. 対象 stage と run dir を確定する
+2. まず `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行する
+3. 返ってきた `readset_path` の `global_docs -> stage_docs -> templates -> inputs` の順に読む
+4. `stage.<name>.grounding.status=ready` かつ `stage.<name>.audit.status=passed` のときだけ成果物を更新する
+5. 必要なら `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行し、その出力をそのまま contextless subagent に渡す
+   - prompt artifact は `logs/grounding/<stage>.subagent_prompt.md` に保存され、`state.txt` には `stage.<name>.subagent.prompt=...` が追記される
+6. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
+   - prompt artifact は `logs/review/image_prompt.subagent_prompt.md` に保存され、`state.txt` には `review.image_prompt.subagent.prompt=...` が追記される
+
+multi-agent が使える環境では、コンテキストを fork しない audit 専用 subagent に `scripts/audit-stage-grounding.py` を実行させてよい。ただし story / script / manifest などの content artifact は編集させず、hard gate は state / report artifact と verifier に置く。
+
 ## Hard Rules
 
 - `state.txt` を置き換えない。append-only を維持する。
 - hybridization は人間承認必須。自動承認しない。
 - `run_report.md` は手書きしない。`eval_report.json` から生成する。
+- marketing 関連の参照先は `marketing/SNS/` に限定する。通常の story / script / image / video generation と混ぜない。
 - root guide に長い説明を戻さない。詳細は正本へ移す。
 - `AGENTS.md` / `CLAUDE.md` を更新したら次を通す。
 

@@ -164,11 +164,12 @@ PROMPT_SELF_CONTAINED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 IMAGE_REVIEW_RUBRIC_WEIGHTS = {
-    "story_alignment": 0.30,
-    "subject_specificity": 0.25,
+    "story_alignment": 0.25,
+    "subject_specificity": 0.20,
     "prompt_craft": 0.15,
     "continuity_readiness": 0.15,
-    "production_readiness": 0.15,
+    "first_frame_readiness": 0.15,
+    "production_readiness": 0.10,
 }
 
 IMAGE_REVIEW_RUBRIC_THRESHOLDS = {
@@ -176,8 +177,35 @@ IMAGE_REVIEW_RUBRIC_THRESHOLDS = {
     "subject_specificity": 0.60,
     "prompt_craft": 0.65,
     "continuity_readiness": 0.60,
+    "first_frame_readiness": 0.60,
     "production_readiness": 0.60,
 }
+
+MID_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"話し、"),
+    re.compile(r"うなずく"),
+    re.compile(r"叩く"),
+    re.compile(r"渡す"),
+    re.compile(r"差し出す"),
+    re.compile(r"受け取る"),
+    re.compile(r"泳ぎだす"),
+    re.compile(r"歩いていく"),
+    re.compile(r"開けます"),
+    re.compile(r"あふれ出します"),
+)
+
+FIRST_FRAME_SAFE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"最初の1フレーム"),
+    re.compile(r"動き出す直前"),
+    re.compile(r"初期姿勢"),
+    re.compile(r"ふと"),
+    re.compile(r"視線"),
+    re.compile(r"立ち止まる"),
+    re.compile(r"構える"),
+    re.compile(r"〜しようとする"),
+    re.compile(r"しかけ"),
+    re.compile(r"前に"),
+)
 
 IMAGE_TARGET_FOCUS_TERMS = {
     "character": ("人物", "主人公", "表情", "顔", "視線", "立ち姿", "しぐさ"),
@@ -186,6 +214,43 @@ IMAGE_TARGET_FOCUS_TERMS = {
     "blocking": ("動き", "導線", "姿勢", "またがる", "歩く", "振り向く", "差し出す", "進む"),
     "environment": ("背景", "風景", "空気感", "地形", "建築", "天候", "海", "森"),
 }
+
+SOFT_FINDING_CODES = {
+    "image_contract_must_avoid_violated",
+    "image_contract_target_focus_unmet",
+    "prompt_only_local_mismatch",
+    "non_japanese_prompt_term",
+    "image_prompt_story_alignment_weak",
+    "image_prompt_subject_specificity_weak",
+    "image_prompt_continuity_weak",
+    "image_prompt_first_frame_readiness_weak",
+    "image_prompt_production_readiness_weak",
+}
+
+HARD_FINDING_CODES = {
+    "image_contract_missing",
+    "image_contract_must_include_unmet",
+    "missing_required_prompt_block",
+    "prompt_not_self_contained",
+    "prompt_mentions_character_but_character_ids_empty",
+    "missing_character_id",
+    "missing_object_id",
+    "prompt_missing_expected_character_anchor",
+    "prompt_missing_expected_object_anchor",
+    "prompt_subject_drift",
+    "source_anchor_missing_from_prompt",
+    "blocking_drift",
+    "script_reveal_constraint_violated",
+    "image_prompt_not_first_frame_ready",
+}
+
+
+def is_soft_finding(finding: Finding) -> bool:
+    return finding.code in SOFT_FINDING_CODES
+
+
+def is_hard_finding(finding: Finding) -> bool:
+    return finding.code not in SOFT_FINDING_CODES or finding.code in HARD_FINDING_CODES
 
 
 def _selector_label(scene_id: Any, cut_id: Any) -> str:
@@ -651,6 +716,20 @@ def _score_continuity_readiness(
     return round(max(0.0, min(1.0, id_score - blocking_penalty)), 3)
 
 
+def _assess_first_frame_readiness(prompt: str, output: str) -> tuple[float, list[str]]:
+    output_norm = (output or "").replace("\\", "/")
+    if "/assets/scenes/" not in f"/{output_norm}":
+        return 1.0, []
+    text = prompt or ""
+    mid_action_hits = [pattern.pattern for pattern in MID_ACTION_PATTERNS if pattern.search(text)]
+    safe = any(pattern.search(text) for pattern in FIRST_FRAME_SAFE_PATTERNS)
+    if not mid_action_hits:
+        return 1.0, []
+    if safe:
+        return 0.75, []
+    return 0.35, mid_action_hits
+
+
 def _score_production_readiness(findings: list[Finding]) -> float:
     severe_codes = {
         "missing_required_prompt_block",
@@ -658,6 +737,7 @@ def _score_production_readiness(findings: list[Finding]) -> float:
         "image_contract_must_avoid_violated",
         "image_contract_missing",
         "image_reveal_constraint_violated",
+        "image_prompt_not_first_frame_ready",
     }
     medium_codes = {
         "non_japanese_prompt_term",
@@ -693,6 +773,7 @@ def _score_prompt_entry(
     suggested_character_ids: set[str],
     suggested_object_ids: set[str],
     blocking_missing: bool,
+    first_frame_readiness: float,
     findings: list[Finding],
 ) -> tuple[dict[str, float], float]:
     rubric_scores = {
@@ -711,6 +792,7 @@ def _score_prompt_entry(
             suggested_object_ids=suggested_object_ids,
             blocking_missing=blocking_missing,
         ),
+        "first_frame_readiness": first_frame_readiness,
         "production_readiness": _score_production_readiness(findings),
     }
     overall_score = round(
@@ -986,6 +1068,18 @@ def review_entries(
                 )
             )
 
+        first_frame_readiness, mid_action_hits = _assess_first_frame_readiness(entry.prompt, entry.output)
+        if mid_action_hits:
+            findings.append(
+                Finding(
+                    code="image_prompt_not_first_frame_ready",
+                    message=(
+                        "scene image prompt reads like the middle of an action instead of the first frame of the video. "
+                        f"Rewrite it as a pre-action or initial-pose image; detected action markers: {mid_action_hits!r}."
+                    ),
+                )
+            )
+
         missing_source_terms = sorted(term for term in important_source_terms if not term_is_covered(term, prompt_terms))
         suggested_character_ids = set(character_alias_hits.keys()) - declared_character_ids
         suggested_object_ids = set(object_alias_hits.keys()) - declared_object_ids
@@ -1005,6 +1099,7 @@ def review_entries(
             suggested_character_ids=suggested_character_ids,
             suggested_object_ids=suggested_object_ids,
             blocking_missing=blocking_missing,
+            first_frame_readiness=first_frame_readiness,
             findings=findings,
         )
         if rubric_scores["story_alignment"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["story_alignment"]:
@@ -1026,6 +1121,13 @@ def review_entries(
                 Finding(
                     code="image_prompt_continuity_weak",
                     message="prompt is not specific enough to preserve asset continuity and blocking across cuts.",
+                )
+            )
+        if rubric_scores["first_frame_readiness"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["first_frame_readiness"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_first_frame_readiness_weak",
+                    message="prompt does not read clearly as the first frame of the intended video shot.",
                 )
             )
         if rubric_scores["production_readiness"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["production_readiness"]:
@@ -1127,7 +1229,8 @@ def apply_review_statuses(entries: list[PromptEntry], results: list[ReviewOutcom
     updated: list[PromptEntry] = []
     for entry in entries:
         outcome = outcome_map.get((entry.scene_id, entry.cut_id))
-        agent_review_ok = not bool(outcome and outcome.findings)
+        hard_findings = [finding for finding in outcome.findings] if outcome else []
+        agent_review_ok = not any(is_hard_finding(finding) for finding in hard_findings)
         reason_keys = reason_keys_from_findings(outcome.findings) if outcome and outcome.findings else []
         reason_messages = reason_messages_from_findings(outcome.findings) if outcome and outcome.findings else []
         updated.append(
@@ -1197,6 +1300,8 @@ def render_report(
 ) -> str:
     total = len(results)
     warned = sum(1 for outcome in results if outcome.findings)
+    hard_findings = sum(1 for outcome in results for finding in outcome.findings if is_hard_finding(finding))
+    soft_findings = sum(1 for outcome in results for finding in outcome.findings if is_soft_finding(finding))
     finding_count = sum(len(outcome.findings) for outcome in results)
     status = "FAIL" if unresolved_entries else ("WARN" if finding_count else "PASS")
     lines = [
@@ -1207,6 +1312,8 @@ def render_report(
         f"- reviewed_entries: `{total}`",
         f"- entries_with_findings: `{warned}`",
         f"- findings: `{finding_count}`",
+        f"- hard_findings: `{hard_findings}`",
+        f"- soft_findings: `{soft_findings}`",
         f"- unresolved_entries: `{unresolved_entries}`",
         f"- fixed_character_ids: `{fixed_character_ids}`",
         f"- fixed_object_ids: `{fixed_object_ids}`",

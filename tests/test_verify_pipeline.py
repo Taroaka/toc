@@ -4,6 +4,47 @@ import sys
 import unittest
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.harness import append_state_snapshot
+
+
+def _run_grounding(run_dir: Path, stage: str, *, flow: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "resolve-stage-grounding.py"),
+            "--stage",
+            stage,
+            "--run-dir",
+            str(run_dir),
+            "--flow",
+            flow,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+
+def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.story.status": "approved",
+            "review.image.status": "approved",
+            "review.narration.status": "approved",
+        },
+    )
+    for stage in ["research", "story", "script", "image_prompt", "video_generation"]:
+        result = _run_grounding(run_dir, stage, flow=flow)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr or result.stdout)
+
+
 class TestVerifyPipeline(unittest.TestCase):
     def test_verify_pipeline_fast_generates_reports(self) -> None:
         import tempfile
@@ -150,11 +191,12 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "video.mp4").write_bytes(b"placeholder")
+            _resolve_ready_grounding(run_dir, flow="immersive")
 
             result = subprocess.run(
                 [
                     sys.executable,
-                    "scripts/verify-pipeline.py",
+                    str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
                     "--run-dir",
                     str(run_dir),
                     "--flow",
@@ -165,6 +207,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                cwd=REPO_ROOT,
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -289,11 +332,12 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "video.mp4").write_bytes(b"placeholder")
+            _resolve_ready_grounding(run_dir, flow="immersive")
 
             result = subprocess.run(
                 [
                     sys.executable,
-                    "scripts/verify-pipeline.py",
+                    str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
                     "--run-dir",
                     str(run_dir),
                     "--flow",
@@ -304,6 +348,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                cwd=REPO_ROOT,
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -371,11 +416,12 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "video.mp4").write_bytes(b"placeholder")
+            _resolve_ready_grounding(run_dir, flow="immersive")
 
             result = subprocess.run(
                 [
                     sys.executable,
-                    "scripts/verify-pipeline.py",
+                    str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
                     "--run-dir",
                     str(run_dir),
                     "--flow",
@@ -386,6 +432,56 @@ class TestVerifyPipeline(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                cwd=REPO_ROOT,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_verify_pipeline_fails_when_grounding_readset_missing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0009"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "timestamp=2099-01-01T00:00:00+09:00",
+                        "job_id=JOB_2099-01-01_000009",
+                        "topic=桃太郎",
+                        "status=DONE",
+                        "runtime.stage=done",
+                        "runtime.render.status=success",
+                        "review.video.status=pending",
+                        "---",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "research.md").write_text("```yaml\ntopic: \"桃太郎\"\nstory_baseline:\n  canonical_synopsis:\n    one_liner: \"桃太郎\"\n    short_summary: \"summary\"\n    beat_sheet:\n      - beat: \"b1\"\n        scene_ids: [1]\n        confidence: 0.9\n        sources: [\"S1\"]\nscene_plan:\n  min_scene_count: 1\n  scenes:\n    - scene_id: 1\n      role: \"opening\"\n      beat_summary: \"b\"\n      desired_emotion: \"c\"\n      key_visuals: [\"v\"]\n      key_dialogue_or_voiceover: \"k\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\"\nsources:\n  - source_id: \"S1\"\n    title: \"s\"\n    url: \"https://example.com\"\n    type: \"primary\"\n    reliability: \"high\"\n    accessed_at: \"2099-01-01T00:00:00+09:00\"\n    notes: \"\"\nconflicts: []\nmetadata:\n  confidence_score: 0.9\n```\n", encoding="utf-8")
+            (run_dir / "story.md").write_text("```yaml\nselection:\n  candidates:\n    - candidate_id: \"A\"\n      logline: \"x\"\n      why_it_scores: [\"x\"]\n      score_hint:\n        engagement: 0.9\n        coherence: 0.9\n        production_fit: 0.9\n      requires_hybridization_approval: false\n  chosen_candidate_id: \"A\"\n  rationale: \"x\"\nhybridization:\n  approval_status: \"not_needed\"\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      narration: \"x\"\n      visual: \"y\"\n      research_refs: [\"research.story_baseline.beat_sheet[0]\"]\n```\n", encoding="utf-8")
+            (run_dir / "script.md").write_text("# Script\n\n十分な長さの script 本文です。十分な長さの script 本文です。\n", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text("```yaml\nvideo_metadata:\n  topic: \"桃太郎\"\n  experience: \"cinematic_story\"\nscenes:\n  - scene_id: 1\n    cuts:\n      - cut_id: 1\n        cut_role: \"main\"\n        image_generation:\n          tool: \"google_nanobanana_2\"\n          character_ids: []\n          object_ids: []\n          prompt: |\n            画面内テキストなし。\n          output: \"assets/scenes/scene01.png\"\n        video_generation:\n          tool: \"kling_3_0\"\n          duration_seconds: 5\n          output: \"assets/scenes/scene01.mp4\"\n        audio:\n          narration:\n            text: \"桃太郎が歩く。\"\n            tool: \"elevenlabs\"\n            output: \"assets/audio/scene01.mp3\"\n```\n", encoding="utf-8")
+            (run_dir / "video.mp4").write_bytes(b"placeholder")
+            _resolve_ready_grounding(run_dir, flow="immersive")
+            (run_dir / "logs" / "grounding" / "script.readset.json").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--flow",
+                    "immersive",
+                    "--profile",
+                    "fast",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
             )
 
             self.assertNotEqual(result.returncode, 0)

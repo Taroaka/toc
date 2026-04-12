@@ -1,0 +1,53 @@
+# Kindle full-book session
+
+- run_dir: `/Users/kantaro/Downloads/toc/kindle/runs/20260412_210527`
+- target: `https://read.amazon.com`
+- login_mode: manual
+- transcription_source: codex vision from local images (per-page codex exec --image)
+- page_turn_method: `cdp-mouse-next-button`
+- status: partial
+- completed_pages: `5`
+- review_items: `3`
+- last_completed_transcript_page: `5`
+- last_completed_book_page: `7`
+- reader_url: `https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2`
+- reader_title: `Kindle`
+- reader_total_pages: `339`
+- resume_mode: `False`
+- created_at: `2026-04-12T21:05:27+09:00`
+- updated_at: `2026-04-12T21:08:52+09:00`
+
+## Recent events
+
+- 2026-04-12T21:05:27+09:00: Starting full-book Kindle transcription run.
+- 2026-04-12T21:05:27+09:00: Connected to Kindle reader tab: https://read.amazon.co.jp/?asin=B07YY2WV6K&ref_=kwl_kr_iv_rec_2
+- 2026-04-12T21:05:27+09:00: Exporting transcript page 1 from Kindle page 3.
+- 2026-04-12T21:05:27+09:00: Image export completed for transcript page 1.
+- 2026-04-12T21:05:27+09:00: Running Codex vision transcription for transcript page 1.
+- 2026-04-12T21:06:05+09:00: Completed transcript page 1 with vision status `completed`.
+- 2026-04-12T21:06:05+09:00: Queued transcript page 1 for review because the transcription is shorter than expected.
+- 2026-04-12T21:06:06+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:06:07+09:00: Exporting transcript page 2 from Kindle page 4.
+- 2026-04-12T21:06:07+09:00: Image export completed for transcript page 2.
+- 2026-04-12T21:06:07+09:00: Running Codex vision transcription for transcript page 2.
+- 2026-04-12T21:06:30+09:00: Completed transcript page 2 with vision status `completed`.
+- 2026-04-12T21:06:30+09:00: Queued transcript page 2 for review because the transcription is shorter than expected.
+- 2026-04-12T21:06:31+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:06:32+09:00: Exporting transcript page 3 from Kindle page 5.
+- 2026-04-12T21:06:32+09:00: Image export completed for transcript page 3.
+- 2026-04-12T21:06:32+09:00: Running Codex vision transcription for transcript page 3.
+- 2026-04-12T21:07:02+09:00: Completed transcript page 3 with vision status `completed`.
+- 2026-04-12T21:07:03+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:07:04+09:00: Exporting transcript page 4 from Kindle page 6.
+- 2026-04-12T21:07:04+09:00: Image export completed for transcript page 4.
+- 2026-04-12T21:07:04+09:00: Running Codex vision transcription for transcript page 4.
+- 2026-04-12T21:08:08+09:00: Completed transcript page 4 with vision status `completed`.
+- 2026-04-12T21:08:09+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:08:10+09:00: Exporting transcript page 5 from Kindle page 7.
+- 2026-04-12T21:08:10+09:00: Image export completed for transcript page 5.
+- 2026-04-12T21:08:10+09:00: Running Codex vision transcription for transcript page 5.
+- 2026-04-12T21:08:50+09:00: Completed transcript page 5 with vision status `partial`.
+- 2026-04-12T21:08:50+09:00: Queued transcript page 5 for review because vision_status=partial.
+- 2026-04-12T21:08:51+09:00: Advanced to the next page via `cdp-mouse-next-button`.
+- 2026-04-12T21:08:52+09:00: Stopped at safety cap after 5 transcript pages.
+- 2026-04-12T21:08:52+09:00: Run marked partial.

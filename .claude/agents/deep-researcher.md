@@ -46,9 +46,10 @@ model: inherit
 
 ### Phase 1: 準備
 
-1. `docs/information-gathering.md` を読み込み、手順とスキーマを確認
-2. 出力ディレクトリ `output/research/` の存在を確認（なければ作成）
-3. トピックを正規化（別名、関連キーワード、ドメイン推定）
+1. run dir が与えられている場合は、開始前に `python scripts/resolve-stage-grounding.py --stage research --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` を実行し、続けて `python scripts/audit-stage-grounding.py --stage research --run-dir output/<topic>_<timestamp>` を実行して、`stage.research.grounding.status=ready` と `stage.research.audit.status=passed` を確認する
+2. `docs/system-architecture.md` と `docs/information-gathering.md` を読み込み、全体設計と手順・スキーマを確認
+3. 出力ディレクトリ `output/research/` または指定 run dir の存在を確認（なければ作成）
+4. トピックを正規化（別名、関連キーワード、ドメイン推定）
 
 ### Phase 2: 仮説駆動型設計
 

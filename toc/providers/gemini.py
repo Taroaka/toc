@@ -3,9 +3,12 @@ from __future__ import annotations
 import base64
 import os
 import time
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from toc.http import request_bytes, request_json
 
@@ -52,6 +55,34 @@ def _guess_mime(path: Path) -> str:
     if ext == ".webp":
         return "image/webp"
     return "application/octet-stream"
+
+
+def _encode_reference_image(
+    path: Path,
+    *,
+    max_side_px: int = 1536,
+    jpeg_quality: int = 82,
+) -> tuple[str, str]:
+    raw = path.read_bytes()
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img = img.convert("RGBA") if img.mode in {"P", "LA"} else img.copy()
+            if max(img.size) > max_side_px:
+                img.thumbnail((max_side_px, max_side_px), Image.Resampling.LANCZOS)
+
+            has_alpha = "A" in img.getbands()
+            out = io.BytesIO()
+            if has_alpha:
+                img.save(out, format="PNG", optimize=True)
+                mime = "image/png"
+            else:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(out, format="JPEG", quality=jpeg_quality, optimize=True)
+                mime = "image/jpeg"
+            return mime, base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return _guess_mime(path), base64.b64encode(raw).decode("ascii")
 
 
 def _extract_first_inline_image(resp: dict[str, Any]) -> tuple[bytes, str | None]:
@@ -108,8 +139,7 @@ class GeminiClient:
         url = f"{self.config.api_base.rstrip('/')}/models/{model_name}:generateContent"
         parts: list[dict[str, Any]] = [{"text": prompt}]
         for ref in reference_images or []:
-            mime = _guess_mime(ref)
-            b64 = base64.b64encode(ref.read_bytes()).decode("ascii")
+            mime, b64 = _encode_reference_image(ref)
             parts.append({"inlineData": {"mimeType": mime, "data": b64}})
         payload = {
             "contents": [{"parts": parts}],

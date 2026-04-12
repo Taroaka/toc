@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "run_dir": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503",
+  "status": "running",
+  "created_at": "2026-04-12T20:45:03+09:00",
+  "updated_at": "2026-04-12T20:45:03+09:00",
+  "last_completed_page_index": 0,
+  "last_completed_kindle_page": null,
+  "reader": {
+    "url": null,
+    "title": null,
+    "current_page": null,
+    "total_pages": null
+  },
+  "completed_pages": 0,
+  "partial_pages": 0,
+  "failed_pages": 0,
+  "review_items": 0,
+  "artifacts": {
+    "transcript": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/transcript.txt",
+    "session": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/session.md",
+    "state": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/run_state.json",
+    "review_queue": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/review_queue.md",
+    "pages_dir": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/pages",
+    "vision_dir": "/Users/kantaro/Downloads/toc/kindle/runs/20260412_204503/vision"
+  }
+}

@@ -84,6 +84,34 @@ class TestTocStateScript(unittest.TestCase):
                 [
                     sys.executable,
                     "scripts/toc-state.py",
+                    "set-slot",
+                    "--run-dir",
+                    str(run_dir),
+                    "--slot",
+                    "p540",
+                    "--status",
+                    "skipped",
+                    "--requirement",
+                    "optional",
+                    "--skip-reason",
+                    "asset stage not needed for draft",
+                    "--note",
+                    "user deferred reusable assets",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            st = _merge_state(state_path)
+            self.assertEqual(st.get("slot.p540.status"), "skipped")
+            self.assertEqual(st.get("slot.p540.requirement"), "optional")
+            self.assertEqual(st.get("slot.p540.skip_reason"), "asset stage not needed for draft")
+            self.assertEqual(st.get("slot.p540.note"), "user deferred reusable assets")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
                     "approve-image-prompts",
                     "--run-dir",
                     str(run_dir),
@@ -128,6 +156,74 @@ class TestTocStateScript(unittest.TestCase):
             self.assertIn("Image prompt gate:", r.stdout)
             self.assertIn("Render: started", r.stdout)
             self.assertIn("Run status:", r.stdout)
+
+            index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
+            self.assertIn("#### p540 Asset Review", index_text)
+            self.assertIn("- status: `skipped`", index_text)
+            self.assertIn("- requirement: `optional`", index_text)
+            self.assertIn("- skip_reason: `asset stage not needed for draft`", index_text)
+
+    def test_set_slot_rejects_unknown_slot_and_invalid_enums(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_state_slot_validation_") as td:
+            run_dir = Path(td) / "out" / "topic_20990101_0000"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=test\n---\n", encoding="utf-8")
+
+            bad_slot = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
+                    "set-slot",
+                    "--run-dir",
+                    str(run_dir),
+                    "--slot",
+                    "p999",
+                    "--status",
+                    "done",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_slot.returncode, 0)
+            self.assertIn("Invalid --slot", bad_slot.stderr)
+
+            bad_status = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
+                    "set-slot",
+                    "--run-dir",
+                    str(run_dir),
+                    "--slot",
+                    "p540",
+                    "--status",
+                    "whatever",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_status.returncode, 0)
+            self.assertIn("Invalid --status", bad_status.stderr)
+
+            bad_requirement = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
+                    "set-slot",
+                    "--run-dir",
+                    str(run_dir),
+                    "--slot",
+                    "p540",
+                    "--requirement",
+                    "maybe",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_requirement.returncode, 0)
+            self.assertIn("Invalid --requirement", bad_requirement.stderr)
 
     def test_sync_embeds_eval_report(self) -> None:
         import json

@@ -15,6 +15,9 @@
   - 参照画像がない場合は、参照画像を前提にした wording を外し、要素そのものを維持する表現にする
   - character reference asset では `参照画像` を `基準画像` に寄せる
   - story topic がある場合、人物基準画像と story scene request には `物語「<topic>」` の文脈を加える
+  - `references` が空なら `[参照画像の使い方]` 節を本文から消す
+  - request metadata の `references` には path を残すが、本文には path を直接書かない
+  - 本文では `人物参照画像1`, `場所参照画像1`, `小道具参照画像1` のような役割付きラベルへ置き換える
 
 ## Verification
 

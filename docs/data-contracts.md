@@ -27,16 +27,60 @@ job_id=JOB_YYYY-MM-DD_0001
 topic=string
 status=INIT|RESEARCH|STORY|SCRIPT|VIDEO|QA|DONE
 stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.research.grounding.status=ready|missing_docs|missing_inputs
+stage.research.grounding.report=logs/grounding/research.json
+stage.research.readset.report=logs/grounding/research.readset.json
+stage.research.audit.status=passed|failed
+stage.research.audit.report=logs/grounding/research.audit.json
+stage.research.subagent.prompt=logs/grounding/research.subagent_prompt.md
+stage.research.playbooks.report=logs/grounding/research.playbooks.json
+stage.research.playbooks.selected_count=0
 stage.story.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.story.grounding.status=ready|missing_docs|missing_inputs
+stage.story.grounding.report=logs/grounding/story.json
+stage.story.readset.report=logs/grounding/story.readset.json
+stage.story.audit.status=passed|failed
+stage.story.audit.report=logs/grounding/story.audit.json
+stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
+stage.story.playbooks.report=logs/grounding/story.playbooks.json
+stage.story.playbooks.selected_count=0
 stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.script.grounding.status=ready|missing_docs|missing_inputs
+stage.script.grounding.report=logs/grounding/script.json
+stage.script.readset.report=logs/grounding/script.readset.json
+stage.script.audit.status=passed|failed
+stage.script.audit.report=logs/grounding/script.audit.json
+stage.script.subagent.prompt=logs/grounding/script.subagent_prompt.md
+stage.script.playbooks.report=logs/grounding/script.playbooks.json
+stage.script.playbooks.selected_count=0
 stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.render.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.image_prompt.grounding.status=ready|missing_docs|missing_inputs
+stage.image_prompt.grounding.report=logs/grounding/image_prompt.json
+stage.image_prompt.readset.report=logs/grounding/image_prompt.readset.json
+stage.image_prompt.audit.status=passed|failed
+stage.image_prompt.audit.report=logs/grounding/image_prompt.audit.json
+stage.image_prompt.subagent.prompt=logs/grounding/image_prompt.subagent_prompt.md
+review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
+stage.image_prompt.playbooks.report=logs/grounding/image_prompt.playbooks.json
+stage.image_prompt.playbooks.selected_count=0
+stage.video_generation.grounding.status=ready|missing_docs|missing_inputs
+stage.video_generation.grounding.report=logs/grounding/video_generation.json
+stage.video_generation.readset.report=logs/grounding/video_generation.readset.json
+stage.video_generation.audit.status=passed|failed
+stage.video_generation.audit.report=logs/grounding/video_generation.audit.json
+stage.video_generation.subagent.prompt=logs/grounding/video_generation.subagent_prompt.md
+stage.video_generation.playbooks.report=logs/grounding/video_generation.playbooks.json
+stage.video_generation.playbooks.selected_count=0
 gate.research_review=required|optional|skipped
 gate.story_review=required|optional|skipped
 gate.script_review=required|optional|skipped
 gate.image_review=required|optional|skipped
 gate.narration_review=required|optional|skipped
 gate.video_review=required|optional|skipped
+review.policy.story=required|optional
+review.policy.image=required|optional
+review.policy.narration=required|optional
 artifact.research=output/<topic>_<timestamp>/research.md
 artifact.research_review=output/<topic>_<timestamp>/research_review.md
 artifact.story=output/<topic>_<timestamp>/story.md
@@ -47,6 +91,16 @@ artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
 artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 artifact.video=output/<topic>_<timestamp>/video.mp4
 artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
+artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
+artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json
+artifact.grounding.script=output/<topic>_<timestamp>/logs/grounding/script.json
+artifact.grounding.image_prompt=output/<topic>_<timestamp>/logs/grounding/image_prompt.json
+artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
+artifact.grounding.playbooks.research=output/<topic>_<timestamp>/logs/grounding/research.playbooks.json
+artifact.grounding.playbooks.story=output/<topic>_<timestamp>/logs/grounding/story.playbooks.json
+artifact.grounding.playbooks.script=output/<topic>_<timestamp>/logs/grounding/script.playbooks.json
+artifact.grounding.playbooks.image_prompt=output/<topic>_<timestamp>/logs/grounding/image_prompt.playbooks.json
+artifact.grounding.playbooks.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.playbooks.json
 eval.research.status=approved|changes_requested
 eval.image_prompt.score=0.0-1.0
 eval.image_prompt.findings=0
@@ -64,6 +118,12 @@ eval.narration.unresolved_entries=0
 ```
 
 対応テンプレート: `workflow/state-schema.txt`
+
+grounding 契約の正本:
+
+- `workflow/stage-grounding.yaml`
+- `scripts/resolve-stage-grounding.py`
+- `scripts/select-stage-playbooks.py`
 
 Evaluator summary:
 
@@ -106,16 +166,47 @@ output/<topic>_<timestamp>/run_status.json
 - current run inventory
 - file-to-stage mapping
 
-番号運用は navigation layer として扱う。
+番号運用は navigation layer だが、slot contract は固定である。
 
 - `100` 番台ごとに大工程を割り当てる
-- `10` 番台刻みは default meaning を持つが固定契約ではない
-- stage ごとの actual slot meaning は `p000_index.md` を正とする
+- `10` 番台刻みは fixed slot contract の一部として扱う
+- `p000_index.md` は fixed slot contract に基づく run progress の source of truth
 - 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
 - narration は
   - `p400`: narration text / `tts_text` / script review / human changes
   - `p800`: TTS 実行 / audio outputs / narration runtime checks
   に分けて扱う
+
+### 1.0.2 Fixed p-slot workflow contract
+
+`p100` から `p900` までの slot 意味は、すべての story で共通の固定契約とする。story ごとの差分は slot の意味を変えるのではなく、各 slot の状態と要件で表現する。
+
+各 slot は次の generic keys を持つ。
+
+```text
+slot.pXXX.status=pending|in_progress|awaiting_approval|done|failed|skipped
+slot.pXXX.requirement=required|optional
+slot.pXXX.skip_reason=string
+slot.pXXX.note=string
+```
+
+固定 slot の意味:
+
+- `p100`: research
+- `p200`: story
+- `p300`: visual planning
+- `p400`: script / narration text / human changes
+- `p500`: asset
+- `p600`: image
+- `p700`: video
+- `p800`: audio generation
+- `p900`: render / QA / runtime
+
+運用ルール:
+
+- story 固有の差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` にのみ載せる
+- slot の意味や順序を story ごとに変更しない
+- `p000_index.md` はこの固定 slot contract を run progress の正本として要約する
 
 ### 1.1 `status` と `stage.*.status` の役割分担
 
@@ -146,6 +237,17 @@ output/<topic>_<timestamp>/run_status.json
 stage.<name>.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.<name>.started_at=ISO8601
 stage.<name>.finished_at=ISO8601
+stage.<name>.grounding.status=ready|missing_docs|missing_inputs
+stage.<name>.grounding.report=logs/grounding/<stage>.json
+stage.<name>.readset.report=logs/grounding/<stage>.readset.json
+stage.<name>.audit.status=passed|failed
+stage.<name>.audit.report=logs/grounding/<stage>.audit.json
+stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md
+review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
+slot.pXXX.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
+slot.pXXX.requirement=required|optional
+slot.pXXX.skip_reason=string
+slot.pXXX.note=string
 ```
 
 asset stage を分ける場合は次を追加する。
@@ -168,6 +270,14 @@ asset stage を分ける場合は次を追加する。
 - `stage.asset_generation` → `gate.asset_review` / `review.asset.*`
 - `stage.image_generation` → `gate.image_review` / `review.image.*`
 - `stage.narration` → `gate.narration_review` / `review.narration.*`
+
+grounding ルール:
+
+- stage は開始前に `scripts/resolve-stage-grounding.py` を実行して required docs / templates / inputs を解決する
+- 直後に `scripts/audit-stage-grounding.py` を実行して readset / audit を確定する
+- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、当該 stage は開始しない
+- artifact が存在しても grounding report が欠けていれば verifier / evaluator は fail にできる
+- `requires_approved_input` は `workflow/stage-grounding.yaml` を正本とし、`review.policy.*=optional` の run では対象 review gate を skip できる
 
 ### 1.2 読み方
 
@@ -233,6 +343,7 @@ output/<topic>_<timestamp>/
 - `workflow/script-template.yaml`
 - `workflow/asset-plan-template.yaml`
 - `workflow/scene-outline-template.yaml`（story → 画像/動画生成の橋渡し。未知トピックでモデル記憶に依存しないための asset brief）
+- `workflow/stage-grounding.yaml`（stage ごとの必須参照契約）
 
 各テンプレートは `docs/information-gathering.md` / `docs/story-creation.md` /
 `docs/script-creation.md` のスキーマから最小フィールドのみ抽出。
@@ -308,6 +419,7 @@ output/<topic>_<timestamp>/
 - `video_manifest.md`
   - image/video/audio generation の実装正本
   - `scene_contract`, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
+  - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
 
 generator の読み順:
 
@@ -325,6 +437,7 @@ generator の読み順:
 - `audio.narration.tts_text` は TTS 専用字段
 - `tts_text` を image/video generation の主ソースにしてはならない
 - `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
+- materialize された `image_generation_requests.md` / `video_generation_requests.md` は review artifact として `source_requests` metadata を含んでよい
 
 ### 4.6 `asset_plan.md`（asset stage 正本）
 
@@ -573,6 +686,12 @@ Lifecycle:
 3. fix を source manifest に反映する
 4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
 5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
+
+Hard/soft split:
+
+- 関数 review の hard gate は、missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題を中心に扱う
+- `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
+- これらの warning を別コンテキストで評価したい場合は `scripts/build-subagent-image-review-prompt.py` で `logs/review/image_prompt.subagent_prompt.md` を生成し、contextless subagent に judgment review を依頼する
 
 Optional `human_review.change_requests[]` item:
 

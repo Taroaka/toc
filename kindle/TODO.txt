@@ -1,7 +1,130 @@
-Kindle / Calibre TODO
+Kindle Full-Book Transcript TODO
 
-- Evaluate `Calibre + calibre-mcp` as the primary path for local ebook access.
-- Confirm which book sources are DRM-free and can be imported into Calibre safely.
-- Define a workflow to export readable text files from Calibre-managed books when licensing permits it.
-- Decide whether this repo should store source ebooks, extracted txt files, or only derived notes.
-- If needed, prototype a local MCP setup that can search the Calibre library and read exported text.
+Current status
+
+- [x] v1 is proven: `CDP direct page-image export + per-page codex vision` works for 5 pages.
+- [ ] v2 goal: after manual login and manual book open, one instruction should produce a full-book `transcript.txt`.
+- [ ] v3 backlog: opening the target book from the Kindle library should also become automated.
+
+Definition of done for v2
+
+- [ ] A single entrypoint runs the full-book job end to end.
+- [ ] The job can resume after interruption without losing completed pages.
+- [ ] End-of-book detection stops at the right place without obvious duplicates.
+- [ ] `transcript.txt`, `session.md`, `run_state.json`, and review artifacts are produced.
+- [ ] Medium and full-book validation runs pass with acceptable quality.
+
+Task checklist
+
+- [x] 1. Lock the execution contract.
+Done when: supported inputs, required manual steps, and v2/v3 scope are fixed in docs and CLI help.
+Notes: v2 should assume "user already logged in and book already open in the active reader tab".
+
+- [x] 2. Build the full-book orchestrator.
+Done when: one command can loop `export current page -> transcribe page -> turn page -> checkpoint` until completion.
+Implementation: add a new top-level runner such as `run-kindle-full-book.py` or `run-kindle-full-book.sh`.
+
+- [x] 3. Refactor the extractor into page-level building blocks.
+Done when: the current extractor can be called as reusable operations for `connect`, `read state`, `export one page`, and `turn page`.
+Implementation: keep the current CLI, but split internal logic into functions or a small module that the full-book runner can import.
+
+- [ ] 4. Implement end-of-book detection.
+Done when: the runner can stop reliably when the book is finished.
+Implementation: use multiple signals together: disabled next button, unchanged Kindle page number, repeated image hash, and repeated transcription.
+
+- [ ] 5. Implement duplicate-page and page-skip detection.
+Done when: repeated pages and accidental skips are detected during the run.
+Implementation: store `page_index`, `kindle_page_number`, `image_hash`, and `vision_status` in `run_state.json` and validate transitions on every page.
+
+- [x] 6. Make Codex vision transcription long-run safe.
+Done when: each exported page is transcribed immediately and saved durably before moving on.
+Implementation: keep the current `per-page codex exec --image` approach and call it from the full-book runner page by page.
+
+- [x] 7. Add checkpoint and resume.
+Done when: an interrupted run can continue from the last completed page without redoing finished work.
+Implementation: persist state after every successful page and support `--resume` on the main runner.
+
+- [ ] 8. Add failure recovery and retry policy.
+Done when: transient failures do not kill the whole run immediately.
+Implementation: separate retries for `reader lost`, `page turn failed`, `image export failed`, and `vision transcription failed`.
+
+- [ ] 9. Add quality gates.
+Done when: obviously bad page results are flagged automatically.
+Implementation: check empty output, suspiciously short output, repeated output, and partial/failure markers, then mark the run `partial` when needed.
+
+- [ ] 10. Redesign output artifacts for full-book runs.
+Done when: the run directory has a stable artifact contract for long jobs.
+Implementation: formalize `pages/`, `vision/`, `transcript.txt`, `session.md`, `run_state.json`, `manifest.json`, and `review_queue.md`.
+
+- [x] 11. Unify the operator surface.
+Done when: users no longer need to manually chain multiple scripts for the main path.
+Implementation: provide one official command and treat the older helper scripts as setup/debug tools.
+
+- [ ] 12. Add progress logging and live visibility.
+Done when: a long run clearly reports where it is and where it failed.
+Implementation: print progress lines to stdout and append meaningful events to `session.md` while the run is active.
+
+- [ ] 13. Automate book selection from the library page.
+Done when: the runner can locate and open the target book by title or URL.
+Implementation: treat this as v3, separate from the full-book transcription core because UI dependence is high.
+
+- [x] 14. Build the validation matrix.
+Done when: smoke, medium-length, full-book, and failure-drill runs are defined and repeatable.
+Implementation: test at least `5-page smoke`, `30-50 page medium run`, `full-book run`, plus interruption and retry scenarios.
+
+Critical path
+
+- [ ] First: 2, 3, 6, 7
+- [ ] Second: 4, 5, 8
+- [ ] Third: 9, 10, 11, 12
+- [ ] Last: 14
+- [ ] Separate backlog: 13
+
+Recommended sub-agent layout
+
+- [ ] Main agent owns tasks 2, 3, 6, 7.
+Reason: this is the critical path and the write set is tightly coupled.
+Likely files: `extract-kindle-web-cdp.py`, new `run-kindle-full-book.py`, new `run-kindle-full-book.sh`.
+
+- [ ] Sub-agent 1 owns tasks 1 and 11.
+Reason: execution contract and operator UX can be updated in parallel once the runner interface is clear.
+Likely files: `README.md`, `codex-browser-use-plan.md`, command help text.
+
+- [ ] Sub-agent 2 owns tasks 4, 5, and 8.
+Reason: end detection, dedupe, and retry logic are tightly related but separable from the main orchestration loop after the state contract is fixed.
+Likely files: helper module for run-state validation, retry policy helpers, session note helpers.
+
+- [ ] Sub-agent 3 owns tasks 9, 10, and 12.
+Reason: quality gates, manifest generation, and progress/review artifacts share the same output surface.
+Likely files: `run_state.json` schema docs, `review_queue.md` generation, transcript assembly helpers.
+
+- [ ] Sub-agent 4 owns task 14.
+Reason: verification can run in parallel once the first runnable version of the full-book runner exists.
+Likely files: validation docs, smoke-test scripts, reproducible run recipes.
+
+- [ ] Optional sub-agent 5 owns task 13 only after v2 is stable.
+Reason: library-page book selection is useful but not required for the first full-book automation milestone.
+Likely files: library tab detection and title-selection helpers.
+
+Parallelization rules
+
+- [ ] Do not split tasks 2, 3, 6, and 7 across multiple agents.
+- [ ] Do not let two agents edit the same runner file at the same time.
+- [ ] Let verification start only after the first resumable runner exists.
+- [ ] Treat task 13 as a separate stream, not part of the v2 blocking path.
+
+Suggested development order
+
+- [ ] Phase 1: main agent completes 2, 3, 6, 7.
+- [ ] Phase 2: sub-agent 2 works on 4, 5, 8 while sub-agent 1 prepares 1 and 11.
+- [ ] Phase 3: sub-agent 3 adds 9, 10, 12 on top of the stabilized runner.
+- [ ] Phase 4: sub-agent 4 runs 14 and feeds fixes back to the main agent.
+- [ ] Phase 5: optional sub-agent 5 starts 13 after v2 is accepted.
+
+Acceptance gate before calling v2 complete
+
+- [ ] One command can continue from a partial run and finish the book.
+- [ ] At least one full-book run completes without manual intervention after the book is opened.
+- [ ] Duplicate-page rate is acceptably low and documented.
+- [ ] Failed or partial pages are isolated and reviewable.
+- [ ] The official docs point only to the one-command full-book path.

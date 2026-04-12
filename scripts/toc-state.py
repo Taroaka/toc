@@ -28,6 +28,19 @@ from toc.harness import (
     safe_load_yaml,
     sync_run_status,
 )
+from toc.run_index import SLOT_BY_CODE
+
+
+VALID_SLOT_STATUSES = {
+    "pending",
+    "in_progress",
+    "done",
+    "skipped",
+    "blocked",
+    "awaiting_approval",
+    "failed",
+}
+VALID_SLOT_REQUIREMENTS = {"required", "optional"}
 
 
 def read_manifest_topic(manifest_path: Path) -> str:
@@ -95,6 +108,35 @@ def cmd_append(args: argparse.Namespace) -> int:
     updates = _parse_set_pairs(args.set or [])
     if not updates:
         raise SystemExit("--set is required")
+    append_state_snapshot(state_path, updates)
+    return 0
+
+
+def cmd_set_slot(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    state_path = run_dir / "state.txt"
+    if not state_path.exists():
+        raise SystemExit(f"state.txt not found: {state_path} (run ensure first)")
+    slot = str(args.slot).strip()
+    if slot not in SLOT_BY_CODE:
+        raise SystemExit(f"Invalid --slot (expected fixed workflow slot): {slot}")
+    updates: dict[str, str] = {}
+    if args.status:
+        status = str(args.status).strip().lower()
+        if status not in VALID_SLOT_STATUSES:
+            raise SystemExit(f"Invalid --status for {slot}: {args.status}")
+        updates[f"slot.{slot}.status"] = status
+    if args.requirement:
+        requirement = str(args.requirement).strip().lower()
+        if requirement not in VALID_SLOT_REQUIREMENTS:
+            raise SystemExit(f"Invalid --requirement for {slot}: {args.requirement}")
+        updates[f"slot.{slot}.requirement"] = requirement
+    if args.skip_reason:
+        updates[f"slot.{slot}.skip_reason"] = str(args.skip_reason).replace("\n", " ").strip()
+    if args.note:
+        updates[f"slot.{slot}.note"] = str(args.note).replace("\n", " ").strip()
+    if not updates:
+        raise SystemExit("At least one of --status/--requirement/--skip-reason/--note is required")
     append_state_snapshot(state_path, updates)
     return 0
 
@@ -251,6 +293,15 @@ def main() -> int:
     p_append.add_argument("--run-dir", required=True)
     p_append.add_argument("--set", action="append", default=[], help="key=value (repeatable)")
     p_append.set_defaults(fn=cmd_append)
+
+    p_slot = sub.add_parser("set-slot", help="Set fixed p-slot workflow state.")
+    p_slot.add_argument("--run-dir", required=True)
+    p_slot.add_argument("--slot", required=True, help="Fixed slot code, e.g. p540")
+    p_slot.add_argument("--status", default=None)
+    p_slot.add_argument("--requirement", default=None)
+    p_slot.add_argument("--skip-reason", default=None)
+    p_slot.add_argument("--note", default=None)
+    p_slot.set_defaults(fn=cmd_set_slot)
 
     p_approve = sub.add_parser("approve-video", help="Mark video as human-approved.")
     p_approve.add_argument("--run-dir", required=True)

@@ -233,6 +233,75 @@ class TestImagePromptStoryReview(unittest.TestCase):
         findings = [finding.code for outcome in results for finding in outcome.findings]
         self.assertIn("prompt_mentions_character_but_character_ids_empty", findings)
 
+    def test_review_flags_mid_action_prompt_as_not_first_frame_ready(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt_collection = """# Image Prompt Collection
+
+件数: `1`
+
+## scene08_cut02
+
+- output: `assets/scenes/scene08_cut02.png`
+- narration: `太郎が帰りたいと話すと、乙姫は静かにうなずきます。`
+- rationale: `anchor`
+
+```text
+[全体 / 不変条件]
+実写映画調、画像内テキストなし。
+
+[登場人物]
+浦島太郎が話し、乙姫がうなずく。
+
+[小道具 / 舞台装置]
+宴会エリア。
+
+[シーン]
+宴会エリア内で太郎が帰りたいと話し、乙姫は静かにうなずく。
+
+[連続性]
+この画像だけで二人のやり取りが分かるようにする。
+
+[禁止]
+ロゴ、字幕、ウォーターマーク。
+```
+"""
+        manifest = {
+            "assets": {
+                "character_bible": [
+                    {"character_id": "urashima", "review_aliases": ["浦島太郎", "太郎"]},
+                    {"character_id": "otohime", "review_aliases": ["乙姫"]},
+                ]
+            },
+            "scenes": [
+                {
+                    "scene_id": 8,
+                    "cuts": [
+                        {
+                            "cut_id": 2,
+                            "image_generation": {
+                                "character_ids": ["urashima", "otohime"],
+                                "object_ids": [],
+                            },
+                            "audio": {"narration": {"text": "太郎が帰りたいと話すと、乙姫は静かにうなずきます。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        entries = mod.parse_prompt_collection(prompt_collection)
+        results = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={8: "帰郷を申し出る場面"},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertIn("image_prompt_not_first_frame_ready", findings)
+
     def test_review_flags_reveal_constraint_violation(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)
@@ -657,6 +726,97 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
         )
         findings = [finding.code for outcome in results for finding in outcome.findings]
         self.assertIn("prompt_only_local_mismatch", findings)
+
+    def test_soft_semantic_findings_do_not_force_agent_review_false(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt_collection = """# Image Prompt Collection
+
+件数: `1`
+
+## scene06_cut01
+
+- output: `assets/scenes/scene06_cut01.png`
+- narration: `浦島太郎が浜辺に立つ。`
+- rationale: `anchor`
+
+```text
+[全体 / 不変条件]
+実写映画調、画像内テキストなし。
+
+[登場人物]
+浦島太郎が静かに立つ。
+
+[小道具 / 舞台装置]
+浜辺、玉手箱。
+
+[シーン]
+浦島太郎が浜辺に立つ。
+
+[連続性]
+前後カットと衣装・天候・位置関係を維持する。
+
+[禁止]
+群衆、花火、煙、ロゴ、字幕、ウォーターマーク、派手な光、夜景、回転。
+```
+"""
+        manifest = {
+            "assets": {
+                "character_bible": [
+                    {"character_id": "urashima", "review_aliases": ["浦島太郎"]},
+                ],
+                "object_bible": [
+                    {"object_id": "beach", "review_aliases": ["浜辺"]},
+                    {"object_id": "tamatebako", "review_aliases": ["玉手箱"]},
+                ],
+            },
+            "scenes": [
+                {
+                    "scene_id": 6,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "image_generation": {
+                                "character_ids": ["urashima"],
+                                "object_ids": ["beach", "tamatebako"],
+                                "contract": {
+                                    "target_focus": "relationship",
+                                    "must_include": ["浦島太郎", "浜辺", "玉手箱"],
+                                    "must_avoid": ["群衆", "花火", "煙", "ロゴ", "字幕", "ウォーターマーク", "派手な光", "夜景", "回転"],
+                                    "done_when": ["浦島太郎と浜辺と玉手箱が読める"],
+                                },
+                            },
+                            "audio": {"narration": {"text": "浦島太郎が浜辺に立つ。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        entries = mod.parse_prompt_collection(prompt_collection)
+        results = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertIn("image_contract_must_avoid_violated", findings)
+        self.assertIn("image_contract_target_focus_unmet", findings)
+        self.assertIn("image_prompt_production_readiness_weak", findings)
+        self.assertTrue(all(mod.is_soft_finding(finding) for outcome in results for finding in outcome.findings))
+
+        updated = mod.apply_review_statuses(entries, results)
+        self.assertTrue(updated[0].agent_review_ok)
+        self.assertIn("image_contract_must_avoid_violated", updated[0].agent_review_reason_keys)
+        self.assertIn("image_prompt_production_readiness_weak", updated[0].agent_review_reason_keys)
+
+        report = mod.render_report(results, manifest_path=Path("video_manifest.md"))
+        self.assertIn("- status: `WARN`", report)
+        self.assertIn("- hard_findings: `0`", report)
+        self.assertIn("- soft_findings: `", report)
 
     def test_review_flags_missing_required_prompt_blocks(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

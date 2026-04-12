@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import parse_state_file
+from toc.harness import append_state_snapshot, parse_state_file
 
 
 def _good_research_yaml() -> str:
@@ -40,6 +40,81 @@ def _good_research_yaml() -> str:
             "",
         ]
     )
+
+
+def _good_story_yaml() -> str:
+    return (
+        "```yaml\n"
+        "selection:\n"
+        "  candidates:\n"
+        "    - candidate_id: \"A\"\n"
+        "      logline: \"王道案\"\n"
+        "      why_it_scores: [\"clear\"]\n"
+        "      score_hint:\n"
+        "        engagement: 0.9\n"
+        "        coherence: 0.9\n"
+        "        production_fit: 0.9\n"
+        "      requires_hybridization_approval: false\n"
+        "  chosen_candidate_id: \"A\"\n"
+        "  rationale: \"最も安定している\"\n"
+        "hybridization:\n"
+        "  approval_status: \"not_needed\"\n"
+        "script:\n"
+        "  scenes:\n"
+        "    - scene_id: 1\n"
+        "      phase: \"opening\"\n"
+        "      narration: \"導入です。\"\n"
+        "      visual: \"導入の情景\"\n"
+        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]\n"
+        "```\n"
+    )
+
+
+def _run_grounding(run_dir: Path, stage: str, *, flow: str = "toc-run") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "resolve-stage-grounding.py"),
+            "--stage",
+            stage,
+            "--run-dir",
+            str(run_dir),
+            "--flow",
+            flow,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _ensure_story_ready(run_dir: Path) -> None:
+    story_path = run_dir / "story.md"
+    if not story_path.exists():
+        story_path.write_text(_good_story_yaml(), encoding="utf-8")
+    append_state_snapshot(run_dir / "state.txt", {"review.story.status": "approved"})
+
+
+def _ensure_video_generation_ready(run_dir: Path) -> None:
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.image.status": "approved",
+            "review.narration.status": "approved",
+        },
+    )
+
+
+def _resolve_ready_grounding(run_dir: Path, *stages: str, flow: str = "toc-run") -> None:
+    if any(stage in {"story", "script", "image_prompt", "video_generation"} for stage in stages):
+        _ensure_story_ready(run_dir)
+    if "video_generation" in stages:
+        _ensure_video_generation_ready(run_dir)
+    for stage in stages:
+        result = _run_grounding(run_dir, stage, flow=flow)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr or result.stdout)
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
@@ -104,6 +179,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "video.mp4").write_bytes(b"fake")
+            _resolve_ready_grounding(run_dir, "research", "story", "script", "image_prompt", "video_generation")
 
             commands = [
                 "scripts/review-research-stage.py",
@@ -142,6 +218,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "research.md").write_text("```yaml\nsources: []\nscene_plan:\n  scenes: []\nstory_baseline:\n  canonical_synopsis:\n    short_summary: \"\"\n    beat_sheet: []\nconflicts: []\nmetadata:\n  confidence_score: 0.1\n```\n", encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "research")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-research-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],
@@ -213,6 +290,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _resolve_ready_grounding(run_dir, "image_prompt")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],
@@ -289,6 +367,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _resolve_ready_grounding(run_dir, "image_prompt")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard"],
@@ -374,6 +453,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _resolve_ready_grounding(run_dir, "image_prompt")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],
@@ -472,6 +552,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _resolve_ready_grounding(run_dir, "image_prompt")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard"],
@@ -532,6 +613,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _resolve_ready_grounding(run_dir, "image_prompt")
 
             result = subprocess.run(
                 [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--fail-on-findings"],

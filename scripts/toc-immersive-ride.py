@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
 from toc.harness import append_state_snapshot
 
 EXPERIENCE_TEMPLATES: dict[str, Path] = {
@@ -60,6 +61,10 @@ def write_text(path: Path, content: str, force: bool) -> bool:
     return True
 
 
+def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
+    run_stage_grounding(run_dir, stage, flow=flow, retries=1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold an immersive run folder.")
     parser.add_argument("--topic", required=True, help="Video topic (used for folder name).")
@@ -79,6 +84,10 @@ def main() -> None:
         help='Video generation tool in manifest ("kling", "kling-omni", or "seedance"). "veo" is mapped to Kling for safety.',
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files.")
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default="strict")
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
     args = parser.parse_args()
 
     topic_raw = args.topic
@@ -92,6 +101,12 @@ def main() -> None:
 
     run_dir = Path(args.run_dir) if args.run_dir else (Path(args.base) / f"{topic_slug}_{ts}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    review_policy = resolve_review_policy(
+        preset=args.review_policy,
+        story_review=args.story_review,
+        image_review=args.image_review,
+        narration_review=args.narration_review,
+    )
 
     # assets
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
@@ -100,6 +115,7 @@ def main() -> None:
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
 
     state_path = run_dir / "state.txt"
     if not state_path.exists():
@@ -112,11 +128,15 @@ def main() -> None:
                 "runtime.stage": "immersive_ride_scaffold",
                 "gate.video_review": "required",
                 "immersive.experience": str(experience),
+                "runtime.review_policy": args.review_policy,
+                **review_policy_state_entries(review_policy),
             },
         )
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "research", flow="immersive")
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "story", flow="immersive")
     if VISUAL_VALUE_TEMPLATE.exists():
         visual_value = (
             VISUAL_VALUE_TEMPLATE.read_text(encoding="utf-8")
@@ -128,6 +148,7 @@ def main() -> None:
     else:
         write_text(run_dir / "visual_value.md", "# 視覚化価値パート（visual value）\n\nTODO\n", force=args.force)
     write_text(run_dir / "script.md", "# 台本（没入型 / cinematic）\n\nTODO\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "script", flow="immersive")
     if SCENE_CONTE_TEMPLATE.exists():
         tmpl = SCENE_CONTE_TEMPLATE.read_text(encoding="utf-8")
         tmpl = (
@@ -162,6 +183,8 @@ def main() -> None:
         write_text(run_dir / "video_manifest.md", tmpl, force=args.force)
     else:
         write_text(run_dir / "video_manifest.md", "# Video Manifest\n\nTBD\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "image_prompt", flow="immersive")
+    maybe_run_stage_grounding(run_dir, "video_generation", flow="immersive")
 
     append_state_block(
         state_path,

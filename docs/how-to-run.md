@@ -38,6 +38,12 @@ Claude Code で以下を実行:
 /toc-run "桃太郎" --dry-run
 ```
 
+story review を後回しにして script draft まで一気に進める run:
+
+```text
+/toc-run "かぐや姫" --dry-run --review-policy drafts
+```
+
 YouTube サムネイル用の prompt だけ作る場合:
 
 ```text
@@ -67,6 +73,12 @@ python scripts/toc-scene-series.py "桃太郎" --run-dir output/桃太郎_<times
 
 ```text
 /toc-immersive-ride --topic "桃太郎"
+```
+
+API をまだ使わず、story/script/manifest draft まで進めたい場合:
+
+```text
+/toc-immersive-ride --topic "かぐや姫" --stage script --experience cinematic_story --review-policy drafts
 ```
 
 ## 期待される出力（/toc-run）
@@ -117,6 +129,8 @@ output/<topic>_<timestamp>/
 - 具体は `docs/implementation/video-integration.md` を参照
 - 画像生成の review 正本は `video_manifest.md` 自体
 - `review-image-prompt-story-consistency.py` は manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む
+  - hard gate は missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題に寄せる
+  - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
 - reusable asset が多い run では、cut 画像生成の前に `asset_plan.md` を作って review / approve してから asset を生成する
 - image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
 - provider 実行前に request file を materialize できる
@@ -140,9 +154,35 @@ output/<topic>_<timestamp>/
   - `p700`: video
   - `p800`: audio generation
   - `p900`: render / QA / runtime
-- `10` 番台刻みの意味は既定値を持つが固定契約ではない
-  - stage ごとの actual slot meaning は `p000_index.md` の stage table を正とする
+- これらの slot 意味は固定契約で、story ごとに変えない
+- 細番号も固定 slot contract の一部として扱う
+  - `p110`, `p120`, `p130`
+  - `p210`, `p220`, `p230`
+  - `p310`, `p320`, `p330`
+  - `p410`, `p420`, `p430`, `p440`
+  - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`, `p580`
+  - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`
+  - `p710`, `p720`, `p730`, `p740`, `p750`
+  - `p810`, `p820`, `p830`
+  - `p910`, `p920`, `p930`
+- story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
+- `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
+- `p000_index.md` の stage table / slot table を、その run の進捗正本とする
+- slot 状態を手で残したい場合は次を使う
+
+```bash
+python scripts/toc-state.py set-slot \
+  --run-dir output/<topic>_<timestamp> \
+  --slot p540 \
+  --status skipped \
+  --requirement optional \
+  --skip-reason "asset stage not needed for this run"
+```
+
+- fixed `p-slot` contract を更新したら `python scripts/validate-slot-contract.py` を実行する
 - `python scripts/generate-assets-from-manifest.py --manifest ... --materialize-request-files-only` で request file だけ更新できる
+- request file の手修正は正本ではなく、次回 materialize で再構成される
+- 修正理由を残したい場合は `script.md.human_change_requests[]` を正本にし、materialized request file の `source_requests` を review に使う
 - 同時に `generation_exclusion_report.md` も更新され、`cut_status: deleted` の cut が request / generation / concat から外れることを確認できる
 - 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
 - `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
@@ -203,9 +243,17 @@ python scripts/sync-narration-from-script.py \
   - `generation_status` は `missing|created|recreate`
   - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
   - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
+  - 画像生成は依存のない cut から並列化され、`--image-max-concurrency` で同時実行数を制御できる（上限 10）
   - `recreate` を実際に回すときは `--force` を使う
   - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする
   - `--force --test-image-variants N` を併用すれば exploratory variant を複数出せる
+- scene 3 以降など大きい範囲をまとめて見直すときは、scene 単位で request authoring subagent を並列起動して scratch rewrite を作り、メインエージェントが `image_generation_requests.md` へ統合する
+  - 各担当は `script.md`、`video_manifest.md`、現在の request draft、`docs/implementation/image-prompting.md` を必ず読む
+  - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も必ず読む
+  - 担当 scene の `visual_beat` を semantic source にして、stateless な request 文へ書き直す
+  - この scene 分割は毎回の image generation run で再現できるよう、順番・担当範囲・統合手順を固定する
+  - semantic source は `script.md`、implementation source は `video_manifest.md`
+  - request 本文の具体化はコードで自動変換せず、自然言語エージェントと人レビューで決める
 - `scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する
   - `cut_status: deleted` の cut は `video_clips.txt` / `video_narration_list.txt` から自動で除外される
   - 最終 render はこの concat list を正本として使う
@@ -275,6 +323,28 @@ python scripts/review-video-stage.py \
 - スキーマは `workflow/state-schema.txt` を参照
 - 高レベルの現在地は `status=`、工程別の進行は `stage.*.status=` で読む
 - `awaiting_approval` は「作業は終わったが、ユーザー承認待ちで次工程へ進めない」を意味する
+- 各 stage は開始前に grounding preflight を必ず実行する
+  - `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
+  - 証跡は `logs/grounding/<stage>.json`
+  - 続けて `python scripts/audit-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp>` を実行する
+  - `logs/grounding/<stage>.readset.json` が「その stage で読むべき対象」の正本になる
+- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、その stage を開始しない
+- chat/manual で stage 作業を始めるときは、`python scripts/prepare-stage-context.py --stage <stage> --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を標準入口として使う
+- この helper は `resolve -> audit -> readset確認` を直列で実行し、`readset_path`、`grounding_report_path`、`audit_report_path`、`read_order` を含む JSON を返す
+- 返ってきた `readset_path` の `global_docs -> stage_docs -> templates -> inputs` の順に読む
+- stage 完了後に独立検証をしたいときは `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を使う
+  - この script は prompt を stdout に出すだけでなく、`logs/grounding/<stage>.subagent_prompt.md` に保存し、`state.txt` に `stage.<name>.subagent.prompt=...` を追記する
+  - 保存された prompt artifact をそのまま contextless subagent に渡してよい
+- image prompt の意味評価を独立 subagent に任せたいときは `python scripts/build-subagent-image-review-prompt.py --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を使う
+  - この script は prompt を stdout に出すだけでなく、`logs/review/image_prompt.subagent_prompt.md` に保存し、`state.txt` に `review.image_prompt.subagent.prompt=...` を追記する
+  - judgment subagent は content 生成や schema 判定をせず、story/script/manifest の意味整合と revision 優先度だけを見る
+- run 開始時に review policy を固定する
+  - `review.policy.story=required|optional`
+  - `review.policy.image=required|optional`
+  - `review.policy.narration=required|optional`
+  - 既定は `required`
+  - `--review-policy drafts` は 3 つすべてを `optional` に倒す
+  - 必要なら `--story-review optional` のように個別 override する
 - 物語の矛盾ソースを同一シーン/設定として混成（ハイブリッド）する場合は、確定前に人間承認を取る（運用）
   - 承認: `python scripts/toc-state.py approve-hybridization --run-dir output/<topic>_<timestamp> --note "OK"`
 - 画像 prompt review の finding を人間判断で許容する場合は、対象 cut の `human_review_ok` を true にする
@@ -302,10 +372,13 @@ python scripts/review-video-stage.py \
 基本ルール:
 
 1. 作業開始時
+   - grounding preflight を実行し、`stage.<name>.grounding.status=ready` を記録する
+   - audit を実行し、`stage.<name>.audit.status=passed` を記録する
    - `status=...`
    - `stage.<name>.status=in_progress`
    - `stage.<name>.started_at=...`
 2. 作業完了時
+   - grounding が `ready` かつ audit が `passed` の stage だけ完了扱いに進める
    - 承認不要なら `stage.<name>.status=done`
    - 承認が必要なら `stage.<name>.status=awaiting_approval`
    - `stage.<name>.finished_at=...`
@@ -336,15 +409,21 @@ python scripts/review-video-stage.py \
 例:
 
 - 調査開始:
+  - `stage.research.grounding.status=ready`
+  - `stage.research.audit.status=passed`
   - `status=RESEARCH`
   - `stage.research.status=in_progress`
 - 調査完了:
   - `stage.research.status=done`
   - `artifact.research=.../research.md`
 - 物語開始:
+  - `stage.story.grounding.status=ready`
+  - `stage.story.audit.status=passed`
   - `status=STORY`
   - `stage.story.status=in_progress`
 - 台本完了（承認待ち）:
+  - `stage.script.grounding.status=ready`
+  - `stage.script.audit.status=passed`
   - `status=SCRIPT`
   - `stage.script.status=awaiting_approval`
   - `review.script.status=pending`
