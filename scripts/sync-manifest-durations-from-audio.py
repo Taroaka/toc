@@ -152,6 +152,16 @@ def _round_duration(seconds: float, *, mode: str) -> int:
     return int(math.ceil(seconds))
 
 
+def _is_intentional_silent(container: dict) -> bool:
+    audio = container.get("audio")
+    if not isinstance(audio, dict):
+        return False
+    narration = audio.get("narration")
+    if not isinstance(narration, dict):
+        return False
+    return (_as_opt_str(narration.get("tool")) or "").strip().lower() == "silent"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync manifest durations/timestamps from narration audio lengths.")
     parser.add_argument("--manifest", required=True, help="Path to video_manifest.md")
@@ -208,6 +218,8 @@ def main() -> None:
 
     def update_one_duration(*, container: dict, role: str, audio_out: str, key_path: str) -> int | None:
         nonlocal changed
+        if _is_intentional_silent(container):
+            return None
         audio_path = _resolve_path(base_dir, audio_out)
         if not audio_path:
             return None

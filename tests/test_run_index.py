@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from toc.harness import sync_run_status
+from toc.run_index import classify_run_file
 
 
 class TestRunIndex(unittest.TestCase):
@@ -46,10 +47,34 @@ class TestRunIndex(unittest.TestCase):
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
             self.assertIn("current_position: `p400 Script / Narration Text / Human Changes / awaiting script human review`", index_text)
             self.assertIn("next_required_human_review: `script.md`", index_text)
-            self.assertIn("`p630` | Image Stage | `optional` | Hard Image Review", index_text)
+            self.assertIn("`p540` | Narration / Audio Runtime Stage | `optional` | Duration Fit Gate", index_text)
             self.assertIn("#### p110 Research Grounding", index_text)
             self.assertIn("- requirement: `required`", index_text)
             self.assertIn("[transitional] `scene_outline_v3.md`", index_text)
             self.assertIn("[output] `assets/audio/scene01_cut01.mp3`", index_text)
             self.assertIn("[log] `logs/providers/scene01_image.json`", index_text)
             self.assertIn("[scratch] `scratch/note.txt`", index_text)
+
+    def test_classify_scene_series_nested_files_with_scene_subrun_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_run_index_scene_series_") as td:
+            run_dir = Path(td) / "out" / "series_20990101_0000"
+            scene_dir = run_dir / "scenes" / "scene01"
+            (scene_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
+            (scene_dir / "video_manifest.md").write_text(
+                "# Manifest\n\n```yaml\nmanifest_phase: skeleton\nscenes: []\n```\n",
+                encoding="utf-8",
+            )
+            (scene_dir / "script.md").write_text("# scene script\n", encoding="utf-8")
+            (scene_dir / "state.txt").write_text("topic=scene01\n---\n", encoding="utf-8")
+            (scene_dir / "logs" / "grounding" / "narration.json").write_text("{}", encoding="utf-8")
+
+            script_entry = classify_run_file("scenes/scene01/script.md", run_dir=run_dir)
+            manifest_entry = classify_run_file("scenes/scene01/video_manifest.md", run_dir=run_dir)
+            grounding_entry = classify_run_file("scenes/scene01/logs/grounding/narration.json", run_dir=run_dir)
+            state_entry = classify_run_file("scenes/scene01/state.txt", run_dir=run_dir)
+
+            self.assertEqual(script_entry.slot, "p420")
+            self.assertEqual(manifest_entry.slot, "p450")
+            self.assertEqual(grounding_entry.slot, "p510")
+            self.assertEqual(state_entry.slot, "p930")
+            self.assertIn("scene subrun", grounding_entry.note)

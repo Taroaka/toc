@@ -17,7 +17,7 @@ from toc.grounding import StageGroundingError, prepare_stage_context  # noqa: E4
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Resolve, audit, and return the canonical readset for one stage.")
-    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, image_prompt, video_generation).")
+    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, narration, asset, scene_implementation, video_generation).")
     parser.add_argument("--run-dir", required=True, help="Path to output/<topic>_<timestamp>.")
     parser.add_argument("--flow", choices=["toc-run", "scene-series", "immersive"], default=None)
     args = parser.parse_args()

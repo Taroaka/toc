@@ -18,6 +18,124 @@ SPEC.loader.exec_module(MODULE)
 
 
 class TestRequestPreviewPrompt(unittest.TestCase):
+    def test_skeleton_manifest_does_not_materialize_scene_or_video_request_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+manifest_phase: skeleton
+video_metadata:
+  topic: "かぐや姫"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        still_image_plan:
+          mode: generate_still
+          generation_status: planned
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "p1"
+          output: "assets/scenes/scene01_1.png"
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 4
+          output: "assets/videos/scene01_1.mp4"
+        audio:
+          narration:
+            tool: "silent"
+            text: ""
+            tts_text: ""
+            silence_contract:
+              intentional: true
+              kind: "visual_value_hold"
+              confirmed_by_human: true
+              reason: "draft"
+            output: "assets/audio/scene01_1.mp3"
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--skip-images",
+                    "--skip-videos",
+                    "--dry-run",
+                    "--skip-image-prompt-review",
+                    "--skip-narration-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
+
+    def test_skeleton_manifest_fails_before_scene_review_can_mutate_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            original_manifest = """# Manifest
+
+```yaml
+manifest_phase: skeleton
+video_metadata:
+  topic: "かぐや姫"
+scenes:
+  - scene_id: 1
+    image_generation:
+      tool: "google_nanobanana_2"
+      prompt: "かぐや姫"
+      output: "assets/scenes/scene01.png"
+    video_generation:
+      tool: "kling_3_0"
+      duration_seconds: 4
+      output: "assets/videos/scene01.mp4"
+    audio:
+      narration:
+        tool: "silent"
+        text: ""
+        tts_text: ""
+        silence_contract:
+          intentional: true
+          kind: "visual_value_hold"
+          confirmed_by_human: true
+          reason: "draft"
+        output: "assets/audio/scene01.mp3"
+```
+"""
+            manifest_path.write_text(original_manifest, encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--skip-videos",
+                    "--dry-run",
+                    "--image-prompt-review-fix-character-ids",
+                    "--skip-narration-review",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("skeleton phase", result.stderr + result.stdout)
+            self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
+
     def test_rewrites_stateful_character_asset_wording(self) -> None:
         prompt = """[登場人物]
 浦島太郎の参照画像（以後のsceneで一貫性を保つため）。
@@ -307,6 +425,163 @@ scenes:
             self.assertIn("`小道具参照画像1`: `assets/objects/tamatebako.png`", request_text)
             self.assertIn("`場所参照画像1`: `assets/locations/banquet_hall_main.png`", request_text)
 
+    def test_asset_generation_requests_include_bootstrap_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+  experience: "asset_stage"
+scenes:
+  - scene_id: 0
+    still_assets:
+      - asset_id: "urashima_seed"
+        asset_type: "character_reference"
+        output: "assets/characters/urashima_seed.png"
+        review:
+          status: "pending"
+        image_generation:
+          tool: "google_nanobanana_2"
+          execution_lane: "bootstrap_builtin"
+          bootstrap_allowed: true
+          bootstrap_reason: "no_reference_seed"
+          prompt: "浦島太郎の seed"
+          output: "assets/characters/urashima_seed.png"
+          references: []
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            request_text = (tmp_path / "asset_generation_requests.md").read_text(encoding="utf-8")
+            self.assertIn("- asset_id: `urashima_seed`", request_text)
+            self.assertIn("- asset_type: `character_reference`", request_text)
+            self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
+            self.assertIn("- reference_count: `0`", request_text)
+            self.assertIn("- review_status: `pending`", request_text)
+            self.assertIn("- output: `assets/characters/urashima_seed.png`", request_text)
+
+    def test_image_generation_requests_include_lane_and_reference_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            (tmp_path / "assets" / "characters").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "assets" / "characters" / "urashima.png").write_bytes(b"x")
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        still_image_plan:
+          mode: "generate_still"
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "浜辺の establishing shot"
+          references: []
+          output: "assets/scenes/scene1_cut1.png"
+      - cut_id: 2
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "浦島太郎の中景"
+          references:
+            - "assets/characters/urashima.png"
+          output: "assets/scenes/scene1_cut2.png"
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
+            self.assertIn("## scene1_cut1", request_text)
+            self.assertIn("## scene1_cut2", request_text)
+            self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
+            self.assertIn("- reference_count: `0`", request_text)
+            self.assertIn("- execution_lane: `standard`", request_text)
+            self.assertIn("- reference_count: `1`", request_text)
+
+    def test_generation_fails_with_no_reference_lane_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        still_image_plan:
+          mode: "generate_still"
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "浜辺の establishing shot"
+          references: []
+          output: "assets/scenes/scene1_cut1.png"
+```
+""",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--dry-run",
+                    "--skip-audio",
+                    "--skip-videos",
+                    "--skip-image-prompt-review",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("NO_REFERENCE_IMAGE_LANE_REQUIRED", completed.stderr)
+            self.assertIn("$toc-no-reference-image-runner", completed.stderr)
+
     def test_materialized_requests_preserve_explicit_scene_self_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -483,6 +758,9 @@ scenes:
 
             self.assertIn("- source_requests:", video_request_text)
             self.assertIn("`hr-001`: scene1_cut1 の玉手箱を asset に合わせて直す。", video_request_text)
+            self.assertRegex(video_request_text, r"- duration_seconds: `\d+`")
+            self.assertIn("- aspect_ratio: `9:16`", video_request_text)
+            self.assertIn("- resolution: `1080p`", video_request_text)
             self.assertIn("`hr-002`: scene1_cut1 の人物を老いた浦島太郎に直す。", video_request_text)
             self.assertLess(video_request_text.index("`hr-001`"), video_request_text.index("`hr-002`"))
 
@@ -540,6 +818,109 @@ scenes:
             self.assertNotIn("- source_requests:", image_request_text)
             self.assertNotIn("- source_requests:", video_request_text)
 
+    def test_materialized_video_requests_support_render_units_with_source_cuts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "p1"
+          output: "assets/scenes/scene03_cut01.png"
+        video_generation:
+          tool: "kling_3_0_omni"
+          motion_prompt: "m1"
+          output: "assets/videos/scene03_cut01.mp4"
+        audio:
+          narration:
+            tool: "elevenlabs"
+            text: "n1"
+            tts_text: "n1"
+            output: "assets/audio/scene03_cut01_narration.mp3"
+      - cut_id: 2
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "p2"
+          output: "assets/scenes/scene03_cut02.png"
+        video_generation:
+          tool: "kling_3_0_omni"
+          motion_prompt: "m2"
+          output: "assets/videos/scene03_cut02.mp4"
+        audio:
+          narration:
+            tool: "elevenlabs"
+            text: "n2"
+            tts_text: "n2"
+            output: "assets/audio/scene03_cut02_narration.mp3"
+      - cut_id: 3
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "p3"
+          output: "assets/scenes/scene03_cut03.png"
+        video_generation:
+          tool: "kling_3_0_omni"
+          motion_prompt: "m3"
+          output: "assets/videos/scene03_cut03.mp4"
+        audio:
+          narration:
+            tool: "elevenlabs"
+            text: "n3"
+            tts_text: "n3"
+            output: "assets/audio/scene03_cut03_narration.mp3"
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1]
+        video_generation:
+          tool: "kling_3_0_omni"
+          duration_seconds: 8
+          first_frame: "assets/scenes/scene03_cut01.png"
+          motion_prompt: "unit1"
+          output: "assets/videos/scene03_cut01.mp4"
+      - unit_id: 2
+        source_cut_ids: [2, 3]
+        video_generation:
+          tool: "kling_3_0_omni"
+          duration_seconds: 11
+          first_frame: "assets/scenes/scene03_cut02.png"
+          motion_prompt: "unit2"
+          output: "assets/videos/scene03_cut02.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            video_request_text = (tmp_path / "video_generation_requests.md").read_text(encoding="utf-8")
+
+            self.assertIn("## scene3_unit1", video_request_text)
+            self.assertIn("## scene3_unit2", video_request_text)
+            self.assertIn("- source_cuts:", video_request_text)
+            self.assertIn("`scene3_cut2`", video_request_text)
+            self.assertIn("`scene3_cut3`", video_request_text)
+            self.assertNotIn("## scene3_cut3", video_request_text)
+
     def test_validate_human_change_requests_rejects_unknown_applied_request_ids(self) -> None:
         manifest = {
             "human_change_requests": [
@@ -575,6 +956,43 @@ scenes:
             MODULE.validate_human_change_requests(manifest=manifest, scene_filter=None)
 
         self.assertIn("unknown human_change_request id(s) in image_generation", str(ctx.exception))
+
+    def test_validate_human_change_requests_rejects_unknown_render_unit_request_ids(self) -> None:
+        manifest = {
+            "human_change_requests": [
+                {
+                    "request_id": "hr-001",
+                    "status": "verified",
+                    "raw_request": "scene3_unit2 を直す。",
+                }
+            ],
+            "scenes": [
+                {
+                    "scene_id": "3",
+                    "cuts": [
+                        {"cut_id": "1"},
+                        {"cut_id": "2"},
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": "2",
+                            "source_cut_ids": ["1", "2"],
+                            "video_generation": {
+                                "tool": "kling_3_0_omni",
+                                "motion_prompt": "m",
+                                "output": "assets/videos/scene03_cut02.mp4",
+                                "applied_request_ids": ["hr-999"],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaises(SystemExit) as ctx:
+            MODULE.validate_human_change_requests(manifest=manifest, scene_filter=None)
+
+        self.assertIn("render_units.video_generation", str(ctx.exception))
 
     def test_scene7_onward_request_prefers_script_visual_beat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -696,6 +1114,10 @@ scenes:
             self.assertNotIn("scene6_cut1", request_text)
             self.assertIn("scene6_cut2", request_text)
             self.assertTrue((tmp_path / "p000_index.md").exists())
+
+            video_request_text = (tmp_path / "video_generation_requests.md").read_text(encoding="utf-8")
+            self.assertNotIn("scene6_cut1", video_request_text)
+            self.assertNotIn("scene06_cut01.mp4", video_request_text)
 
             exclusion_text = (tmp_path / "generation_exclusion_report.md").read_text(encoding="utf-8")
             self.assertIn("scene6_cut1", exclusion_text)

@@ -3,6 +3,7 @@
 このテンプレは `/toc-immersive-ride` の `output/<topic>_<timestamp>/video_manifest.md` 用。
 
 ```yaml
+manifest_phase: skeleton
 video_metadata:
   topic: "<topic>"
   source_story: "output/<topic>_<timestamp>/story.md"

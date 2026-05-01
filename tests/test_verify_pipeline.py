@@ -37,6 +37,7 @@ def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
             "review.story.status": "approved",
             "review.image.status": "approved",
             "review.narration.status": "approved",
+            "review.duration_fit.status": "passed",
         },
     )
     for stage in ["research", "story", "script", "image_prompt", "video_generation"]:

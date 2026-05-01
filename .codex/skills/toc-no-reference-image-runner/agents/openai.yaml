@@ -1,0 +1,6 @@
+interface:
+  display_name: "ToC No-Reference Image Runner"
+  short_description: "Run this repo's no-reference image flow and delegate execution to the shared built-in batch skill."
+
+policy:
+  allow_implicit_invocation: false

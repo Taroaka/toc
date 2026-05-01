@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from toc.harness import append_state_snapshot, now_iso, parse_state_file, safe_load_yaml, write_json
+from toc.harness import append_state_snapshot, extract_yaml_block, now_iso, parse_state_file, safe_load_yaml, write_json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +142,14 @@ def _load_mapping_file(path: Path) -> dict[str, Any] | None:
     data = safe_load_yaml(text)
     if isinstance(data, dict) and data:
         return data
+    try:
+        fenced = extract_yaml_block(text)
+    except Exception:
+        fenced = ""
+    if fenced:
+        data = safe_load_yaml(fenced)
+        if isinstance(data, dict) and data:
+            return data
     try:
         payload = json.loads(text)
     except Exception:
@@ -327,6 +335,18 @@ def _run_entry(run_dir: Path, path_text: str, *, flow: str | None = None) -> dic
     }
 
 
+def _manifest_phase_for_entry(entry: dict[str, Any]) -> str:
+    if not entry.get("exists"):
+        return ""
+    resolved_path = Path(str(entry.get("resolved_path") or ""))
+    if resolved_path.name != "video_manifest.md":
+        return ""
+    data = _load_mapping_file(resolved_path)
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("manifest_phase") or "production").strip().lower()
+
+
 def _load_state_for_grounding(run_dir: Path, *, flow: str | None = None) -> dict[str, str]:
     inherited_root = parent_run_dir(run_dir, flow)
     merged: dict[str, str] = {}
@@ -338,7 +358,8 @@ def _load_state_for_grounding(run_dir: Path, *, flow: str | None = None) -> dict
 
 def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = None, contract_path: Path = GROUNDING_CONTRACT_PATH) -> dict[str, Any]:
     contract = load_grounding_contract(contract_path)
-    stage_spec = stage_contract(stage, contract)
+    canonical_stage = canonical_stage_name(stage, contract)
+    stage_spec = stage_contract(canonical_stage, contract)
     resolved_flow = flow or detect_flow(run_dir)
 
     required_global_docs = [_repo_entry(path, kind="global_doc") for path in global_required_docs(contract)]
@@ -384,9 +405,52 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
             }
         )
 
+    required_state_checks: list[dict[str, Any]] = []
+    required_state_ok = True
+    for raw in stage_spec.get("required_state", []):
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip()
+        allowed_values = [str(value).strip().lower() for value in raw.get("allowed_values", []) if str(value).strip()]
+        current_value = str(state.get(key, "")).strip().lower()
+        passed = bool(key) and current_value in set(allowed_values)
+        if not passed:
+            required_state_ok = False
+        required_state_checks.append(
+            {
+                "key": key,
+                "value": current_value,
+                "allowed_values": allowed_values,
+                "passed": passed,
+            }
+        )
+
+    manifest_phase_checks: list[dict[str, Any]] = []
+    manifest_phase_ok = True
+    raw_manifest_phase = stage_spec.get("required_manifest_phase")
+    if isinstance(raw_manifest_phase, dict):
+        path_text = str(raw_manifest_phase.get("path") or "").strip()
+        allowed_values = [str(value).strip().lower() for value in raw_manifest_phase.get("allowed_values", []) if str(value).strip()]
+        entry = _run_entry(run_dir, path_text, flow=resolved_flow) if path_text else {"exists": False, "resolved_path": "", "source": "run_dir"}
+        current_phase = _manifest_phase_for_entry(entry)
+        passed = bool(path_text) and bool(entry.get("exists")) and current_phase in set(allowed_values)
+        if not passed:
+            manifest_phase_ok = False
+        manifest_phase_checks.append(
+            {
+                "path": path_text,
+                "resolved_path": str(entry.get("resolved_path") or ""),
+                "source": str(entry.get("source") or "run_dir"),
+                "exists": bool(entry.get("exists")),
+                "manifest_phase": current_phase,
+                "allowed_values": allowed_values,
+                "passed": passed,
+            }
+        )
+
     missing_paths = [entry for entry in [*required_global_docs, *required_docs, *required_templates, *required_inputs] if not entry["exists"]]
     missing_docs = any(entry["kind"] in {"global_doc", "doc", "template"} for entry in missing_paths)
-    missing_inputs = any(entry["kind"] == "input" for entry in missing_paths) or not approved_ok
+    missing_inputs = any(entry["kind"] == "input" for entry in missing_paths) or not approved_ok or not required_state_ok or not manifest_phase_ok
     if missing_docs:
         status = "missing_docs"
     elif missing_inputs:
@@ -398,7 +462,7 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
         "generated_at": now_iso(),
         "contract_version": contract.get("contract_version"),
         "stage": stage,
-        "canonical_stage": canonical_stage_name(stage, contract),
+        "canonical_stage": canonical_stage,
         "flow": resolved_flow,
         "run_dir": str(run_dir.resolve()),
         "parent_run_dir": str(parent_run_dir(run_dir, resolved_flow).resolve()) if parent_run_dir(run_dir, resolved_flow) else "",
@@ -417,6 +481,8 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
         },
         "missing_paths": missing_paths,
         "approved_input_checks": approved_input_checks,
+        "required_state_checks": required_state_checks,
+        "manifest_phase_checks": manifest_phase_checks,
         "status": status,
         "review_policy": current_review_policy(state),
     }
@@ -657,22 +723,23 @@ def run_stage_grounding(
     attempts = max(0, int(retries)) + 1
     last_report: dict[str, Any] | None = None
     contract = load_grounding_contract()
+    canonical_stage = canonical_stage_name(stage, contract)
 
     for _ in range(attempts):
-        report = resolve_stage_grounding(stage=stage, run_dir=run_dir, flow=flow)
-        report_path = write_stage_grounding_report(run_dir=run_dir, stage=stage, report=report)
-        readset = build_stage_grounding_readset(report, stage=stage)
-        readset_path = write_stage_grounding_readset(run_dir=run_dir, stage=stage, readset=readset)
-        audit = build_stage_grounding_audit(run_dir=run_dir, stage=stage, report=report, readset=readset, contract=contract)
-        audit_path = write_stage_grounding_audit(run_dir=run_dir, stage=stage, audit=audit)
+        report = resolve_stage_grounding(stage=canonical_stage, run_dir=run_dir, flow=flow)
+        report_path = write_stage_grounding_report(run_dir=run_dir, stage=canonical_stage, report=report)
+        readset = build_stage_grounding_readset(report, stage=canonical_stage)
+        readset_path = write_stage_grounding_readset(run_dir=run_dir, stage=canonical_stage, readset=readset)
+        audit = build_stage_grounding_audit(run_dir=run_dir, stage=canonical_stage, report=report, readset=readset, contract=contract)
+        audit_path = write_stage_grounding_audit(run_dir=run_dir, stage=canonical_stage, audit=audit)
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                f"stage.{stage}.grounding.status": str(report["status"]),
-                f"stage.{stage}.grounding.report": str(report_path.relative_to(run_dir)),
-                f"stage.{stage}.readset.report": str(readset_path.relative_to(run_dir)),
-                f"stage.{stage}.audit.status": str(audit["status"]),
-                f"stage.{stage}.audit.report": str(audit_path.relative_to(run_dir)),
+                f"stage.{canonical_stage}.grounding.status": str(report["status"]),
+                f"stage.{canonical_stage}.grounding.report": str(report_path.relative_to(run_dir)),
+                f"stage.{canonical_stage}.readset.report": str(readset_path.relative_to(run_dir)),
+                f"stage.{canonical_stage}.audit.status": str(audit["status"]),
+                f"stage.{canonical_stage}.audit.report": str(audit_path.relative_to(run_dir)),
             },
         )
         last_report = report
@@ -684,11 +751,11 @@ def run_stage_grounding(
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                f"stage.{stage}.status": "failed",
-                "last_error": f"grounding_failed:{stage}:{last_report['status']}",
+                f"stage.{canonical_stage}.status": "failed",
+                "last_error": f"grounding_failed:{canonical_stage}:{last_report['status']}",
             },
         )
-    raise StageGroundingError(stage=stage, status=str(last_report["status"]), run_dir=run_dir, report=last_report)
+    raise StageGroundingError(stage=canonical_stage, status=str(last_report["status"]), run_dir=run_dir, report=last_report)
 
 
 def prepare_stage_context(

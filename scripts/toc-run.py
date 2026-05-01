@@ -44,6 +44,12 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
     run_stage_grounding(run_dir, stage, flow=flow, retries=1)
 
 
+def ensure_skeleton_manifest(manifest_text: str) -> str:
+    if "manifest_phase:" in manifest_text:
+        return manifest_text
+    return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold a standard ToC run dir.")
     parser.add_argument("topic", help="Run topic.")
@@ -108,10 +114,10 @@ def main() -> None:
             .replace("<ISO8601>", now_iso())
         )
     else:
-        manifest = "# Video Manifest\n\nTODO\n"
+        manifest = "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n"
+    manifest = ensure_skeleton_manifest(manifest)
     write_text(run_dir / "video_manifest.md", manifest, args.force)
-    maybe_run_stage_grounding(run_dir, "image_prompt", flow="toc-run")
-    maybe_run_stage_grounding(run_dir, "video_generation", flow="toc-run")
+    maybe_run_stage_grounding(run_dir, "narration", flow="toc-run")
 
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "objects").mkdir(parents=True, exist_ok=True)

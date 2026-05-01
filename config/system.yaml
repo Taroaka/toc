@@ -30,7 +30,8 @@ state:
     separator: "---"
 
 providers:
-  image: google_nanobanana_pro
+  image: google_nanobanana_2
+  image_alt: gemini_3_1_flash_image
   video: kling_3_0
   tts: elevenlabs
   llm: langchain

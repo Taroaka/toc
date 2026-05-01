@@ -16,7 +16,7 @@ from toc.grounding import StageGroundingError, run_stage_grounding
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Resolve required files before starting a ToC stage.")
-    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, image_prompt, video_generation).")
+    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, narration, asset, scene_implementation, video_generation).")
     parser.add_argument("--run-dir", required=True, help="Path to output/<topic>_<timestamp>.")
     parser.add_argument("--flow", choices=["toc-run", "scene-series", "immersive"], default=None)
     args = parser.parse_args()

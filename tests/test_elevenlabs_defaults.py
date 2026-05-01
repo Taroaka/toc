@@ -18,7 +18,18 @@ class TestElevenLabsDefaults(unittest.TestCase):
             else:
                 os.environ["ELEVENLABS_VOICE_ID"] = old
 
+    def test_from_env_defaults_to_eleven_v3_model(self) -> None:
+        old = os.environ.get("ELEVENLABS_MODEL_ID")
+        try:
+            os.environ.pop("ELEVENLABS_MODEL_ID", None)
+            cfg = ElevenLabsConfig.from_env(api_key="test_key")
+            self.assertEqual(cfg.model_id, "eleven_v3")
+        finally:
+            if old is None:
+                os.environ.pop("ELEVENLABS_MODEL_ID", None)
+            else:
+                os.environ["ELEVENLABS_MODEL_ID"] = old
+
 
 if __name__ == "__main__":
     unittest.main()
-

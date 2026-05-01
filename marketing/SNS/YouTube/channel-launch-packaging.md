@@ -1,6 +1,6 @@
 # YouTube チャンネル公開導線設計
 
-最終更新: 2026-04-12  
+最終更新: 2026-04-26
 用途: 初回公開前に、チャンネルページを `着地ページ` として成立させるための設計メモ。
 
 ---
@@ -50,11 +50,11 @@
 - 関連する補助動画または Shorts 2〜4 本
 - それらを束ねる playlist 2〜4 個
 
-ToC なら初期形はこれでよい。
+`にわかのAI` なら初期形はこれでよい。
 
 - flagship: `浦島太郎` 本編
-- support: `Behind-the-AI` 1本、Shorts 1〜2本
-- playlists: `Start Here / 日本民話シリーズ / Behind-the-AI / Shorts`
+- support: `制作の裏側` 1本、Shorts 1〜2本
+- playlists: `まず見る3本 / AIでつくる民話・神話 / 制作の裏側 / Shorts`
 
 ---
 
@@ -83,8 +83,8 @@ ToC なら初期形はこれでよい。
 
 1. Trailer / Featured video
 2. `Start Here`
-3. `日本民話シリーズ`
-4. `Behind-the-AI`
+3. `AIでつくる民話・神話`
+4. `制作の裏側`
 5. `Shorts`
 
 ---
@@ -124,11 +124,11 @@ ToC なら初期形はこれでよい。
 
 ---
 
-## 10. ToC の推奨初期形
+## 10. にわかのAI の推奨初期形
 
-- trailer: `ToC とは何か` を伝える短い紹介動画
+- trailer: `にわかのAIとは何か` を伝える短い紹介動画
 - featured video: 代表作または最新の旗艦動画
-- playlists: `Start Here / 日本民話シリーズ / Behind-the-AI / Shorts`
+- playlists: `まず見る3本 / AIでつくる民話・神話 / 制作の裏側 / Shorts`
 - sections: 上の4本をそのまま top page に出す
 
 ---

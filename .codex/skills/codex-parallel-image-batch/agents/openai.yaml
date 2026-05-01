@@ -1,0 +1,7 @@
+interface:
+  display_name: "Parallel Image Batch"
+  short_description: "Generate image batches with Codex built-in image generation and optional subagent fan-out."
+
+policy:
+  allow_implicit_invocation: false
+

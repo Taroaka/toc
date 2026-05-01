@@ -65,6 +65,12 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
     run_stage_grounding(run_dir, stage, flow=flow, retries=1)
 
 
+def ensure_skeleton_manifest(manifest_text: str) -> str:
+    if "manifest_phase:" in manifest_text:
+        return manifest_text
+    return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold an immersive run folder.")
     parser.add_argument("--topic", required=True, help="Video topic (used for folder name).")
@@ -180,11 +186,10 @@ def main() -> None:
                 print('[warn] --video-tool veo is disabled for safety; using kling_3_0_omni instead.')
             tmpl = re.sub(r'(?m)^(\s*)tool: "google_veo_3_1"\s*$', r'\1tool: "kling_3_0_omni"', tmpl)
             tmpl = re.sub(r'(?m)^(\s*)tool: "kling_3_0"\s*$', r'\1tool: "kling_3_0_omni"', tmpl)
-        write_text(run_dir / "video_manifest.md", tmpl, force=args.force)
+        write_text(run_dir / "video_manifest.md", ensure_skeleton_manifest(tmpl), force=args.force)
     else:
-        write_text(run_dir / "video_manifest.md", "# Video Manifest\n\nTBD\n", force=args.force)
-    maybe_run_stage_grounding(run_dir, "image_prompt", flow="immersive")
-    maybe_run_stage_grounding(run_dir, "video_generation", flow="immersive")
+        write_text(run_dir / "video_manifest.md", "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "narration", flow="immersive")
 
     append_state_block(
         state_path,

@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument("--api-key", default=_env("ELEVENLABS_API_KEY"))
     parser.add_argument("--api-base", default=_env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1"))
     parser.add_argument("--voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
-    parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2"))
+    parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
 
     parser.add_argument("--stability", type=float, default=0.35)

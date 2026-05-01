@@ -62,6 +62,7 @@
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`
 - fixed slot workflow: `p100`-`p900` plus fine-grained slots (`p110`, `p120`, ... `p930`) are global across all stories
 - per-run differences are recorded with `slot.<code>.status`, `slot.<code>.requirement`, `slot.<code>.skip_reason`, `slot.<code>.note`
+- `video_manifest.md` lifecycle: `manifest_phase: skeleton|production`
 
 ## Required Workflow
 
@@ -72,11 +73,11 @@
   - manual/chat では `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を標準入口として使う
   - 返ってきた JSON の `readset_path` を起点に、`global_docs -> stage_docs -> templates -> inputs` の順で読む
 - `scripts/resolve-stage-grounding.py` と `scripts/audit-stage-grounding.py` は `prepare-stage-context.py` の下位処理として扱う
-  - `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
+  - `python scripts/resolve-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
   - `stage.<name>.grounding.status=ready` を確認できない限り、当該 stage を開始しない
   - stage 完了扱いに進めてよいのは grounding が `ready` のときだけ
-  - `python scripts/audit-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp>` を続けて実行し、`stage.<name>.audit.status=passed` を確認する
-  - slot を skip / optional として残したいときは `python scripts/toc-state.py set-slot --run-dir output/<topic>_<timestamp> --slot p540 --status skipped --requirement optional --skip-reason "<reason>"` を使う
+  - `python scripts/audit-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp>` を続けて実行し、`stage.<name>.audit.status=passed` を確認する
+  - slot を skip / optional として残したいときは `python scripts/toc-state.py set-slot --run-dir output/<topic>_<timestamp> --slot p640 --status skipped --requirement optional --skip-reason "<reason>"` を使う
   - fixed `p-slot` contract を触ったら `python scripts/validate-slot-contract.py` を実行する
 
 ```bash
@@ -93,12 +94,24 @@ scripts/ai/session-bootstrap.sh
 
 各エージェントステップは **作業開始前** に対応する設計書を読み、grounding preflight を通す。全 stage 共通で `docs/system-architecture.md` を読み、その上で stage ごとの設計書へ入る。install 可能な stage skill は `skills/toc-<stage>/SKILL.md` を正本とする。
 
+変更内容:
+- production order を audio-first に切り替えた
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`
+
+修正理由:
+- 最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから
+
+旧仕様との差分:
+- 旧 canonical stage は `image_prompt` 中心だったが、公開上は `scene_implementation` に寄せた
+
 | ステージ | 正本ドキュメント | Playbooks |
 |---------|----------------|-----------|
 | research | `docs/information-gathering.md` | `workflow/playbooks/research/` |
-| scene_design | `docs/story-creation.md` `docs/affect-design.md` | `workflow/playbooks/scene/` |
-| script / narration | `docs/script-creation.md` | `workflow/playbooks/script/` |
-| image_prompt | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
+| story | `docs/story-creation.md` `docs/affect-design.md` | `workflow/playbooks/scene/` |
+| script | `docs/script-creation.md` | `workflow/playbooks/script/` |
+| narration | `docs/implementation/video-integration.md` | `workflow/playbooks/script/` |
+| asset | `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
+| scene_implementation | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
 | video_generation | `docs/video-generation.md` | `workflow/playbooks/video-generation/` |
 
 grounding preflight の正本:
@@ -122,6 +135,11 @@ grounding preflight の正本:
    - prompt artifact は `logs/grounding/<stage>.subagent_prompt.md` に保存され、`state.txt` には `stage.<name>.subagent.prompt=...` が追記される
 6. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
    - prompt artifact は `logs/review/image_prompt.subagent_prompt.md` に保存され、`state.txt` には `review.image_prompt.subagent.prompt=...` が追記される
+7. audio-only 生成後に尺が target 未満だった場合は、次を使って duration review 用 prompt artifact を生成する
+   - `python scripts/build-subagent-duration-scene-review-prompt.py --run-dir <run_dir> --min-seconds <target> --actual-seconds <actual> [--flow <flow>]`
+   - `python scripts/build-subagent-duration-narration-review-prompt.py --run-dir <run_dir> --min-seconds <target> --actual-seconds <actual> [--flow <flow>]`
+   - prompt artifact は `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` に保存される
+8. 標準運用では prompt builder を直接叩く前に `python scripts/check-audio-duration-gate.py --manifest <run_dir>/video_manifest.md --run-dir <run_dir>` を使い、実尺 gate と prompt 生成を一度に行う
 
 multi-agent が使える環境では、コンテキストを fork しない audit 専用 subagent に `scripts/audit-stage-grounding.py` を実行させてよい。ただし story / script / manifest などの content artifact は編集させず、hard gate は state / report artifact と verifier に置く。
 

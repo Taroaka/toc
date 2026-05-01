@@ -1,0 +1,7 @@
+interface:
+  display_name: "ToC P600 Image Runner"
+  short_description: "Run this repo's p600 cut-image generation flow and delegate execution to the shared batch skill."
+
+policy:
+  allow_implicit_invocation: false
+

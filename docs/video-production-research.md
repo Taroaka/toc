@@ -23,7 +23,8 @@
 
 ### 採用スタック（決定）
 
-- 画像: Google Nano Banana Pro（Gemini Image / `gemini-3-pro-image-preview`）
+- 画像: Google Nano Banana 2（`google_nanobanana_2`）
+- 画像（代替）: Gemini 3.1 Flash Image（`gemini_3_1_flash_image` / `gemini-3.1-flash-image-preview`）
 - 動画: Google Veo 3.1（`veo-3.1-generate-preview`）
 - 音声（TTS）: ElevenLabs
 
@@ -130,9 +131,9 @@
 
 ### 1) プロバイダ選定（画像/動画）
 
-採用プロバイダ（Nano Banana Pro / Veo 3.1 / ElevenLabs）について、運用に必要な仕様を詰める。
+採用プロバイダ（Nano Banana 2 / Gemini 3.1 Flash Image / Veo 3.1 / ElevenLabs）について、運用に必要な仕様を詰める。
 
-- 画像（Nano Banana Pro）:
+- 画像（Nano Banana 2 / Gemini 3.1 Flash Image）:
   - 入出力仕様（解像度、アスペクト比、参照画像、ネガティブ）
   - 生成結果の安定性（同一プロンプト/seedでの再現性）
   - 料金体系とレート制限（バッチ可否、同時実行）

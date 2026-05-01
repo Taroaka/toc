@@ -118,11 +118,18 @@ evaluator は少なくとも次を確認する。
 - 確定後、`video_manifest.md` の `audio.narration.*` へ一方向同期する
 - manifest 側で直接ナレーション文面を育てない
 
-現行 ElevenLabs 運用では、manifest へ同期する値は `tts_text` 系の spoken form を優先し、`audio.narration.text` と `audio.narration.tts_text` の両方へ反映する。
+`script.md` の ElevenLabs 正本は `elevenlabs_prompt` と `tts_text` の組とする。
+この slice では runtime 側の contract は変えないが、script 側では `tts_text` を
+**ElevenLabs v3 に渡す最終文字列**として扱う。
 
 cut ごとに少なくとも次を持てる。
 
 ```yaml
+elevenlabs_prompt:
+  spoken_context: "string"
+  voice_tags: ["excited", "laughs harder"]
+  spoken_body: "string"
+  stability_profile: "creative|natural|robust|\"\""
 tts_text: "string"
 human_review:
   status: "pending|approved|changes_requested"
@@ -142,10 +149,19 @@ human_review:
   approved_tts_text: ""
 ```
 
+- `elevenlabs_prompt`
+  - `tts_text` を組み立てるための authoring source
+  - `spoken_context` / `voice_tags` / `spoken_body` / `stability_profile` を持つ
+  - `voice_tags` は bracket なしの生タグを順序付き配列で持つ
 - `narration`
   - 作品として読ませる台本文面
 - `tts_text`
-  - 読み上げ用 spoken form
+  - ElevenLabs v3 に送る final string
+  - 組み立て順は `spoken_context + [tag][tag] + spoken_body`
+  - 通常はひらがな寄せを基本にしつつ、`[]` の audio tag を許容する
+  - ElevenLabs v3 で音声品質を優先する cut では、漢字かな交じりの自然な日本語を許可する
+  - 締め / 教訓 / bitter aftertaste の narration では、`spoken_context` は原則空にし、`voice_tags: ["low", "measured"]` を基準にする
+  - 採用基準例: `[low][measured] 知らない世界には、強い引力があります。`
 - `human_review.approved_narration`
   - 人間が確定した文面。空なら `narration` を使う
 - `human_review.approved_tts_text`
@@ -160,12 +176,17 @@ human_review:
 - reviewer が差し戻すときは、`notes` だけで終わらせず `change_requests[]` に分解して残す
 - reveal 順序、かな読み、意味距離、説明過多のように論点が複数ある場合は request を分ける
 - `changes_requested` はレビューの結果、`change_requests[]` は要求の本文であり、役割を混同しない
+- `elevenlabs_prompt` を修正したら、同じ変更を `tts_text` にも反映する
+- `elevenlabs_prompt` 用の `approved_*` mirror field は追加しない
+- `spoken_context` は読み上げ対象なので、音声品質や尺を優先する cut では使わない
+- `alpha` は常用 baseline にしない。輪郭や押し出しが必要な cut に限定する
+- 導入 / 通常 narration は `gentle` 系、締め / 教訓 narration は `low + measured` 系を優先する
 
 人間 review の観点は固定しておく。
 
 - 昔話 / 作品文脈として自然か
 - reveal 順序を壊していないか
-- ひらがな読みで違和感がないか
+- ElevenLabs v3 の final text と audio tag で違和感がないか
 - 映像より先走っていないか
 - 説明過多になっていないか
 
@@ -201,6 +222,7 @@ human_change_requests:
   - `visual_beat`
   - reveal 順序
   - `narration`
+  - `elevenlabs_prompt`
   - `tts_text`
   - 人レビューで来た image/video 指示
 - `script.md` が持ちすぎないもの
@@ -212,7 +234,7 @@ human_change_requests:
 
 - `script.md` は image/video をまったく語らない文書にはしない
 - ただし、image/video の **生成方法そのもの** を主責務にしない
-- `tts_text` は TTS 専用の spoken form であり、image/video generation の主ソースにしない
+- `tts_text` は TTS 専用の final string であり、image/video generation の主ソースにしない
 
 したがって、`script.md` は「何を見せるか」「何をまだ見せてはいけないか」「人レビューでどの参照画像や演出意図が入ったか」を保持し、`video_manifest.md` がそれを prompt / asset / motion / continuity へ materialize する。
 

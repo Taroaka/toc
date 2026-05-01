@@ -40,7 +40,7 @@ assets:
 scenes:
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: ["ryugu_palace"]
       prompt: |
@@ -55,7 +55,7 @@ scenes:
       references: []
   - scene_id: 2
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: ["ryugu_palace"]
       prompt: |
@@ -112,7 +112,7 @@ assets:
 scenes:
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       # object_ids intentionally missing
       prompt: |
@@ -122,7 +122,7 @@ scenes:
       references: []
   - scene_id: 2
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: ["tamatebako"]
       prompt: "ref"
@@ -155,7 +155,7 @@ assets:
 scenes:
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: ["ryugu_palace"]
       prompt: "p"
@@ -194,7 +194,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: ["amulet"]
       object_variant_ids: ["amulet_corrupted"]

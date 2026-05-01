@@ -94,6 +94,12 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
     run_stage_grounding(run_dir, stage, flow=flow, retries=1)
 
 
+def ensure_manifest_phase(manifest_text: str, *, phase: str) -> str:
+    if "manifest_phase:" in manifest_text:
+        return re.sub(r'(?m)^manifest_phase:\s*"?[A-Za-z_]+"?\s*$', f"manifest_phase: {phase}", manifest_text, count=1)
+    return manifest_text.replace("```yaml\n", f"```yaml\nmanifest_phase: {phase}\n", 1)
+
+
 def detect_hybridization_pending(md_text: str) -> bool:
     """
     Conservative detector for "hybridization requires human approval".
@@ -471,6 +477,7 @@ def render_scene_manifest_md(
         "# シーン動画マニフェスト（DRAFT）",
         "",
         "```yaml",
+        "manifest_phase: skeleton",
         "video_metadata:",
         f'  topic: "{topic}"',
         f'  source_run: "{run_dir.as_posix()}/"',
@@ -726,11 +733,15 @@ def main() -> None:
             ),
             force=args.force,
         )
-        maybe_run_stage_grounding(scene_dir, "image_prompt", flow="scene-series")
+        maybe_run_stage_grounding(scene_dir, "narration", flow="scene-series")
 
         if args.placeholder_e2e and not args.dry_run:
-            maybe_run_stage_grounding(scene_dir, "video_generation", flow="scene-series")
             manifest_path = scene_dir / "video_manifest.md"
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            manifest_path.write_text(ensure_manifest_phase(manifest_text, phase="production"), encoding="utf-8")
+            append_state_snapshot(scene_dir / "state.txt", {"review.duration_fit.status": "passed"})
+            maybe_run_stage_grounding(scene_dir, "scene_implementation", flow="scene-series")
+            maybe_run_stage_grounding(scene_dir, "video_generation", flow="scene-series")
             run(["python", "scripts/generate-placeholder-assets.py", "--manifest", str(manifest_path), "--force"])
             run(
                 [

@@ -10,7 +10,13 @@ script_metadata:
   narration_source_of_truth: "script.md"
   visual_intent_source_of_truth: "script.md"
   generation_execution_source_of_truth: "video_manifest.md"
-  tts_text_usage_boundary: "tts_text is for TTS only; image/video generators must not use it as their primary source"
+  tts_text_usage_boundary: "tts_text is the final ElevenLabs text for TTS only; image/video generators must not use it as their primary source"
+  elevenlabs:
+    provider: "elevenlabs"
+    model_id: "eleven_v3"
+    prompt_contract_version: "v3_tagged_context_v1"
+    default_stability_profile: "creative"
+    text_policy: "hiragana_plus_audio_tags"
 
 human_change_requests:
   - request_id: "hr-001"
@@ -43,7 +49,7 @@ human_review_criteria:
   narration:
     - "昔話/作品文脈として自然か"
     - "reveal 順序を壊していないか"
-    - "ひらがな読みで違和感がないか"
+    - "ひらがな寄せ + audio tag で違和感がないか"
     - "映像より先走っていないか"
     - "説明過多になっていないか"
 
@@ -89,6 +95,11 @@ scenes:
       - cut_id: 1  # dotted numeric string も可: 2.1
         narration: "string"
         tts_text: "string"
+        elevenlabs_prompt:
+          spoken_context: "string"
+          voice_tags: ["excited", "laughs harder"]
+          spoken_body: "string"
+          stability_profile: "creative|natural|robust|\"\""
         visual_beat: "string"
         human_review:
           status: "pending|approved|changes_requested"

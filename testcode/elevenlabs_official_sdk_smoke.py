@@ -50,7 +50,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ElevenLabs official SDK smoke test (manual).")
     parser.add_argument("--text", default="The first move is what sets everything in motion.")
     parser.add_argument("--voice-id", default="JOcmGzB8OFjY8MhjHHEf")
-    parser.add_argument("--model-id", default="eleven_multilingual_v2")
+    parser.add_argument("--model-id", default="eleven_v3")
     parser.add_argument("--output-format", default="mp3_44100_128")
     parser.add_argument("--out", default="output/_smoke/elevenlabs_sdk_smoke.mp3")
     args = parser.parse_args()

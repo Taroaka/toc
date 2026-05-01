@@ -2,7 +2,7 @@
 """
 Generate a single image via Google Gemini API (Image generation).
 
-Defaults are tuned for "Nano Banana Pro" (= gemini-3-pro-image-preview) but can be overridden.
+Defaults are tuned for Nano Banana 2 / Gemini 3.1 Flash Image (= gemini-3.1-flash-image-preview) but can be overridden.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate an image via Gemini API.")
     parser.add_argument("--prompt", required=True, help="Text prompt.")
     parser.add_argument("--out", required=True, help="Output image path (recommended: .png).")
-    parser.add_argument("--model", default=_env("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview"))
+    parser.add_argument("--model", default=_env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image-preview"))
     parser.add_argument("--api-base", default=_env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"))
     parser.add_argument("--api-key", default=_env("GEMINI_API_KEY"))
     parser.add_argument("--aspect-ratio", default="9:16", help='e.g. "9:16", "16:9", "1:1"')

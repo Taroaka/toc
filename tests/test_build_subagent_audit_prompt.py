@@ -104,16 +104,16 @@ class TestBuildSubagentAuditPrompt(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-            prompt_path = run_dir / "logs" / "grounding" / "image_prompt.subagent_prompt.md"
+            prompt_path = run_dir / "logs" / "grounding" / "scene_implementation.subagent_prompt.md"
             self.assertTrue(prompt_path.exists())
             self.assertEqual(prompt_path.read_text(encoding="utf-8").strip(), result.stdout.strip())
 
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(
-                state.get("stage.image_prompt.subagent.prompt"),
-                "logs/grounding/image_prompt.subagent_prompt.md",
+                state.get("stage.scene_implementation.subagent.prompt"),
+                "logs/grounding/scene_implementation.subagent_prompt.md",
             )
-            self.assertTrue(state.get("stage.image_prompt.subagent.prompt.generated_at"))
+            self.assertTrue(state.get("stage.scene_implementation.subagent.prompt.generated_at"))
 
 
 if __name__ == "__main__":

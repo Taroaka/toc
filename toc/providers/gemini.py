@@ -24,7 +24,7 @@ def _env(name: str, default: str | None = None) -> str | None:
 class GeminiConfig:
     api_key: str
     api_base: str = "https://generativelanguage.googleapis.com/v1beta"
-    image_model: str = "gemini-3-pro-image-preview"
+    image_model: str = "gemini-3.1-flash-image-preview"
     video_model: str = "veo-3.1-generate-preview"
 
     @staticmethod
@@ -41,7 +41,7 @@ class GeminiConfig:
         return GeminiConfig(
             api_key=key,
             api_base=api_base or _env("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta") or "",
-            image_model=image_model or _env("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview") or "",
+            image_model=image_model or _env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image-preview") or "",
             video_model=video_model or _env("GEMINI_VIDEO_MODEL", "veo-3.1-generate-preview") or "",
         )
 

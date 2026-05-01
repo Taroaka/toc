@@ -67,7 +67,7 @@ assets:
 scenes:
   - scene_id: 0
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero"]
       prompt: |
         [GLOBAL / INVARIANTS]
@@ -79,7 +79,7 @@ scenes:
       references: []
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero", "villain"]
       prompt: |
         [GLOBAL / INVARIANTS]
@@ -152,7 +152,7 @@ assets:
 scenes:
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       # character_ids intentionally missing
       prompt: |
         [GLOBAL / INVARIANTS]
@@ -199,7 +199,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero"]
       character_variant_ids: ["hero_night"]
       object_ids: []
@@ -258,7 +258,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero", "turtle"]
       object_ids: []
       prompt: |
@@ -271,7 +271,7 @@ scenes:
       references: []
   - scene_id: 11
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: []
       object_ids: []
       prompt: |
@@ -318,7 +318,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero"]
       character_variant_ids: ["hero_missing"]
       object_ids: []

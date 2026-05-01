@@ -6,6 +6,18 @@
 # - Resume by reading the last block.
 # - Rollback by copying a previous block and appending it as the newest.
 #
+# 変更内容:
+# - production order を audio-first に切り替えた
+# - canonical grounding stage は narration / asset / scene_implementation / video_generation に再編した
+# - video_manifest.md は manifest_phase=skeleton|production を持つ
+#
+# 修正理由:
+# - 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が運用が安定するため
+#
+# 旧仕様との差分:
+# - 旧 schema は image_prompt stage を公開 stage とし、audio stage は後段だった
+# - 新 schema では scene_implementation を公開 stage とし、audio-first を前提にする
+#
 # Required keys (minimum):
 #   timestamp=ISO8601
 #   job_id=JOB_YYYY-MM-DD_0001
@@ -58,29 +70,53 @@
 #   stage.script.subagent.prompt.generated_at=ISO8601
 #   stage.script.playbooks.report=logs/grounding/script.playbooks.json
 #   stage.script.playbooks.selected_count=0
+#   stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
+#   stage.narration.grounding.status=ready|missing_docs|missing_inputs
+#   stage.narration.grounding.report=logs/grounding/narration.json
+#   stage.narration.readset.report=logs/grounding/narration.readset.json
+#   stage.narration.audit.status=passed|failed
+#   stage.narration.audit.report=logs/grounding/narration.audit.json
+#   stage.narration.subagent.prompt=logs/grounding/narration.subagent_prompt.md
+#   stage.narration.subagent.prompt.generated_at=ISO8601
+#   stage.narration.playbooks.report=logs/grounding/narration.playbooks.json
+#   stage.narration.playbooks.selected_count=0
+#   stage.asset.status=pending|in_progress|awaiting_approval|done|failed|skipped
+#   stage.asset.grounding.status=ready|missing_docs|missing_inputs
+#   stage.asset.grounding.report=logs/grounding/asset.json
+#   stage.asset.readset.report=logs/grounding/asset.readset.json
+#   stage.asset.audit.status=passed|failed
+#   stage.asset.audit.report=logs/grounding/asset.audit.json
+#   stage.asset.subagent.prompt=logs/grounding/asset.subagent_prompt.md
+#   stage.asset.subagent.prompt.generated_at=ISO8601
+#   stage.asset.playbooks.report=logs/grounding/asset.playbooks.json
+#   stage.asset.playbooks.selected_count=0
 #   stage.asset_plan_review.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.asset_plan_review.started_at=ISO8601
 #   stage.asset_plan_review.finished_at=ISO8601
 #   stage.asset_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.asset_generation.started_at=ISO8601
 #   stage.asset_generation.finished_at=ISO8601
+#   legacy compatibility keys:
 #   stage.image_prompt_review.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.image_prompt_review.started_at=ISO8601
 #   stage.image_prompt_review.finished_at=ISO8601
 #   stage.image_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.image_generation.started_at=ISO8601
 #   stage.image_generation.finished_at=ISO8601
-#   stage.image_prompt.grounding.status=ready|missing_docs|missing_inputs
-#   stage.image_prompt.grounding.report=logs/grounding/image_prompt.json
-#   stage.image_prompt.readset.report=logs/grounding/image_prompt.readset.json
-#   stage.image_prompt.audit.status=passed|failed
-#   stage.image_prompt.audit.report=logs/grounding/image_prompt.audit.json
-#   stage.image_prompt.subagent.prompt=logs/grounding/image_prompt.subagent_prompt.md
-#   stage.image_prompt.subagent.prompt.generated_at=ISO8601
+#   stage.scene_implementation.status=pending|in_progress|awaiting_approval|done|failed|skipped
+#   stage.scene_implementation.started_at=ISO8601
+#   stage.scene_implementation.finished_at=ISO8601
+#   stage.scene_implementation.grounding.status=ready|missing_docs|missing_inputs
+#   stage.scene_implementation.grounding.report=logs/grounding/scene_implementation.json
+#   stage.scene_implementation.readset.report=logs/grounding/scene_implementation.readset.json
+#   stage.scene_implementation.audit.status=passed|failed
+#   stage.scene_implementation.audit.report=logs/grounding/scene_implementation.audit.json
+#   stage.scene_implementation.subagent.prompt=logs/grounding/scene_implementation.subagent_prompt.md
+#   stage.scene_implementation.subagent.prompt.generated_at=ISO8601
 #   review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
 #   review.image_prompt.subagent.prompt.generated_at=ISO8601
-#   stage.image_prompt.playbooks.report=logs/grounding/image_prompt.playbooks.json
-#   stage.image_prompt.playbooks.selected_count=0
+#   stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
+#   stage.scene_implementation.playbooks.selected_count=0
 #   stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.video_generation.started_at=ISO8601
 #   stage.video_generation.finished_at=ISO8601
@@ -107,7 +143,7 @@
 #   gate.story_review=required|optional|skipped
 #   gate.script_review=required|optional|skipped
 #   gate.asset_review=required|optional|skipped
-#   gate.image_prompt_review=required|optional|skipped
+#   gate.image_prompt_review=required|optional|skipped  # legacy compatibility gate
 #   gate.image_review=required|optional|skipped
 #   gate.narration_review=required|optional|skipped
 #   gate.video_review=required|optional|skipped
@@ -115,6 +151,8 @@
 #   review.policy.story=required|optional
 #   review.policy.image=required|optional
 #   review.policy.narration=required|optional
+#   artifact.video_manifest=output/<topic>_<timestamp>/video_manifest.md
+#   manifest.video_manifest.phase=skeleton|production
 #   review.hybridization.status=pending|approved|rejected
 #   review.hybridization.note=string
 #   review.hybridization.at=ISO8601
@@ -161,6 +199,15 @@
 #   review.narration.change_request_count=0
 #   review.narration.open_change_request_count=0
 #   review.narration.last_change_request_id=string
+#   review.duration_fit.status=passed|changes_requested|skipped
+#   review.duration_fit.actual_seconds=0
+#   review.duration_fit.minimum_seconds=0
+#   review.duration_fit.note=string
+#   review.duration_fit.at=ISO8601
+#   review.duration_fit.scene_prompt=logs/review/duration_scene.subagent_prompt.md
+#   review.duration_fit.scene_prompt.generated_at=ISO8601
+#   review.duration_fit.narration_prompt=logs/review/duration_narration.subagent_prompt.md
+#   review.duration_fit.narration_prompt.generated_at=ISO8601
 #   review.human_changes.status=pending|approved|changes_requested
 #   review.human_changes.note=string
 #   review.human_changes.change_request_count=0
@@ -180,7 +227,7 @@
 #   artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
 #   artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json
 #   artifact.grounding.script=output/<topic>_<timestamp>/logs/grounding/script.json
-#   artifact.grounding.image_prompt=output/<topic>_<timestamp>/logs/grounding/image_prompt.json
+#   artifact.grounding.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.json
 #   artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
 #   artifact.run_index=output/<topic>_<timestamp>/p000_index.md
 #   artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
@@ -263,7 +310,7 @@
 #   runtime.scene.1.status=draft|review|revise|accepted|failed
 #   runtime.scene.1.attempts=0
 #   last_error=string|null
-#   note: evaluator / verifier compatibility aliases `manifest=image_prompt`, `video=video_generation`
+#   note: evaluator / verifier compatibility aliases `manifest=scene_implementation`, `image_prompt=scene_implementation`, `video=video_generation`
 #
 # Example:
 #

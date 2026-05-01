@@ -1,0 +1,6 @@
+interface:
+  display_name: "ToC P500 Bootstrap Image Runner"
+  short_description: "Run this repo's p500 no-reference bootstrap asset flow and delegate execution to the shared built-in batch skill."
+
+policy:
+  allow_implicit_invocation: false

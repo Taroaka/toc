@@ -64,9 +64,12 @@ scenes:
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           # 1 つでも欠けていれば subagent review は false にする。
-          # tool: "google_nanobanana_pro"
+          # no-reference の entry は実行時に `execution_lane=bootstrap_builtin` として
+          # Codex built-in image generation に回す。
+          # tool: "google_nanobanana_2"
+          # tool: "gemini_3_1_flash_image"  # Gemini 3.1 Flash Image direct alias
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           character_ids: ["character_id_here"]  # Use [] for B-roll scenes with no characters visible
           character_variant_ids: []  # Optional: pick a specific state/time variant for the active character(s)
           object_ids: []  # Use [] when no item / setpiece anchor is needed
@@ -117,7 +120,7 @@ scenes:
           # 新規生成を前提にしない。必要なときだけ anchor を更新する。
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           character_ids: ["character_id_here"]
           character_variant_ids: []
           object_ids: []

@@ -318,8 +318,18 @@ def _manifest_rubric(nodes: list[dict[str, Any]], body_text: str) -> dict[str, f
         if image_generation.get("character_ids") is not None and image_generation.get("object_ids") is not None:
             ids_with_values += 1
         narration = (audio or {}).get("narration") if isinstance(audio, dict) else {}
-        if isinstance(narration, dict) and str(narration.get("text") or "").strip():
-            narration_count += 1
+        if isinstance(narration, dict):
+            narration_text = str(narration.get("text") or "").strip()
+            silence_contract = narration.get("silence_contract") if isinstance(narration.get("silence_contract"), dict) else {}
+            is_intentional_silence = (
+                str(narration.get("tool") or "").strip().lower() == "silent"
+                and bool(silence_contract.get("intentional"))
+                and bool(silence_contract.get("confirmed_by_human"))
+                and non_empty(silence_contract.get("kind"))
+                and non_empty(silence_contract.get("reason"))
+            )
+            if narration_text or is_intentional_silence:
+                narration_count += 1
         if isinstance(node.get("scene_contract"), dict):
             contract_count += 1
         if isinstance(video_generation, dict) and video_generation.get("duration_seconds"):
@@ -816,6 +826,8 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     text, data = load_structured_document(path)
     body_text = flatten_without_keys(data, excluded={"scene_contract", "review_contract", "evaluation_contract"}) or text
     _append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
+    manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
+    add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
     _manifest_checks(checks, body_text, data, profile=profile, flow=flow, path_label="manifest")
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
@@ -899,13 +911,17 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
         }
 
     nested_ok = True
+    phase_ok = True
     for path in manifest_paths:
         text, data = load_structured_document(path)
         local_checks: list[dict[str, Any]] = []
         body_text = flatten_without_keys(data, excluded={"scene_contract", "review_contract", "evaluation_contract"}) or text
+        if str(data.get("manifest_phase") or "production").strip().lower() != "production":
+            phase_ok = False
         _manifest_checks(local_checks, body_text, data, profile=profile, flow="scene-series", path_label=path.name)
         if not all(check["passed"] for check in local_checks):
             nested_ok = False
+    add_check(checks, "manifest.scene_phase", phase_ok, "scene manifests are in production phase", kind="rubric")
     add_check(checks, "manifest.scene_contracts", nested_ok, "scene manifests satisfy render contract checks", kind="rubric")
     rubric_scores = {
         "beat_clarity": 1.0 if nested_ok else 0.4,

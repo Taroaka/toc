@@ -6,23 +6,39 @@
 
 `script.md` から素材生成→合成→検証までを一貫した流れとして定義する。
 
+変更内容:
+- production order を audio-first に固定した
+- `video_manifest.md` は `manifest_phase: skeleton|production` の二段階にした
+
+修正理由:
+- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が尺ズレの再設計を減らせるため
+
+旧仕様との差分:
+- 旧運用では asset / image / video が audio より前に語られていた
+- 新運用では `script -> skeleton manifest -> narration/TTS -> duration gate -> asset -> scene implementation -> video -> render` を正本にする
+
 ## 全体フロー
 
-`script.md → video_manifest.md → assets生成 → clips/narration list → render-video.sh → video.mp4 → QA`
+`script.md → video_manifest.md (manifest_phase: skeleton) → narration/TTS → duration gate → asset → scene implementation (manifest_phase: production) → video → render-video.sh → video.mp4 → QA`
 
 ## 正本ルール
 
 - **`script.md` を言語情報の正本**とする
-- `audio.narration.text` は `script.md` の narration を平易化したものであり、別の話を足さない。現行の ElevenLabs 運用では **ひらがなだけ** を基本にする
-- `audio.narration.tts_text` は `audio.narration.text` を ElevenLabs 向けに読みへ寄せた専用字段とする
+- `script.md.scenes[].cuts[].elevenlabs_prompt` は ElevenLabs v3 用の authoring source とし、`spoken_context` / `voice_tags` / `spoken_body` / `stability_profile` を持てる
+- `script.md.scenes[].cuts[].tts_text` は ElevenLabs v3 に渡す final string とし、`spoken_context + [tag][tag] + spoken_body` を materialize した値として扱う
 - `image_generation.prompt` / `video_generation.motion_prompt` は `script.md` の visual beat を生成向けに翻訳したものであり、新しい物語情報を足さない
 - `scene_conte.md` は橋渡し資料であり、`script.md` と矛盾してはならない
+- `video_manifest.md` は二段階で扱う
+  - `manifest_phase: skeleton`
+    - narration review / TTS / duration gate に必要な最小構造
+  - `manifest_phase: production`
+    - image_generation / video_generation の実装 field を持つ生成正本
 
 補足:
 
 - `script.md` は **意味設計の正本**
 - `video_manifest.md` は **生成実装の正本**
-- `audio.narration.tts_text` は TTS 専用であり、image/video generation の主ソースにしない
+- `script.md` の `tts_text` は TTS 専用であり、image/video generation の主ソースにしない
 
 generator の既定参照順:
 
@@ -102,8 +118,9 @@ generator の既定参照順:
     - `must_cover`: 必ず触れる概念
     - `must_avoid`: 直接言わない語や避けたい説明
     - `done_when`: evaluator と共有する完了条件
-  - `audio.narration.text` は平易で寄り添う話し言葉を優先し、現行運用では **ひらがなだけ** を基本にする
-  - `audio.narration.tts_text` も ElevenLabs に送る専用字段として **ひらがなだけ** を基本にする
+  - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
+  - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
+  - `voice_tags` は bracket なしの生タグで保持し、materialize 時に `[]` を付ける
   - 原稿は cut の物語上の役割に合わせる
     - opening: 物語の入口として自然で安定した説明を優先
     - middle: 展開 / 不安 / 因果 / 揺れを支える
@@ -119,13 +136,28 @@ generator の既定参照順:
   - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
   - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
   - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
-  - `eleven_multilingual_v2` の運用前提として、`[whispers]` のような audio tag、raw な URL / 数字 / 英字略語、句読点不足、長すぎる文、`TODO` / カメラ語の混入、`tts_text` 未設定、ひらがな以外が混じった `text` / `tts_text` を false にできる
+  - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
   - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
    - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
 4) 先に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
 5) `video_generation.duration_seconds` をナレーション秒数に合わせて更新し、その後に画像/動画生成に進む
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
+6) 実尺が target を満たすかを gate する
+   - `python scripts/check-audio-duration-gate.py --manifest output/<run>/video_manifest.md --run-dir output/<run>`
+   - `cinematic_story` は既定で 300 秒以上を target にする
+   - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
+   - gate を超えた run だけが次の human review と image/video generation に進む
+
+render unit の扱い:
+
+- 標準では `1 cut = 1 narration = 1 video clip` でよい
+- ただし、複数 cut の narration を 1 本の動画で受けたい scene では、`video_manifest.md.scenes[].render_units[]` を使う
+- `render_units[]` は最終 render 用の動画クリップ単位で、`unit_id`, `source_cut_ids[]`, `video_generation` を持つ
+- cut は引き続き story / image / audio の正本のまま残す
+- scene に `render_units[]` がある場合、最終 render の動画正本は cut 側 `video_generation` ではなく render unit 側を使う
+- `video_clips.txt` は render unit 順、`video_narration_list.txt` は各 unit の `source_cut_ids[]` を flatten した順で作る
+- したがって `動画2本 / 音声3本` のような編集構成も、ffmpeg concat 前に manifest で明示できる
 
 silent cut の扱い:
 
@@ -143,6 +175,7 @@ silent cut の扱い:
 - 余白は、話し始め前の入りと、話し終わり後の余韻の合計として扱う
 - 例外として、人レビューで追加した intentional silent cut だけは **`video duration > narration duration`** を許可する
 - この例外では narration は空のままにし、最終連結では無音がその秒数ぶん入る
+- ただし total runtime が target 未満なら、余白だけで帳尻を合わせず、scene 設計と narration 設計の見直しを優先する
 
 推奨レンジ:
 - 通常 cut:

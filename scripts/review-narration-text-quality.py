@@ -34,7 +34,6 @@ SYMBOL_RE = re.compile(r"%|％|/|://|@|#")
 PUNCTUATION_RE = re.compile(r"[、。！？!?…]")
 SENTENCE_SPLIT_RE = re.compile(r"[。！？!?]\s*|\n+")
 JP_TOKEN_RE = re.compile(r"[一-龯ぁ-んァ-ヶー]{2,}")
-HIRAGANA_ONLY_RE = re.compile(r"^[ぁ-ゖーゝゞ\s　、。！？!?…「」『』（）()・，,．.]+$")
 
 VISUAL_DIRECTION_TERMS = (
     "カメラ",
@@ -252,6 +251,10 @@ def _selector_label(scene_id: Any, cut_id: Any | None = None) -> str:
     return f"scene{scene_label}_cut{cut_label}"
 
 
+def _strip_audio_tags(text: str) -> str:
+    return AUDIO_TAG_RE.sub("", text)
+
+
 def _phase_to_story_role(phase: str, *, scene_index: int, total_scenes: int) -> str:
     normalized = phase.strip().lower()
     if normalized in OPENING_PHASES:
@@ -466,6 +469,7 @@ def _semantic_phrase_match(text: str, phrase: str) -> bool:
 
 
 def _needs_text_normalization(text: str) -> bool:
+    text = _strip_audio_tags_for_review(text)
     if URL_RE.search(text) or EMAIL_RE.search(text):
         return True
     if NUMBER_RE.search(text):
@@ -477,12 +481,18 @@ def _needs_text_normalization(text: str) -> bool:
     return False
 
 
+def _strip_audio_tags_for_review(text: str) -> str:
+    """ElevenLabs v3 voice tags are intentional control tokens, not spoken symbols."""
+    return AUDIO_TAG_RE.sub("", text).strip()
+
+
 def _has_long_sentence(text: str) -> bool:
     segments = [segment.strip() for segment in SENTENCE_SPLIT_RE.split(text) if segment.strip()]
     return any(len(segment) >= 48 for segment in segments)
 
 
 def _needs_pause_punctuation(text: str) -> bool:
+    text = _strip_audio_tags_for_review(text)
     compact = _normalize_text(text)
     if len(compact) < 25:
         return False
@@ -503,14 +513,13 @@ def dedupe_findings(findings: list[Finding]) -> list[Finding]:
 
 
 def _score_tts_readiness(text: str) -> float:
+    review_text = _strip_audio_tags_for_review(text)
     score = 1.0
     if META_MARKER_RE.search(text):
         score -= 0.45
     if URL_RE.search(text) or EMAIL_RE.search(text) or MARKDOWN_LINK_RE.search(text) or BACKTICK_RE.search(text):
         score -= 0.35
-    if AUDIO_TAG_RE.search(text):
-        score -= 0.25
-    if _needs_text_normalization(text):
+    if _needs_text_normalization(review_text):
         score -= 0.20
     return max(0.0, min(1.0, score))
 
@@ -607,6 +616,7 @@ def _score_anti_redundancy(
 
 
 def _score_pacing_fit(text: str, duration_seconds: int | None) -> float:
+    text = _strip_audio_tags_for_review(text)
     compact_len = len(_normalize_text(text))
     punct_count = len(PUNCTUATION_RE.findall(text))
     if duration_seconds is None or duration_seconds <= 0:
@@ -629,6 +639,7 @@ def _score_pacing_fit(text: str, duration_seconds: int | None) -> float:
 
 
 def _score_spoken_japanese(text: str) -> float:
+    text = _strip_audio_tags_for_review(text)
     score = 1.0
     if _needs_pause_punctuation(text):
         score -= 0.25
@@ -687,11 +698,7 @@ def review_entries(entries: list[NarrationEntry]) -> list[ReviewOutcome]:
             continue
 
         if tool == "elevenlabs" and not entry.tts_text.strip():
-            findings.append(Finding(code="narration_tts_text_missing", message="elevenlabs narration should define audio.narration.tts_text as the hiragana TTS payload."))
-        if tool == "elevenlabs" and entry.text.strip() and not HIRAGANA_ONLY_RE.fullmatch(entry.text.strip()):
-            findings.append(Finding(code="narration_text_not_hiragana_only", message="audio.narration.text should also be kept in hiragana-only spoken form for the current ElevenLabs workflow."))
-        if tool == "elevenlabs" and entry.tts_text.strip() and not HIRAGANA_ONLY_RE.fullmatch(entry.tts_text.strip()):
-            findings.append(Finding(code="tts_text_not_hiragana_only", message="audio.narration.tts_text should be written in hiragana-only spoken form for the current ElevenLabs workflow."))
+            findings.append(Finding(code="narration_tts_text_missing", message="elevenlabs narration should define audio.narration.tts_text as the final ElevenLabs v3 payload."))
 
         contract = entry.contract or {}
         target_function = str(contract.get("target_function") or "").strip()
@@ -709,8 +716,6 @@ def review_entries(entries: list[NarrationEntry]) -> list[ReviewOutcome]:
             findings.append(Finding(code="narration_contains_meta_marker", message="narration text still contains TODO/TBD or memo-style markers."))
         if URL_RE.search(spoken_text) or EMAIL_RE.search(spoken_text) or MARKDOWN_LINK_RE.search(spoken_text) or BACKTICK_RE.search(spoken_text):
             findings.append(Finding(code="tts_unfriendly_literal", message="narration text includes URL/email/markdown-like literals that should be rewritten for speech."))
-        if AUDIO_TAG_RE.search(spoken_text):
-            findings.append(Finding(code="unsupported_audio_tag_for_v2", message="narration text includes bracketed audio tags that are unsuitable for the repo's v2 narration path."))
         if _needs_text_normalization(spoken_text):
             findings.append(Finding(code="needs_text_normalization", message="narration text contains raw numbers, ASCII abbreviations, or symbols that should be normalized for TTS."))
         if _has_long_sentence(spoken_text):

@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import load_structured_document
 from toc.immersive_manifest import dotted_id_sort_key, dotted_id_slug, make_scene_cut_selector, normalize_dotted_id
+from toc.script_narration import resolve_script_cut_tts_text
 
 
 def replace_yaml_block(text: str, new_yaml: str) -> str:
@@ -63,12 +64,7 @@ def preferred_text(cut: dict[str, Any]) -> str:
 
 
 def preferred_tts_text(cut: dict[str, Any]) -> str:
-    review = _as_dict(cut.get("human_review"))
-    approved_tts = str(review.get("approved_tts_text") or "").strip()
-    tts_text = str(cut.get("tts_text") or "").strip()
-    approved = str(review.get("approved_narration") or "").strip()
-    narration = str(cut.get("narration") or "").strip()
-    return approved_tts or tts_text or approved or narration
+    return resolve_script_cut_tts_text(cut)
 
 
 def preferred_visual_beat(cut: dict[str, Any]) -> str:
@@ -171,6 +167,130 @@ def _ensure_video_generation(cut: dict[str, Any]) -> dict[str, Any]:
     return video_generation
 
 
+def _default_video_output(scene_id: str, cut_id: str) -> str:
+    try:
+        scene_label = f"{int(scene_id):02d}"
+    except Exception:
+        scene_label = dotted_id_slug(scene_id)
+    try:
+        cut_label = f"{int(cut_id):02d}"
+    except Exception:
+        cut_label = dotted_id_slug(cut_id)
+    return f"assets/videos/scene{scene_label}_cut{cut_label}.mp4"
+
+
+def _cut_image_output(cut: dict[str, Any]) -> str:
+    image_generation = _as_dict(cut.get("image_generation"))
+    output = str(image_generation.get("output") or cut.get("output") or "").strip()
+    return output
+
+
+def _cut_visual_hint(cut: dict[str, Any], script_cut: dict[str, Any]) -> str:
+    review = _as_dict(script_cut.get("human_review"))
+    approved_visual = str(review.get("approved_visual_beat") or "").strip()
+    if approved_visual:
+        return approved_visual
+    image_generation = _as_dict(cut.get("image_generation"))
+    rationale = str(image_generation.get("rationale") or "").strip()
+    if rationale:
+        return rationale
+    return str(script_cut.get("visual_beat") or "").strip()
+
+
+def _ensure_story_cut_video_defaults(cut: dict[str, Any], *, scene_id: str, cut_id: str, script_cut: dict[str, Any]) -> bool:
+    image_output = _cut_image_output(cut)
+    if not image_output:
+        return False
+
+    video_generation = _ensure_video_generation(cut)
+    changed = False
+
+    if not str(video_generation.get("tool") or "").strip():
+        video_generation["tool"] = "kling_3_0_omni"
+        changed = True
+    if not str(video_generation.get("output") or "").strip():
+        video_generation["output"] = _default_video_output(scene_id, cut_id)
+        changed = True
+    if not str(video_generation.get("first_frame") or video_generation.get("input_image") or "").strip():
+        video_generation["first_frame"] = image_output
+        changed = True
+    if "duration_seconds" not in video_generation:
+        video_generation["duration_seconds"] = 4
+        changed = True
+    if not str(video_generation.get("motion_prompt") or "").strip():
+        visual_hint = _cut_visual_hint(cut, script_cut)
+        if visual_hint:
+            video_generation["motion_prompt"] = (
+                f"{visual_hint} を主題に、被写体と空間の連続性を保ちつつ、"
+                "微速ドリーまたは穏やかな視差移動で見せる。水平と視点を安定させる。"
+            )
+        else:
+            video_generation["motion_prompt"] = (
+                "被写体と空間の連続性を保ちつつ、微速ドリーまたは穏やかな視差移動で見せる。"
+                "水平と視点を安定させる。"
+            )
+        changed = True
+
+    request_ids: list[str] = []
+    review = _as_dict(script_cut.get("human_review"))
+    request_ids.extend(str(v).strip() for v in _as_list(review.get("change_request_ids")) if str(v).strip())
+    if not request_ids:
+        trace = _as_dict(cut.get("implementation_trace"))
+        request_ids.extend(str(v).strip() for v in _as_list(trace.get("source_request_ids")) if str(v).strip())
+    if request_ids:
+        existing = _as_list(video_generation.get("applied_request_ids"))
+        merged: list[str] = []
+        for value in [*existing, *request_ids]:
+            text = str(value).strip()
+            if text and text not in merged:
+                merged.append(text)
+        if merged != existing:
+            video_generation["applied_request_ids"] = merged
+            changed = True
+
+    return changed
+
+
+def _scene_has_render_units(scene: dict[str, Any]) -> bool:
+    render_units = scene.get("render_units")
+    return isinstance(render_units, list) and bool(render_units)
+
+
+def _ensure_story_cut_image_plan_defaults(cut: dict[str, Any]) -> bool:
+    image_output = _cut_image_output(cut)
+    image_prompt = str(_as_dict(cut.get("image_generation")).get("prompt") or "").strip()
+    if not image_output or not image_prompt:
+        return False
+    still_image_plan = cut.get("still_image_plan")
+    if not isinstance(still_image_plan, dict):
+        still_image_plan = {}
+        cut["still_image_plan"] = still_image_plan
+    if str(still_image_plan.get("mode") or "").strip():
+        return False
+    still_image_plan["mode"] = "generate_still"
+    return True
+
+
+def _backfill_video_request_ids_from_trace(cut: dict[str, Any]) -> bool:
+    video_generation = cut.get("video_generation")
+    if not isinstance(video_generation, dict):
+        return False
+    trace = _as_dict(cut.get("implementation_trace"))
+    request_ids = [str(v).strip() for v in _as_list(trace.get("source_request_ids")) if str(v).strip()]
+    if not request_ids:
+        return False
+    existing = _as_list(video_generation.get("applied_request_ids"))
+    merged: list[str] = []
+    for value in [*existing, *request_ids]:
+        text = str(value).strip()
+        if text and text not in merged:
+            merged.append(text)
+    if merged == existing:
+        return False
+    video_generation["applied_request_ids"] = merged
+    return True
+
+
 def _ensure_trace(node: dict[str, Any], *, request_ids: list[str]) -> dict[str, Any]:
     trace = node.get("implementation_trace")
     if not isinstance(trace, dict):
@@ -225,7 +345,9 @@ def _rewrite_cut_identifiers(node: dict[str, Any], *, old_cut_id: str, new_cut_i
     node.update(rewritten)
 
 
-def _sync_human_fields_to_manifest_cut(cut: dict[str, Any], script_cut: dict[str, Any]) -> bool:
+def _sync_human_fields_to_manifest_cut(
+    cut: dict[str, Any], script_cut: dict[str, Any], *, scene_has_render_units: bool = False
+) -> bool:
     changed = False
     narration = _ensure_audio_narration(cut)
     tool = str(narration.get("tool") or "").strip().lower()
@@ -253,14 +375,15 @@ def _sync_human_fields_to_manifest_cut(cut: dict[str, Any], script_cut: dict[str
     if image_notes:
         image_generation["direction_notes"] = image_notes
         changed = True
-    if video_notes:
+    if video_notes and not scene_has_render_units:
         video_generation = _ensure_video_generation(cut)
         video_generation["direction_notes"] = video_notes
         changed = True
     if request_ids:
         narration["applied_request_ids"] = request_ids
         image_generation["applied_request_ids"] = request_ids
-        _ensure_video_generation(cut)["applied_request_ids"] = request_ids
+        if not scene_has_render_units:
+            _ensure_video_generation(cut)["applied_request_ids"] = request_ids
         _ensure_trace(cut, request_ids=request_ids)
         changed = True
     return changed
@@ -379,6 +502,7 @@ def _apply_cut_action(manifest_data: dict[str, Any], action: dict[str, Any], req
     if scene is None:
         return False
     _ensure_scene(scene)
+    scene_has_render_units = _scene_has_render_units(scene)
 
     if action_name == "add_cut" and cut_id:
         if _find_cut(scene, cut_id) is None:
@@ -489,10 +613,11 @@ def _apply_cut_action(manifest_data: dict[str, Any], action: dict[str, Any], req
         image_generation["direction_notes"] = notes
         changed = True
     if action_name == "set_video_direction":
-        video_generation = _ensure_video_generation(cut)
-        notes = [str(v).strip() for v in _as_list(payload.get("notes")) if str(v).strip()]
-        video_generation["direction_notes"] = notes
-        changed = True
+        if not scene_has_render_units:
+            video_generation = _ensure_video_generation(cut)
+            notes = [str(v).strip() for v in _as_list(payload.get("notes")) if str(v).strip()]
+            video_generation["direction_notes"] = notes
+            changed = True
     if action_name == "add_object_asset":
         assets = _ensure_manifest_assets(manifest_data)
         assets.setdefault("object_bible", [])
@@ -511,13 +636,17 @@ def _apply_cut_action(manifest_data: dict[str, Any], action: dict[str, Any], req
     if changed:
         narration = _ensure_audio_narration(cut)
         image_generation = _ensure_image_generation(cut)
-        video_generation = _ensure_video_generation(cut)
-        for node in (narration, image_generation, video_generation, cut):
+        video_generation = cut.get("video_generation") if isinstance(cut.get("video_generation"), dict) else None
+        trace_nodes: list[dict[str, Any]] = [narration, image_generation, cut]
+        if video_generation is not None:
+            trace_nodes.append(video_generation)
+        for node in trace_nodes:
             if isinstance(node, dict):
                 _ensure_trace(node, request_ids=[request_id])
         narration.setdefault("applied_request_ids", []).append(request_id)
         image_generation.setdefault("applied_request_ids", []).append(request_id)
-        video_generation.setdefault("applied_request_ids", []).append(request_id)
+        if video_generation is not None:
+            video_generation.setdefault("applied_request_ids", []).append(request_id)
     return changed
 
 
@@ -575,13 +704,19 @@ def sync_narration(*, script_path: Path, manifest_path: Path) -> tuple[int, int]
             cut_id = _normalized_id(cut.get("cut_id"))
             if not cut_id:
                 continue
+            if _backfill_video_request_ids_from_trace(cut):
+                updated += 1
             script_cut = script_cut_map.get(make_scene_cut_selector(scene_id, cut_id))
             if not isinstance(script_cut, dict):
                 skipped += 1
                 continue
-            if _sync_human_fields_to_manifest_cut(cut, script_cut):
+            if _sync_human_fields_to_manifest_cut(cut, script_cut, scene_has_render_units=_scene_has_render_units(scene)):
                 updated += 1
             _sync_primary_image_generation_from_still_assets(cut)
+            if _ensure_story_cut_image_plan_defaults(cut):
+                updated += 1
+            if not _scene_has_render_units(scene) and _ensure_story_cut_video_defaults(cut, scene_id=scene_id, cut_id=cut_id, script_cut=script_cut):
+                updated += 1
 
     manifest_data["human_change_requests"] = deepcopy(_as_list(script_data.get("human_change_requests")))
     manifest_data["scenes"] = _sorted_scenes([scene for scene in _as_list(manifest_data.get("scenes")) if isinstance(scene, dict)])

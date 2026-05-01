@@ -127,7 +127,7 @@ Report missing items against the repo checklist and save screenshots of the sett
 Use the browser MCP to open the target public YouTube channels and videos.
 Collect title patterns, thumbnail motifs, upload cadence, and visible engagement signals from the latest 10 uploads.
 Do not log in unless needed.
-Summarize repeated patterns and list what seems reusable for ToC.
+Summarize repeated patterns and list what seems reusable for にわかのAI.
 ```
 
 ---

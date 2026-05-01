@@ -1,10 +1,11 @@
-contract_version: 2
+contract_version: 3
 
 global_required_docs:
   - docs/system-architecture.md
 
 aliases:
-  manifest: image_prompt
+  manifest: scene_implementation
+  image_prompt: scene_implementation
   video: video_generation
 
 stages:
@@ -50,7 +51,37 @@ stages:
         allowed_values:
           - approved
 
-  image_prompt:
+  narration:
+    required_docs:
+      - docs/implementation/video-integration.md
+    required_templates:
+      - workflow/video-manifest-template.md
+    required_inputs:
+      - script.md
+      - video_manifest.md
+    optional_playbooks: []
+    requires_approved_input: []
+    required_manifest_phase:
+      path: video_manifest.md
+      allowed_values:
+        - skeleton
+        - production
+
+  asset:
+    required_docs:
+      - docs/implementation/asset-bibles.md
+    required_templates: []
+    required_inputs:
+      - script.md
+      - video_manifest.md
+    optional_playbooks: []
+    requires_approved_input: []
+    required_state:
+      - key: review.duration_fit.status
+        allowed_values:
+          - passed
+
+  scene_implementation:
     required_docs:
       - docs/implementation/image-prompting.md
       - docs/implementation/asset-bibles.md
@@ -58,17 +89,14 @@ stages:
       - workflow/video-manifest-template.md
     required_inputs:
       - video_manifest.md
-      - story.md
+      - script.md
     optional_playbooks:
       - workflow/playbooks/image-generation/reference-consistent-batch.md
-    requires_approved_input:
-      - path: story.md
-        review_key: review.story.status
-        policy_key: review.policy.story
-        required_when:
-          - required
+    requires_approved_input: []
+    required_state:
+      - key: review.duration_fit.status
         allowed_values:
-          - approved
+          - passed
 
   video_generation:
     required_docs:
@@ -96,3 +124,7 @@ stages:
           - required
         allowed_values:
           - approved
+    required_manifest_phase:
+      path: video_manifest.md
+      allowed_values:
+        - production

@@ -134,6 +134,73 @@ scenes:
             self.assertEqual(narration["text"], "むらへ かえります。")
             self.assertEqual(narration["tts_text"], "むらへ かえります。")
 
+    def test_sync_materializes_tts_text_from_elevenlabs_prompt(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_narration_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+
+            script_path.write_text(
+                """# Script
+
+```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 3
+        narration: "彼女は駆けだします。"
+        tts_text: ""
+        elevenlabs_prompt:
+          spoken_context: "かのじょは こえを ふるわせながら いいました。"
+          voice_tags: ["excited", "laughs harder"]
+          spoken_body: "やっと ここまで これました！"
+          stability_profile: "creative"
+        human_review:
+          status: "pending"
+          notes: ""
+          approved_narration: ""
+          approved_tts_text: ""
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 3
+        audio:
+          narration:
+            tool: "elevenlabs"
+            text: ""
+            tts_text: ""
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                    "--script",
+                    str(script_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+            expected = "かのじょは こえを ふるわせながら いいました。 [excited][laughs harder] やっと ここまで これました！"
+            self.assertEqual(narration["text"], expected)
+            self.assertEqual(narration["tts_text"], expected)
+
     def test_sync_materializes_human_change_requests_and_still_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_human_changes_") as td:
             run_dir = Path(td)
@@ -181,7 +248,7 @@ human_change_requests:
           role: "primary"
           output: "assets/scenes/temple_day.png"
           image_generation:
-            tool: "google_nanobanana_pro"
+            tool: "google_nanobanana_2"
             prompt: "temple day"
             output: "assets/scenes/temple_day.png"
             references: []
@@ -229,7 +296,7 @@ scenes:
       - cut_id: 2
         output: "assets/scenes/scene35_cut02.png"
         image_generation:
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           prompt: "old"
           output: "assets/scenes/scene35_cut02.png"
           character_ids: []
@@ -277,6 +344,327 @@ scenes:
             self.assertEqual(cut["video_generation"]["first_frame_image"], "assets/scenes/scene3.1_cut02.png")
             self.assertEqual(cut["video_generation"]["direction_notes"], ["slow dolly in"])
             self.assertEqual(cut["audio"]["narration"]["applied_request_ids"], ["req-1"])
+
+    def test_sync_adds_default_video_generation_for_remaining_story_cuts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_default_video_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+
+            script_path.write_text(
+                """# Script
+
+```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 2
+        narration: "帰り道を進みます。"
+        tts_text: "かえりみちを すすみます。"
+        visual_beat: "浜辺を静かに進む"
+        human_review:
+          status: "approved"
+          notes: ""
+          approved_narration: ""
+          approved_tts_text: ""
+          approved_visual_beat: "浜辺を静かに進む"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 2
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "beach path"
+          output: "assets/scenes/scene01_cut02.png"
+          character_ids: []
+          object_ids: []
+        audio:
+          narration:
+            tool: "elevenlabs"
+            text: ""
+            tts_text: ""
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                    "--script",
+                    str(script_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            cut = manifest["scenes"][0]["cuts"][0]
+            self.assertEqual(cut["still_image_plan"]["mode"], "generate_still")
+            video = cut["video_generation"]
+            self.assertEqual(video["tool"], "kling_3_0_omni")
+            self.assertEqual(video["output"], "assets/videos/scene01_cut02.mp4")
+            self.assertEqual(video["first_frame"], "assets/scenes/scene01_cut02.png")
+            self.assertEqual(video["duration_seconds"], 4)
+            self.assertIn("浜辺を静かに進む", video["motion_prompt"])
+
+    def test_sync_does_not_restore_deleted_cuts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_deleted_cut_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+
+            script_path.write_text(
+                """# Script
+
+```yaml
+human_change_requests:
+  - request_id: "req-delete"
+    source: "human_script_review"
+    created_at: "2026-04-19T00:00:00+09:00"
+    raw_request: "scene1_cut2 を削除する"
+    original_selectors: ["scene1_cut2"]
+    current_selectors: []
+    normalized_actions:
+      - action: "delete_cut"
+        target:
+          scene_id: "1"
+          cut_id: "2"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        narration: "残すカットです。"
+        tts_text: "のこす かっとです。"
+        visual_beat: "残る"
+        human_review:
+          status: "approved"
+          notes: ""
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "keep"
+          output: "assets/scenes/scene01_cut01.png"
+          character_ids: []
+          object_ids: []
+      - cut_id: 2
+        image_generation:
+          tool: "google_nanobanana_2"
+          prompt: "delete"
+          output: "assets/scenes/scene01_cut02.png"
+          character_ids: []
+          object_ids: []
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                    "--script",
+                    str(script_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            cuts = manifest["scenes"][0]["cuts"]
+            self.assertEqual([str(c["cut_id"]) for c in cuts], ["1"])
+
+    def test_sync_does_not_backfill_cut_video_generation_when_scene_uses_render_units(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_render_units_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+
+            script_path.write_text(
+                """# Script
+
+```yaml
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        narration: "ひとつめ"
+        tts_text: "ひとつめ"
+        visual_beat: "cut1"
+      - cut_id: 2
+        narration: "ふたつめ"
+        tts_text: "ふたつめ"
+        visual_beat: "cut2"
+      - cut_id: 3
+        narration: "みっつめ"
+        tts_text: "みっつめ"
+        visual_beat: "cut3"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: "assets/scenes/scene03_cut01.png"
+      - cut_id: 2
+        image_generation:
+          output: "assets/scenes/scene03_cut02.png"
+      - cut_id: 3
+        image_generation:
+          output: "assets/scenes/scene03_cut03.png"
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1]
+        video_generation:
+          output: "assets/videos/scene03_cut01.mp4"
+      - unit_id: 2
+        source_cut_ids: [2, 3]
+        video_generation:
+          output: "assets/videos/scene03_cut02.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                    "--script",
+                    str(script_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            cuts = manifest["scenes"][0]["cuts"]
+            self.assertNotIn("video_generation", cuts[0])
+            self.assertNotIn("video_generation", cuts[1])
+            self.assertNotIn("video_generation", cuts[2])
+            self.assertIn("render_units", manifest["scenes"][0])
+
+    def test_sync_does_not_recreate_cut_video_generation_from_change_requests_when_scene_uses_render_units(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_render_units_request_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+
+            script_path.write_text(
+                """# Script
+
+```yaml
+human_change_requests:
+  - request_id: hr-201
+    normalized_actions:
+      - action: set_video_direction
+        target:
+          scene_id: 3
+          cut_id: 2
+        payload:
+          notes:
+            - "前進速度を上げる"
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        narration: "ひとつめ"
+        tts_text: "ひとつめ"
+        visual_beat: "cut1"
+      - cut_id: 2
+        narration: "ふたつめ"
+        tts_text: "ふたつめ"
+        visual_beat: "cut2"
+      - cut_id: 3
+        narration: "みっつめ"
+        tts_text: "みっつめ"
+        visual_beat: "cut3"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: "assets/scenes/scene03_cut01.png"
+      - cut_id: 2
+        image_generation:
+          output: "assets/scenes/scene03_cut02.png"
+      - cut_id: 3
+        image_generation:
+          output: "assets/scenes/scene03_cut03.png"
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1]
+        video_generation:
+          output: "assets/videos/scene03_cut01.mp4"
+      - unit_id: 2
+        source_cut_ids: [2, 3]
+        video_generation:
+          output: "assets/videos/scene03_cut02.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                    "--script",
+                    str(script_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            cuts = manifest["scenes"][0]["cuts"]
+            self.assertNotIn("video_generation", cuts[0])
+            self.assertNotIn("video_generation", cuts[1])
+            self.assertNotIn("video_generation", cuts[2])
+            self.assertIn("render_units", manifest["scenes"][0])
 
 
 if __name__ == "__main__":

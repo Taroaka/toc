@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.run_index import write_run_index
+from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id
 
 
 def extract_yaml_block(text: str) -> str:
@@ -43,6 +44,93 @@ def _selector(scene_id: object, cut_id: object | None = None) -> str:
     if cut_id in {None, ""}:
         return f"scene{scene_id}"
     return f"scene{scene_id}_cut{cut_id}"
+
+
+def _render_unit_selector(scene_id: object, unit_id: object | None = None) -> str:
+    return f"scene{scene_id}_unit{unit_id}"
+
+
+def _non_deleted_cut_lookup(raw_cuts: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    lookup: dict[str, dict[str, object]] = {}
+    for raw_cut in raw_cuts:
+        cut_id = normalize_dotted_id(raw_cut.get("cut_id"))
+        if cut_id is None:
+            continue
+        if _normalize_status(raw_cut.get("cut_status")) == "deleted":
+            continue
+        lookup[cut_id] = raw_cut
+    return lookup
+
+
+def _append_render_unit_outputs(
+    *,
+    scene_id: str,
+    raw_scene: dict[str, object],
+    raw_cuts: list[dict[str, object]],
+    clips: list[str],
+    narrations: list[str],
+) -> None:
+    render_units = raw_scene.get("render_units")
+    if not isinstance(render_units, list) or not render_units:
+        return
+
+    non_deleted_cut_lookup = _non_deleted_cut_lookup(raw_cuts)
+    ownership: dict[str, str] = {}
+    missing: list[str] = []
+    duplicate: list[str] = []
+
+    for raw_unit in render_units:
+        if not isinstance(raw_unit, dict):
+            raise SystemExit(f"scene{scene_id}: render_units[] must be mappings.")
+        unit_id = normalize_dotted_id(raw_unit.get("unit_id"))
+        if unit_id is None:
+            raise SystemExit(f"scene{scene_id}: render_units[].unit_id is required.")
+        selector = _render_unit_selector(scene_id, unit_id)
+        source_cut_ids_raw = raw_unit.get("source_cut_ids")
+        if not isinstance(source_cut_ids_raw, list) or not source_cut_ids_raw:
+            raise SystemExit(f"{selector}: source_cut_ids must be a non-empty list.")
+
+        source_cut_ids: list[str] = []
+        seen_within_unit: set[str] = set()
+        for raw_cut_id in source_cut_ids_raw:
+            cut_id = normalize_dotted_id(raw_cut_id)
+            if cut_id is None:
+                raise SystemExit(f"{selector}: invalid source_cut_id: {raw_cut_id!r}")
+            if cut_id in seen_within_unit:
+                raise SystemExit(f"{selector}: duplicate source_cut_id within render unit: {cut_id}")
+            seen_within_unit.add(cut_id)
+            source_cut_ids.append(cut_id)
+
+        video_generation = raw_unit.get("video_generation")
+        if not isinstance(video_generation, dict):
+            raise SystemExit(f"{selector}: video_generation is required.")
+        video_output = str(video_generation.get("output") or "").strip()
+        if video_output:
+            clips.append(video_output)
+
+        for cut_id in source_cut_ids:
+            raw_cut = non_deleted_cut_lookup.get(cut_id)
+            if raw_cut is None:
+                missing.append(cut_id)
+                continue
+            previous_owner = ownership.get(cut_id)
+            if previous_owner is not None:
+                duplicate.append(f"{cut_id} -> {previous_owner}, {selector}")
+                continue
+            ownership[cut_id] = selector
+            audio = raw_cut.get("audio") if isinstance(raw_cut.get("audio"), dict) else {}
+            narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+            narration_output = narration.get("output")
+            if isinstance(narration_output, str) and narration_output.strip():
+                narrations.append(narration_output.strip())
+
+    if missing:
+        raise SystemExit(f"scene{scene_id}: render_units reference non-deleted cuts that do not exist: {sorted(set(missing))}")
+    if duplicate:
+        raise SystemExit(f"scene{scene_id}: cuts assigned to multiple render_units: {duplicate}")
+    missing_coverage = sorted(set(non_deleted_cut_lookup.keys()) - set(ownership.keys()))
+    if missing_coverage:
+        raise SystemExit(f"scene{scene_id}: non-deleted cuts missing from render_units: {missing_coverage}")
 
 
 def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, object]]]:
@@ -64,6 +152,15 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
         scene_id = raw_scene.get("scene_id")
         raw_cuts = raw_scene.get("cuts")
         if isinstance(raw_cuts, list) and raw_cuts:
+            normalized_scene_id = normalize_dotted_id(scene_id) or str(scene_id or "").strip()
+            if isinstance(raw_scene.get("render_units"), list) and raw_scene.get("render_units"):
+                _append_render_unit_outputs(
+                    scene_id=normalized_scene_id,
+                    raw_scene=raw_scene,
+                    raw_cuts=[cut for cut in raw_cuts if isinstance(cut, dict)],
+                    clips=clips,
+                    narrations=narrations,
+                )
             for raw_cut in raw_cuts:
                 if not isinstance(raw_cut, dict):
                     continue
@@ -90,6 +187,8 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
                             "skipped_outputs": skipped_outputs,
                         }
                     )
+                    continue
+                if isinstance(raw_scene.get("render_units"), list) and raw_scene.get("render_units"):
                     continue
                 video_output = video_generation.get("output")
                 if isinstance(video_output, str) and video_output.strip():

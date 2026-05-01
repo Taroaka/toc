@@ -1,5 +1,16 @@
 # Orchestration / QA / Compliance / Publishing
 
+変更内容:
+- production order を audio-first に切り替え、公開 workflow を `narration -> asset -> scene implementation -> video` に再編した。
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation` に揃えた。
+
+修正理由:
+- 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が late recut を減らせるため。
+
+旧仕様との差分:
+- 旧運用は `image_prompt_review` / `image_generation` を公開 stage として前面に出し、audio runtime は後段だった。
+- 新運用は scene implementation を公開 stage にし、audio-first を固定する。
+
 運用設計ドキュメント（追加レイヤー）
 
 ## 位置づけ
@@ -94,12 +105,19 @@ audit:
 - `stage.story`
 - `stage.visual_value`
 - `stage.script`
-- `stage.image_prompt_review`
-- `stage.image_generation`
-- `stage.video_generation`
 - `stage.narration`
+- `stage.asset`
+- `stage.scene_implementation`
+- `stage.video_generation`
 - `stage.render`
 - `stage.qa`
+
+legacy compatibility keys:
+
+- `stage.image_prompt_review`
+- `stage.image_generation`
+
+これらは旧 run / 旧 evaluator 互換の補助キーであり、公開 workflow の正本 stage ではない。
 
 各作業は **開始時** と **完了時** に append する:
 
@@ -120,8 +138,8 @@ audit:
 標準で承認待ちを挟む stage:
 
 - `stage.script`
-- `stage.image_generation`
 - `stage.narration`
+- `stage.scene_implementation`
 
 この 3 つが `awaiting_approval` の間は、**次工程へ進まない**。
 
@@ -142,13 +160,13 @@ grounding 状態と証跡:
 - `stage.<name>.audit.report=logs/grounding/<stage>.audit.json`
 - `stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md`
 - `review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md`
-- canonical stage は `research`, `story`, `script`, `image_prompt`, `video_generation`
-- evaluator / verifier では互換 alias として `manifest=image_prompt`, `video=video_generation` を許可する
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`
+- evaluator / verifier では互換 alias として `manifest=scene_implementation`, `image_prompt=scene_implementation`, `video=video_generation` を許可する
 
 run 開始時に固定する review policy:
 
 - `review.policy.story`
-  - `story.md` を `script` / `image_prompt` の upstream として使う前に承認が要るか
+  - `story.md` を `script` / `scene_implementation` の upstream として使う前に承認が要るか
 - `review.policy.image`
   - `video_generation` 前に `review.image.status=approved` を要求するか
 - `review.policy.narration`
@@ -175,8 +193,8 @@ run 直下には `p000_index.md` を置き、人間向けの入口にする。
 - `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - 第1段階では binary / logs / scratch の物理 rename は行わず、navigation layer として番号を導入する
 - narration は
-  - `p400`: narration text / `tts_text` / human changes
-  - `p800`: TTS 実行 / audio outputs
+  - `p400`: narration draft / `tts_text` / human changes / skeleton manifest materialization
+  - `p500`: TTS 実行 / duration fit gate / audio handoff
   の 2 層で扱う
 - 画像生成の request 改稿は、scene 単位で自然言語エージェントへ割り当てる
   - 各 scene agent は `script.md`、`video_manifest.md`、現在の request draft を読む
@@ -195,17 +213,37 @@ python scripts/toc-state.py set-slot \
   --skip-reason "asset stage not needed for this run"
 ```
 
-### 1.5 VIDEOステージの内部サブフロー
+### 1.5 Production Order の内部サブフロー
 
 ```
+SCRIPT:
+  1) scene / narration draft
+  2) skeleton manifest materialization
+
+NARRATION:
+  1) narration text review
+  2) TTS generation
+  3) duration fit gate
+
+ASSET:
+  1) reusable asset inventory
+  2) asset plan / generation
+
+SCENE_IMPLEMENTATION:
+  1) production manifest / prompt authoring
+  2) hard review
+  3) judgment review
+  4) scene still generation
+
 VIDEO:
-  1) シーン静止画生成・選定
-  2) Image-to-Video クリップ生成
-  3) ナレーション/BGM/SFX 生成
-  4) クリップ結合 + 音声ミックス
-  5) 字幕作成・焼き込み
-  6) 最終レンダリング（mp4出力）
-  7) 品質ゲート通過
+  1) motion prompt review
+  2) clip generation
+
+RENDER:
+  1) クリップ結合 + 音声ミックス
+  2) 字幕作成・焼き込み
+  3) 最終レンダリング（mp4出力）
+  4) 品質ゲート通過
 ```
 
 ### 1.6 mp4出力の必須条件

@@ -23,7 +23,7 @@ def _load_review_module(repo_root: Path):
 
 
 class TestNarrationTextReview(unittest.TestCase):
-    def test_review_flags_v2_unfriendly_patterns(self) -> None:
+    def test_review_flags_v3_unfriendly_patterns(self) -> None:
         mod = _load_review_module(REPO_ROOT)
         entries = [
             mod.NarrationEntry(
@@ -55,11 +55,45 @@ class TestNarrationTextReview(unittest.TestCase):
         results = mod.review_entries(entries)
         codes = [finding.code for outcome in results for finding in outcome.findings]
 
-        self.assertIn("unsupported_audio_tag_for_v2", codes)
         self.assertIn("needs_text_normalization", codes)
         self.assertIn("tts_unfriendly_literal", codes)
         self.assertIn("visual_direction_leaked_into_narration", codes)
         self.assertLess(results[0].rubric_scores["tts_readiness"], 0.7)
+
+    def test_review_allows_audio_tags_in_v3_tts_text(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        entries = [
+            mod.NarrationEntry(
+                scene_id=10,
+                cut_id=1,
+                selector="scene10_cut01",
+                text="主人公は浜辺で立ち止まります。",
+                tts_text="[gentle][alpha] しゅじんこうは はまべで たちどまります。",
+                tool="elevenlabs",
+                output="assets/audio/scene10_cut01.mp3",
+                duration_seconds=8,
+                image_prompt="主人公が浜辺で立ち止まる。",
+                motion_prompt="波がゆれる。",
+                story_role="middle",
+                phase="development",
+                scene_summary="主人公は浜辺で立ち止まります。",
+                script_narration="主人公は浜辺で立ち止まります。",
+                contract={},
+                agent_review_ok=True,
+                human_review_ok=False,
+                human_review_reason="",
+                agent_review_reason_keys=[],
+                agent_review_reason_messages=[],
+                rubric_scores={},
+                overall_score=1.0,
+            )
+        ]
+
+        results = mod.review_entries(entries)
+        codes = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertNotIn("narration_tts_text_missing", codes)
+        self.assertNotIn("needs_text_normalization", codes)
+        self.assertEqual(results[0].rubric_scores["tts_readiness"], 1.0)
 
     def test_opening_narration_can_be_scene_faithful_without_penalty(self) -> None:
         mod = _load_review_module(REPO_ROOT)
@@ -266,8 +300,6 @@ class TestNarrationTextReview(unittest.TestCase):
             self.assertIn("narration_contains_meta_marker", review["agent_review_reason_keys"])
             self.assertIn("needs_text_normalization", review["agent_review_reason_keys"])
             self.assertIn("tts_unfriendly_literal", review["agent_review_reason_keys"])
-            self.assertIn("narration_text_not_hiragana_only", review["agent_review_reason_keys"])
-            self.assertIn("tts_text_not_hiragana_only", review["agent_review_reason_keys"])
             self.assertIn("rubric_scores", review)
             self.assertIn("overall_score", review)
             state = parse_state_file(run_dir / "state.txt")

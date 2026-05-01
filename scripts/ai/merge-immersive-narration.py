@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.immersive_manifest import is_character_reference_scene, scene_numeric_id, story_scene_ids
+from toc.script_narration import materialize_elevenlabs_tts_text, normalize_stability_profile, normalize_voice_tags
 
 
 def now_iso() -> str:
@@ -82,7 +83,18 @@ def _load_scratch_file(path: Path) -> tuple[int, dict[int, dict[str, Any]]] | No
             continue
         out[int(cid)] = {
             "text": _as_str(c.get("narration_text")).strip(),
-            "tts_text": _as_str(c.get("tts_text")).strip(),
+            "tts_text": _as_str(c.get("tts_text")).strip()
+            or materialize_elevenlabs_tts_text(
+                spoken_context=_as_str(c.get("spoken_context")).strip(),
+                voice_tags=normalize_voice_tags(c.get("voice_tags")),
+                spoken_body=_as_str(c.get("spoken_body")).strip(),
+            ),
+            "prompt": {
+                "spoken_context": _as_str(c.get("spoken_context")).strip(),
+                "voice_tags": normalize_voice_tags(c.get("voice_tags")),
+                "spoken_body": _as_str(c.get("spoken_body")).strip(),
+                "stability_profile": normalize_stability_profile(c.get("stability_profile")),
+            },
             "contract": {
                 "target_function": _as_str(c.get("target_function")).strip(),
                 "must_cover": [str(v).strip() for v in list(c.get("must_cover") or []) if str(v).strip()],

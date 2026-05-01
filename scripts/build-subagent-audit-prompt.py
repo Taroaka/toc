@@ -87,7 +87,7 @@ def build_subagent_audit_prompt(*, stage: str, run_dir: Path, flow: str | None =
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a pasteable contextless subagent audit prompt.")
-    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, image_prompt, video_generation).")
+    parser.add_argument("--stage", required=True, help="Stage name (research, story, script, narration, asset, scene_implementation, video_generation).")
     parser.add_argument("--run-dir", required=True, help="Path to output/<topic>_<timestamp> or a scene run directory.")
     parser.add_argument("--flow", choices=["toc-run", "scene-series", "immersive"], default=None)
     args = parser.parse_args()

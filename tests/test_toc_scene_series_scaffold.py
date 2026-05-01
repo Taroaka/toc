@@ -40,8 +40,8 @@ class TestTocSceneSeriesScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "scenes" / "scene01" / "evidence.md").exists())
             self.assertTrue((run_dir / "scenes" / "scene01" / "script.md").exists())
             self.assertTrue((run_dir / "scenes" / "scene01" / "video_manifest.md").exists())
-            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "image_prompt.json").exists())
-            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "image_prompt.audit.json").exists())
+            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "narration.json").exists())
+            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "narration.audit.json").exists())
 
 
 if __name__ == "__main__":

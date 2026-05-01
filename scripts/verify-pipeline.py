@@ -384,6 +384,8 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
 
     text, data = load_structured_document(path)
     append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
+    manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
+    add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
     _manifest_checks(checks, text, data, profile=profile, flow=flow, path_label="manifest")
     updates["eval.manifest.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("manifest", path.name, checks), updates
@@ -403,12 +405,16 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
         }
 
     nested_ok = True
+    phase_ok = True
     for path in manifest_paths:
         text, data = load_structured_document(path)
         local_checks: list[dict[str, Any]] = []
+        if str(data.get("manifest_phase") or "production").strip().lower() != "production":
+            phase_ok = False
         _manifest_checks(local_checks, text, data, profile=profile, flow="scene-series", path_label=path.name)
         if not all(check["passed"] for check in local_checks):
             nested_ok = False
+    add_check(checks, "manifest.scene_phase", phase_ok, "scene manifests are in production phase", kind="rubric")
     add_check(checks, "manifest.scene_contracts", nested_ok, "scene manifests satisfy render contract checks", kind="rubric")
 
     updates = {"eval.manifest.score": f"{score_from_checks(checks):.4f}"}

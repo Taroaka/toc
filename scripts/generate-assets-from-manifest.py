@@ -35,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.env import load_env_files
-from toc.harness import load_structured_document
+from toc.harness import load_structured_document, parse_state_file
 from toc.http import HttpError, request_bytes
 from toc.immersive_manifest import (
     dotted_id_slug,
@@ -55,6 +55,20 @@ from toc.run_index import write_run_index
 
 
 ALLOWED_VEO_DURATIONS = (4, 6, 8)
+NO_REFERENCE_IMAGE_EXECUTION_LANE = "bootstrap_builtin"
+NO_REFERENCE_IMAGE_EXECUTION_LANE_ALIASES = {"bootstrap_builtin", "no_reference_builtin"}
+REFERENCE_DRIVEN_IMAGE_TOOLS = {
+    "google_nanobanana_2",
+    "nanobanana_2",
+    "gemini_3_1_flash_image",
+    "gemini3_1_flash_image",
+    "gemini_3.1_flash_image",
+    "gemini-3.1-flash-image",
+    "seadream",
+    "seedream",
+    "seedream_4_5",
+    "byteplus_seedream_4_5",
+}
 
 
 @dataclass
@@ -103,10 +117,37 @@ class SceneSpec:
     narration_silence_kind: str | None
     narration_silence_reason: str | None
     still_assets: list[dict[str, Any]]
+    image_asset_id: str | None = None
+    image_asset_type: str | None = None
+    image_execution_lane: str | None = None
+    image_bootstrap_allowed: bool = False
+    image_bootstrap_reason: str | None = None
+    image_review_status: str | None = None
     still_image_generation_status: str | None = None
     still_image_plan_source: str | None = None
     cut_status: str | None = None
     deletion_reason: str | None = None
+    manifest_cut_id: str | None = None
+
+
+@dataclass(frozen=True)
+class VideoRenderTargetSpec:
+    selector: str
+    manifest_scene_id: str
+    unit_id: str | None
+    source_cut_ids: list[str]
+    source_selectors: list[str]
+    source_scenes: list[SceneSpec]
+    video_tool: str | None
+    video_input_image: str | None
+    video_first_frame: str | None
+    video_last_frame: str | None
+    video_motion_prompt: str | None
+    video_output: str | None
+    video_applied_request_ids: list[str]
+    duration_seconds: int | None
+    timestamp: str | None
+    reference_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +357,19 @@ def _as_opt_str(value: Any) -> str | None:
     return s
 
 
+def _as_opt_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in {"true", "yes", "1", "on"}:
+        return True
+    if s in {"false", "no", "0", "off"}:
+        return False
+    return None
+
+
 def _parse_reference_variants(raw_variants: Any) -> list[ReferenceVariantSpec]:
     variants: list[ReferenceVariantSpec] = []
     if not isinstance(raw_variants, list):
@@ -478,6 +532,110 @@ def _effective_image_generation(raw_node: dict[str, Any], still_assets: list[dic
     return derived, _as_opt_str(primary_still.get("output"))
 
 
+def _derive_asset_type_from_output(image_output: str | None) -> str | None:
+    norm = str(image_output or "").replace("\\", "/")
+    if "/assets/characters/" in f"/{norm}":
+        return "character_reference"
+    if "/assets/objects/" in f"/{norm}":
+        return "object_reference"
+    if "/assets/locations/" in f"/{norm}":
+        return "location_anchor"
+    if "/assets/scenes/" in f"/{norm}":
+        return "reusable_still"
+    return None
+
+
+def _extract_asset_stage_image_metadata(
+    *,
+    raw_node: dict[str, Any],
+    still_assets: list[dict[str, Any]],
+    image_output: str | None,
+) -> dict[str, Any]:
+    primary_still = _select_primary_still_asset(still_assets)
+    primary_ig = primary_still.get("image_generation") if isinstance(primary_still, dict) and isinstance(primary_still.get("image_generation"), dict) else {}
+    scene_ig = raw_node.get("image_generation") if isinstance(raw_node.get("image_generation"), dict) else {}
+
+    asset_id = None
+    asset_type = None
+    review_status = None
+    execution_lane = None
+    bootstrap_allowed = None
+    bootstrap_reason = None
+
+    if isinstance(primary_still, dict):
+        asset_id = _as_opt_str(primary_still.get("asset_id"))
+        asset_type = _as_opt_str(primary_still.get("asset_type"))
+        review = primary_still.get("review") if isinstance(primary_still.get("review"), dict) else {}
+        review_status = _as_opt_str(review.get("status"))
+        execution_lane = _as_opt_str(primary_still.get("execution_lane")) or _as_opt_str(primary_ig.get("execution_lane"))
+        bootstrap_allowed = _as_opt_bool(primary_still.get("bootstrap_allowed"))
+        if bootstrap_allowed is None:
+            bootstrap_allowed = _as_opt_bool(primary_ig.get("bootstrap_allowed"))
+        bootstrap_reason = _as_opt_str(primary_still.get("bootstrap_reason")) or _as_opt_str(primary_ig.get("bootstrap_reason"))
+
+    scene_review = scene_ig.get("review") if isinstance(scene_ig.get("review"), dict) else {}
+    asset_type = asset_type or _derive_asset_type_from_output(image_output)
+    review_status = review_status or _as_opt_str(scene_review.get("status"))
+    execution_lane = execution_lane or _as_opt_str(scene_ig.get("execution_lane"))
+    if bootstrap_allowed is None:
+        bootstrap_allowed = _as_opt_bool(scene_ig.get("bootstrap_allowed"))
+    bootstrap_reason = bootstrap_reason or _as_opt_str(scene_ig.get("bootstrap_reason"))
+
+    return {
+        "asset_id": asset_id,
+        "asset_type": asset_type,
+        "execution_lane": execution_lane,
+        "bootstrap_allowed": bool(bootstrap_allowed) if bootstrap_allowed is not None else False,
+        "bootstrap_reason": bootstrap_reason,
+        "review_status": review_status,
+    }
+
+
+def _normalize_execution_lane(execution_lane: str | None) -> str | None:
+    normalized = str(execution_lane or "").strip().lower().replace(" ", "_")
+    if not normalized:
+        return None
+    if normalized in NO_REFERENCE_IMAGE_EXECUTION_LANE_ALIASES:
+        return NO_REFERENCE_IMAGE_EXECUTION_LANE
+    return normalized
+
+
+def _infer_image_execution_lane(*, references: list[str] | None) -> str:
+    if list(references or []):
+        return "standard"
+    return NO_REFERENCE_IMAGE_EXECUTION_LANE
+
+
+def _effective_image_execution_lane(scene: SceneSpec) -> str:
+    return _infer_image_execution_lane(references=scene.image_references)
+
+
+def _validate_image_execution_lane(scene: SceneSpec) -> None:
+    explicit_lane = _normalize_execution_lane(scene.image_execution_lane)
+    if explicit_lane is None:
+        return
+    expected_lane = _effective_image_execution_lane(scene)
+    if explicit_lane == expected_lane:
+        return
+    raise SystemExit(
+        f"{scene.selector or scene.scene_id}: execution_lane mismatch: "
+        f"declared `{explicit_lane}` but this repo expects `{expected_lane}` "
+        "from the current reference count"
+    )
+
+
+def _no_reference_image_lane_error(*, scene: SceneSpec, tool: str) -> str:
+    selector = scene.selector or str(scene.scene_id)
+    return (
+        f"NO_REFERENCE_IMAGE_LANE_REQUIRED {selector}: `{tool}` cannot run in this repo "
+        "without at least one resolved reference image. "
+        "Route no-reference image work through Codex built-in image generation "
+        f"(execution_lane=`{NO_REFERENCE_IMAGE_EXECUTION_LANE}`) instead. "
+        "Use $toc-no-reference-image-runner for general no-reference image requests, "
+        "or $toc-p500-bootstrap-image-runner for p500 asset seeds."
+    )
+
+
 def _build_human_change_request_lookup(manifest: dict[str, Any]) -> dict[str, dict[str, str]]:
     raw_requests = manifest.get("human_change_requests")
     if not isinstance(raw_requests, list):
@@ -524,6 +682,52 @@ def _resolve_source_requests(
 def _scene_log_slug(scene: SceneSpec) -> str:
     base = scene.selector or scene.scene_id or scene.manifest_scene_id
     return dotted_id_slug(base)
+
+
+def _video_target_log_slug(target: VideoRenderTargetSpec) -> str:
+    return dotted_id_slug(target.selector or target.manifest_scene_id)
+
+
+def _video_target_reference_strings(target: VideoRenderTargetSpec) -> list[str]:
+    refs: list[str] = []
+    for scene in target.source_scenes:
+        refs.extend(list(scene.image_references or []))
+    return _dedupe_keep_order(refs)
+
+
+def _video_target_first_frame_path(base_dir: Path, target: VideoRenderTargetSpec) -> Path | None:
+    first_frame = resolve_path(base_dir, target.video_first_frame or target.video_input_image)
+    if first_frame is not None:
+        return first_frame
+    for scene in target.source_scenes:
+        candidate = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
+        if candidate is not None:
+            return candidate
+        if scene.image_output:
+            candidate = resolve_path(base_dir, scene.image_output)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _video_target_last_frame_path(base_dir: Path, target: VideoRenderTargetSpec) -> Path | None:
+    last_frame = resolve_path(base_dir, target.video_last_frame)
+    if last_frame is not None:
+        return last_frame
+    for scene in reversed(target.source_scenes):
+        candidate = resolve_path(base_dir, scene.video_last_frame)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _video_target_image_prompts(target: VideoRenderTargetSpec) -> list[str]:
+    prompts: list[str] = []
+    for scene in target.source_scenes:
+        prompt = str(scene.image_prompt or "").strip()
+        if prompt:
+            prompts.append(prompt)
+    return _dedupe_keep_order(prompts)
 
 
 def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
@@ -660,6 +864,7 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 still_image_plan_source=None,
                 cut_status=None,
                 deletion_reason=None,
+                manifest_cut_id=None,
             )
             continue
 
@@ -862,6 +1067,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
                 image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
                 image_applied_request_ids = _ensure_str_list(ig.get("applied_request_ids")) if isinstance(ig, dict) else []
+                image_stage_meta = _extract_asset_stage_image_metadata(
+                    raw_node=raw_cut,
+                    still_assets=cut_still_assets,
+                    image_output=image_output,
+                )
 
                 video_tool = _as_opt_str(vg.get("tool")) if isinstance(vg, dict) else None
                 video_input_image = _as_opt_str(vg.get("input_image")) if isinstance(vg, dict) else None
@@ -952,10 +1162,17 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         narration_silence_kind=narration_silence_kind,
                         narration_silence_reason=narration_silence_reason,
                         still_assets=cut_still_assets,
+                        image_asset_id=image_stage_meta["asset_id"],
+                        image_asset_type=image_stage_meta["asset_type"],
+                        image_execution_lane=image_stage_meta["execution_lane"],
+                        image_bootstrap_allowed=image_stage_meta["bootstrap_allowed"],
+                        image_bootstrap_reason=image_stage_meta["bootstrap_reason"],
+                        image_review_status=image_stage_meta["review_status"],
                         still_image_generation_status=still_image_generation_status,
                         still_image_plan_source=still_image_plan_source,
                         cut_status=cut_status,
                         deletion_reason=deletion_reason,
+                        manifest_cut_id=cut_id,
                     )
                 )
             continue
@@ -992,6 +1209,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_aspect_ratio = _as_opt_str(ig.get("aspect_ratio")) if isinstance(ig, dict) else None
         image_size = _as_opt_str(ig.get("image_size")) if isinstance(ig, dict) else None
         image_applied_request_ids = _ensure_str_list(ig.get("applied_request_ids")) if isinstance(ig, dict) else []
+        image_stage_meta = _extract_asset_stage_image_metadata(
+            raw_node=raw_scene,
+            still_assets=scene_still_assets,
+            image_output=image_output,
+        )
 
         video_tool = _as_opt_str(vg.get("tool")) if isinstance(vg, dict) else None
         video_input_image = _as_opt_str(vg.get("input_image")) if isinstance(vg, dict) else None
@@ -1083,10 +1305,17 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 narration_silence_kind=narration_silence_kind,
                 narration_silence_reason=narration_silence_reason,
                 still_assets=scene_still_assets,
+                image_asset_id=image_stage_meta["asset_id"],
+                image_asset_type=image_stage_meta["asset_type"],
+                image_execution_lane=image_stage_meta["execution_lane"],
+                image_bootstrap_allowed=image_stage_meta["bootstrap_allowed"],
+                image_bootstrap_reason=image_stage_meta["bootstrap_reason"],
+                image_review_status=image_stage_meta["review_status"],
                 still_image_generation_status=still_image_generation_status,
                 still_image_plan_source=still_image_plan_source,
                 cut_status=cut_status,
                 deletion_reason=deletion_reason,
+                manifest_cut_id=None,
             )
         )
 
@@ -1117,8 +1346,172 @@ def _scene_matches_filter(scene: SceneSpec, scene_filter: set[str] | None) -> bo
     )
 
 
+def _render_unit_selector(scene_id: str, unit_id: str) -> str:
+    return f"scene{scene_id}_unit{unit_id}"
+
+
+def _scene_has_explicit_render_units(raw_scene: Any) -> bool:
+    return isinstance(raw_scene, dict) and isinstance(raw_scene.get("render_units"), list) and bool(raw_scene.get("render_units"))
+
+
 def _scene_is_deleted(scene: SceneSpec) -> bool:
     return (scene.cut_status or "").strip().lower() == "deleted"
+
+
+def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneSpec]) -> list[VideoRenderTargetSpec]:
+    raw_scenes = manifest.get("scenes")
+    if not isinstance(raw_scenes, list):
+        return []
+
+    scenes_by_manifest_scene_id: dict[str, list[SceneSpec]] = {}
+    for scene in scenes:
+        scenes_by_manifest_scene_id.setdefault(str(scene.manifest_scene_id), []).append(scene)
+
+    issues: list[str] = []
+    targets: list[VideoRenderTargetSpec] = []
+
+    for raw_scene in raw_scenes:
+        if not isinstance(raw_scene, dict):
+            continue
+        scene_id = normalize_dotted_id(raw_scene.get("scene_id"))
+        if scene_id is None:
+            continue
+
+        scene_nodes = scenes_by_manifest_scene_id.get(scene_id, [])
+        if _scene_has_explicit_render_units(raw_scene):
+            cut_nodes = [node for node in scene_nodes if node.manifest_cut_id is not None]
+            if not cut_nodes:
+                issues.append(f"scene{scene_id}: render_units requires cuts[].")
+                continue
+
+            non_deleted_cut_nodes = [node for node in cut_nodes if not _scene_is_deleted(node)]
+            non_deleted_by_cut_id = {
+                str(node.manifest_cut_id): node
+                for node in non_deleted_cut_nodes
+                if node.manifest_cut_id is not None
+            }
+            ownership: dict[str, str] = {}
+            raw_render_units = raw_scene.get("render_units") or []
+            for raw_unit in raw_render_units:
+                if not isinstance(raw_unit, dict):
+                    issues.append(f"scene{scene_id}: render_units[] must be mappings.")
+                    continue
+                unit_id = normalize_dotted_id(raw_unit.get("unit_id"))
+                if unit_id is None:
+                    issues.append(f"scene{scene_id}: render_units[].unit_id is required.")
+                    continue
+
+                selector = _render_unit_selector(scene_id, unit_id)
+                source_cut_ids: list[str] = []
+                raw_source_cut_ids = raw_unit.get("source_cut_ids")
+                if not isinstance(raw_source_cut_ids, list) or not raw_source_cut_ids:
+                    issues.append(f"{selector}: source_cut_ids must be a non-empty list.")
+                    continue
+                for raw_cut_id in raw_source_cut_ids:
+                    normalized_cut_id = normalize_dotted_id(raw_cut_id)
+                    if normalized_cut_id is None:
+                        issues.append(f"{selector}: invalid source_cut_id: {raw_cut_id!r}")
+                        continue
+                    source_cut_ids.append(normalized_cut_id)
+
+                if not source_cut_ids:
+                    continue
+
+                source_scenes: list[SceneSpec] = []
+                seen_within_unit: set[str] = set()
+                for cut_id in source_cut_ids:
+                    if cut_id in seen_within_unit:
+                        issues.append(f"{selector}: duplicate source_cut_id within render unit: {cut_id}")
+                        continue
+                    seen_within_unit.add(cut_id)
+                    source_scene = non_deleted_by_cut_id.get(cut_id)
+                    if source_scene is None:
+                        issues.append(f"{selector}: source_cut_id does not point to a non-deleted cut: {cut_id}")
+                        continue
+                    previous_owner = ownership.get(cut_id)
+                    if previous_owner is not None:
+                        issues.append(f"scene{scene_id}: cut {cut_id} is assigned to multiple render_units: {previous_owner}, {selector}")
+                        continue
+                    ownership[cut_id] = selector
+                    source_scenes.append(source_scene)
+
+                video_generation = raw_unit.get("video_generation") if isinstance(raw_unit.get("video_generation"), dict) else {}
+                unit_duration_seconds: int | None = None
+                if isinstance(video_generation, dict) and video_generation.get("duration_seconds") is not None:
+                    try:
+                        unit_duration_seconds = int(video_generation.get("duration_seconds"))
+                    except Exception:
+                        unit_duration_seconds = None
+                targets.append(
+                    VideoRenderTargetSpec(
+                        selector=selector,
+                        manifest_scene_id=scene_id,
+                        unit_id=unit_id,
+                        source_cut_ids=list(source_cut_ids),
+                        source_selectors=[scene.selector for scene in source_scenes if scene.selector],
+                        source_scenes=source_scenes,
+                        video_tool=_as_opt_str(video_generation.get("tool")) if isinstance(video_generation, dict) else None,
+                        video_input_image=_as_opt_str(video_generation.get("input_image")) if isinstance(video_generation, dict) else None,
+                        video_first_frame=_as_opt_str(video_generation.get("first_frame")) if isinstance(video_generation, dict) else None,
+                        video_last_frame=_as_opt_str(video_generation.get("last_frame")) if isinstance(video_generation, dict) else None,
+                        video_motion_prompt=_as_opt_str(video_generation.get("motion_prompt")) if isinstance(video_generation, dict) else None,
+                        video_output=_as_opt_str(video_generation.get("output")) if isinstance(video_generation, dict) else None,
+                        video_applied_request_ids=_ensure_str_list(video_generation.get("applied_request_ids")) if isinstance(video_generation, dict) else [],
+                        duration_seconds=unit_duration_seconds,
+                        timestamp=source_scenes[0].timestamp if source_scenes else _as_opt_str(raw_scene.get("timestamp")),
+                        reference_id=source_scenes[0].reference_id if source_scenes else None,
+                    )
+                )
+
+            missing_cut_ids = sorted(set(non_deleted_by_cut_id.keys()) - set(ownership.keys()))
+            if missing_cut_ids:
+                issues.append(f"scene{scene_id}: non-deleted cuts missing from render_units: {missing_cut_ids}")
+            continue
+
+        for scene in scene_nodes:
+            if _scene_is_deleted(scene):
+                continue
+            targets.append(
+                VideoRenderTargetSpec(
+                    selector=scene.selector or make_scene_cut_selector(scene.manifest_scene_id, scene.manifest_cut_id),
+                    manifest_scene_id=scene.manifest_scene_id,
+                    unit_id=None,
+                    source_cut_ids=[scene.manifest_cut_id] if scene.manifest_cut_id is not None else [],
+                    source_selectors=[scene.selector] if scene.selector else [],
+                    source_scenes=[scene],
+                    video_tool=scene.video_tool,
+                    video_input_image=scene.video_input_image,
+                    video_first_frame=scene.video_first_frame,
+                    video_last_frame=scene.video_last_frame,
+                    video_motion_prompt=scene.video_motion_prompt,
+                    video_output=scene.video_output,
+                    video_applied_request_ids=list(scene.video_applied_request_ids or []),
+                    duration_seconds=scene.duration_seconds,
+                    timestamp=scene.timestamp,
+                    reference_id=scene.reference_id,
+                )
+            )
+
+    if issues:
+        raise SystemExit("Render unit contract validation failed:\n- " + "\n- ".join(issues))
+    return targets
+
+
+def _video_target_matches_filter(target: VideoRenderTargetSpec, scene_filter: set[str] | None) -> bool:
+    tokens = set(
+        scene_selector_tokens(
+            operational_scene_id=target.selector,
+            manifest_scene_id=target.manifest_scene_id,
+            reference_id=target.reference_id,
+        )
+    )
+    tokens.add(target.selector)
+    tokens.update(target.source_selectors)
+    tokens.update(str(cut_id) for cut_id in target.source_cut_ids if str(cut_id).strip())
+    for cut_id in target.source_cut_ids:
+        if str(cut_id).strip():
+            tokens.add(make_scene_cut_selector(target.manifest_scene_id, cut_id))
+    return selector_matches(tokens, scene_filter)
 
 
 def _should_generate_story_still_by_plan(scene: SceneSpec, allowed_modes: set[str]) -> bool:
@@ -1265,6 +1658,7 @@ def _generate_single_image_scene(
     gemini_client: GeminiClient | None,
     seadream_client: SeaDreamClient | None,
 ) -> None:
+    _validate_image_execution_lane(scene)
     tool = normalize_tool_name(scene.image_tool)
     out_path = resolve_path(base_dir, scene.image_output)
     if not out_path:
@@ -1290,10 +1684,14 @@ def _generate_single_image_scene(
         dry_run=bool(args.dry_run),
         scene_selector=str(scene.selector or scene.scene_id),
     )
+    execution_lane = _effective_image_execution_lane(scene)
+
+    if tool in REFERENCE_DRIVEN_IMAGE_TOOLS and execution_lane == NO_REFERENCE_IMAGE_EXECUTION_LANE:
+        raise SystemExit(_no_reference_image_lane_error(scene=scene, tool=tool))
 
     is_char_ref = bool(out_path and _is_character_ref_path(out_path))
 
-    if tool in {"google_nanobanana_2", "nanobanana_2"}:
+    if tool in {"google_nanobanana_2", "nanobanana_2", "gemini_3_1_flash_image", "gemini3_1_flash_image"}:
         prefix = (args.image_prompt_prefix or "").strip()
         suffix = (args.image_prompt_suffix or "").strip()
         prompt = scene.image_prompt.strip()
@@ -1551,6 +1949,106 @@ def _generate_image_scenes_with_dependencies(
                 selector = in_flight.pop(future)
                 future.result()
                 completed.add(selector)
+
+
+def _generate_single_audio_scene(
+    *,
+    scene: SceneSpec,
+    base_dir: Path,
+    args: Any,
+    log_dir: Path,
+    elevenlabs_client: ElevenLabsClient | None,
+) -> None:
+    if args.skip_audio or not scene.narration_output:
+        return
+
+    dur = int(scene.duration_seconds) if scene.duration_seconds is not None else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+    out_path = resolve_path(base_dir, scene.narration_output)
+    if not out_path:
+        raise SystemExit(f"scene{scene.scene_id}: missing narration output path")
+
+    tool = normalize_tool_name((args.override_narration_tool or "").strip() or scene.narration_tool)
+    if tool == "elevenlabs":
+        narration_source = scene.narration_tts_text or scene.narration_text
+        if not narration_source:
+            raise SystemExit(f"scene{scene.scene_id}: missing narration text for ElevenLabs TTS")
+        tts_text = narration_source.strip()
+        tprefix = (args.tts_prompt_prefix or "").strip()
+        tsuffix = (args.tts_prompt_suffix or "").strip()
+        if tprefix:
+            tts_text = tprefix + "\n\n" + tts_text
+        if tsuffix:
+            tts_text = tts_text + "\n\n" + tsuffix
+        normalize_dur = dur if scene.narration_normalize_to_scene_duration else None
+        generate_elevenlabs_tts(
+            client=elevenlabs_client,
+            voice_id=str((args.elevenlabs_voice_id or DEFAULT_ELEVENLABS_VOICE_ID)),
+            model_id=args.elevenlabs_model_id or "eleven_v3",
+            output_format=args.elevenlabs_output_format or "mp3_44100_128",
+            text=tts_text,
+            out_path=out_path,
+            duration_seconds=normalize_dur,
+            force=args.force,
+            request_log_path=log_dir / f"scene{scene.scene_id}_tts_request.json",
+            dry_run=args.dry_run,
+        )
+        return
+
+    if tool in {"macos_say", "say"}:
+        narration_source = scene.narration_tts_text or scene.narration_text
+        if not narration_source:
+            raise SystemExit(f"scene{scene.scene_id}: missing narration text for macos_say TTS")
+        tts_text = narration_source.strip()
+        tprefix = (args.tts_prompt_prefix or "").strip()
+        tsuffix = (args.tts_prompt_suffix or "").strip()
+        if tprefix:
+            tts_text = tprefix + "\n\n" + tts_text
+        if tsuffix:
+            tts_text = tts_text + "\n\n" + tsuffix
+        generate_macos_say_tts(
+            text=tts_text,
+            out_path=out_path,
+            voice=(args.macos_say_voice or "").strip() or None,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+        return
+
+    if tool in {"silent", "tbd", ""}:
+        if args.dry_run:
+            print(f"[dry-run] AUDIO {out_path} <- placeholder (tool={scene.narration_tool})")
+        else:
+            _ffmpeg_write_silence_mp3(out_path, dur, args.force)
+        return
+
+    raise SystemExit(f"scene{scene.scene_id}: unsupported narration tool: {scene.narration_tool}")
+
+
+def _generate_audio_scenes_in_parallel(
+    *,
+    audio_scenes: list[SceneSpec],
+    audio_max_concurrency: int,
+    base_dir: Path,
+    args: Any,
+    log_dir: Path,
+    elevenlabs_client: ElevenLabsClient | None,
+) -> None:
+    if not audio_scenes:
+        return
+    with ThreadPoolExecutor(max_workers=audio_max_concurrency) as executor:
+        futures = [
+            executor.submit(
+                _generate_single_audio_scene,
+                scene=scene,
+                base_dir=base_dir,
+                args=args,
+                log_dir=log_dir,
+                elevenlabs_client=elevenlabs_client,
+            )
+            for scene in audio_scenes
+        ]
+        for future in futures:
+            future.result()
 
 
 def _merge_refs(existing: list[str], extra: list[str], *, exclude: str | None = None) -> list[str]:
@@ -2067,7 +2565,11 @@ def validate_scene_reference_variant_ids(
 
 
 def validate_scene_narration(
-    *, scenes: list[SceneSpec], require: bool, scene_filter: set[str] | None
+    *,
+    scenes: list[SceneSpec],
+    require: bool,
+    scene_filter: set[str] | None,
+    video_participating_selectors: set[str] | None = None,
 ) -> None:
     if not require:
         return
@@ -2076,15 +2578,11 @@ def validate_scene_narration(
             continue
         if _scene_is_deleted(scene):
             continue
-        # Narration is required only for scenes/cuts that participate in video generation.
-        if not scene.video_tool and not scene.video_output:
+        if video_participating_selectors is not None:
+            if scene.selector not in video_participating_selectors:
+                continue
+        elif not scene.video_tool and not scene.video_output:
             continue
-
-        if not scene.narration_output:
-            raise SystemExit(
-                f"scene{scene.scene_id}: missing audio.narration.output (required). "
-                "To intentionally generate assets without narration, pass --skip-audio."
-            )
 
         tool = normalize_tool_name(scene.narration_tool)
         if not tool:
@@ -2106,6 +2604,11 @@ def validate_scene_narration(
                     "audio.narration.silence_contract.kind and reason."
                 )
             continue
+        if not scene.narration_output:
+            raise SystemExit(
+                f"scene{scene.scene_id}: missing audio.narration.output (required). "
+                "To intentionally generate assets without narration, pass --skip-audio."
+            )
         if tool == "elevenlabs" and not (narration_source and narration_source.strip()):
             raise SystemExit(
                 f"scene{scene.scene_id}: missing audio.narration.tts_text/text for ElevenLabs (required). "
@@ -2423,16 +2926,26 @@ def generate_elevenlabs_tts(
     if client is None:
         raise SystemExit("ElevenLabs client not configured (missing ELEVENLABS_API_KEY).")
 
-    try:
-        audio = client.tts(
-            text=text,
-            voice_id=voice_id,
-            model_id=model_id,
-            output_format=output_format,
-            voice_settings=payload["voice_settings"],
-        )
-    except HttpError as e:
-        raise SystemExit(str(e)) from e
+    audio: bytes | None = None
+    for attempt in range(5):
+        try:
+            audio = client.tts(
+                text=text,
+                voice_id=voice_id,
+                model_id=model_id,
+                output_format=output_format,
+                voice_settings=payload["voice_settings"],
+            )
+            break
+        except HttpError as e:
+            body = (e.body or "").lower()
+            if e.status == 429 and "concurrent_limit_exceeded" in body and attempt < 4:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise SystemExit(str(e)) from e
+
+    if audio is None:
+        raise SystemExit("ElevenLabs TTS failed without returning audio.")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
         tmp_path = Path(tmp.name)
@@ -2855,6 +3368,23 @@ def generate_kling_video(
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(json.dumps({"submit": submit, "operation": op}, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary_path = log_path.with_name(log_path.stem + "_credit_summary.json")
+        summary_path.write_text(
+            json.dumps(
+                _extract_kling_credit_summary(
+                    submit=submit,
+                    operation=op,
+                    model=model,
+                    duration_seconds=duration_seconds,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    output=str(out_path),
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     if client.is_failed_operation(op):
         raise SystemExit(f"Kling operation failed: {json.dumps(op, ensure_ascii=False)}")
@@ -2864,6 +3394,97 @@ def generate_kling_video(
         client.download_to_file(uri=video_uri, out_path=out_path)
     except (HttpError, ValueError) as e:
         raise SystemExit(str(e)) from e
+
+
+def _extract_kling_credit_summary(
+    *,
+    submit: dict[str, Any],
+    operation: dict[str, Any],
+    model: str,
+    duration_seconds: int,
+    aspect_ratio: str,
+    resolution: str,
+    output: str,
+) -> dict[str, Any]:
+    task_result = None
+    for path in (
+        "data.task_result",
+        "task_result",
+        "data.result",
+        "result",
+    ):
+        value = _lookup_json_path(operation, path)
+        if isinstance(value, dict):
+            task_result = value
+            break
+
+    final_unit_deduction = None
+    for path in (
+        "data.task_result.final_unit_deduction",
+        "task_result.final_unit_deduction",
+        "data.final_unit_deduction",
+        "final_unit_deduction",
+    ):
+        value = _lookup_json_path(operation, path)
+        if value not in (None, ""):
+            final_unit_deduction = value
+            break
+
+    task_id = None
+    for path in ("data.task_id", "task_id", "data.id", "id"):
+        value = _lookup_json_path(submit, path)
+        if value not in (None, ""):
+            task_id = value
+            break
+    if task_id in (None, ""):
+        for path in ("data.task_id", "task_id", "data.id", "id"):
+            value = _lookup_json_path(operation, path)
+            if value not in (None, ""):
+                task_id = value
+                break
+
+    status = None
+    for path in ("data.task_status", "task_status", "data.status", "status"):
+        value = _lookup_json_path(operation, path)
+        if value not in (None, ""):
+            status = value
+            break
+
+    return {
+        "provider": "kling",
+        "model": model,
+        "duration_seconds": int(duration_seconds),
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+        "output": output,
+        "task_id": task_id,
+        "status": status,
+        "final_unit_deduction": final_unit_deduction,
+        "task_result": task_result,
+    }
+
+
+def _lookup_json_path(data: Any, path: str) -> Any:
+    current: Any = data
+    for raw_part in str(path or "").split("."):
+        part = raw_part.strip()
+        if not part:
+            return None
+        if isinstance(current, list):
+            if not part.isdigit():
+                return None
+            idx = int(part)
+            if idx < 0 or idx >= len(current):
+                return None
+            current = current[idx]
+            continue
+        if isinstance(current, dict):
+            if part not in current:
+                return None
+            current = current.get(part)
+            continue
+        return None
+    return current
 
 
 def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -3022,7 +3643,14 @@ def normalize_tool_name(tool: str | None) -> str:
     # Safety: treat Veo tool names as Kling to avoid accidental paid Google video calls.
     if normalized in {"google_veo_3_1", "veo", "veo_3_1", "veo3", "veo_3"}:
         return "kling_3_0_omni"
-    if normalized in {"google_nanobanana_pro", "nanobanana_pro", "google_nanobanana_2", "nanobanana_2"}:
+    if normalized in {
+        "google_nanobanana_2",
+        "nanobanana_2",
+        "gemini_3_1_flash_image",
+        "gemini3_1_flash_image",
+        "gemini_3.1_flash_image",
+        "gemini-3.1-flash-image",
+    }:
         return "google_nanobanana_2"
     return normalized
 
@@ -3147,6 +3775,32 @@ def validate_human_change_requests(*, manifest: dict[str, Any], scene_filter: se
                     if target_asset_id and target_asset_id not in known_asset_ids:
                         issues.append(f"{selector}:{asset_id}: reference_usage_target_missing")
 
+        render_units = scene.get("render_units")
+        if isinstance(render_units, list):
+            for raw_unit in render_units:
+                if not isinstance(raw_unit, dict):
+                    continue
+                unit_id = normalize_dotted_id(raw_unit.get("unit_id"))
+                selector = _render_unit_selector(scene_id, unit_id) if unit_id is not None else f"scene{scene_id}_unit<missing>"
+                source_cut_ids = [
+                    cut_id
+                    for cut_id in (normalize_dotted_id(value) for value in _ensure_str_list(raw_unit.get("source_cut_ids")))
+                    if cut_id is not None
+                ]
+                if scene_filter:
+                    filter_tokens = {selector, scene_id, _node_selector(scene_id)}
+                    filter_tokens.update(_node_selector(scene_id, cut_id) for cut_id in source_cut_ids)
+                    if not selector_matches(filter_tokens, scene_filter):
+                        continue
+                video_generation = raw_unit.get("video_generation") if isinstance(raw_unit.get("video_generation"), dict) else {}
+                applied = _ensure_str_list(video_generation.get("applied_request_ids")) if isinstance(video_generation, dict) else []
+                unknown_applied = [request_id for request_id in applied if request_id not in known_request_ids]
+                if unknown_applied:
+                    issues.append(
+                        f"{selector}: unknown human_change_request id(s) in render_units.video_generation: "
+                        + ", ".join(unknown_applied)
+                    )
+
     if issues:
         raise SystemExit("Human review contract validation failed:\n- " + "\n- ".join(issues))
 
@@ -3202,6 +3856,32 @@ def _compose_final_video_prompt(scene: SceneSpec, *, prefix: str, suffix: str) -
     return prompt.strip()
 
 
+def _compose_final_video_prompt_for_target(
+    target: VideoRenderTargetSpec,
+    *,
+    prefix: str,
+    suffix: str,
+) -> str:
+    prompt_parts: list[str] = []
+    if target.video_motion_prompt:
+        prompt_parts.append(target.video_motion_prompt.strip())
+    image_prompts = _video_target_image_prompts(target)
+    if len(image_prompts) == 1:
+        prompt_parts.append("シーン説明:\n" + image_prompts[0])
+    elif len(image_prompts) > 1:
+        prompt_parts.append(
+            "\n\n".join(
+                f"補助シーン説明{idx}:\n{prompt}" for idx, prompt in enumerate(image_prompts, start=1)
+            )
+        )
+    prompt = "\n\n".join(prompt_parts).strip()
+    if prefix:
+        prompt = prefix + "\n\n" + prompt if prompt else prefix
+    if suffix:
+        prompt = prompt + "\n\n" + suffix if prompt else suffix
+    return prompt.strip()
+
+
 def _write_request_preview_md(
     *,
     out_path: Path,
@@ -3224,11 +3904,32 @@ def _write_request_preview_md(
             lines.append(f"- generation_status: `{entry['generation_status']}`")
         if entry.get("plan_source"):
             lines.append(f"- plan_source: `{entry['plan_source']}`")
+        if entry.get("asset_id"):
+            lines.append(f"- asset_id: `{entry['asset_id']}`")
+        if entry.get("asset_type"):
+            lines.append(f"- asset_type: `{entry['asset_type']}`")
+        if entry.get("execution_lane"):
+            lines.append(f"- execution_lane: `{entry['execution_lane']}`")
+        if entry.get("reference_count") is not None:
+            lines.append(f"- reference_count: `{entry['reference_count']}`")
+        if entry.get("review_status"):
+            lines.append(f"- review_status: `{entry['review_status']}`")
         lines.append(f"- output: `{entry['output']}`")
+        if entry.get("duration_seconds") is not None:
+            lines.append(f"- duration_seconds: `{entry['duration_seconds']}`")
+        if entry.get("aspect_ratio"):
+            lines.append(f"- aspect_ratio: `{entry['aspect_ratio']}`")
+        if entry.get("resolution"):
+            lines.append(f"- resolution: `{entry['resolution']}`")
         if entry.get("first_frame"):
             lines.append(f"- first_frame: `{entry['first_frame']}`")
         if entry.get("last_frame"):
             lines.append(f"- last_frame: `{entry['last_frame']}`")
+        source_cuts = entry.get("source_cuts") or []
+        if source_cuts:
+            lines.append("- source_cuts:")
+            for source_cut in source_cuts:
+                lines.append(f"  - `{source_cut}`")
         source_requests = entry.get("source_requests") or []
         if source_requests:
             lines.append("- source_requests:")
@@ -3462,6 +4163,11 @@ def main() -> None:
     parser.add_argument("--skip-videos", action="store_true")
     parser.add_argument("--skip-audio", action="store_true")
     parser.add_argument(
+        "--ignore-duration-fit-gate",
+        action="store_true",
+        help="Allow image/video generation even if review.duration_fit.status=changes_requested.",
+    )
+    parser.add_argument(
         "--skip-image-prompt-review",
         action="store_true",
         help="Skip the pre-image-generation story consistency review gate.",
@@ -3570,6 +4276,12 @@ def main() -> None:
         type=int,
         default=10,
         help="Maximum number of image generation tasks to run in parallel after dependency filtering (capped at 10).",
+    )
+    parser.add_argument(
+        "--audio-max-concurrency",
+        type=int,
+        default=3,
+        help="Maximum number of audio generation tasks to run in parallel (capped at 12).",
     )
 
     # SeaDream (Seedream 4.5, OpenAI Images compatible)
@@ -3691,7 +4403,7 @@ def main() -> None:
     parser.add_argument("--elevenlabs-api-key", default=_env("ELEVENLABS_API_KEY"))
     parser.add_argument("--elevenlabs-api-base", default=_env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1"))
     parser.add_argument("--elevenlabs-voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
-    parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2"))
+    parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--elevenlabs-output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
     parser.add_argument("--tts-prompt-prefix", default="", help="Optional text prepended to every TTS input.")
     parser.add_argument("--tts-prompt-suffix", default="", help="Optional text appended to every TTS input.")
@@ -3731,9 +4443,49 @@ def main() -> None:
         raise SystemExit(f"Manifest not found: {manifest_path}")
 
     base_dir = Path(args.base_dir) if args.base_dir else manifest_path.parent
+    state_path = base_dir / "state.txt"
+    if args.skip_audio and not (args.skip_images and args.skip_videos) and not args.ignore_duration_fit_gate and state_path.exists():
+        state = parse_state_file(state_path)
+        if state.get("review.duration_fit.status", "").strip().lower() == "changes_requested":
+            raise SystemExit(
+                "Audio duration gate is still requesting scene/narration expansion.\n"
+                f"  Review prompts:\n"
+                f"  - {base_dir / 'logs/review/duration_scene.subagent_prompt.md'}\n"
+                f"  - {base_dir / 'logs/review/duration_narration.subagent_prompt.md'}\n"
+                "  Resolve the duration-fit review before generating images/videos, or pass --ignore-duration-fit-gate."
+            )
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
 
-    if not args.skip_images and not args.skip_image_prompt_review:
+    md = manifest_path.read_text(encoding="utf-8")
+    yaml_text = extract_yaml_block(md)
+    manifest_data = yaml.safe_load(yaml_text) if yaml is not None else {}
+    if not isinstance(manifest_data, dict):
+        manifest_data = {}
+    manifest_phase = str(manifest_data.get("manifest_phase") or "production").strip().lower() or "production"
+    if manifest_phase not in {"skeleton", "production"}:
+        raise SystemExit(f"Unsupported manifest_phase: {manifest_phase!r} (expected skeleton|production)")
+
+    metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
+    aspect_ratio = (
+        args.image_aspect_ratio
+        or args.video_aspect_ratio
+        or (metadata.get("aspect_ratio") if isinstance(metadata.get("aspect_ratio"), str) else None)
+        or "9:16"
+    )
+    experience = str(metadata.get("experience") or "").strip().lower()
+    image_request_filename = "asset_generation_requests.md" if experience.startswith("asset_stage") else "image_generation_requests.md"
+    is_asset_stage_request = image_request_filename == "asset_generation_requests.md"
+    production_stage_generation_requested = (
+        (not args.skip_videos) or ((not args.skip_images) and not is_asset_stage_request)
+    )
+    if production_stage_generation_requested and manifest_phase != "production":
+        raise SystemExit(
+            "Manifest is still in skeleton phase.\n"
+            "  Run narration review / TTS / duration sync first, then promote video_manifest.md to manifest_phase=production\n"
+            "  before generating scene-implementation images or videos."
+        )
+
+    if not args.skip_images and not args.skip_image_prompt_review and manifest_phase == "production" and not is_asset_stage_request:
         review_cmd = [
             sys.executable,
             str(REPO_ROOT / "scripts/review-image-prompt-story-consistency.py"),
@@ -3760,13 +4512,6 @@ def main() -> None:
             "--fail-on-findings",
         ]
         subprocess.run(review_cmd, check=True)
-
-    md = manifest_path.read_text(encoding="utf-8")
-    yaml_text = extract_yaml_block(md)
-    manifest_data = yaml.safe_load(yaml_text) if yaml is not None else {}
-    if not isinstance(manifest_data, dict):
-        manifest_data = {}
-    metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
     script_visual_beat_map: dict[str, str] = {}
     script_path = base_dir / "script.md"
     if script_path.exists():
@@ -3880,6 +4625,13 @@ def main() -> None:
         scene_filter=scene_filter,
     )
     human_change_request_lookup = _build_human_change_request_lookup(manifest_data)
+    video_render_targets = _build_video_render_targets(manifest=manifest_data, scenes=scenes)
+    video_participating_selectors = {
+        selector
+        for target in video_render_targets
+        for selector in target.source_selectors
+        if selector
+    }
 
     validate_scene_character_ids(
         scenes=scenes,
@@ -3908,17 +4660,8 @@ def main() -> None:
         scenes=scenes,
         require=not bool(args.skip_audio),
         scene_filter=scene_filter,
+        video_participating_selectors=video_participating_selectors,
     )
-
-    aspect_ratio = (
-        args.image_aspect_ratio
-        or args.video_aspect_ratio
-        or (metadata.get("aspect_ratio") if isinstance(metadata.get("aspect_ratio"), str) else None)
-        or "9:16"
-    )
-
-    experience = str(metadata.get("experience") or "").strip().lower()
-    image_request_filename = "asset_generation_requests.md" if experience.startswith("asset_stage") else "image_generation_requests.md"
 
     log_dir = Path(args.log_dir) if args.log_dir else (base_dir / "logs/providers")
 
@@ -3948,25 +4691,25 @@ def main() -> None:
     needs_gemini_video = (
         not args.skip_videos
         and any(
-            normalize_tool_name(scene.video_tool) == "google_veo_3_1"
-            and scene.video_output
-            and _scene_matches_filter(scene, scene_filter)
-            for scene in scenes
+            normalize_tool_name(target.video_tool) == "google_veo_3_1"
+            and target.video_output
+            and _video_target_matches_filter(target, scene_filter)
+            for target in video_render_targets
         )
     )
     needs_kling_video = (
         not args.skip_videos
         and any(
-            normalize_tool_name(scene.video_tool) in {"kling_3_0", "kling", "kling_3_0_omni", "kling_omni", "kling-omni"}
-            and scene.video_output
-            and _scene_matches_filter(scene, scene_filter)
-            for scene in scenes
+            normalize_tool_name(target.video_tool) in {"kling_3_0", "kling", "kling_3_0_omni", "kling_omni", "kling-omni"}
+            and target.video_output
+            and _video_target_matches_filter(target, scene_filter)
+            for target in video_render_targets
         )
     )
     needs_seedance_video = (
         not args.skip_videos
         and any(
-            normalize_tool_name(scene.video_tool)
+            normalize_tool_name(target.video_tool)
             in {
                 "seedance",
                 "byteplus_seedance",
@@ -3976,9 +4719,9 @@ def main() -> None:
                 "seedream_video",
                 "see_dream",
             }
-            and scene.video_output
-            and _scene_matches_filter(scene, scene_filter)
-            for scene in scenes
+            and target.video_output
+            and _video_target_matches_filter(target, scene_filter)
+            for target in video_render_targets
         )
     )
 
@@ -4148,110 +4891,129 @@ def main() -> None:
     image_preview_entries: list[dict[str, Any]] = []
     image_prefix = (args.image_prompt_prefix or "").strip()
     image_suffix = (args.image_prompt_suffix or "").strip()
-    include_image_source_requests = image_request_filename == "image_generation_requests.md"
-    image_request_scenes: list[SceneSpec] = []
-    for scene in scenes:
-        if not _scene_matches_filter(scene, scene_filter):
-            continue
-        if _scene_is_deleted(scene):
-            continue
-        if not scene.image_output or not scene.image_prompt:
-            continue
-        image_request_scenes.append(scene)
-    for scene in image_request_scenes:
-        out_path = resolve_path(base_dir, scene.image_output)
-        selector = scene.selector or make_scene_cut_selector(scene.scene_id)
-        request_visual_beat = ""
-        if _scene_request_should_prefer_script_visual_beat(scene):
-            request_visual_beat = script_visual_beat_map.get(selector, "")
-        source_requests: list[dict[str, str]] = []
-        if include_image_source_requests and scene.image_applied_request_ids:
-            source_requests = _resolve_source_requests(
-                request_ids=list(scene.image_applied_request_ids),
-                request_lookup=human_change_request_lookup,
-                selector=selector,
-                section_name="image_generation.applied_request_ids",
+    written_request_paths: list[Path] = []
+    if manifest_phase == "production" or is_asset_stage_request:
+        include_image_source_requests = image_request_filename == "image_generation_requests.md"
+        image_request_scenes: list[SceneSpec] = []
+        for scene in scenes:
+            if not _scene_matches_filter(scene, scene_filter):
+                continue
+            if _scene_is_deleted(scene):
+                continue
+            if not scene.image_output or not scene.image_prompt:
+                continue
+            image_request_scenes.append(scene)
+        for scene in image_request_scenes:
+            out_path = resolve_path(base_dir, scene.image_output)
+            selector = scene.selector or make_scene_cut_selector(scene.scene_id)
+            request_visual_beat = ""
+            if _scene_request_should_prefer_script_visual_beat(scene):
+                request_visual_beat = script_visual_beat_map.get(selector, "")
+            source_requests: list[dict[str, str]] = []
+            if include_image_source_requests and scene.image_applied_request_ids:
+                source_requests = _resolve_source_requests(
+                    request_ids=list(scene.image_applied_request_ids),
+                    request_lookup=human_change_request_lookup,
+                    selector=selector,
+                    section_name="image_generation.applied_request_ids",
+                )
+            image_preview_entries.append(
+                {
+                    "selector": selector,
+                    "tool": normalize_tool_name(scene.image_tool) or "",
+                    "still_mode": scene.still_image_plan_mode or "",
+                    "generation_status": _effective_still_generation_status(scene, base_dir=base_dir),
+                    "plan_source": scene.still_image_plan_source or "",
+                    "asset_id": scene.image_asset_id or "",
+                    "asset_type": scene.image_asset_type or "",
+                    "execution_lane": _effective_image_execution_lane(scene),
+                    "reference_count": len(list(scene.image_references or [])),
+                    "review_status": scene.image_review_status or "",
+                    "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                    "source_requests": source_requests,
+                    "references": list(scene.image_references or []),
+                    "prompt": _compose_final_image_prompt(
+                        scene,
+                        prefix=image_prefix,
+                        suffix=image_suffix,
+                        request_visual_beat=request_visual_beat,
+                    ),
+                }
             )
-        image_preview_entries.append(
-            {
-                "selector": selector,
-                "tool": normalize_tool_name(scene.image_tool) or "",
-                "still_mode": scene.still_image_plan_mode or "",
-                "generation_status": _effective_still_generation_status(scene, base_dir=base_dir),
-                "plan_source": scene.still_image_plan_source or "",
-                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
-                "source_requests": source_requests,
-                "references": list(scene.image_references or []),
-                "prompt": _compose_final_image_prompt(
-                    scene,
-                    prefix=image_prefix,
-                    suffix=image_suffix,
-                    request_visual_beat=request_visual_beat,
-                ),
-            }
+        _write_request_preview_md(
+            out_path=base_dir / image_request_filename,
+            title="Asset Generation Requests" if image_request_filename == "asset_generation_requests.md" else "Image Generation Requests",
+            entries=image_preview_entries,
+            topic=str(metadata.get("topic") or ""),
         )
-    _write_request_preview_md(
-        out_path=base_dir / image_request_filename,
-        title="Asset Generation Requests" if image_request_filename == "asset_generation_requests.md" else "Image Generation Requests",
-        entries=image_preview_entries,
-        topic=str(metadata.get("topic") or ""),
-    )
+        written_request_paths.append(base_dir / image_request_filename)
 
-    video_scenes_preview: list[SceneSpec] = []
-    for s in scenes:
-        if not _scene_matches_filter(s, scene_filter):
-            continue
-        if _scene_is_deleted(s):
-            continue
-        if args.skip_videos or not s.video_output or not (s.video_motion_prompt or s.image_prompt):
-            continue
-        video_scenes_preview.append(s)
+    if manifest_phase == "production":
+        video_targets_preview: list[VideoRenderTargetSpec] = []
+        for target in video_render_targets:
+            if not _video_target_matches_filter(target, scene_filter):
+                continue
+            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
+                continue
+            video_targets_preview.append(target)
 
-    video_prefix = (args.video_prompt_prefix or "").strip()
-    video_suffix = (args.video_prompt_suffix or "").strip()
-    video_preview_entries: list[dict[str, Any]] = []
-    for scene in video_scenes_preview:
-        out_path = resolve_path(base_dir, scene.video_output)
-        first_frame = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
-        if first_frame is None and scene.image_output:
-            first_frame = resolve_path(base_dir, scene.image_output)
-        last_frame = resolve_path(base_dir, scene.video_last_frame)
-        source_requests: list[dict[str, str]] = []
-        if scene.video_applied_request_ids:
-            source_requests = _resolve_source_requests(
-                request_ids=list(scene.video_applied_request_ids),
-                request_lookup=human_change_request_lookup,
-                selector=scene.selector or make_scene_cut_selector(scene.scene_id),
-                section_name="video_generation.applied_request_ids",
+        video_prefix = (args.video_prompt_prefix or "").strip()
+        video_suffix = (args.video_prompt_suffix or "").strip()
+        video_preview_entries: list[dict[str, Any]] = []
+        for target in video_targets_preview:
+            out_path = resolve_path(base_dir, target.video_output)
+            first_frame = _video_target_first_frame_path(base_dir, target)
+            last_frame = _video_target_last_frame_path(base_dir, target)
+            duration_preview = (
+                int(target.duration_seconds)
+                if target.duration_seconds is not None
+                else duration_from_timestamp_range(target.timestamp, args.default_scene_seconds)
             )
-        video_preview_entries.append(
-            {
-                "selector": scene.selector or make_scene_cut_selector(scene.scene_id),
-                "tool": normalize_tool_name(scene.video_tool) or "",
-                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
-                "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
-                "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
-                "source_requests": source_requests,
-                "references": list(scene.image_references or []),
-                "prompt": _compose_final_video_prompt(scene, prefix=video_prefix, suffix=video_suffix),
-            }
+            source_requests: list[dict[str, str]] = []
+            if target.video_applied_request_ids:
+                source_requests = _resolve_source_requests(
+                    request_ids=list(target.video_applied_request_ids),
+                    request_lookup=human_change_request_lookup,
+                    selector=target.selector,
+                    section_name="video_generation.applied_request_ids",
+                )
+            video_preview_entries.append(
+                {
+                    "selector": target.selector,
+                    "tool": normalize_tool_name(target.video_tool) or "",
+                    "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                    "duration_seconds": duration_preview,
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": args.video_resolution,
+                    "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
+                    "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
+                    "source_cuts": list(target.source_selectors),
+                    "source_requests": source_requests,
+                    "references": _video_target_reference_strings(target),
+                    "prompt": _compose_final_video_prompt_for_target(target, prefix=video_prefix, suffix=video_suffix),
+                }
+            )
+        _write_request_preview_md(
+            out_path=base_dir / "video_generation_requests.md",
+            title="Video Generation Requests",
+            entries=video_preview_entries,
+            topic=str(metadata.get("topic") or ""),
         )
-    _write_request_preview_md(
-        out_path=base_dir / "video_generation_requests.md",
-        title="Video Generation Requests",
-        entries=video_preview_entries,
-        topic=str(metadata.get("topic") or ""),
-    )
-    _write_generation_exclusion_report_md(
-        out_path=base_dir / "generation_exclusion_report.md",
-        scenes=scenes,
-    )
+        _write_generation_exclusion_report_md(
+            out_path=base_dir / "generation_exclusion_report.md",
+            scenes=scenes,
+        )
+        written_request_paths.extend(
+            [
+                base_dir / "video_generation_requests.md",
+                base_dir / "generation_exclusion_report.md",
+            ]
+        )
 
     if args.materialize_request_files_only:
         write_run_index(base_dir)
-        print(f"[materialized] {base_dir / image_request_filename}")
-        print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
-        print(f"[materialized] {base_dir / 'generation_exclusion_report.md'}")
+        for written_path in written_request_paths:
+            print(f"[materialized] {written_path}")
         return
 
     image_max_concurrency = max(1, min(int(args.image_max_concurrency or 1), 10))
@@ -4268,81 +5030,80 @@ def main() -> None:
     )
 
     # Pass 2: videos
-    video_scenes_in_order: list[SceneSpec] = []
-    for s in scenes:
-        if not _scene_matches_filter(s, scene_filter):
-            continue
-        if _scene_is_deleted(s):
-            continue
-        if args.skip_videos or not s.video_output or not (s.video_motion_prompt or s.image_prompt):
-            continue
-        video_scenes_in_order.append(s)
+    video_targets_in_order: list[VideoRenderTargetSpec] = []
+    if manifest_phase == "production":
+        for target in video_render_targets:
+            if not _video_target_matches_filter(target, scene_filter):
+                continue
+            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
+                continue
+            video_targets_in_order.append(target)
 
-    video_prefix = (args.video_prompt_prefix or "").strip()
-    video_suffix = (args.video_prompt_suffix or "").strip()
-    video_preview_entries: list[dict[str, Any]] = []
-    for scene in video_scenes_in_order:
-        out_path = resolve_path(base_dir, scene.video_output)
-        first_frame = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
-        if first_frame is None and scene.image_output:
-            first_frame = resolve_path(base_dir, scene.image_output)
-        last_frame = resolve_path(base_dir, scene.video_last_frame)
-        video_preview_entries.append(
-            {
-                "selector": scene.selector or make_scene_cut_selector(scene.scene_id),
-                "tool": normalize_tool_name(scene.video_tool) or "",
-                "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
-                "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
-                "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
-                "references": list(scene.image_references or []),
-                "prompt": _compose_final_video_prompt(scene, prefix=video_prefix, suffix=video_suffix),
-            }
+        video_prefix = (args.video_prompt_prefix or "").strip()
+        video_suffix = (args.video_prompt_suffix or "").strip()
+        video_preview_entries: list[dict[str, Any]] = []
+        for target in video_targets_in_order:
+            out_path = resolve_path(base_dir, target.video_output)
+            first_frame = _video_target_first_frame_path(base_dir, target)
+            last_frame = _video_target_last_frame_path(base_dir, target)
+            duration_preview = (
+                int(target.duration_seconds)
+                if target.duration_seconds is not None
+                else duration_from_timestamp_range(target.timestamp, args.default_scene_seconds)
+            )
+            source_requests: list[dict[str, str]] = []
+            if target.video_applied_request_ids:
+                source_requests = _resolve_source_requests(
+                    request_ids=list(target.video_applied_request_ids),
+                    request_lookup=human_change_request_lookup,
+                    selector=target.selector,
+                    section_name="video_generation.applied_request_ids",
+                )
+            video_preview_entries.append(
+                {
+                    "selector": target.selector,
+                    "tool": normalize_tool_name(target.video_tool) or "",
+                    "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
+                    "duration_seconds": duration_preview,
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": args.video_resolution,
+                    "first_frame": str(first_frame.relative_to(base_dir)) if first_frame is not None else "",
+                    "last_frame": str(last_frame.relative_to(base_dir)) if last_frame is not None else "",
+                    "source_cuts": list(target.source_selectors),
+                    "source_requests": source_requests,
+                    "references": _video_target_reference_strings(target),
+                    "prompt": _compose_final_video_prompt_for_target(target, prefix=video_prefix, suffix=video_suffix),
+                }
+            )
+        _write_request_preview_md(
+            out_path=base_dir / "video_generation_requests.md",
+            title="Video Generation Requests",
+            entries=video_preview_entries,
+            topic=str(metadata.get("topic") or ""),
         )
-    _write_request_preview_md(
-        out_path=base_dir / "video_generation_requests.md",
-        title="Video Generation Requests",
-        entries=video_preview_entries,
-    )
 
-    if args.materialize_request_files_only:
-        write_run_index(base_dir)
-        print(f"[materialized] {base_dir / image_request_filename}")
-        print(f"[materialized] {base_dir / 'video_generation_requests.md'}")
-        return
-
-    video_scene_index_by_id: dict[str, int] = {str(s.scene_id): idx for idx, s in enumerate(video_scenes_in_order)}
+    video_target_index_by_selector: dict[str, int] = {str(target.selector): idx for idx, target in enumerate(video_targets_in_order)}
 
     prev_chain_first_frame: Path | None = None
-    for scene in scenes:
-        if not _scene_matches_filter(scene, scene_filter):
-            continue
-        if _scene_is_deleted(scene):
+    for target in video_targets_in_order:
+        if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
             continue
 
-        if args.skip_videos or not scene.video_output or not (scene.video_motion_prompt or scene.image_prompt):
-            continue
-
-        tool = normalize_tool_name(scene.video_tool)
-        out_path = resolve_path(base_dir, scene.video_output)
+        tool = normalize_tool_name(target.video_tool)
+        out_path = resolve_path(base_dir, target.video_output)
         if not out_path:
-            raise SystemExit(f"scene{scene.scene_id}: missing video output path")
+            raise SystemExit(f"{target.selector}: missing video output path")
 
-        dur = int(scene.duration_seconds) if scene.duration_seconds is not None else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
+        dur = int(target.duration_seconds) if target.duration_seconds is not None else duration_from_timestamp_range(target.timestamp, args.default_scene_seconds)
 
-        input_image = resolve_path(base_dir, scene.video_first_frame or scene.video_input_image)
-        if input_image is None and scene.image_output:
-            input_image = resolve_path(base_dir, scene.image_output)
+        input_image = _video_target_first_frame_path(base_dir, target)
         if args.chain_first_frame_from_prev_video and prev_chain_first_frame is not None:
-            # Best-effort: override the provided first_frame so the new clip starts
-            # exactly where the previous clip ended (improves mp4 concat continuity).
             input_image = prev_chain_first_frame
         elif args.chain_first_frame_from_prev_video and prev_chain_first_frame is None:
-            # If the user is regenerating only later scenes, we may have skipped the previous video generation.
-            # Don't assume contiguous numeric IDs; use manifest order to find the previous video scene.
-            idx = video_scene_index_by_id.get(str(scene.scene_id))
+            idx = video_target_index_by_selector.get(str(target.selector))
             if idx is not None and idx > 0:
-                prev_scene = video_scenes_in_order[idx - 1]
-                prev_video = resolve_path(base_dir, prev_scene.video_output)
+                prev_target = video_targets_in_order[idx - 1]
+                prev_video = resolve_path(base_dir, prev_target.video_output)
                 if prev_video and prev_video.exists() and not args.dry_run:
                     chain_frame = prev_video.with_name(prev_video.stem + "_chain_first_frame.png")
                     try:
@@ -4356,45 +5117,36 @@ def main() -> None:
                     except FileNotFoundError:
                         prev_chain_first_frame = None
         if input_image and not args.dry_run and not input_image.exists():
-            raise SystemExit(f"scene{scene.scene_id}: first frame image not found: {input_image}")
+            raise SystemExit(f"{target.selector}: first frame image not found: {input_image}")
 
         last_image: Path | None = None
         if args.enable_last_frame:
-            last_image = resolve_path(base_dir, scene.video_last_frame)
+            last_image = _video_target_last_frame_path(base_dir, target)
             if last_image and not args.dry_run and not last_image.exists():
-                raise SystemExit(f"scene{scene.scene_id}: last frame image not found: {last_image}")
+                raise SystemExit(f"{target.selector}: last frame image not found: {last_image}")
 
-        prompt_parts: list[str] = []
-        if scene.video_motion_prompt:
-            prompt_parts.append(scene.video_motion_prompt.strip())
-        if scene.image_prompt:
-            prompt_parts.append("シーン説明:\n" + scene.image_prompt.strip())
-        prompt = "\n\n".join(prompt_parts).strip()
-        vprefix = (args.video_prompt_prefix or "").strip()
-        vsuffix = (args.video_prompt_suffix or "").strip()
-        if vprefix:
-            prompt = vprefix + "\n\n" + prompt
-        if vsuffix:
-            prompt = prompt + "\n\n" + vsuffix
+        prompt = _compose_final_video_prompt_for_target(
+            target,
+            prefix=(args.video_prompt_prefix or "").strip(),
+            suffix=(args.video_prompt_suffix or "").strip(),
+        )
         if args.log_prompts:
             log_dir.mkdir(parents=True, exist_ok=True)
-            (log_dir / f"scene{scene.scene_id}_video_prompt.txt").write_text(prompt + "\n", encoding="utf-8")
+            (log_dir / f"{_video_target_log_slug(target)}_video_prompt.txt").write_text(prompt + "\n", encoding="utf-8")
 
         video_ref_paths: list[Path] = []
-        for ref_str in scene.image_references or []:
+        for ref_str in _video_target_reference_strings(target):
             ref_path = resolve_path(base_dir, ref_str)
             if not ref_path:
                 continue
             if not args.dry_run and not ref_path.exists():
-                raise SystemExit(f"scene{scene.scene_id}: reference image not found: {ref_path}")
+                raise SystemExit(f"{target.selector}: reference image not found: {ref_path}")
             video_ref_paths.append(ref_path)
 
         if args.video_reference_prefer_character_refstrips:
             non_char = [p for p in video_ref_paths if not _is_character_ref_path(p)]
             char = [p for p in video_ref_paths if _is_character_ref_path(p)]
             strips = [p for p in char if _is_character_refstrip_path(p, args.character_reference_strip_suffix)]
-            # If any strips are available, keep only strips for character references (reduces token/bandwidth and
-            # matches the intended "turnaround strip for video" workflow). Keep other non-character refs intact.
             if strips:
                 video_ref_paths = non_char + strips
 
@@ -4416,18 +5168,18 @@ def main() -> None:
                     poll_every=args.poll_every,
                     timeout_seconds=args.timeout_seconds,
                     force=args.force,
-                    log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                    log_path=log_dir / f"{_video_target_log_slug(target)}_video.json",
                     dry_run=args.dry_run,
                 )
             else:
                 if args.dry_run:
-                    print(f"[dry-run] VIDEO scene{scene.scene_id}: segments={segs} then trim_to={trim_to}")
+                    print(f"[dry-run] VIDEO {target.selector}: segments={segs} then trim_to={trim_to}")
                 else:
                     with tempfile.TemporaryDirectory() as tmpdir:
                         tmpdir_path = Path(tmpdir)
                         seg_paths: list[Path] = []
                         for idx, seg_dur in enumerate(segs, start=1):
-                            seg_out = tmpdir_path / f"scene{scene.scene_id}_seg{idx}.mp4"
+                            seg_out = tmpdir_path / f"{_video_target_log_slug(target)}_seg{idx}.mp4"
                             generate_veo_video(
                                 client=gemini_client,
                                 model=args.gemini_video_model,
@@ -4443,12 +5195,12 @@ def main() -> None:
                                 poll_every=args.poll_every,
                                 timeout_seconds=args.timeout_seconds,
                                 force=True,
-                                log_path=log_dir / f"scene{scene.scene_id}_video_seg{idx}.json",
+                                log_path=log_dir / f"{_video_target_log_slug(target)}_video_seg{idx}.json",
                                 dry_run=False,
                             )
                             seg_paths.append(seg_out)
 
-                        concat_path = tmpdir_path / f"scene{scene.scene_id}_concat.mp4"
+                        concat_path = tmpdir_path / f"{_video_target_log_slug(target)}_concat.mp4"
                         _ffmpeg_concat_videos(seg_paths, concat_path)
                         if trim_to:
                             _ffmpeg_trim_video(concat_path, out_path, int(trim_to))
@@ -4483,7 +5235,7 @@ def main() -> None:
                     poll_every=args.poll_every,
                     timeout_seconds=args.timeout_seconds,
                     force=args.force,
-                    log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                    log_path=log_dir / f"{_video_target_log_slug(target)}_video.json",
                     dry_run=args.dry_run,
                 )
             else:
@@ -4507,7 +5259,7 @@ def main() -> None:
                     poll_every=args.poll_every,
                     timeout_seconds=args.timeout_seconds,
                     force=args.force,
-                    log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                    log_path=log_dir / f"{_video_target_log_slug(target)}_video.json",
                     dry_run=args.dry_run,
                 )
         elif tool in {
@@ -4536,11 +5288,11 @@ def main() -> None:
                 poll_every=args.poll_every,
                 timeout_seconds=args.timeout_seconds,
                 force=args.force,
-                log_path=log_dir / f"scene{scene.scene_id}_video.json",
+                log_path=log_dir / f"{_video_target_log_slug(target)}_video.json",
                 dry_run=args.dry_run,
             )
         else:
-            raise SystemExit(f"scene{scene.scene_id}: unsupported video tool: {scene.video_tool}")
+            raise SystemExit(f"{target.selector}: unsupported video tool: {target.video_tool}")
 
         if args.chain_first_frame_from_prev_video:
             if args.dry_run:
@@ -4556,74 +5308,28 @@ def main() -> None:
                     )
                     prev_chain_first_frame = chain_frame
                 except FileNotFoundError:
-                    # ffmpeg missing; chaining can't proceed.
                     prev_chain_first_frame = None
 
     # Pass 3: audio (TTS)
+    audio_scenes: list[SceneSpec] = []
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
             continue
         if _scene_is_deleted(scene):
             continue
-
         if args.skip_audio or not scene.narration_output:
             continue
+        audio_scenes.append(scene)
 
-        dur = int(scene.duration_seconds) if scene.duration_seconds is not None else duration_from_timestamp_range(scene.timestamp, args.default_scene_seconds)
-        out_path = resolve_path(base_dir, scene.narration_output)
-        if not out_path:
-            raise SystemExit(f"scene{scene.scene_id}: missing narration output path")
-
-        tool = normalize_tool_name((args.override_narration_tool or "").strip() or scene.narration_tool)
-        if tool == "elevenlabs":
-            narration_source = scene.narration_tts_text or scene.narration_text
-            if not narration_source:
-                raise SystemExit(f"scene{scene.scene_id}: missing narration text for ElevenLabs TTS")
-            tts_text = narration_source.strip()
-            tprefix = (args.tts_prompt_prefix or "").strip()
-            tsuffix = (args.tts_prompt_suffix or "").strip()
-            if tprefix:
-                tts_text = tprefix + "\n\n" + tts_text
-            if tsuffix:
-                tts_text = tts_text + "\n\n" + tsuffix
-            normalize_dur = dur if scene.narration_normalize_to_scene_duration else None
-            generate_elevenlabs_tts(
-                client=elevenlabs_client,
-                voice_id=str((args.elevenlabs_voice_id or DEFAULT_ELEVENLABS_VOICE_ID)),
-                model_id=args.elevenlabs_model_id or "eleven_multilingual_v2",
-                output_format=args.elevenlabs_output_format or "mp3_44100_128",
-                text=tts_text,
-                out_path=out_path,
-                duration_seconds=normalize_dur,
-                force=args.force,
-                request_log_path=log_dir / f"scene{scene.scene_id}_tts_request.json",
-                dry_run=args.dry_run,
-            )
-        elif tool in {"macos_say", "say"}:
-            narration_source = scene.narration_tts_text or scene.narration_text
-            if not narration_source:
-                raise SystemExit(f"scene{scene.scene_id}: missing narration text for macos_say TTS")
-            tts_text = narration_source.strip()
-            tprefix = (args.tts_prompt_prefix or "").strip()
-            tsuffix = (args.tts_prompt_suffix or "").strip()
-            if tprefix:
-                tts_text = tprefix + "\n\n" + tts_text
-            if tsuffix:
-                tts_text = tts_text + "\n\n" + tsuffix
-            generate_macos_say_tts(
-                text=tts_text,
-                out_path=out_path,
-                voice=(args.macos_say_voice or "").strip() or None,
-                force=args.force,
-                dry_run=args.dry_run,
-            )
-        elif tool in {"silent", "tbd", ""}:
-            if args.dry_run:
-                print(f"[dry-run] AUDIO {out_path} <- placeholder (tool={scene.narration_tool})")
-            else:
-                _ffmpeg_write_silence_mp3(out_path, dur, args.force)
-        else:
-            raise SystemExit(f"scene{scene.scene_id}: unsupported narration tool: {scene.narration_tool}")
+    audio_max_concurrency = max(1, min(int(args.audio_max_concurrency or 1), 12))
+    _generate_audio_scenes_in_parallel(
+        audio_scenes=audio_scenes,
+        audio_max_concurrency=audio_max_concurrency,
+        base_dir=base_dir,
+        args=args,
+        log_dir=log_dir,
+        elevenlabs_client=elevenlabs_client,
+    )
 
     write_run_index(base_dir)
     print("Done.")

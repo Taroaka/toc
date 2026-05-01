@@ -203,6 +203,16 @@ human_review:
       resolution_notes: ""
 ```
 
+動画 cut の採否ルール:
+
+- `scene/cut` を動画化しない判断は、人レビューに基づく `delete_scene` / `delete_cut` だけで行う
+- `reuse_anchor` / `no_dedicated_still` / `motion chain` は image planning の圧縮表現であり、動画 cut の採否理由として使わない
+- 人レビューで削除されていない story cut は、既定で `video_generation` を持つ
+- つまり `image_generation` と `audio` が残っているのに `video_generation` だけ自動で落とす、という設計は採らない
+- ただし scene に `render_units[]` がある場合、最終 render の動画クリップ単位は render unit で表す
+  - cut は story / image / audio の正本のまま残す
+  - render unit は `source_cut_ids[]` で複数 cut の narration を 1 本の動画に束ねられる
+
 ### 2.2.2 Script と Manifest の参照優先順位
 
 画像生成と動画生成では、`script.md` と `video_manifest.md` の役割を分けて読む。
@@ -234,6 +244,7 @@ human_review:
    - `asset_plan.md` を作る
    - human review を通す
    - reusable asset を生成する
+   - `reference_count == 0` の image request だけは bootstrap lane を使ってよい
    - provider 実行前に `asset_generation_requests.md` を materialize して review できる
    - rerun で比較案が必要なときだけ `--force --test-image-variants N` で `assets/test/` に追加候補を出す
 2. cut stage
@@ -250,6 +261,8 @@ stage 1 の原則:
 - 人間レビューで通るまで asset 生成に進まない
 - asset stage 完了時は、次が human review 待ちであることを明示してユーザーへ確認を促す
 - 浦島 run のように scene still を後から asset に昇格する例外はあるが、それは設計移行中の互換運用であり、今後の標準フローでは asset stage を先に置く
+- Codex built-in image generation は repo の標準画像基盤ではない
+- ただし `reference_count == 0` の no-reference image request は例外として許可する
 - request file は「最終的にこの prompt / reference / output で投げる」を確認するための凍結成果物として扱う
 - `plan` は設計用、`request` は人レビュー用と割り切る
 - 人が review する既定の対象は request file

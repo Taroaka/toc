@@ -19,7 +19,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | Storage | Filesystem object store + PostgreSQL metadata DB | Durable metadata |
 | Job queue | In-process async queue | Simple and sufficient for MVP |
 | State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
-| Providers | LLM via LangChain; image=Google Nano Banana Pro; video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
+| Providers | LLM via LangChain; image=Google Nano Banana 2 / Gemini 3.1 Flash Image; video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Claude Code entrypoint (slash command) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
 
@@ -48,10 +48,13 @@ graph TD
 - Long-running tasks executed via in-process worker pool (async + process/thread).
 - Concurrency default: 2 workers; configurable via `config/system.yaml`.
 - Parallelism policy (MVP):
-  - Core flow (RESEARCH → STORY → SCRIPT → REVIEW) is sequential.
-  - Parallelizable points are limited to:
-    - Within a single approved scene: generate assets (image, TTS, video) in parallel.
-    - After a scene is approved: start that scene's asset generation while the next scene is being drafted/reviewed.
+  - Core flow is sequential and gate-driven.
+  - Audio-first production order is fixed as:
+    - `RESEARCH -> STORY -> SCRIPT -> NARRATION -> ASSET -> SCENE_IMPLEMENTATION -> VIDEO -> RENDER/QA`
+  - Parallelism is allowed only inside a stage whose upstream gate is already complete.
+    - `ASSET`: recurring still generation can run in parallel.
+    - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production`.
+    - `VIDEO`: clip generation can fan out after still inputs and duration gates are complete.
 
 ## Storage strategy
 
@@ -70,14 +73,21 @@ graph TD
 - Base unit is a stage task aligned to LangGraph nodes:
   - `RESEARCH` → produces `research.md`
   - `STORY` → produces `story.md`
-  - `SCRIPT` → produces `script.md` (scene plan + narration text)
-  - `VIDEO` → produces assets + `video.mp4`
-  - `QA` → produces review/score + pass/fail
-- Scene-level tasks exist only inside `SCRIPT` and `VIDEO`:
-  - `SCRIPT` subtask: draft one scene from the approved scene plan.
-  - `VIDEO` subtask: generate assets for an approved scene (image, TTS, clip).
-- Asset-level tasks exist only inside `VIDEO`:
-  - Image, TTS, and clip generation are independent per approved scene.
+  - `SCRIPT` → produces `script.md` and a narration-ready skeleton `video_manifest.md`
+  - `NARRATION` → produces reviewed TTS audio and confirmed runtime duration
+  - `ASSET` → produces reusable recurring still assets
+  - `SCENE_IMPLEMENTATION` → produces the production manifest and scene still outputs
+  - `VIDEO` → produces motion clips
+  - `RENDER/QA` → produces `video.mp4` and review outputs
+- Scene-level tasks exist inside `SCRIPT`, `SCENE_IMPLEMENTATION`, and `VIDEO`:
+  - `SCRIPT` subtask: draft one scene and narration beat from the approved story plan.
+  - `SCENE_IMPLEMENTATION` subtask: implement one approved scene/cut into production prompt fields.
+  - `VIDEO` subtask: generate motion clips for an approved scene/cut.
+- Asset-level tasks are split by stage:
+  - `NARRATION`: TTS generation and duration fit checks.
+  - `ASSET`: character/object/location reference stills.
+  - `SCENE_IMPLEMENTATION`: cut still generation.
+  - `VIDEO`: clip generation.
 - Granularity principles:
   - Keep core flow sequential and gate-driven.
   - Only split tasks where outputs are independently verifiable.
@@ -95,6 +105,12 @@ graph TD
   - `review.policy.image=required|optional`
   - `review.policy.narration=required|optional`
 - stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。
+- audio runtime は TTS 実行後の実尺を正本にし、`cinematic_story` は既定で 300 秒以上を target とする。
+  - target 未満なら scene / narration stretch review prompt を生成して停止し、人レビューへは進めない。
+- production order は audio-first を採用する。
+  - `script` で scene / narration draft を確定したあと、`video_manifest.md` はまず `manifest_phase: skeleton` で materialize する。
+  - その後に `narration -> asset -> scene implementation -> video -> render` の順で進める。
+  - 理由は、最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから。asset / scene / video を先に固定すると、後から尺ズレで recut が発生しやすい。
 - したがって「script draft までは人承認なしで進める」のような運用差分は、prompt の解釈ではなく run 初期 state で表現する。
 - チャット起点の stage 実行も同じ state / grounding 契約の上で扱う。
   - `resolve-stage-grounding.py` で contract を解決
@@ -103,6 +119,19 @@ graph TD
   - これにより slash command とチャット実行の前提を揃える
 
 ## Fixed P-Slot Contract
+
+変更内容:
+- fixed `p-slot` contract を production order に合わせて再編した。
+- 後半順序は `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video -> p900 render` に固定する。
+- `p450` を追加し、`video_manifest.md` を narration-ready skeleton manifest として先に materialize する。
+
+修正理由:
+- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が late recut を減らせる。
+- 尺が target 未満のとき、padding で誤魔化さず scene / narration の再設計へ戻れるようにするため。
+
+旧仕様との差分:
+- 旧仕様では `p500 asset -> p600 image -> p700 video -> p800 audio` だった。
+- 新仕様では audio-first に切り替え、asset / scene / video は実尺確定後へ移動した。
 
 - `p100` ごとに大工程を固定する。
 - `p110` 以降の細番号も全作品で固定契約として扱う。
@@ -128,33 +157,38 @@ graph TD
   - `p420`: authoring
   - `p430`: review
   - `p440`: human changes / narration sync
-- `p500`: asset
-  - `p510`: grounding
-  - `p520`: reusable asset inventory
-  - `p530`: asset plan authoring
-  - `p540`: asset review
-  - `p550`: asset plan fixes
-  - `p560`: asset requests
-  - `p570`: asset generation
-  - `p580`: asset continuity check
-- `p600`: image
-  - `p610`: grounding
-  - `p620`: manifest / prompt authoring
-  - `p630`: hard review
-  - `p640`: judgment review
-  - `p650`: generation ready
-  - `p660`: image generation
-  - `p670`: image QA / fix loop
-- `p700`: video
-  - `p710`: grounding
-  - `p720`: motion / video review
-  - `p730`: video requests
-  - `p740`: video generation
-  - `p750`: video review / exclusions
-- `p800`: audio
-  - `p810`: narration text review
-  - `p820`: TTS request / generation
-  - `p830`: audio QA
+  - `p450`: skeleton manifest materialization
+- `p500`: narration / audio runtime
+  - `p510`: narration grounding
+  - `p520`: narration text review
+  - `p530`: TTS request / generation
+  - `p540`: duration fit gate
+  - `p550`: scene stretch review
+  - `p560`: narration stretch review
+  - `p570`: audio QA / human review handoff
+- `p600`: asset
+  - `p610`: asset grounding
+  - `p620`: reusable asset inventory
+  - `p630`: asset plan authoring
+  - `p640`: asset review
+  - `p650`: asset plan fixes
+  - `p660`: asset requests
+  - `p670`: asset generation
+  - `p680`: asset continuity check
+- `p700`: scene implementation
+  - `p710`: scene implementation grounding
+  - `p720`: production manifest / prompt authoring
+  - `p730`: hard scene review
+  - `p740`: judgment review
+  - `p750`: generation ready
+  - `p760`: image generation
+  - `p770`: image QA / fix loop
+- `p800`: video
+  - `p810`: video grounding
+  - `p820`: motion / video review
+  - `p830`: video requests
+  - `p840`: video generation
+  - `p850`: video review / exclusions
 - `p900`: render / QA / runtime
   - `p910`: render inputs
   - `p920`: final render
@@ -164,7 +198,8 @@ graph TD
 
 - Provider interfaces for image, video, TTS, and LLM.
 - LLM integration uses LangChain.
-- Image: Google Nano Banana Pro（Gemini Image / `gemini-3-pro-image-preview`）
+- Image: Google Nano Banana 2（`google_nanobanana_2`）
+- Image (alt): Gemini 3.1 Flash Image（`gemini_3_1_flash_image` / `gemini-3.1-flash-image-preview`）
 - Video: Kling 3.0（default。`video_generation.tool: kling_3_0`）
 - Video (omni): Kling 3.0 Omni（`video_generation.tool: kling_3_0_omni`）
 - Video (alt): Seedance（BytePlus ModelArk。`video_generation.tool: seedance`）

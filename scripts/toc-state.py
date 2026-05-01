@@ -222,6 +222,10 @@ def cmd_show(args: argparse.Namespace) -> int:
     image_prompt_status = state.get("review.image_prompt.status", "")
     image_prompt_at = state.get("review.image_prompt.at", "")
     image_prompt_note = state.get("review.image_prompt.note", "")
+    duration_fit_status = state.get("review.duration_fit.status", "")
+    duration_fit_actual = state.get("review.duration_fit.actual_seconds", "")
+    duration_fit_minimum = state.get("review.duration_fit.minimum_seconds", "")
+    duration_fit_note = state.get("review.duration_fit.note", "")
     review_status = state.get("review.video.status", "")
     review_at = state.get("review.video.at", "")
     review_note = state.get("review.video.note", "")
@@ -256,6 +260,13 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(s)
         if image_prompt_note:
             print(f"Image prompt note: {image_prompt_note}")
+    if duration_fit_status:
+        s = f"Duration fit: {duration_fit_status}"
+        if duration_fit_actual or duration_fit_minimum:
+            s += f" ({duration_fit_actual or '?'}s / min {duration_fit_minimum or '?'}s)"
+        print(s)
+        if duration_fit_note:
+            print(f"Duration fit note: {duration_fit_note}")
     print(f"Video: {artifact_video} ({'exists' if video_exists else 'missing'})")
     if review_status:
         s = f"Review: {review_status}"

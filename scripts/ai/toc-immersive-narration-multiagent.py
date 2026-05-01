@@ -110,14 +110,19 @@ def main() -> None:
                     "must_cover": [],
                     "must_avoid": [],
                     "done_when": [],
+                    "spoken_context": "",
+                    "voice_tags": [],
+                    "spoken_body": "",
+                    "stability_profile": "",
                     "narration_text": "",
                     "tts_text": "",
                 }
                 for i in range(1, int(args.min_cuts) + 1)
             ],
             "notes": [
-                "narration_text は物語用、tts_text は TTS に送るひらがな原稿として使う。",
-                "tts_text は elevenlabs 向けに、できるだけひらがなだけで書く。TODO/メタ情報を書かない。",
+                "narration_text は物語用、tts_text は ElevenLabs v3 に送る最終文字列として使う。",
+                "spoken_context / voice_tags / spoken_body / stability_profile を先に書き、tts_text はその完成形を置く。",
+                "tts_text は ひらがな寄せを基本にしつつ、[] の audio tag を許可する。TODO/メタ情報は書かない。",
                 "先に target_function / must_cover / must_avoid / done_when を埋め、done 条件を明確にする。",
                 "1カット=1ナレーション。main=5–15秒、sub=3–15秒を目安に短く。",
             ],
@@ -133,6 +138,10 @@ def main() -> None:
                     "    must_cover: []",
                     "    must_avoid: []",
                     "    done_when: []",
+                    "    spoken_context: \"\"",
+                    "    voice_tags: []",
+                    "    spoken_body: \"\"",
+                    "    stability_profile: \"\"",
                     "    narration_text: \"\"",
                     "    tts_text: \"\"",
                 ]

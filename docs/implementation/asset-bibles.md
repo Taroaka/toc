@@ -43,6 +43,11 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - 例: 浜辺の現在と未来も、同じ場所として continuity を保ちたいなら main beach anchor を基準に派生させる
 - `source_script_selectors[]` は使用箇所の記録であり、`reference_inputs[]` とは別物
 - `reference_inputs[]` は同一人物 variant / 同一場所 variant / same-camera 派生のときだけ使う
+- `reference_inputs[]` が空の asset では、bootstrap 用に `execution_lane=bootstrap_builtin` を選んでよい
+- 既存 reference を持つ派生 asset では使わない
+- `bootstrap_builtin` という lane 名は asset 専用語ではなく、repo 全体では no-reference built-in image lane の互換名として扱う
+- asset 段階で参照を持つのは、複数 cut で再利用される同一 entity の identity / state / structure / relation continuity を固定したい場合に限る
+- shot 内の移動、演技、立ち位置、カメラ差分のような表現差分は cut stage で扱い、asset 段階の参照理由にしない
 - 独立した location anchor は原則 `reference_inputs: []`
 - ただし、同じ建物の中でも物語上は別エリアなら、無理に派生させない
 - 例: 竜宮城の宴会エリアと foyer は別 `location_anchor` にしてよい
@@ -53,6 +58,9 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - 浦島 run のように設計試行錯誤の途中で、先に scene still ができてから asset に昇格される例外はありうる
 - これは移行中の互換運用であり、本来フローでは asset stage が先、cut stage が後
 - 将来の run では、scene still がそのまま asset 正本になる前提では進めない
+- 例外として、`reference_inputs[]` が無い初期 asset seed は Codex built-in image generation を bootstrap lane として使ってよい
+- その場合も human review で `review.status=approved` になるまでは canonical asset にしない
+- approved 後は bootstrap 生成物をそのまま canonical reference として後続 stage で使ってよい
 
 正本は `/toc-immersive-ride` の `video_manifest.md`（`assets` 内）:
 
@@ -88,6 +96,13 @@ sceneに映す object/setpiece を **IDで宣言**する。
 
 生成側は `--apply-asset-guides` で、該当 object の `fixed_prompts` と cinematic 情報を
 sceneの `[PROPS / SETPIECES]` に自動注入できる。
+
+review で最低限確認する項目:
+
+- `character_reference`: 顔、髪型、衣装、年齢感
+- `object_reference`: silhouette、材質、装飾、縮尺感
+- `location_anchor`: spatial identity、主要構造、光環境
+- `reusable_still`: 後続 cut の continuity anchor として十分か
 
 ---
 

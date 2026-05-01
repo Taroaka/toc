@@ -30,6 +30,9 @@ assets:
       generation_plan:
         output_dir: "assets/characters"
         required_views: ["front", "side", "back"]
+        execution_lane: "standard|bootstrap_builtin"
+        bootstrap_allowed: false
+        bootstrap_reason: "no_reference_seed|other"
         reference_inputs: []
         derived_from_asset_id: ""
       creation_status: "planned|created|stale|missing"
@@ -50,6 +53,9 @@ assets:
       generation_plan:
         output_dir: "assets/objects"
         required_views: ["hero"]
+        execution_lane: "standard|bootstrap_builtin"
+        bootstrap_allowed: false
+        bootstrap_reason: "no_reference_seed|other"
         reference_inputs: []
         derived_from_asset_id: ""
       creation_status: "planned|created|stale|missing"
@@ -70,6 +76,9 @@ assets:
       generation_plan:
         output_dir: "assets/locations"
         required_views: ["hero"]
+        execution_lane: "standard|bootstrap_builtin"
+        bootstrap_allowed: false
+        bootstrap_reason: "no_reference_seed|other"
         reference_inputs: []
         derived_from_asset_id: ""
       creation_status: "planned|created|stale|missing"
@@ -90,6 +99,9 @@ assets:
       generation_plan:
         output_dir: "assets/scenes"
         required_views: ["single"]
+        execution_lane: "standard|bootstrap_builtin"
+        bootstrap_allowed: false
+        bootstrap_reason: "no_reference_seed|other"
         reference_inputs: []
         derived_from_asset_id: ""
       creation_status: "planned|created|stale|missing"
@@ -102,3 +114,6 @@ assets:
 # - source_script_selectors は「どこで使うか」
 # - generation_plan.reference_inputs は「何を参照して生成するか」
 # - reference_inputs を使うのは same character / same location / same camera 派生だけ
+# - execution_lane は既定で standard。reference_inputs が空で、かつ bootstrap_allowed=true のときだけ bootstrap_builtin を使ってよい
+# - bootstrap_builtin という lane 名は互換のため維持するが、repo 全体では no-reference built-in image lane を意味する
+# - derived_from_asset_id がある asset は常に standard

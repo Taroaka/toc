@@ -95,3 +95,87 @@ class TestImmersiveNarrationMultiagent(unittest.TestCase):
             self.assertEqual(contract["must_cover"], ["迷い"])
             self.assertEqual(contract["must_avoid"], ["カメラ"])
             self.assertEqual(manifest["scenes"][0]["cuts"][0]["audio"]["narration"]["tts_text"], "かれは、まだ いっぽを きめきれずにいます。")
+
+    def test_merge_materializes_tts_text_from_structured_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_narration_multiagent_v3_") as td:
+            run_dir = Path(td)
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "scenes:",
+                        "  - scene_id: 10",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"\"",
+                        "            tts_text: \"\"",
+                        "            tool: \"elevenlabs\"",
+                        "            output: \"assets/audio/scene10_cut01.mp3\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "ai" / "toc-immersive-narration-multiagent.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--scene-ids",
+                    "10",
+                    "--min-cuts",
+                    "1",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            scratch = run_dir / "scratch" / "narration" / "scene10.yaml"
+            scratch.write_text(
+                "\n".join(
+                    [
+                        "scene_id: 10",
+                        "cuts:",
+                        "  - cut_id: 1",
+                        "    target_function: \"inner_state\"",
+                        "    must_cover: [\"よろこび\"]",
+                        "    must_avoid: []",
+                        "    done_when: [\"声の勢いが伝わる\"]",
+                        "    spoken_context: \"かのじょは こえを はずませながら いいました。\"",
+                        "    voice_tags: [\"excited\", \"laughs harder\"]",
+                        "    spoken_body: \"ほんとうに ありがとう！\"",
+                        "    stability_profile: \"creative\"",
+                        "    narration_text: \"彼女は声を弾ませて礼を言います。\"",
+                        "    tts_text: \"\"",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "ai" / "merge-immersive-narration.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--force",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            _, manifest = load_structured_document(manifest_path)
+            narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+            self.assertEqual(
+                narration["tts_text"],
+                "かのじょは こえを はずませながら いいました。 [excited][laughs harder] ほんとうに ありがとう！",
+            )

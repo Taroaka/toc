@@ -22,7 +22,7 @@ class ElevenLabsConfig:
     api_key: str
     api_base: str = "https://api.elevenlabs.io/v1"
     voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID
-    model_id: str = "eleven_multilingual_v2"
+    model_id: str = "eleven_v3"
     output_format: str = "mp3_44100_128"
 
     @staticmethod
@@ -44,7 +44,7 @@ class ElevenLabsConfig:
             api_key=key,
             api_base=api_base or _env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1") or "",
             voice_id=v_id,
-            model_id=model_id or _env("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2") or "",
+            model_id=model_id or _env("ELEVENLABS_MODEL_ID", "eleven_v3") or "",
             output_format=output_format or _env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128") or "",
         )
 

@@ -95,6 +95,21 @@ python scripts/generate-assets-from-manifest.py \
 python scripts/sync-manifest-durations-from-audio.py \
   --manifest "$manifest"
 
+if ! python scripts/check-audio-duration-gate.py \
+  --manifest "$manifest" \
+  --run-dir "$run_dir"; then
+  trap - ERR
+  python scripts/toc-state.py append --run-dir "$run_dir" \
+    --set "runtime.stage=audio_duration_gate" \
+    --set "runtime.render.status=blocked" \
+    --set "last_error=audio duration gate requested scene/narration expansion before human review"
+  echo "Audio duration gate blocked downstream generation." >&2
+  echo "Review prompts:" >&2
+  echo "  - ${run_dir%/}/logs/review/duration_scene.subagent_prompt.md" >&2
+  echo "  - ${run_dir%/}/logs/review/duration_narration.subagent_prompt.md" >&2
+  exit 1
+fi
+
 python scripts/generate-assets-from-manifest.py \
   --manifest "$manifest" \
   --skip-audio \

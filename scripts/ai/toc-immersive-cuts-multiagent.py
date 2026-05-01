@@ -76,7 +76,7 @@ def _default_cut_skeleton(scene_id: int, cut_id: int) -> dict:
     return {
         "cut_id": int(cut_id),
         "image_generation": {
-            "tool": "google_nanobanana_pro",
+            "tool": "google_nanobanana_2",
             "character_ids": [],
             "object_ids": [],
             "prompt": (
@@ -151,7 +151,7 @@ def main() -> None:
                     [
                         f"  - cut_id: {cut_id}",
                         "    image_generation:",
-                        "      tool: google_nanobanana_pro",
+                        "      tool: google_nanobanana_2",
                         "      character_ids: []",
                         "      object_ids: []",
                         "      prompt: |",

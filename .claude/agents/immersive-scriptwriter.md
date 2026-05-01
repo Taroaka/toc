@@ -37,6 +37,7 @@ model: inherit
 
 - **`script.md` を言語情報の正本**にする
 - `video_manifest.md` の `audio.narration.text` と `image_generation.prompt` は、`script.md` に書いた内容を具体化したものでなければならない
+- `script.md` の cut では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として持てるようにする
 - `video_manifest.md` 側で **新しい物語情報・新しい感情解釈・新しい見せ場** を勝手に足さない
 - `visual_value.md` がある場合、その価値パートは **中盤の視覚報酬** として優先的に取り込む
 - つまり:
@@ -171,6 +172,8 @@ model: inherit
 ### script.md
 
 - narration（cut/clip単位の読み上げ原稿）
+- cutごとに `elevenlabs_prompt`（`spoken_context` / `voice_tags` / `spoken_body` / `stability_profile`）を持てるようにする
+- cutごとに `tts_text` を持ち、`spoken_context + [tag][tag] + spoken_body` の final string として埋める
 - scene一覧（scene_id / シーン要約 / 次sceneへのつなぎ）
 - narration は原則 **です・ます調** で、平易な話し言葉にする
 - scene_summary は出来事を素直に要約し、必要のない含みや設計意図の先出しは避ける

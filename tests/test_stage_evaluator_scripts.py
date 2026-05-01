@@ -107,8 +107,10 @@ def _ensure_video_generation_ready(run_dir: Path) -> None:
 
 
 def _resolve_ready_grounding(run_dir: Path, *stages: str, flow: str = "toc-run") -> None:
-    if any(stage in {"story", "script", "image_prompt", "video_generation"} for stage in stages):
+    if any(stage in {"story", "script", "image_prompt", "scene_implementation", "video_generation"} for stage in stages):
         _ensure_story_ready(run_dir)
+    if any(stage in {"image_prompt", "scene_implementation", "video_generation"} for stage in stages):
+        append_state_snapshot(run_dir / "state.txt", {"review.duration_fit.status": "passed"})
     if "video_generation" in stages:
         _ensure_video_generation_ready(run_dir)
     for stage in stages:

@@ -44,10 +44,11 @@ class TestTocRunScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "image_prompt.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "video_generation.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "narration.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "research.readset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "research.audit.json").exists())
+            manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            self.assertIn("manifest_phase: skeleton", manifest)
 
 
 if __name__ == "__main__":

@@ -118,8 +118,14 @@ output/<topic>_<timestamp>/
 
 ## 生成（画像/動画/TTS）について
 
-- 画像: Google Nano Banana Pro（Gemini Image / `gemini-3-pro-image-preview`）
+- 画像: Google Nano Banana 2（`tool: "google_nanobanana_2"`）
+- 画像（代替）: Gemini 3.1 Flash Image（`tool: "gemini_3_1_flash_image"` / `gemini-3.1-flash-image-preview`）
 - 画像（代替）: SeaDream / Seedream 4.5（`tool: "seadream"` + `SEADREAM_*`）
+- Codex built-in image generation は標準画像基盤としては使わない
+- ただし `reference_count == 0` の image request は、互換 lane 名 `execution_lane=bootstrap_builtin` で Codex built-in image generation に回す
+- `reference_count > 0` の image request は `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` の標準 lane に残す
+- `scripts/generate-assets-from-manifest.py` を no-reference のまま標準 provider で実行すると、deterministic error を返して `$toc-no-reference-image-runner` へ誘導する
+- repo-local Codex hooks を有効にすると、その deterministic error を `PostToolUse` hook が拾って同じ指示へ寄せる
 - 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
 - 動画（Omni）: Kling 3.0 Omni（`video_generation.tool: "kling_3_0_omni"` + `KLING_OMNI_*`）
 - 動画（代替）: Seedance（BytePlus ModelArk。`video_generation.tool: "seedance"` + `ARK_API_KEY`）
@@ -137,6 +143,9 @@ output/<topic>_<timestamp>/
   - asset stage: `asset_generation_requests.md`
   - cut image stage: `image_generation_requests.md`
   - video stage: `video_generation_requests.md`
+- story cut の動画有無は human review の削除結果で決める
+  - `delete_scene` / `delete_cut` で消していない cut は、sync 時に既定の `video_generation` を持つ
+  - `still_image_plan.mode` は image 圧縮計画であり、動画 request から cut を落とす基準には使わない
 - `p000_index.md` は run 直下の人間向け入口
   - current stage
   - next required human review
@@ -144,26 +153,33 @@ output/<topic>_<timestamp>/
   - current run inventory
   をまとめる
   - 手動再生成: `python scripts/build-run-index.py --run-dir output/<topic>_<timestamp>`
+- 変更内容:
+  - fixed `p-slot` workflow を audio-first の production order に切り替えた
+  - `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video -> p900 render` を全 story 共通に固定した
+- 修正理由:
+  - 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が late recut を減らせるため
+- 旧仕様との差分:
+  - 旧順序は `p500 asset -> p600 image -> p700 video -> p800 audio` だった
 - `100` 番台ごとに大工程を割り当てる
   - `p100`: research
   - `p200`: story
   - `p300`: visual planning
-  - `p400`: script / narration text / human changes
-  - `p500`: asset
-  - `p600`: image
-  - `p700`: video
-  - `p800`: audio generation
+  - `p400`: script / narration draft / human changes
+  - `p500`: narration / audio runtime
+  - `p600`: asset
+  - `p700`: scene implementation
+  - `p800`: video
   - `p900`: render / QA / runtime
 - これらの slot 意味は固定契約で、story ごとに変えない
 - 細番号も固定 slot contract の一部として扱う
   - `p110`, `p120`, `p130`
   - `p210`, `p220`, `p230`
   - `p310`, `p320`, `p330`
-  - `p410`, `p420`, `p430`, `p440`
-  - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`, `p580`
-  - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`
-  - `p710`, `p720`, `p730`, `p740`, `p750`
-  - `p810`, `p820`, `p830`
+  - `p410`, `p420`, `p430`, `p440`, `p450`
+  - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`
+  - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`, `p680`
+  - `p710`, `p720`, `p730`, `p740`, `p750`, `p760`, `p770`
+  - `p810`, `p820`, `p830`, `p840`, `p850`
   - `p910`, `p920`, `p930`
 - story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
 - `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
@@ -173,10 +189,10 @@ output/<topic>_<timestamp>/
 ```bash
 python scripts/toc-state.py set-slot \
   --run-dir output/<topic>_<timestamp> \
-  --slot p540 \
+  --slot p640 \
   --status skipped \
   --requirement optional \
-  --skip-reason "asset stage not needed for this run"
+  --skip-reason "asset review not needed for this run"
 ```
 
 - fixed `p-slot` contract を更新したら `python scripts/validate-slot-contract.py` を実行する
@@ -187,7 +203,8 @@ python scripts/toc-state.py set-slot \
 - 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
 - `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
 - ナレーション文面の human review 正本は `script.md`
-  - `script.md` の `narration` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する
+  - `script.md` の `narration` / `elevenlabs_prompt` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する
+  - `elevenlabs_prompt` を直したときは、同じ変更を `tts_text` にも反映する
   - 同期コマンド:
 
 ```bash
@@ -195,6 +212,21 @@ python scripts/sync-narration-from-script.py \
   --script output/<topic>_<timestamp>/script.md \
   --manifest output/<topic>_<timestamp>/video_manifest.md
 ```
+
+- audio-only 生成の後は、必ず実尺ゲートを通す
+  - `python scripts/generate-assets-from-manifest.py --manifest output/<topic>_<timestamp>/video_manifest.md --skip-images --skip-videos`
+  - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<topic>_<timestamp>/video_manifest.md`
+  - `python scripts/check-audio-duration-gate.py --manifest output/<topic>_<timestamp>/video_manifest.md --run-dir output/<topic>_<timestamp>`
+- `cinematic_story` は既定で 300 秒以上を target にする
+  - `video_metadata.duration_seconds` が target 未満なら、`logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
+  - これらの prompt は contextless subagent に渡して、scene 再分割と narration 拡張の見直しに使う
+  - gate を超えた run だけが次の human review に進める
+- `video_manifest.md` は二段階で扱う
+  - `manifest_phase: skeleton`
+    - narration review / TTS / duration gate に必要な最小構造
+  - `manifest_phase: production`
+    - image / video 実装 field を埋めた生成正本
+- `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
   - research は `research.md.evaluation_contract`
@@ -230,7 +262,7 @@ python scripts/sync-narration-from-script.py \
   - review 実行後に subagent が `agent_review_ok` を更新する
   - `human_review_ok` は初期値 `false`
   - false の cut/scene には reason key を 1 つ以上残す
-  - canonical reason key は `narration_contract_missing` / `narration_contract_must_cover_unmet` / `narration_contract_must_avoid_violated` / `narration_contract_target_function_unmet` / `narration_empty` / `narration_tts_text_missing` / `narration_text_not_hiragana_only` / `tts_text_not_hiragana_only` / `narration_contains_meta_marker` / `tts_unfriendly_literal` / `unsupported_audio_tag_for_v2` / `needs_text_normalization` / `sentence_too_long_for_tts` / `missing_pause_punctuation` / `visual_direction_leaked_into_narration` / `narration_story_role_mismatch` / `narration_too_visual_redundant` / `narration_pacing_mismatch` / `narration_spoken_japanese_weak`
+  - canonical reason key は `narration_contract_missing` / `narration_contract_must_cover_unmet` / `narration_contract_must_avoid_violated` / `narration_contract_target_function_unmet` / `narration_empty` / `narration_tts_text_missing` / `narration_contains_meta_marker` / `tts_unfriendly_literal` / `needs_text_normalization` / `sentence_too_long_for_tts` / `missing_pause_punctuation` / `visual_direction_leaked_into_narration` / `narration_story_role_mismatch` / `narration_too_visual_redundant` / `narration_pacing_mismatch` / `narration_spoken_japanese_weak`
   - false reason に対応する修正を manifest に反映し、修正後に再 review して finding が消えれば、subagent はその node を `agent_review_ok: true` に戻す
   - `human_review_ok: true` は finding を理解して例外許容した記録であり、subagent finding を消す意味ではない
   - **両方 `false` の node が残っていると音声生成は止まる**
@@ -256,6 +288,7 @@ python scripts/sync-narration-from-script.py \
   - request 本文の具体化はコードで自動変換せず、自然言語エージェントと人レビューで決める
 - `scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する
   - `cut_status: deleted` の cut は `video_clips.txt` / `video_narration_list.txt` から自動で除外される
+  - scene に `render_units[]` がある場合、`video_clips.txt` は render unit 単位、`video_narration_list.txt` は `source_cut_ids[]` の順で作る
   - 最終 render はこの concat list を正本として使う
 - `--apply-asset-guides --asset-guides-character-refs scene` で人物 still を回す場合、既存の `assets/characters/*_refstrip.png` は reference に自動で追加される
 
@@ -324,9 +357,9 @@ python scripts/review-video-stage.py \
 - 高レベルの現在地は `status=`、工程別の進行は `stage.*.status=` で読む
 - `awaiting_approval` は「作業は終わったが、ユーザー承認待ちで次工程へ進めない」を意味する
 - 各 stage は開始前に grounding preflight を必ず実行する
-  - `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
+  - `python scripts/resolve-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
   - 証跡は `logs/grounding/<stage>.json`
-  - 続けて `python scripts/audit-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp>` を実行する
+  - 続けて `python scripts/audit-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp>` を実行する
   - `logs/grounding/<stage>.readset.json` が「その stage で読むべき対象」の正本になる
 - `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、その stage を開始しない
 - chat/manual で stage 作業を始めるときは、`python scripts/prepare-stage-context.py --stage <stage> --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を標準入口として使う
@@ -362,12 +395,19 @@ python scripts/review-video-stage.py \
 - `stage.story`
 - `stage.visual_value`
 - `stage.script`
-- `stage.image_prompt_review`
-- `stage.image_generation`
-- `stage.video_generation`
 - `stage.narration`
+- `stage.asset`
+- `stage.video_generation`
+- `stage.scene_implementation`
 - `stage.render`
 - `stage.qa`
+
+legacy compatibility keys:
+
+- `stage.image_prompt_review`
+- `stage.image_generation`
+
+これらは旧 run の互換キーであり、公開 workflow の標準 stage としては数えない。
 
 基本ルール:
 
@@ -396,7 +436,7 @@ python scripts/review-video-stage.py \
   - `gate.script_review=required`
   - `review.script.status=pending`
 - 画像作成後
-  - `stage.image_generation.status=awaiting_approval`
+  - `stage.scene_implementation.status=awaiting_approval`
   - `gate.image_review=required`
   - `review.image.status=pending`
 - ナレーション作成後
@@ -427,14 +467,18 @@ python scripts/review-video-stage.py \
   - `status=SCRIPT`
   - `stage.script.status=awaiting_approval`
   - `review.script.status=pending`
-- 画像完了（承認待ち）:
-  - `status=VIDEO`
-  - `stage.image_generation.status=awaiting_approval`
-  - `review.image.status=pending`
 - ナレーション完了（承認待ち）:
-  - `status=VIDEO`
+  - `status=SCRIPT`
   - `stage.narration.status=awaiting_approval`
   - `review.narration.status=pending`
+- asset 開始:
+  - `status=VIDEO`
+  - `stage.asset.status=in_progress`
+- scene implementation 完了（承認待ち）:
+  - `status=VIDEO`
+  - `stage.scene_implementation.grounding.status=ready`
+  - `stage.scene_implementation.status=awaiting_approval`
+  - `review.image.status=pending`
 - evaluator 実行後:
   - `eval.research.status=approved|changes_requested`
   - `eval.script.status=approved|changes_requested`

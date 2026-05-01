@@ -89,6 +89,45 @@ scenes:
             mod.validate_scene_narration(scenes=scenes, require=True, scene_filter=None)
         self.assertIn("silence_contract.intentional=true", str(ctx.exception))
 
+    def test_validate_scene_narration_allows_silent_tool_without_output_file(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 10
+    image_generation:
+      tool: "google_nanobanana_2"
+      character_ids: []
+      object_ids: []
+      prompt: "scene"
+      output: "assets/scenes/scene10.png"
+      references: []
+    video_generation:
+      tool: "kling_3_0"
+      duration_seconds: 4
+      output: "assets/scenes/scene10.mp4"
+    audio:
+      narration:
+        tool: "silent"
+        text: ""
+        tts_text: ""
+        silence_contract:
+          intentional: true
+          kind: "visual_value_hold"
+          confirmed_by_human: true
+          reason: "映像で見せる価値が大きい追加カット"
+        output: null
+```
+"""
+
+        yaml_text = mod.extract_yaml_block(md)
+        _, _, scenes = mod.parse_manifest_yaml_full(yaml_text)
+
+        mod.validate_scene_narration(scenes=scenes, require=True, scene_filter=None)
+
 
 if __name__ == "__main__":
     unittest.main()

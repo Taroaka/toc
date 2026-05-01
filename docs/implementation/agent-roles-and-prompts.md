@@ -40,9 +40,9 @@
 - 入力: `story.md` / `script.md` / `video_manifest.md`
 - 出力: `video_manifest.md` の `audio.narration.text` と `audio.narration.tts_text`
 - 原則:
-  - `audio.narration.text` は manifest 上の正本でも、現行の ElevenLabs 運用では **ひらがなだけ** を基本にする
-  - `audio.narration.tts_text` は ElevenLabs に送る読み上げ専用原稿
-  - `audio.narration.tts_text` も **ひらがなだけ** で書く
+  - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
+  - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
+  - `voice_tags` は bracket なしの生タグで保持し、`tts_text` では順番通りに `[]` を付ける
   - どちらにも `TODO:` 等のメタ情報を書かない（空文字は可。未記入は生成時にエラー）
 - 品質基準:
   - narration は cut の物語上の役割に従う

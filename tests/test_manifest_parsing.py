@@ -31,7 +31,7 @@ scenes:
   - scene_id: 1
     timestamp: "00:00-00:08"
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       prompt: "p"
       output: "assets/scenes/scene1.png"
       references: ["assets/characters/c.png", "assets/styles/s.png"]
@@ -76,7 +76,7 @@ scenes:
     cuts:
       - cut_id: 1
         image_generation:
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           character_ids: []
           object_ids: []
           prompt: "p1"
@@ -90,7 +90,7 @@ scenes:
           output: "assets/scenes/scene10_1_to_2.mp4"
       - cut_id: 2
         image_generation:
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           character_ids: []
           object_ids: []
           prompt: "p2"
@@ -155,13 +155,13 @@ scenes:
     reference_id: protagonist_front_ref
     kind: character_reference
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       prompt: "character ref"
       output: "assets/characters/protagonist_front.png"
       references: []
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       prompt: "story"
       output: "assets/scenes/scene10.png"
       references: []
@@ -213,7 +213,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero", "villain"]
       character_variant_ids: ["hero_day"]
       object_ids: ["amulet"]
@@ -265,7 +265,7 @@ assets:
 scenes:
   - scene_id: 10
     image_generation:
-      tool: "google_nanobanana_pro"
+      tool: "google_nanobanana_2"
       character_ids: ["hero", "turtle"]
       object_ids: []
       prompt: "story"
@@ -301,14 +301,14 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           prompt: "p1"
           output: "assets/scenes/scene10_1.png"
       - cut_id: 2
         still_image_plan:
           mode: reuse_anchor
         image_generation:
-          tool: "google_nanobanana_pro"
+          tool: "google_nanobanana_2"
           prompt: "p2"
           output: "assets/scenes/scene10_2.png"
 ```
@@ -334,7 +334,7 @@ scenes:
             role: "primary"
             output: "assets/scenes/temple_day.png"
             image_generation:
-              tool: "google_nanobanana_pro"
+              tool: "google_nanobanana_2"
               prompt: "temple"
               output: "assets/scenes/temple_day.png"
               references: []
@@ -368,7 +368,7 @@ scenes:
             timestamp=None,
             duration_seconds=None,
             still_image_plan_mode=None,
-            image_tool="google_nanobanana_pro",
+            image_tool="google_nanobanana_2",
             image_prompt="ref",
             image_output="assets/characters/hero.png",
             image_references=[],

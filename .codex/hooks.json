@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/user_prompt_agent_skill_context.py\"",
+            "statusMessage": "サブエージェントとスキル活用方針を会話コンテキストへ追加中"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/post_tool_no_reference_image_lane.py\"",
+            "statusMessage": "画像を生成する際の no-reference image lane policy を確認中"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/stop_save_generated_image.py\"",
+            "statusMessage": "生成画像の保存先を会話文脈から確認中"
+          }
+        ]
+      }
+    ]
+  }
+}

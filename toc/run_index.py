@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -186,6 +187,29 @@ STAGES: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         bucket="p500",
+        title="Narration / Audio Runtime Stage",
+        slots=_stage_slots(
+            {
+                "00": "narration runtime source-of-truth",
+                "10": "narration-ready manifest sync / review",
+                "20": "tts request / generation",
+                "30": "duration fit gate",
+                "40": "scene stretch review",
+                "50": "narration stretch review",
+                "60": "audio qa / human review handoff",
+            }
+        ),
+        state_keys=("stage.narration.status",),
+        source_of_truth="script.md narration / skeleton video_manifest.md runtime handoff",
+        evaluator="narration_text_review.md / duration fit gate",
+        human_review="script.md / duration stretch prompts",
+        request_target="manifest audio node / TTS runtime request",
+        outputs="assets/audio/**",
+        default_owner="generator",
+        planned_artifacts=(("p520", "narration_text_review.md"),),
+    ),
+    StageSpec(
+        bucket="p600",
         title="Asset Stage",
         slots=_stage_slots(
             {
@@ -197,7 +221,7 @@ STAGES: tuple[StageSpec, ...] = (
                 "50": "asset appendix / test variants / transitional notes",
             }
         ),
-        state_keys=("stage.asset_plan_review.status", "stage.asset_generation.status"),
+        state_keys=("stage.asset.status", "stage.asset_plan_review.status", "stage.asset_generation.status"),
         source_of_truth="asset_plan.md",
         evaluator="asset review state / asset evaluator",
         human_review="asset_plan.md",
@@ -205,24 +229,24 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="assets/characters/**, assets/objects/**, assets/locations/**, assets/test/**",
         default_owner="generator",
         planned_artifacts=(
-            ("p500", "asset_plan.md"),
-            ("p530", "asset_generation_requests.md"),
+            ("p600", "asset_plan.md"),
+            ("p660", "asset_generation_requests.md"),
         ),
     ),
     StageSpec(
-        bucket="p600",
-        title="Image Stage",
+        bucket="p700",
+        title="Scene Implementation Stage",
         slots=_stage_slots(
             {
-                "00": "image generation source-of-truth",
-                "10": "manifest / image evaluator",
-                "20": "image human review",
-                "30": "image generation request freeze",
+                "00": "production manifest source-of-truth",
+                "10": "hard scene evaluator / semantic review",
+                "20": "scene human review",
+                "30": "generation ready / request freeze",
                 "40": "scene image outputs",
-                "50": "image appendix / transitional prompt artifacts",
+                "50": "scene appendix / transitional prompt artifacts",
             }
         ),
-        state_keys=("stage.image_prompt_review.status", "stage.image_generation.status"),
+        state_keys=("stage.scene_implementation.status", "stage.image_prompt_review.status", "stage.image_generation.status"),
         source_of_truth="video_manifest.md",
         evaluator="manifest_review.md / image_prompt_story_review.md",
         human_review="image_generation_requests.md",
@@ -230,54 +254,32 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="assets/scenes/**",
         default_owner="generator",
         planned_artifacts=(
-            ("p600", "video_manifest.md"),
-            ("p610", "manifest_review.md"),
-            ("p620", "image_generation_requests.md"),
+            ("p700", "video_manifest.md"),
+            ("p730", "manifest_review.md"),
+            ("p750", "image_generation_requests.md"),
         ),
     ),
     StageSpec(
-        bucket="p700",
+        bucket="p800",
         title="Video Stage",
         slots=_stage_slots(
             {
                 "00": "video generation plan / handoff",
-                "10": "video request review",
+                "10": "motion / video review",
                 "20": "video human review",
                 "30": "video generation requests / clip plan",
                 "40": "video clip outputs",
                 "50": "video appendix / exclusions / transitional notes",
             }
         ),
-        state_keys=("stage.video_generation.status",),
+        state_keys=("stage.video.status", "stage.video_generation.status"),
         source_of_truth="video_generation plan / manifest handoff",
         evaluator="video request review / final video review",
         human_review="video_generation_requests.md",
         request_target="video_generation_requests.md",
         outputs="assets/videos/**",
         default_owner="generator",
-        planned_artifacts=(("p710", "video_generation_requests.md"),),
-    ),
-    StageSpec(
-        bucket="p800",
-        title="Audio Generation Stage",
-        slots=_stage_slots(
-            {
-                "00": "audio generation entry",
-                "10": "narration runtime evaluator",
-                "20": "narration human review note (text source lives in script)",
-                "30": "audio generation request / gate",
-                "40": "audio outputs",
-                "50": "audio appendix / silent-cut notes",
-            }
-        ),
-        state_keys=("stage.narration.status",),
-        source_of_truth="script.md narration / tts_text (text source), manifest audio node (runtime source)",
-        evaluator="narration_text_review.md / narration_review.md",
-        human_review="script.md (text source of truth)",
-        request_target="manifest audio node / TTS runtime request",
-        outputs="assets/audio/**",
-        default_owner="generator",
-        planned_artifacts=(("p810", "narration_text_review.md"),),
+        planned_artifacts=(("p830", "video_generation_requests.md"),),
     ),
     StageSpec(
         bucket="p900",
@@ -372,63 +374,93 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec("p420", "Script Authoring", "author script.md and narration text source", planned_artifacts=("script.md",), state_keys=("stage.script.status",)),
         SlotSpec("p430", "Script Review", "script evaluator and review pass", planned_artifacts=("script_review.md",), default_requirement="optional"),
         SlotSpec("p440", "Human Changes / Narration Sync", "human change log and narration synchronization", default_requirement="optional"),
+        SlotSpec("p450", "Skeleton Manifest Materialization", "materialize or update narration-ready skeleton video_manifest.md", planned_artifacts=("video_manifest.md",), default_requirement="required"),
     ),
     "p500": (
-        SlotSpec("p510", "Asset Grounding", "prepare asset-stage context and references", default_requirement="optional"),
-        SlotSpec("p520", "Reusable Asset Inventory", "inventory recurring characters, objects, and locations", default_requirement="optional"),
-        SlotSpec("p530", "Asset Plan Authoring", "author asset_plan.md", planned_artifacts=("asset_plan.md",), default_requirement="optional"),
-        SlotSpec("p540", "Asset Review", "review and approve reusable asset plan", default_requirement="optional"),
-        SlotSpec("p550", "Asset Plan Fixes", "apply asset review fixes and approval notes", default_requirement="optional"),
         SlotSpec(
-            "p560",
+            "p510",
+            "Narration Grounding",
+            "resolve, audit, readset, and confirm skeleton manifest for narration/audio runtime",
+            planned_artifacts=(
+                "logs/grounding/narration.json",
+                "logs/grounding/narration.readset.json",
+                "logs/grounding/narration.audit.json",
+            ),
+            state_keys=("stage.narration.grounding.status", "stage.narration.audit.status"),
+        ),
+        SlotSpec("p520", "Narration Text Review", "review narration text before TTS", planned_artifacts=("narration_text_review.md", "narration_review.md"), default_requirement="optional"),
+        SlotSpec("p530", "TTS Request / Generation", "prepare and run TTS generation", default_requirement="optional"),
+        SlotSpec("p540", "Duration Fit Gate", "check actual audio-driven runtime against the target minimum duration", default_requirement="optional"),
+        SlotSpec("p550", "Scene Stretch Review", "scene-level duration expansion review prompt and report", default_requirement="optional"),
+        SlotSpec("p560", "Narration Stretch Review", "narration-level duration expansion review prompt and report", default_requirement="optional"),
+        SlotSpec("p570", "Audio QA / Human Review Handoff", "audio runtime QA and human review handoff after duration gate", default_requirement="optional"),
+    ),
+    "p600": (
+        SlotSpec(
+            "p610",
+            "Asset Grounding",
+            "resolve, audit, readset, and preflight artifacts for asset stage",
+            planned_artifacts=(
+                "logs/grounding/asset.json",
+                "logs/grounding/asset.readset.json",
+                "logs/grounding/asset.audit.json",
+            ),
+            state_keys=("stage.asset.grounding.status", "stage.asset.audit.status"),
+        ),
+        SlotSpec("p620", "Reusable Asset Inventory", "inventory recurring characters, objects, and locations", default_requirement="optional"),
+        SlotSpec("p630", "Asset Plan Authoring", "author asset_plan.md", planned_artifacts=("asset_plan.md",), default_requirement="optional"),
+        SlotSpec("p640", "Asset Review", "review and approve reusable asset plan", default_requirement="optional"),
+        SlotSpec("p650", "Asset Plan Fixes", "apply asset review fixes and approval notes", default_requirement="optional"),
+        SlotSpec(
+            "p660",
             "Asset Requests",
             "materialize asset generation requests and manifests",
             planned_artifacts=("asset_generation_requests.md", "asset_generation_manifest.md", "location_asset_generation_manifest.md"),
             default_requirement="optional",
         ),
-        SlotSpec("p570", "Asset Generation", "generate reusable character/object/location assets", default_requirement="optional"),
-        SlotSpec("p580", "Asset Continuity Check", "verify reusable assets before p600", default_requirement="optional"),
+        SlotSpec("p670", "Asset Generation", "generate reusable character/object/location assets", default_requirement="optional"),
+        SlotSpec("p680", "Asset Continuity Check", "verify reusable assets before p700", default_requirement="optional"),
     ),
-    "p600": (
+    "p700": (
         SlotSpec(
-            "p610",
-            "Image Grounding",
-            "resolve, audit, readset, and preflight artifacts for image prompt stage",
+            "p710",
+            "Scene Implementation Grounding",
+            "resolve, audit, readset, and preflight artifacts for scene implementation",
             planned_artifacts=(
-                "logs/grounding/image_prompt.json",
-                "logs/grounding/image_prompt.readset.json",
-                "logs/grounding/image_prompt.audit.json",
+                "logs/grounding/scene_implementation.json",
+                "logs/grounding/scene_implementation.readset.json",
+                "logs/grounding/scene_implementation.audit.json",
             ),
-            state_keys=("stage.image_prompt.grounding.status", "stage.image_prompt.audit.status"),
+            state_keys=("stage.scene_implementation.grounding.status", "stage.scene_implementation.audit.status"),
         ),
-        SlotSpec("p620", "Manifest / Prompt Authoring", "author and revise video_manifest.md for cut-level image prompts", planned_artifacts=("video_manifest.md",)),
+        SlotSpec("p720", "Production Manifest / Prompt Authoring", "author and revise production video_manifest.md for cut-level prompts", planned_artifacts=("video_manifest.md",)),
         SlotSpec(
-            "p630",
-            "Hard Image Review",
-            "run deterministic function review for manifest and image prompts",
+            "p730",
+            "Hard Scene Review",
+            "run deterministic function review for production manifest and prompts",
             planned_artifacts=("manifest_review.md", "image_prompt_story_review.md"),
             default_requirement="optional",
         ),
         SlotSpec(
-            "p640",
+            "p740",
             "Judgment Review",
             "contextless subagent or judgment artifacts for semantic image review",
             default_requirement="optional",
             state_keys=("review.image_prompt.judgment.status",),
         ),
         SlotSpec(
-            "p650",
-            "Image Generation Ready",
+            "p750",
+            "Generation Ready",
             "request freeze, judgment prompt artifacts, and generation-ready handoff",
             planned_artifacts=("image_generation_requests.md",),
             default_requirement="optional",
         ),
-        SlotSpec("p660", "Image Generation", "generate scene stills and cut images", default_requirement="optional"),
-        SlotSpec("p670", "Image QA / Fix Loop", "evaluate generated images and loop fixes", default_requirement="optional"),
+        SlotSpec("p760", "Image Generation", "generate scene stills and cut images", default_requirement="optional"),
+        SlotSpec("p770", "Image QA / Fix Loop", "evaluate generated images and loop fixes", default_requirement="optional"),
     ),
-    "p700": (
+    "p800": (
         SlotSpec(
-            "p710",
+            "p810",
             "Video Grounding",
             "resolve, audit, readset, and preflight artifacts for video generation",
             planned_artifacts=(
@@ -438,15 +470,10 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             ),
             state_keys=("stage.video_generation.grounding.status", "stage.video_generation.audit.status"),
         ),
-        SlotSpec("p720", "Motion / Video Review", "motion prompt review and video request review", default_requirement="optional"),
-        SlotSpec("p730", "Video Requests", "freeze video generation requests", planned_artifacts=("video_generation_requests.md",), default_requirement="optional"),
-        SlotSpec("p740", "Video Generation", "generate video clips", default_requirement="optional"),
-        SlotSpec("p750", "Video Review / Exclusions", "video review and exclusion appendix", default_requirement="optional"),
-    ),
-    "p800": (
-        SlotSpec("p810", "Narration Text Review", "review narration text before TTS", planned_artifacts=("narration_text_review.md", "narration_review.md"), default_requirement="optional"),
-        SlotSpec("p820", "TTS Request / Generation", "prepare and run TTS generation", default_requirement="optional"),
-        SlotSpec("p830", "Audio QA", "check generated audio for runtime quality", default_requirement="optional"),
+        SlotSpec("p820", "Motion / Video Review", "motion prompt review and video request review", default_requirement="optional"),
+        SlotSpec("p830", "Video Requests", "freeze video generation requests", planned_artifacts=("video_generation_requests.md",), default_requirement="optional"),
+        SlotSpec("p840", "Video Generation", "generate video clips", default_requirement="optional"),
+        SlotSpec("p850", "Video Review / Exclusions", "video review and exclusion appendix", default_requirement="optional"),
     ),
     "p900": (
         SlotSpec("p910", "Render Inputs", "freeze concat lists and render inputs", planned_artifacts=("video_clips.txt", "video_narration_list.txt"), default_requirement="optional"),
@@ -461,10 +488,10 @@ PENDING_GATE_TARGETS: dict[str, tuple[str, str, str]] = {
     "research_review": ("p100", "research review", "research.md / research_review.md"),
     "story_review": ("p200", "story review", "story.md"),
     "script_review": ("p400", "script human review", "script.md"),
-    "asset_review": ("p500", "asset human review", "asset_plan.md / asset_generation_requests.md"),
-    "image_prompt_review": ("p600", "image prompt review", "video_manifest.md / image_generation_requests.md"),
-    "image_review": ("p600", "image review", "image_generation_requests.md"),
-    "narration_review": ("p800", "narration runtime gate", "script.md (text source) / narration_text_review.md"),
+    "asset_review": ("p600", "asset human review", "asset_plan.md / asset_generation_requests.md"),
+    "image_prompt_review": ("p700", "scene implementation review", "video_manifest.md / image_generation_requests.md"),
+    "image_review": ("p700", "image review", "image_generation_requests.md"),
+    "narration_review": ("p500", "narration runtime gate", "script.md (text source) / narration_text_review.md"),
     "hybridization_review": ("p400", "hybridization review", "script.md"),
     "video_review": ("p900", "final video review", "run_report.md / final video output"),
 }
@@ -607,15 +634,44 @@ def _normalize_rel_path(rel_path: str) -> str:
     return rel_path.replace("\\", "/")
 
 
-def classify_run_file(rel_path: str) -> InventoryEntry:
+def _manifest_phase_for_file(path: Path) -> str:
+    if not path.exists():
+        return "production"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return "production"
+    match = re.search(r'(?m)^\s*manifest_phase:\s*"?([A-Za-z_]+)"?\s*$', text)
+    if not match:
+        return "production"
+    return str(match.group(1) or "production").strip().lower() or "production"
+
+
+def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> InventoryEntry:
     rel = _normalize_rel_path(rel_path)
+    scene_match = re.match(r"^(scenes/[^/]+)/(.*)$", rel)
+    if scene_match:
+        scene_prefix = scene_match.group(1)
+        nested_rel = scene_match.group(2)
+        if nested_rel:
+            nested_run_dir = (run_dir / scene_prefix).resolve() if run_dir is not None else None
+            nested_entry = classify_run_file(nested_rel, run_dir=nested_run_dir)
+            return InventoryEntry(
+                rel_path=rel,
+                slot=nested_entry.slot,
+                role=nested_entry.role,
+                note=f"scene subrun: {nested_entry.note}",
+            )
 
     grounding_slots = {
         "research": "p110",
         "story": "p210",
         "script": "p410",
-        "image_prompt": "p610",
-        "video_generation": "p710",
+        "narration": "p510",
+        "asset": "p610",
+        "scene_implementation": "p710",
+        "image_prompt": "p710",
+        "video_generation": "p810",
     }
     for stage_name, slot in grounding_slots.items():
         prefix = f"logs/grounding/{stage_name}"
@@ -623,7 +679,18 @@ def classify_run_file(rel_path: str) -> InventoryEntry:
             return InventoryEntry(rel, slot, "log", f"{stage_name} grounding artifact")
 
     if rel.startswith("logs/review/image_prompt"):
-        return InventoryEntry(rel, "p640", "log", "image judgment review artifact")
+        return InventoryEntry(rel, "p740", "log", "scene implementation judgment review artifact")
+    if rel.startswith("logs/review/duration_scene"):
+        return InventoryEntry(rel, "p550", "log", "scene stretch review artifact")
+    if rel.startswith("logs/review/duration_narration"):
+        return InventoryEntry(rel, "p560", "log", "narration stretch review artifact")
+
+    if Path(rel).name == "video_manifest.md":
+        manifest_path = (run_dir / rel).resolve() if run_dir is not None else None
+        manifest_phase = _manifest_phase_for_file(manifest_path) if manifest_path is not None else "production"
+        if manifest_phase == "skeleton":
+            return InventoryEntry(rel, "p450", "canonical", "narration-ready skeleton manifest")
+        return InventoryEntry(rel, "p720", "canonical", "production scene implementation manifest")
 
     exact: dict[str, tuple[str, str, str]] = {
         "p000_index.md": ("p000", "canonical", "human-facing run navigation entry"),
@@ -636,30 +703,31 @@ def classify_run_file(rel_path: str) -> InventoryEntry:
         "script.md": ("p420", "canonical", "script / narration text source-of-truth"),
         "script_review.md": ("p430", "review", "script evaluator report"),
         "human_change_requests.md": ("p440", "request", "structured human change log"),
-        "asset_plan.md": ("p530", "canonical", "asset plan source-of-truth"),
-        "asset_generation_manifest.md": ("p560", "request", "asset generation manifest"),
-        "location_asset_generation_manifest.md": ("p560", "request", "location asset generation manifest"),
-        "location_asset_generation_manifest_patch_105_106.md": ("p560", "request", "asset generation patch manifest"),
-        "asset_generation_requests.md": ("p560", "request", "asset generation request freeze"),
-        "video_manifest.md": ("p620", "canonical", "image/video generation source-of-truth"),
-        "manifest_review.md": ("p630", "review", "manifest evaluator report"),
-        "image_prompt_story_review.md": ("p630", "review", "image prompt evaluator report"),
-        "image_generation_requests.md": ("p650", "request", "image generation request freeze"),
-        "image_generation_plan.md": ("p670", "transitional", "legacy image planning helper"),
-        "image_prompt_collection.md": ("p640", "transitional", "image prompt review collection"),
-        "image_prompt_review.md": ("p640", "transitional", "legacy image prompt review"),
-        "video_generation_plan.md": ("p720", "transitional", "legacy video planning helper"),
-        "video_generation_requests.md": ("p730", "request", "video generation request freeze"),
-        "video_generation_exclusions.md": ("p750", "transitional", "video-stage exclusion appendix"),
-        "narration_text_review.md": ("p810", "review", "narration runtime review"),
-        "narration_review.md": ("p810", "review", "legacy narration review"),
+        "asset_plan.md": ("p630", "canonical", "asset plan source-of-truth"),
+        "asset_generation_manifest.md": ("p660", "request", "asset generation manifest"),
+        "location_asset_generation_manifest.md": ("p660", "request", "location asset generation manifest"),
+        "location_asset_generation_manifest_patch_105_106.md": ("p660", "request", "asset generation patch manifest"),
+        "asset_generation_requests.md": ("p660", "request", "asset generation request freeze"),
+        "manifest_review.md": ("p730", "review", "manifest evaluator report"),
+        "image_prompt_story_review.md": ("p730", "review", "image prompt evaluator report"),
+        "image_generation_requests.md": ("p750", "request", "image generation request freeze"),
+        "image_generation_plan.md": ("p770", "transitional", "legacy image planning helper"),
+        "image_prompt_collection.md": ("p740", "transitional", "image prompt review collection"),
+        "image_prompt_review.md": ("p740", "transitional", "legacy image prompt review"),
+        "video_generation_plan.md": ("p820", "transitional", "legacy video planning helper"),
+        "video_generation_requests.md": ("p830", "request", "video generation request freeze"),
+        "video_generation_exclusions.md": ("p850", "transitional", "video-stage exclusion appendix"),
+        "narration_text_review.md": ("p520", "review", "narration runtime review"),
+        "narration_review.md": ("p520", "review", "legacy narration review"),
+        "logs/review/duration_scene.subagent_prompt.md": ("p550", "log", "scene stretch review prompt artifact"),
+        "logs/review/duration_narration.subagent_prompt.md": ("p560", "log", "narration stretch review prompt artifact"),
         "video_clips.txt": ("p910", "request", "render concat list"),
         "video_narration_list.txt": ("p910", "request", "render narration concat list"),
         "eval_report.json": ("p930", "output", "eval harness json output"),
         "run_report.md": ("p930", "output", "human-facing run report"),
         "state.txt": ("p930", "canonical", "canonical append-only state"),
         "run_status.json": ("p930", "output", "derived machine-facing state"),
-        "generation_exclusion_report.md": ("p750", "transitional", "legacy exclusion appendix"),
+        "generation_exclusion_report.md": ("p850", "transitional", "legacy exclusion appendix"),
         ".DS_Store": ("p950", "legacy", "macOS metadata"),
     }
     if rel in exact:
@@ -667,19 +735,19 @@ def classify_run_file(rel_path: str) -> InventoryEntry:
         return InventoryEntry(rel_path=rel, slot=slot, role=role, note=note)
 
     if rel.startswith("assets/characters/"):
-        return InventoryEntry(rel, "p570", "output", "character asset output")
+        return InventoryEntry(rel, "p670", "output", "character asset output")
     if rel.startswith("assets/objects/"):
-        return InventoryEntry(rel, "p570", "output", "object asset output")
+        return InventoryEntry(rel, "p670", "output", "object asset output")
     if rel.startswith("assets/locations/"):
-        return InventoryEntry(rel, "p570", "output", "location asset output")
+        return InventoryEntry(rel, "p670", "output", "location asset output")
     if rel.startswith("assets/test/"):
-        return InventoryEntry(rel, "p580", "output", "asset test variant")
+        return InventoryEntry(rel, "p680", "output", "asset test variant")
     if rel.startswith("assets/scenes/"):
-        return InventoryEntry(rel, "p660", "output", "scene still output")
+        return InventoryEntry(rel, "p760", "output", "scene still output")
     if rel.startswith("assets/videos/"):
-        return InventoryEntry(rel, "p740", "output", "video clip output")
+        return InventoryEntry(rel, "p840", "output", "video clip output")
     if rel.startswith("assets/audio/"):
-        return InventoryEntry(rel, "p830", "output", "audio output")
+        return InventoryEntry(rel, "p530", "output", "audio output")
     if rel.startswith("logs/providers/"):
         return InventoryEntry(rel, "p930", "log", "provider execution log")
     if rel.startswith("scratch/"):
@@ -703,7 +771,7 @@ def _inventory(run_dir: Path) -> list[InventoryEntry]:
         if path.is_file()
     }
     rel_paths.add("p000_index.md")
-    entries = [classify_run_file(rel) for rel in rel_paths]
+    entries = [classify_run_file(rel, run_dir=run_dir) for rel in rel_paths]
     entries.sort(key=lambda item: (_slot_sort_key(item.slot), ROLE_ORDER.get(item.role, 99), item.rel_path))
     return entries
 

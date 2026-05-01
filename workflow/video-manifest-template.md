@@ -7,6 +7,7 @@
 - 目的: 生成素材・選定・合成の管理
 
 ```yaml
+manifest_phase: skeleton
 # === メタ情報 ===
 video_metadata:
   topic: "<topic>"
@@ -140,6 +141,8 @@ scenes:
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           # 1 つでも欠けていれば subagent review は false にする。
+          # no-reference の entry は実行時に `execution_lane=bootstrap_builtin` として
+          # Codex built-in image generation に回す。
           # tool: "google_nanobanana_2"
           # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
           tool: "google_nanobanana_2"

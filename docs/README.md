@@ -20,7 +20,7 @@
 - LangGraph topology: `docs/implementation/langgraph-topology.md`
 - Agent roles & prompts: `docs/implementation/agent-roles-and-prompts.md`
 - Asset bibles（object / setpiece）: `docs/implementation/asset-bibles.md`
-- Image prompting（Nano Banana Pro / cross-model）: `docs/implementation/image-prompting.md`
+- Image prompting（Nano Banana 2 / Gemini 3.1 Flash Image / cross-model）: `docs/implementation/image-prompting.md`
 - Assistant tooling（Claude/Codex）: `docs/implementation/assistant-tooling.md`
 - Entrypoint (/toc-run): `docs/implementation/entrypoint.md`
 - Entrypoint (/toc-scene-series): `docs/implementation/scene-series-entrypoint.md`

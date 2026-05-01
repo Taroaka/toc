@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.immersive_manifest import is_character_reference_scene, scene_numeric_id
+from toc.script_narration import SCRIPT_ELEVENLABS_DEFAULTS
 
 
 def extract_yaml_block(text: str) -> str:
@@ -154,6 +155,7 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
             "derived_from_story": "story.md",
             "derived_from_manifest": "video_manifest.md",
             "consistency_rule": "narration と visual beat は同じ cut の出来事を述べる。manifest は script の実行指示に留める",
+            "elevenlabs": dict(SCRIPT_ELEVENLABS_DEFAULTS),
         },
         "scenes": [],
     }
@@ -193,10 +195,18 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
                 image_generation = cut.get("image_generation") or {}
                 audio = cut.get("audio") or {}
                 narration = (audio.get("narration") if isinstance(audio, dict) else {}) or {}
+                tts_text = str(narration.get("tts_text") or narration.get("text") or "").strip()
                 scene_entry["cuts"].append(
                     {
                         "cut_id": cut_id,
                         "narration": str(narration.get("text") or "").strip(),
+                        "tts_text": tts_text,
+                        "elevenlabs_prompt": {
+                            "spoken_context": "",
+                            "voice_tags": [],
+                            "spoken_body": tts_text,
+                            "stability_profile": "",
+                        },
                         "visual_beat": simplify_visual_beat(
                             str(image_generation.get("prompt") or ""),
                             str(narration.get("text") or ""),
@@ -208,12 +218,20 @@ def build_script_document(*, topic: str, story_scene_map: dict[int, dict], manif
             image_generation = scene.get("image_generation") or {}
             audio = scene.get("audio") or {}
             narration = (audio.get("narration") if isinstance(audio, dict) else {}) or {}
+            tts_text = str(narration.get("tts_text") or narration.get("text") or "").strip()
             summary = str(narration.get("text") or story_scene.get("narration") or "").strip()
             scene_entry["scene_summary"] = summary
             scene_entry["cuts"].append(
                 {
                     "cut_id": 1,
                     "narration": str(narration.get("text") or "").strip(),
+                    "tts_text": tts_text,
+                    "elevenlabs_prompt": {
+                        "spoken_context": "",
+                        "voice_tags": [],
+                        "spoken_body": tts_text,
+                        "stability_profile": "",
+                    },
                     "visual_beat": simplify_visual_beat(
                         str(image_generation.get("prompt") or ""),
                         str(narration.get("text") or ""),

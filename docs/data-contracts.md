@@ -2,6 +2,17 @@
 
 本書は `todo.txt` の 6) Data contracts を具体化する。
 
+変更内容:
+- production order を audio-first へ切り替え、固定 workflow の後半を `narration -> asset -> scene_implementation -> video_generation` に再編した。
+- `video_manifest.md` に `manifest_phase: skeleton|production` を追加した。
+
+修正理由:
+- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が duration drift に強いため。
+
+旧仕様との差分:
+- 旧 contract は `image_prompt` を公開 stage とし、audio stage は後段だった。
+- 新 contract では `scene_implementation` を公開 stage とし、audio-first を前提にする。
+
 ## 1. State schema（ジョブ状態）
 
 `docs/orchestration-and-ops.md` のマニフェストを最小化し、
@@ -54,16 +65,35 @@ stage.script.subagent.prompt=logs/grounding/script.subagent_prompt.md
 stage.script.playbooks.report=logs/grounding/script.playbooks.json
 stage.script.playbooks.selected_count=0
 stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.narration.grounding.status=ready|missing_docs|missing_inputs
+stage.narration.grounding.report=logs/grounding/narration.json
+stage.narration.readset.report=logs/grounding/narration.readset.json
+stage.narration.audit.status=passed|failed
+stage.narration.audit.report=logs/grounding/narration.audit.json
+stage.narration.subagent.prompt=logs/grounding/narration.subagent_prompt.md
+stage.narration.playbooks.report=logs/grounding/narration.playbooks.json
+stage.narration.playbooks.selected_count=0
+stage.asset.status=pending|in_progress|awaiting_approval|done|failed|skipped
+stage.asset.grounding.status=ready|missing_docs|missing_inputs
+stage.asset.grounding.report=logs/grounding/asset.json
+stage.asset.readset.report=logs/grounding/asset.readset.json
+stage.asset.audit.status=passed|failed
+stage.asset.audit.report=logs/grounding/asset.audit.json
+stage.asset.subagent.prompt=logs/grounding/asset.subagent_prompt.md
+stage.asset.playbooks.report=logs/grounding/asset.playbooks.json
+stage.asset.playbooks.selected_count=0
+stage.scene_implementation.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.render.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.image_prompt.grounding.status=ready|missing_docs|missing_inputs
-stage.image_prompt.grounding.report=logs/grounding/image_prompt.json
-stage.image_prompt.readset.report=logs/grounding/image_prompt.readset.json
-stage.image_prompt.audit.status=passed|failed
-stage.image_prompt.audit.report=logs/grounding/image_prompt.audit.json
-stage.image_prompt.subagent.prompt=logs/grounding/image_prompt.subagent_prompt.md
+stage.scene_implementation.grounding.status=ready|missing_docs|missing_inputs
+stage.scene_implementation.grounding.report=logs/grounding/scene_implementation.json
+stage.scene_implementation.readset.report=logs/grounding/scene_implementation.readset.json
+stage.scene_implementation.audit.status=passed|failed
+stage.scene_implementation.audit.report=logs/grounding/scene_implementation.audit.json
+stage.scene_implementation.subagent.prompt=logs/grounding/scene_implementation.subagent_prompt.md
 review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
-stage.image_prompt.playbooks.report=logs/grounding/image_prompt.playbooks.json
-stage.image_prompt.playbooks.selected_count=0
+stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
+stage.scene_implementation.playbooks.selected_count=0
+stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.video_generation.grounding.status=ready|missing_docs|missing_inputs
 stage.video_generation.grounding.report=logs/grounding/video_generation.json
 stage.video_generation.readset.report=logs/grounding/video_generation.readset.json
@@ -94,12 +124,16 @@ artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
 artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
 artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json
 artifact.grounding.script=output/<topic>_<timestamp>/logs/grounding/script.json
-artifact.grounding.image_prompt=output/<topic>_<timestamp>/logs/grounding/image_prompt.json
+artifact.grounding.narration=output/<topic>_<timestamp>/logs/grounding/narration.json
+artifact.grounding.asset=output/<topic>_<timestamp>/logs/grounding/asset.json
+artifact.grounding.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.json
 artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
 artifact.grounding.playbooks.research=output/<topic>_<timestamp>/logs/grounding/research.playbooks.json
 artifact.grounding.playbooks.story=output/<topic>_<timestamp>/logs/grounding/story.playbooks.json
 artifact.grounding.playbooks.script=output/<topic>_<timestamp>/logs/grounding/script.playbooks.json
-artifact.grounding.playbooks.image_prompt=output/<topic>_<timestamp>/logs/grounding/image_prompt.playbooks.json
+artifact.grounding.playbooks.narration=output/<topic>_<timestamp>/logs/grounding/narration.playbooks.json
+artifact.grounding.playbooks.asset=output/<topic>_<timestamp>/logs/grounding/asset.playbooks.json
+artifact.grounding.playbooks.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.playbooks.json
 artifact.grounding.playbooks.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.playbooks.json
 eval.research.status=approved|changes_requested
 eval.image_prompt.score=0.0-1.0
@@ -116,6 +150,15 @@ eval.narration.findings=0
 eval.narration.unresolved_entries=0
 ---
 ```
+
+`video_manifest.md` top-level contract:
+
+```text
+manifest_phase=skeleton|production
+```
+
+- `skeleton`: narration review / TTS / duration gate に必要な最小構造
+- `production`: image / video 実装 field を持つ生成正本
 
 対応テンプレート: `workflow/state-schema.txt`
 
@@ -173,8 +216,8 @@ output/<topic>_<timestamp>/run_status.json
 - `p000_index.md` は fixed slot contract に基づく run progress の source of truth
 - 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
 - narration は
-  - `p400`: narration text / `tts_text` / script review / human changes
-  - `p800`: TTS 実行 / audio outputs / narration runtime checks
+  - `p400`: narration draft / `tts_text` / script review / human changes / skeleton manifest materialization
+  - `p500`: TTS 実行 / duration fit gate / audio runtime handoff
   に分けて扱う
 
 ### 1.0.2 Fixed p-slot workflow contract
@@ -195,11 +238,11 @@ slot.pXXX.note=string
 - `p100`: research
 - `p200`: story
 - `p300`: visual planning
-- `p400`: script / narration text / human changes
-- `p500`: asset
-- `p600`: image
-- `p700`: video
-- `p800`: audio generation
+- `p400`: script / narration draft / human changes
+- `p500`: narration / audio runtime
+- `p600`: asset
+- `p700`: scene implementation
+- `p800`: video
 - `p900`: render / QA / runtime
 
 運用ルール:
@@ -224,8 +267,9 @@ slot.pXXX.note=string
 - `stage.story`
 - `stage.visual_value`
 - `stage.script`
-- `stage.image_prompt_review`
-- `stage.image_generation`
+- `stage.narration`
+- `stage.asset`
+- `stage.scene_implementation`
 - `stage.video_generation`
 - `stage.narration`
 - `stage.render`
@@ -259,16 +303,16 @@ asset stage を分ける場合は次を追加する。
 
 - `stage.script`
 - `stage.asset_generation`
-- `stage.image_generation`
 - `stage.narration`
+- `stage.scene_implementation`
 
-この 3 つが `awaiting_approval` の間は、**次のフローに進んではならない**。
+この 4 つが `awaiting_approval` の間は、**次のフローに進んではならない**。
 
 対応 gate / review:
 
 - `stage.script` → `gate.script_review` / `review.script.*`
 - `stage.asset_generation` → `gate.asset_review` / `review.asset.*`
-- `stage.image_generation` → `gate.image_review` / `review.image.*`
+- `stage.scene_implementation` → `gate.image_review` / `review.image.*`
 - `stage.narration` → `gate.narration_review` / `review.narration.*`
 
 grounding ルール:
@@ -420,6 +464,10 @@ output/<topic>_<timestamp>/
   - image/video/audio generation の実装正本
   - `scene_contract`, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
   - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
+  - optional `render_units[]` を持てる
+    - `render_units[]` は最終 render 用の動画クリップ単位
+    - `unit_id`, `source_cut_ids[]`, `video_generation` を持つ
+    - scene に `render_units[]` がある場合、最終 render の動画正本は cut ではなく render unit 側を使う
 
 generator の読み順:
 
@@ -438,6 +486,11 @@ generator の読み順:
 - `tts_text` を image/video generation の主ソースにしてはならない
 - `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
 - materialize された `image_generation_requests.md` / `video_generation_requests.md` は review artifact として `source_requests` metadata を含んでよい
+- story cut の `video_generation` 採否は human review 正本に従う
+  - `delete_scene` / `delete_cut` で消されていない cut は既定で `video_generation` を持つ
+  - `still_image_plan.mode` は image planning 用であり、動画 cut の削除理由には使わない
+  - ただし scene に `render_units[]` がある場合、非 deleted cut はどれか 1 つの render unit にちょうど 1 回だけ含まれることを正とする
+  - `video_generation_requests.md` は render unit selector を出力してよい
 
 ### 4.6 `asset_plan.md`（asset stage 正本）
 
@@ -476,12 +529,28 @@ generator の読み順:
 - `existing_outputs[]`
 - `review`
 
+`generation_plan` の追加 field:
+
+- `execution_lane: standard|bootstrap_builtin`
+- `bootstrap_allowed: true|false`
+- `bootstrap_reason: no_reference_seed|other`
+
 asset stage の character variant ルール:
 
 - 同一人物の variant は、必ず main の `character_reference` を基準参照にする
 - `generation_plan.reference_inputs[]` には main reference の front / side / back などを入れる
 - `generation_plan.derived_from_asset_id` で、どの main asset から派生するかを明示する
 - 例: `urashima_old` は `urashima` から派生し、別人として新規設計しない
+
+bootstrap lane ルール:
+
+- `reference_inputs[]` が空で、かつ `bootstrap_allowed=true` の asset だけ `execution_lane=bootstrap_builtin` にできる
+- `reference_inputs[]` が 1 件以上ある asset は常に `execution_lane=standard`
+- `derived_from_asset_id` がある asset は常に `execution_lane=standard`
+- `bootstrap_builtin` という lane 名は互換のため維持するが、repo 全体では「no-reference built-in image lane」を意味する
+- したがって asset stage だけでなく、cut image stage の materialized request でも `reference_count == 0` なら `execution_lane=bootstrap_builtin` を使う
+- bootstrap 生成物は human review の `review.status=approved` になるまで canonical 扱いにしない
+- 承認後は、そのまま canonical asset として `existing_outputs[]` に記録してよい
 
 asset stage の location / still variant ルール:
 
@@ -524,13 +593,24 @@ location の例外ルール:
   - cut image stage: `artifact.image_generation_requests`
   - video stage: `artifact.video_generation_requests`
 - request file は selector ごとの final prompt / references / output を記録し、人レビューの対象にできる
+  - scene に `render_units[]` がある場合、video request file は cut ではなく render unit selector を出し、review metadata として `source_cuts` を併記してよい
+- asset request file では、review 用 metadata として少なくとも次を見えるようにする
+  - `asset_id`
+  - `asset_type`
+  - `execution_lane`
+  - `reference_count`
+  - `output`（canonical output path）
+  - `review.status`
 - image request file は review 用に image prompt を持つ全 scene/cut を載せる
   - `still_mode`
   - `generation_status: missing|created|recreate`
   - `plan_source`
+  - `execution_lane`
+  - `reference_count`
 - story から落とした cut は `cut_status: deleted` と `deletion_reason` を残して監査痕跡にする
   - deleted cut は request / image generation / video generation / audio generation / final concat から除外する
   - 除外対象は `generation_exclusion_report.md` と `*_generation_exclusions.md` に記録する
+  - `scripts/build-clip-lists.py` は scene に `render_units[]` がある場合、`video_clips.txt` を render unit 単位で、`video_narration_list.txt` を `source_cut_ids[]` の順で作る
 - request には prompt 以外の判断材料も十分に残す
   - explicit `references`
   - `character_ids` / `object_ids` / `location_ids` から解決される asset reference
@@ -553,8 +633,17 @@ location の例外ルール:
 - `script.md.scenes[].narrative_value_goal`（optional）
   - `mode: immersion|meaning|mixed`
   - `leave_viewer_with: [string, ...]`
+- `script.md.script_metadata.elevenlabs`
+  - `provider`, `model_id`, `voice_name`, `voice_id`, `prompt_contract_version`, `default_stability_profile`, `text_policy`
+  - 再現 baseline は `provider: elevenlabs`, `model_id: eleven_v3`, `voice_name: Shohei - Warm, Clear and Husky`, `voice_id: 8FuuqoKHuM48hIEwni5e`
+- `script.md.scenes[].cuts[].elevenlabs_prompt`
+  - `spoken_context`, `voice_tags`, `spoken_body`, `stability_profile`
 - `script.md.scenes[].cuts[].tts_text`
-  - spoken form の正本
+  - ElevenLabs v3 に渡す final string の正本
+  - 通常はひらがな寄せ + `[]` audio tag を許容する
+  - 音声品質を優先する cut では、漢字かな交じりの自然な日本語を許可する
+  - 締め / 教訓 narration の再現 baseline は `spoken_context: ""`, `voice_tags: ["low", "measured"]`, `stability_profile: "natural"`
+  - 採用例は `tts_text: "[low][measured] 知らない世界には、強い引力があります。"`
 - `script.md.scenes[].cuts[].human_review`
   - `status`
   - `notes`
@@ -796,11 +885,8 @@ Canonical reason key:
 - `narration_contract_target_function_unmet`
 - `narration_empty`
 - `narration_tts_text_missing`
-- `narration_text_not_hiragana_only`
-- `tts_text_not_hiragana_only`
 - `narration_contains_meta_marker`
 - `tts_unfriendly_literal`
-- `unsupported_audio_tag_for_v2`
 - `needs_text_normalization`
 - `sentence_too_long_for_tts`
 - `missing_pause_punctuation`
@@ -829,6 +915,11 @@ audio:
 - renderable cut で narration を空にする場合は `silence_contract` を必須にする
 - `confirmed_by_human: true` は、人レビューで「この cut は無音でよい」と確定した印
 - 最終連結では、この cut の `video_generation.duration_seconds` 分の無音 mp3 をつなぐ
+- audio-only 生成後は `check-audio-duration-gate.py` を通し、`review.duration_fit.status` を更新する
+- `cinematic_story` の既定 target は 300 秒で、未達時は次を artifact 化する
+  - `logs/review/duration_scene.subagent_prompt.md`
+  - `logs/review/duration_narration.subagent_prompt.md`
+- 未達時は scene 設計 / narration 設計の見直しを先に行い、人レビューへは進めない
 
 Lifecycle:
 
@@ -848,14 +939,17 @@ Lifecycle:
   - `audio.narration.text`
   - `audio.narration.tts_text`
 
-現行 ElevenLabs 運用では manifest 側の `audio.narration.text` と `audio.narration.tts_text` は、どちらも **spoken form** を同期する。
+script 側の `tts_text` は `elevenlabs_prompt` を materialize した final string として扱う。
+この slice では manifest/runtime 側の contract は据え置きだが、script からの sync では
+次の優先順位で値を選ぶ。
 
-spoken form の優先順位:
+sync 優先順位:
 
 1. `scenes[].cuts[].human_review.approved_tts_text`
 2. `scenes[].cuts[].tts_text`
-3. `scenes[].cuts[].human_review.approved_narration`
-4. `scenes[].cuts[].narration`
+3. materialized `scenes[].cuts[].elevenlabs_prompt`
+4. `scenes[].cuts[].human_review.approved_narration`
+5. `scenes[].cuts[].narration`
 
 Narration human review contract:
 
@@ -881,6 +975,8 @@ human_review:
 - `status: changes_requested` のときは `change_requests[]` を空にしない
 - `approved_*` は open request を隠すために使わない
 - manifest 側の `human_review_ok` は例外許容 override であり、この block の代替ではない
+- `elevenlabs_prompt` 用の `approved_*` mirror field は追加しない
+- `elevenlabs_prompt` を直した場合は、同じ変更を `tts_text` にも反映する
 
 同期コマンド:
 

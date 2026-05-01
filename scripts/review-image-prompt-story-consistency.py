@@ -51,7 +51,11 @@ IMPORTANT_SINGLE_KANJI = {
     "城",
     "煙",
     "桃",
+    "翁",
+    "帝",
 }
+
+EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 
 STOPWORDS = {
     "全体",
@@ -477,6 +481,13 @@ def extract_terms(text: str) -> set[str]:
         if re.fullmatch(r"[一-龯]", normalized) and normalized not in IMPORTANT_SINGLE_KANJI:
             continue
         if re.fullmatch(r"[A-Za-z]{1,2}", normalized):
+            continue
+        terms.add(normalized)
+    for token in EN_TOKEN_RE.findall(text or ""):
+        normalized = token.strip().lower()
+        if not normalized:
+            continue
+        if len(normalized) <= 2:
             continue
         terms.add(normalized)
     return compact_terms(terms)
