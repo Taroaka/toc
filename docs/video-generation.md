@@ -261,7 +261,7 @@ stage 1 の原則:
 - 人間レビューで通るまで asset 生成に進まない
 - asset stage 完了時は、次が human review 待ちであることを明示してユーザーへ確認を促す
 - 浦島 run のように scene still を後から asset に昇格する例外はあるが、それは設計移行中の互換運用であり、今後の標準フローでは asset stage を先に置く
-- Codex built-in image generation は repo の標準画像基盤ではない
+- Codex built-in image generation（現行想定モデル: `gpt-image-2`）は repo の標準画像基盤ではない
 - ただし `reference_count == 0` の no-reference image request は例外として許可する
 - request file は「最終的にこの prompt / reference / output で投げる」を確認するための凍結成果物として扱う
 - `plan` は設計用、`request` は人レビュー用と割り切る
@@ -281,6 +281,8 @@ stage 1 の原則:
   - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も入力に含める
   - 出力は scene 単位 scratch rewrite
   - 統合はメインエージェントが行い、最終的な `image_generation_requests.md` を凍結成果物にする
+  - subagent は生成候補、clip review、除外理由の下書きまでを担当し、採用判定と `video_manifest.md` 更新はメインエージェントが行う
+  - 採用した subagent output は `subagent_trace` または `logs/review/` に残し、親会話だけにある判断を正本にしない
 - scene image prompt は、カット全体の出来事をそのまま描くのではなく、**その動画を始める最初の1フレーム**として妥当である必要がある
 - `Aが話し、Bがうなずく` のような表現は、動画側で始まるべき動きを still 側で完了させやすいため避ける
 - 推奨は、抽象的に `動き出す直前` と書くのではなく、その場面の動きに応じて `まだ口を開く前`, `まだうなずき始めていない`, `差し出す直前`, `一歩目の体重移動の直前` のように具体化すること
@@ -487,6 +489,24 @@ ffmpeg -f concat -safe 0 -i filelist.txt -c copy output.mp4
 # file 'clip2.mp4'
 # file 'clip3.mp4'
 ```
+
+注意:
+- 上の `-c copy` 結合は、入力 clip の video/audio stream 仕様が完全に同一の場合だけ使う
+- 最終成果物の scene compile 結合では、事前に全 scene を正規化する
+- 特に audio の `mono` / `stereo` 混在は禁止。`scene08: mono -> scene09: stereo` のような境界で、境界以降の音声がジャミング音・ノイズ化することがある
+
+最終結合前の標準正規化:
+
+```bash
+ffmpeg -i sceneXX_compiled.mp4 \
+  -vf "scale=1280:720,fps=24" \
+  -af "aresample=44100,aformat=channel_layouts=stereo" \
+  -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+  -c:a aac -b:a 192k \
+  sceneXX_normalized.mp4
+```
+
+最終 `filelist.txt` には `sceneXX_normalized.mp4` だけを入れる。
 
 #### 音声の追加
 

@@ -46,6 +46,16 @@ def as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+STORY_REQUIRED_SCENE_FIELDS = [
+    "purpose",
+    "conflict",
+    "turn",
+    "affect",
+    "visualizable_action",
+    "grounding_note",
+]
+
+
 def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
     cur: Any = data
     for key in path:
@@ -166,32 +176,72 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
         add_check(checks, "research.no_todo", not has_todo(text), "research.md does not contain TODO/TBD markers", kind="rubric")
     append_grounding_checks(checks, run_dir=run_dir, stage="research")
 
-    sources = as_list(data.get("sources"))
-    scene_plan = nested_get(data, ["scene_plan", "scenes"], [])
+    sources = as_list(data.get("source_inventory") or data.get("sources"))
+    story_materials = data.get("story_materials")
+    chronological_events = nested_get(data, ["story_materials", "chronological_events"], [])
+    source_passages = as_list(data.get("source_passages"))
+    primary_sources = as_list(data.get("primary_sources"))
+    legacy_passages: list[Any] = []
+    for source in primary_sources:
+        if isinstance(source, dict):
+            legacy_passages.extend(as_list(source.get("key_passages")))
     beat_sheet = nested_get(data, ["story_baseline", "canonical_synopsis", "beat_sheet"], [])
     conflicts = data.get("conflicts")
+    facts = nested_get(data, ["facts", "items"], [])
+    handoff_to_story = data.get("handoff_to_story")
     confidence = nested_get(data, ["metadata", "confidence_score"])
     synopsis = nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"]) or nested_get(
         data, ["story_baseline", "canonical_synopsis", "one_liner"]
     )
+    canonical_story_dump = nested_get(data, ["story_materials", "canonical_story_dump"])
 
     details["sources"] = len(sources)
-    details["scene_count"] = len(as_list(scene_plan))
-    details["beat_count"] = len(as_list(beat_sheet))
+    details["event_count"] = len(as_list(chronological_events)) or len(as_list(beat_sheet))
+    details["source_passage_count"] = len(source_passages) or len(legacy_passages)
+    details["fact_count"] = len(as_list(facts))
 
     add_check(checks, "research.structured", bool(data), "research.md contains structured YAML output")
     add_check(checks, "research.sources", len(sources) >= 12, f"sources >= 12 (got {len(sources)})", kind="rubric")
-    add_check(checks, "research.scene_plan", len(as_list(scene_plan)) >= 20, f"scene plan covers >= 20 scenes (got {len(as_list(scene_plan))})", kind="rubric")
-    add_check(checks, "research.synopsis", non_empty(synopsis), "canonical synopsis is present", kind="rubric")
-    add_check(checks, "research.beat_sheet", len(as_list(beat_sheet)) >= 20, f"beat sheet has >= 20 beats (got {len(as_list(beat_sheet))})", kind="rubric")
+    story_materials_ok = bool(story_materials) or non_empty(synopsis)
+    add_check(
+        checks,
+        "research.story_materials",
+        story_materials_ok,
+        "story_materials or legacy story baseline is present",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "research.canonical_story",
+        non_empty(canonical_story_dump) or non_empty(synopsis),
+        "canonical story dump or legacy synopsis is present",
+        kind="rubric",
+    )
+    event_count = len(as_list(chronological_events)) or len(as_list(beat_sheet))
+    add_check(
+        checks,
+        "research.chronological_events",
+        event_count >= 20,
+        f"chronological events or legacy beats >= 20 (got {event_count})",
+        kind="rubric",
+    )
+    passage_count = len(source_passages) or len(legacy_passages)
+    add_check(
+        checks,
+        "research.source_passages",
+        passage_count >= 1,
+        f"source passages are present (got {passage_count})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "research.facts",
+        len(as_list(facts)) >= 10,
+        f"facts >= 10 (got {len(as_list(facts))})",
+        kind="rubric",
+    )
     add_check(checks, "research.conflicts_field", conflicts is not None, "conflicts field is present", kind="rubric")
-
-    scene_mapping_ok = True
-    for beat in as_list(beat_sheet):
-        if isinstance(beat, dict) and not as_list(beat.get("scene_ids")):
-            scene_mapping_ok = False
-            break
-    add_check(checks, "research.scene_mapping", scene_mapping_ok, "beat sheet entries are mapped to scene_ids", kind="rubric")
+    add_check(checks, "research.handoff_to_story", bool(handoff_to_story), "handoff_to_story is present", kind="rubric")
 
     confidence_ok = isinstance(confidence, (int, float)) and 0.0 <= float(confidence) <= 1.0
     add_check(checks, "research.confidence", confidence_ok, "metadata.confidence_score is between 0.0 and 1.0", kind="rubric")
@@ -230,14 +280,26 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
     add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
     add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
-    add_check(checks, "story.scenes", len(scenes) >= 1, "story includes at least one scripted scene", kind="rubric")
+    add_check(checks, "story.scenes", len(scenes) >= 20, f"story includes at least 20 scenes (got {len(scenes)})", kind="rubric")
 
-    research_refs_ok = True
-    for scene in scenes:
-        if isinstance(scene, dict) and not as_list(scene.get("research_refs")):
-            research_refs_ok = False
-            break
-    add_check(checks, "story.research_refs", research_refs_ok, "scripted scenes keep research_refs", kind="rubric")
+    for field in STORY_REQUIRED_SCENE_FIELDS:
+        missing = [
+            str(scene.get("scene_id") or index + 1)
+            for index, scene in enumerate(scenes)
+            if not isinstance(scene, dict) or not non_empty(scene.get(field))
+        ]
+        if missing:
+            details[f"missing_{field}_scene_ids"] = ",".join(missing[:20])
+        add_check(checks, f"story.scene_{field}", not missing, f"all scripted scenes include {field}", kind="rubric")
+
+    research_refs_missing = [
+        str(scene.get("scene_id") or index + 1)
+        for index, scene in enumerate(scenes)
+        if not isinstance(scene, dict) or not as_list(scene.get("research_refs"))
+    ]
+    if research_refs_missing:
+        details["missing_research_refs_scene_ids"] = ",".join(research_refs_missing[:20])
+    add_check(checks, "story.research_refs", not research_refs_missing, "scripted scenes keep research_refs", kind="rubric")
 
     hybrid_ok = hybrid_status in {None, "", "not_needed", "approved", "rejected"}
     add_check(checks, "story.hybrid_gate", hybrid_ok, "hybridization approval is not left pending", kind="rubric")

@@ -168,6 +168,41 @@ silent cut の扱い:
 - `video_generation.duration_seconds` は `4` 秒を基本にする
 - 最終音声連結では、その cut の `duration_seconds` 分の無音 mp3 が `video_narration_list.txt` 経由で連結される
 
+## Final Compile 正規化ルール
+
+scene 単位の compile を最終結合する前に、すべての scene compile を同一 stream 仕様へ正規化する。
+
+必須仕様:
+- video: target size に統一する。通常の 16:9 run では `1280x720`
+- fps: `24`
+- pixel format: `yuv420p`
+- audio codec: `AAC`
+- audio sample rate: `44100Hz`
+- audio channel layout: `stereo`
+
+禁止:
+- scene compile を直接 `ffmpeg -f concat -safe 0 -i list.txt -c copy final.mp4` で最終結合しない
+- `mono` と `stereo` が混在した scene compile をそのまま concat しない
+- silent cut / padded audio を含む scene だけ mono のまま残さない
+
+理由:
+- ffmpeg concat demuxer は、途中で audio channel layout が変わる入力に弱い
+- `scene08: mono -> scene09: stereo` のような境界では、境界以降の音声がジャミング音・ノイズ化することがある
+- scene 単位では正常に聞こえても、最終結合後だけ壊れるため、QA 前の機械チェックだけでは見落としやすい
+
+推奨手順:
+
+```bash
+ffmpeg -i sceneXX_compiled.mp4 \
+  -vf "scale=1280:720,fps=24" \
+  -af "aresample=44100,aformat=channel_layouts=stereo" \
+  -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+  -c:a aac -b:a 192k \
+  sceneXX_normalized.mp4
+```
+
+最終結合は、全 scene の normalized file だけを入力にする。
+
 ### 尺の決め方（音声実秒 + 余白）
 
 - 原則として、**`映像尺 = 音声実秒 + 余白`** とする

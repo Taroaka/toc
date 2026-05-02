@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import subprocess
 import sys
 import unittest
@@ -9,6 +10,58 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot
+
+VERIFY_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify-pipeline.py"
+SPEC = importlib.util.spec_from_file_location("verify_pipeline", VERIFY_SCRIPT_PATH)
+assert SPEC is not None and SPEC.loader is not None
+VERIFY_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(VERIFY_MODULE)
+
+
+def _good_story_yaml(topic: str = "桃太郎") -> str:
+    scene_lines: list[str] = []
+    for i in range(1, 21):
+        scene_lines.extend(
+            [
+                f"    - scene_id: {i}",
+                "      phase: \"development\"",
+                f"      purpose: \"Scene {i} の物語上の役割を明確にする\"",
+                f"      conflict: \"Scene {i} の内的または外的な葛藤\"",
+                f"      turn: \"Scene {i} で状況や認識が変わる\"",
+                "      affect:",
+                "        label_hint: \"curiosity\"",
+                "        audience_job: \"hook\"",
+                f"      visualizable_action: \"Scene {i} で画面化できる人物行動と状態変化\"",
+                f"      grounding_note: \"Scene {i} の骨格は research refs に基づき、心理描写は演出補完として扱う\"",
+                f"      narration: \"{topic} の scene {i} を語る\"",
+                f"      visual: \"Scene {i} の視覚要素\"",
+                f"      research_refs: [\"research.story_baseline.beat_sheet[{i - 1}]\"]",
+            ]
+        )
+    return "\n".join(
+        [
+            "```yaml",
+            "selection:",
+            "  candidates:",
+            "    - candidate_id: \"A\"",
+            f"      logline: \"{topic} の王道案\"",
+            "      why_it_scores: [\"clear\"]",
+            "      requires_hybridization_approval: false",
+            "    - candidate_id: \"B\"",
+            f"      logline: \"{topic} の別視点案\"",
+            "      why_it_scores: [\"fresh\"]",
+            "      requires_hybridization_approval: false",
+            "  chosen_candidate_id: \"A\"",
+            "  rationale: \"20 scene の展開に最も安定して接続できる\"",
+            "hybridization:",
+            "  approval_status: \"not_needed\"",
+            "script:",
+            "  scenes:",
+            *scene_lines,
+            "```",
+            "",
+        ]
+    )
 
 
 def _run_grounding(run_dir: Path, stage: str, *, flow: str) -> subprocess.CompletedProcess[str]:
@@ -47,6 +100,36 @@ def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
 
 
 class TestVerifyPipeline(unittest.TestCase):
+    def test_story_check_accepts_dense_story_without_author_score_hint(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_story_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0010"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "story.md").write_text(_good_story_yaml("桃太郎"), encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_story(run_dir, "fast")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["story.candidates"])
+            self.assertTrue(checks["story.scene_purpose"])
+            self.assertTrue(checks["story.scene_grounding_note"])
+
+    def test_story_check_fails_when_scene_required_field_missing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_story_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0011"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            story = _good_story_yaml("桃太郎").replace("      conflict: \"Scene 7 の内的または外的な葛藤\"\n", "", 1)
+            (run_dir / "story.md").write_text(story, encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_story(run_dir, "fast")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["story.scene_conflict"])
+            self.assertIn("7", stage["details"]["missing_conflict_scene_ids"])
+
     def test_verify_pipeline_fast_generates_reports(self) -> None:
         import tempfile
 
@@ -86,15 +169,6 @@ class TestVerifyPipeline(unittest.TestCase):
                     ]
                     + [f"      - beat: \"Beat {i}\"\n        scene_ids: [{i}]\n        confidence: 0.9\n        sources: [\"S1\"]" for i in range(1, 21)]
                     + [
-                        "scene_plan:",
-                        "  min_scene_count: 20",
-                        "  scenes:",
-                    ]
-                    + [
-                        f"    - scene_id: {i}\n      role: \"development\"\n      beat_summary: \"Scene {i}\"\n      desired_emotion: \"curiosity\"\n      key_visuals: [\"Visual {i}\"]\n      key_dialogue_or_voiceover: \"Voice {i}\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\""
-                        for i in range(1, 21)
-                    ]
-                    + [
                         "sources:",
                     ]
                     + [
@@ -103,6 +177,26 @@ class TestVerifyPipeline(unittest.TestCase):
                     ]
                     + [
                         "conflicts: []",
+                        "source_passages:",
+                    ]
+                    + [
+                        f"  - passage_id: \"P{i}\"\n    source_id: \"S1\"\n    passage: \"Passage {i}\"\n    evidence_note: \"Evidence {i}\"\n    confidence: 0.9"
+                        for i in range(1, 3)
+                    ]
+                    + [
+                        "facts:",
+                        "  items:",
+                    ]
+                    + [
+                        f"    - fact_id: \"F{i}\"\n      claim: \"Fact {i}\"\n      kind: \"plot\"\n      confidence: 0.9\n      verification: \"verified\"\n      sources: [\"S1\"]\n      notes: \"\""
+                        for i in range(1, 11)
+                    ]
+                    + [
+                        "handoff_to_story:",
+                        "  recommended_focus: [\"桃太郎の選択\"]",
+                        "  must_preserve: [\"出典に基づく出来事\"]",
+                        "  avoid_overstating: [\"未検証の起源\"]",
+                        "  selection_questions_for_p200: [\"どの葛藤を中心にするか\"]",
                         "metadata:",
                         "  confidence_score: 0.9",
                         "```",
@@ -112,45 +206,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            (run_dir / "story.md").write_text(
-                "\n".join(
-                    [
-                        "```yaml",
-                        "selection:",
-                        "  candidates:",
-                        "    - candidate_id: \"A\"",
-                        "      logline: \"王道冒険\"",
-                        "      why_it_scores: [\"clear\"]",
-                        "      score_hint:",
-                        "        engagement: 0.9",
-                        "        coherence: 0.9",
-                        "        production_fit: 0.9",
-                        "      requires_hybridization_approval: false",
-                        "    - candidate_id: \"B\"",
-                        "      logline: \"別視点\"",
-                        "      why_it_scores: [\"fresh\"]",
-                        "      score_hint:",
-                        "        engagement: 0.8",
-                        "        coherence: 0.8",
-                        "        production_fit: 0.8",
-                        "      requires_hybridization_approval: false",
-                        "  chosen_candidate_id: \"A\"",
-                        "  rationale: \"一番安定している\"",
-                        "hybridization:",
-                        "  approval_status: \"not_needed\"",
-                        "script:",
-                        "  scenes:",
-                        "    - scene_id: 1",
-                        "      phase: \"opening\"",
-                        "      narration: \"桃太郎が旅立つ\"",
-                        "      visual: \"川辺\"",
-                        "      research_refs: [\"research.story_baseline.beat_sheet[0]\"]",
-                        "```",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            (run_dir / "story.md").write_text(_good_story_yaml("桃太郎"), encoding="utf-8")
 
             (run_dir / "script.md").write_text(
                 "# Script\n\n桃太郎が出発し、犬と猿と雉を仲間にし、鬼ヶ島へ向かい、戦いの後に宝を持ち帰るまでを具体的に描く台本です。"
@@ -274,6 +330,26 @@ class TestVerifyPipeline(unittest.TestCase):
                     ]
                     + [
                         "conflicts: []",
+                        "source_passages:",
+                    ]
+                    + [
+                        f"  - passage_id: \"P{i}\"\n    source_id: \"S1\"\n    passage: \"Passage {i}\"\n    evidence_note: \"Evidence {i}\"\n    confidence: 0.9"
+                        for i in range(1, 3)
+                    ]
+                    + [
+                        "facts:",
+                        "  items:",
+                    ]
+                    + [
+                        f"    - fact_id: \"F{i}\"\n      claim: \"Fact {i}\"\n      kind: \"plot\"\n      confidence: 0.9\n      verification: \"verified\"\n      sources: [\"S1\"]\n      notes: \"\""
+                        for i in range(1, 11)
+                    ]
+                    + [
+                        "handoff_to_story:",
+                        "  recommended_focus: [\"浦島太郎の帰還不能\"]",
+                        "  must_preserve: [\"時間断絶\"]",
+                        "  avoid_overstating: [\"未検証の起源\"]",
+                        "  selection_questions_for_p200: [\"どの版を採用するか\"]",
                         "metadata:",
                         "  confidence_score: 0.9",
                         "```",
@@ -282,10 +358,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (run_dir / "story.md").write_text(
-                "```yaml\nselection:\n  candidates:\n    - candidate_id: \"A\"\n      logline: \"竜宮城の誘惑\"\n      why_it_scores: [\"visual\"]\n      score_hint:\n        engagement: 0.9\n        coherence: 0.9\n        production_fit: 0.9\n      requires_hybridization_approval: false\n    - candidate_id: \"B\"\n      logline: \"地上の郷愁\"\n      why_it_scores: [\"contrast\"]\n      score_hint:\n        engagement: 0.8\n        coherence: 0.8\n        production_fit: 0.8\n      requires_hybridization_approval: false\n  chosen_candidate_id: \"A\"\n  rationale: \"中盤の価値が強い\"\nhybridization:\n  approval_status: \"not_needed\"\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      narration: \"浦島太郎が海へ向かう\"\n      visual: \"浜辺\"\n      research_refs: [\"research.story_baseline.beat_sheet[0]\"]\n```\n",
-                encoding="utf-8",
-            )
+            (run_dir / "story.md").write_text(_good_story_yaml("浦島太郎"), encoding="utf-8")
             (run_dir / "script.md").write_text(
                 "# Script\n\n浦島太郎が海辺から異界へ入り、竜宮城の魅力を体験したあと、乙姫に出会うまでを描く台本です。"
                 "この版では、中盤に無音の視覚報酬カットを入れ、竜宮城の内部を複数の短い探索カットで見せます。"
@@ -380,7 +453,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "research.md").write_text("```yaml\ntopic: \"浦島太郎\"\nstory_baseline:\n  canonical_synopsis:\n    one_liner: \"浦島太郎\"\n    short_summary: \"summary\"\n    beat_sheet:\n      - beat: \"b\"\n        scene_ids: [1]\n        confidence: 0.9\n        sources: [\"S1\"]\nscene_plan:\n  min_scene_count: 1\n  scenes:\n    - scene_id: 1\n      role: \"opening\"\n      beat_summary: \"b\"\n      desired_emotion: \"c\"\n      key_visuals: [\"v\"]\n      key_dialogue_or_voiceover: \"k\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\"\nsources:\n  - source_id: \"S1\"\n    title: \"s\"\n    url: \"https://example.com\"\n    type: \"primary\"\n    reliability: \"high\"\n    accessed_at: \"2099-01-01T00:00:00+09:00\"\n    notes: \"\"\nconflicts: []\nmetadata:\n  confidence_score: 0.9\n```\n", encoding="utf-8")
-            (run_dir / "story.md").write_text("```yaml\nselection:\n  candidates:\n    - candidate_id: \"A\"\n      logline: \"x\"\n      why_it_scores: [\"x\"]\n      score_hint:\n        engagement: 0.9\n        coherence: 0.9\n        production_fit: 0.9\n      requires_hybridization_approval: false\n  chosen_candidate_id: \"A\"\n  rationale: \"x\"\nhybridization:\n  approval_status: \"not_needed\"\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      narration: \"x\"\n      visual: \"y\"\n      research_refs: [\"research.story_baseline.beat_sheet[0]\"]\n```\n", encoding="utf-8")
+            (run_dir / "story.md").write_text(_good_story_yaml("浦島太郎"), encoding="utf-8")
             (run_dir / "script.md").write_text("# Script\n\nok", encoding="utf-8")
             (run_dir / "video_manifest.md").write_text(
                 "\n".join(
@@ -461,7 +534,7 @@ class TestVerifyPipeline(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "research.md").write_text("```yaml\ntopic: \"桃太郎\"\nstory_baseline:\n  canonical_synopsis:\n    one_liner: \"桃太郎\"\n    short_summary: \"summary\"\n    beat_sheet:\n      - beat: \"b1\"\n        scene_ids: [1]\n        confidence: 0.9\n        sources: [\"S1\"]\nscene_plan:\n  min_scene_count: 1\n  scenes:\n    - scene_id: 1\n      role: \"opening\"\n      beat_summary: \"b\"\n      desired_emotion: \"c\"\n      key_visuals: [\"v\"]\n      key_dialogue_or_voiceover: \"k\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\"\nsources:\n  - source_id: \"S1\"\n    title: \"s\"\n    url: \"https://example.com\"\n    type: \"primary\"\n    reliability: \"high\"\n    accessed_at: \"2099-01-01T00:00:00+09:00\"\n    notes: \"\"\nconflicts: []\nmetadata:\n  confidence_score: 0.9\n```\n", encoding="utf-8")
-            (run_dir / "story.md").write_text("```yaml\nselection:\n  candidates:\n    - candidate_id: \"A\"\n      logline: \"x\"\n      why_it_scores: [\"x\"]\n      score_hint:\n        engagement: 0.9\n        coherence: 0.9\n        production_fit: 0.9\n      requires_hybridization_approval: false\n  chosen_candidate_id: \"A\"\n  rationale: \"x\"\nhybridization:\n  approval_status: \"not_needed\"\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      narration: \"x\"\n      visual: \"y\"\n      research_refs: [\"research.story_baseline.beat_sheet[0]\"]\n```\n", encoding="utf-8")
+            (run_dir / "story.md").write_text(_good_story_yaml("桃太郎"), encoding="utf-8")
             (run_dir / "script.md").write_text("# Script\n\n十分な長さの script 本文です。十分な長さの script 本文です。\n", encoding="utf-8")
             (run_dir / "video_manifest.md").write_text("```yaml\nvideo_metadata:\n  topic: \"桃太郎\"\n  experience: \"cinematic_story\"\nscenes:\n  - scene_id: 1\n    cuts:\n      - cut_id: 1\n        cut_role: \"main\"\n        image_generation:\n          tool: \"google_nanobanana_2\"\n          character_ids: []\n          object_ids: []\n          prompt: |\n            画面内テキストなし。\n          output: \"assets/scenes/scene01.png\"\n        video_generation:\n          tool: \"kling_3_0\"\n          duration_seconds: 5\n          output: \"assets/scenes/scene01.mp4\"\n        audio:\n          narration:\n            text: \"桃太郎が歩く。\"\n            tool: \"elevenlabs\"\n            output: \"assets/audio/scene01.mp3\"\n```\n", encoding="utf-8")
             (run_dir / "video.mp4").write_bytes(b"placeholder")

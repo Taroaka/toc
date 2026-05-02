@@ -28,7 +28,7 @@
 ### 出力
 
 - `output/<topic>_<timestamp>/story.md` - 物語スクリプト
-- `output/<topic>_<timestamp>/visual_value.md` - 視覚化価値パートの設計メモ（後続エージェントが作成）
+- `output/<topic>_<timestamp>/visual_value.md` - p300 visual planning 正本（後続エージェントが作成）
 - 動画用台本（任意の長さに対応）
 
 ### 下流 prompt 設計への受け渡し
@@ -37,6 +37,50 @@
 - 動画プロバイダが未指定なら、汎用ルールとして `docs/video-generation.md` を前提にしてよい
 - 動画プロバイダが `kling_3_0` / `kling_3_0_omni` と明示されている場合、後続 agent が参照する動画 prompt guide は
   `docs/video-generation.md` に加えて `workflow/playbooks/video-generation/kling.md` を優先する前提で、scene の意図を切り出す
+
+---
+
+## Outcome Contract
+
+Story stage のゴールは、`research.md` の材料を、後続の script / narration / scene implementation が迷わず使える
+`story.md` に変換すること。手順はこのゴールを満たすための補助であり、既存テンプレートと grounding contract を優先する。
+p200 は、p100 が厚く残した `story_materials` / `source_passages` / `variants` / `conflicts` を読み、
+scene / beat / emotion curve / candidate selection へ再構成する主責務を持つ。
+p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであり、p200 の分割判断を拘束しない。
+
+### Success criteria
+
+- `story.md` が `workflow/story-template.yaml` の主要フィールドを満たしている
+- protagonist / world / conflict / transformation / theme が、p200 で scene に分解された粒度で書かれている
+- p100 の素材から scene / beat / emotion curve / candidate selection が明示的に作られている
+- p200 は 20 scene 単位の物語骨格までを担当し、cut 分割は後続 stage に渡す
+- 各 scene は `purpose / conflict / turn / affect / visualizable_action / grounding_note` を持ち、単なる一行要約で終わらせない
+- primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
+- 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
+- 矛盾するソースを混成する場合は、hybridization gate でユーザー承認を得ている
+- 下流の prompt 設計で `1 clip = 1意図` に分けられる scene 意図が残っている
+
+### Source vs creative boundary
+
+- 史実、数値、固有名詞、文献差分、伝承バリエーションは `research.md` の根拠に紐づける
+- 感情曲線、視点、会話、画作り、象徴表現は創作補完として扱い、事実主張に見せない
+- research にない事実を足したい場合は、追加調査タスクにするか、明示的な仮説として隔離する
+- 創作補完は、既存の事実アンカーを強めるために使い、根拠の弱い断定を隠すために使わない
+
+### Ask-before-write conditions
+
+- Goal / Success criteria / Scope が読み取れず、出力の合格条件が決められない
+- ユーザー指定の変更対象と repo の grounding / template contract が衝突している
+- 複数ソースの矛盾を同一シーンや設定として混成する必要がある
+- 物語価値を上げるために research にない事実主張を追加したくなる
+
+### Subagent use
+
+- story candidate の複数案出し、source-vs-creative audit、grounding audit は contextless subagent に任せてよい
+- subagent には `research.md`、stage readset、出力先 scratch path、評価目的だけを渡す
+- `story.md` の確定、hybridization 承認確認、`subagent_trace` の採否理由はメインエージェントが統合する
+- p230 `story_review.md` では、subagent が候補スコアリング、20 scene の厚み、根拠境界、後続工程への接続性を評価する
+- p230 は p210 grounding audit と分離する。p210 は前提監査、p230 は成果物レビューである
 
 ---
 
@@ -446,7 +490,7 @@ accuracy_checklist:
 ### Phase 5: 視覚化価値パートへの handoff
 
 `story.md` を確定した後、Scriptwriter に直接渡す前に
-**Visual Value Ideator** が `visual_value.md` を作る。
+**Visual Value Ideator** が `visual_value.md` を作る。これは中盤の視覚報酬メモに限定せず、p400 / p600 / p700 が迷わないための visual planning 正本として扱う。
 
 目的:
 
@@ -600,6 +644,15 @@ script:
     - scene_id: 1
       position_percent: "0-10"
       phase: "opening"
+      purpose: "この scene が物語全体で果たす役割"
+      conflict: "この scene 内の内的/外的/構造的な葛藤"
+      turn: "この scene で変わる状況・認識・関係"
+      affect:
+        label_hint: "curiosity | awe | dread | relief"
+        audience_job: "hook | bond | strain | release | aftertaste"
+      visualizable_action: "画面化できる人物行動・状態変化・象徴の動き"
+      grounding_note: "research の confidence / verification / uncertainty を短い判断文に圧縮する"
+      creative_inventions: ["必要時のみ: invented symbol / dialogue / psychology"]
 
       visual:
         description: "string"
@@ -706,7 +759,7 @@ sources:
 ## Handoff Artifact: `visual_value.md`
 
 Visual Value Ideator は `workflow/visual-value-template.yaml` を基に、
-次のような構造で `visual_value.md` を作る。
+次のような構造で `visual_value.md` を作る。p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt は作らない。
 
 ```yaml
 visual_value_metadata:
@@ -714,30 +767,78 @@ visual_value_metadata:
   source_research: "output/<topic>_<timestamp>/research.md"
   source_story: "output/<topic>_<timestamp>/story.md"
   created_at: "ISO8601"
+  purpose: "p300 visual planning source of truth"
+
+global_visual_identity:
+  visual_style: "string"
+  camera_principles: ["string"]
+  lighting_color_principles: ["string"]
+  continuity_principles: ["string"]
+  forbidden: ["text overlay", "watermark"]
+
+scene_visual_values:
+  - scene_selector: "scene01"
+    story_function: "string"
+    visual_value: "string"
+    must_show: ["string"]
+    must_avoid: ["string"]
+    emotional_payload: "string"
+    continuity_hooks: ["string"]
+    p400_script_notes: ["string"]
+
+anchor_cut_candidates:
+  - selector: "scene01_cut01"
+    proposed_still_mode: "generate_still|reuse_anchor|bridge"
+    anchor_role: "character_anchor|location_anchor|object_anchor|state_transition|visual_value_hold|other"
+    why_anchor_needed: "string"
+    reuse_targets: ["sceneXX_cutYY"]
+
+asset_bible_candidates:
+  characters: []
+  objects: []
+  locations: []
+  reusable_stills: []
+
+reference_strategy:
+  required_reference_assets: []
+  reference_usage_rules: []
+  no_reference_allowed: []
+  color_and_lighting_priority: []
+
+regeneration_risks:
+  - risk_id: "risk_01"
+    affected_selectors: ["sceneXX_cutYY"]
+    failure_mode: "string"
+    prevention_rule: "string"
+    owner_stage: "p400|p600|p700"
+
+handoff_to_p400_p600_p700:
+  p400_script:
+    must_preserve: ["string"]
+    must_not_do: ["string"]
+  p600_asset:
+    must_create_or_review: ["string"]
+    review_focus: ["string"]
+  p700_scene_implementation:
+    must_materialize: ["string"]
+    review_focus: ["string"]
 
 value_parts:
   - part_id: "midroll_visual_payoff_01"
+    optional: true
     title: "string"
-    placement_window:
-      start_percent: 20
-      end_percent: 80
-      preferred_percent: 50
-      rationale: "string"
-    why_this_matters:
-      - "string"
-    ai_visualization_advantage:
-      no_physical_set_required: true
-      spectacle_scale: "string"
-      notes: "string"
-    related_objects: ["object_id"]
-    cut_plan:
-      - cut_id: 1
-        duration_seconds: 4
-        narration: ""
-        focus: "string"
-        description: "string"
-        viewer_payoff: "string"
+    cut_plan: []
 ```
+
+p300 done 条件:
+
+- `visual_value.md` が存在する
+- 主要 story scene に `scene_visual_values[]` の coverage がある
+- `asset_bible_candidates` が列挙されている
+- `anchor_cut_candidates` が列挙されている
+- `reference_strategy` がある
+- `regeneration_risks[]` がある
+- `handoff_to_p400_p600_p700` がある
 
 ---
 

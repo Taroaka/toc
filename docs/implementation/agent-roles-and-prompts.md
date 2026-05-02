@@ -14,6 +14,22 @@
 
 ## 役割と責務
 
+### Orchestrator（統括 / single writer）
+- 入力: user request / `state.txt` / `p000_index.md` / stage readset
+- 出力: canonical artifact updates / state slot updates / subagent task packets
+- 参照: `docs/root-pointer-guide.md` / `docs/system-architecture.md` / `workflow/stage-grounding.yaml`
+- 責務:
+  - stage ごとに `prepare-stage-context.py` で readset を確定する
+  - `p100`-`p900` の依存順序、review policy、approval gate を管理する
+  - subagent に渡す入力を artifact path / 目的 / 出力先へ限定する
+  - subagent の draft / audit / review / scratch output を読み、canonical artifact へ採用する差分を選ぶ
+  - `state.txt` と `p000_index.md` を append / update し、stage verifier へつなぐ
+- 禁止:
+  - subagent に未読の親文脈を前提にさせる
+  - 複数 subagent に同じ canonical file を同時編集させる
+  - hybridization や human review を自動承認する
+  - `state.txt` の置き換えや final status の丸投げを行う
+
 ### Director（監督）
 - 入力: `research.md`
 - 出力: `story.md`
@@ -23,11 +39,12 @@
 ### Visual Value Ideator
 - 入力: `research.md` + `story.md`
 - 出力: `visual_value.md`
-- 目的: 物語本筋では語り切られないが、動画生成AIで実写風に見せると価値が高い中盤パートを定義する
+- 目的: p300 visual planning の正本として、visual identity / scene visual value / anchor / reference strategy / asset bible candidates / regeneration risks / handoff を定義する
 - 制約:
-  - 動画全体の `20% - 80%` に配置する
-  - `4-6` カット、各 `4` 秒、ナレーションなしを基本にする
-  - 文字ではなく、形 / 光 / 動き / 機構 / ショー性で価値を伝える
+  - cut prompt、画像生成 request、asset 画像、動画 motion prompt は作らない
+  - p400 / p600 / p700 が迷わない判断基準を `visual_value.md` に残す
+  - silent visual payoff は p300 の一部機能であり、必要な run だけ `value_parts[]` に定義する
+  - 文字ではなく、形 / 光 / 動き / 機構 / ショー性で伝える価値を優先する
 - エージェント定義: `.claude/agents/visual-value-ideator.md`
 
 ### Scriptwriter

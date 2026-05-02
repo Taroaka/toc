@@ -1,6 +1,6 @@
 ---
 name: codex-parallel-image-batch
-description: Use when Codex should generate or edit one or more images with built-in image generation, using gpt-image-1.5, optionally delegating one image per subagent for explicit parallel batch requests. Supports scene-cut images, thumbnails, and other reusable image asset workflows.
+description: Use when Codex should generate or edit one or more images with built-in image generation, using gpt-image-2, optionally delegating one image per subagent for explicit parallel batch requests. Supports scene-cut images, thumbnails, and other reusable image asset workflows.
 ---
 
 # Codex Parallel Image Batch
@@ -12,7 +12,7 @@ This skill standardizes how Codex handles image generation batches.
 It is intentionally generic:
 
 - prefer Codex built-in image generation
-- assume the built-in image model is `gpt-image-1.5`
+- assume the built-in image model is `gpt-image-2`
 - generate multiple images in parallel only when the user explicitly asks for parallel or subagent-based work
 - keep output handling and naming consistent
 - let the caller decide the destination directory and asset-specific rules
@@ -37,7 +37,7 @@ Do not use this skill when:
 ## Required Operating Rules
 
 1. Prefer Codex built-in image generation for this workflow.
-2. Treat built-in image generation as `gpt-image-1.5`-backed.
+2. Treat built-in image generation as `gpt-image-2`-backed.
 3. When the user explicitly requests parallel generation, fan out the batch with subagents.
 4. Default to one image item per subagent unless the caller gives a different grouping rule.
 5. The main agent remains the single writer for shared manifests, indexes, and summaries.

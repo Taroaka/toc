@@ -149,9 +149,10 @@ graph TD
   - `p220`: authoring
   - `p230`: review
 - `p300`: visual planning
-  - `p310`: visual value
+  - `p310`: visual value authoring (`visual_value.md`)
   - `p320`: visual planning review
-  - `p330`: appendix
+  - `p330`: p400 / p600 / p700 handoff appendix
+  - done when: `visual_value.md` exists, major scenes have visual value coverage, asset bible candidates and anchor candidates are listed, reference strategy and regeneration risks are documented, and p400/p600/p700 handoff exists
 - `p400`: script / narration text / human changes
   - `p410`: grounding
   - `p420`: authoring
@@ -193,6 +194,47 @@ graph TD
   - `p910`: render inputs
   - `p920`: final render
   - `p930`: QA / runtime summary
+
+## Subagent Orchestration Policy
+
+メインエージェントは run 全体の orchestrator / single writer として振る舞う。subagent は contextless / bounded / artifact-scoped な補助役であり、`state.txt`、`p000_index.md`、canonical artifact の最終更新や承認判断を行わない。
+
+呼び出し条件:
+
+- stage grounding が `ready`、audit が `passed`
+- 入力 artifact が存在し、stage readset に含まれている
+- task が scene / cut / review / evidence のように境界分割できる
+- 出力先が `scratch/`、`logs/`、review artifact、または明示された isolated path
+
+slot ごとの標準分担:
+
+| Slot | subagent に任せてよい作業 | メインエージェントの統合責務 |
+| --- | --- | --- |
+| `p100` research | research scout / evidence collector | `research.md` への統合、source trace、slot 更新 |
+| `p200` story | story candidate / source-vs-creative audit | `story.md` 確定、hybridization 承認確認 |
+| `p300` visual planning | visual-value draft / visual payoff audit / anchor-reference-risk audit | `visual_value.md` 統合、story との矛盾確認、p400/p600/p700 handoff 確認 |
+| `p400` script | scene draft / narration draft | `script.md` と skeleton manifest の統合 |
+| `p500` narration | narration review / duration stretch review | TTS 実行判断、duration gate、manifest 反映 |
+| `p600` asset | asset brief / continuity review | asset plan 採用、request 発行、canonical asset 更新 |
+| `p700` scene implementation | scene/cut prompt rewrite / image prompt judgment | production manifest 統合、review finding の採否 |
+| `p800` video | clip generation fan-out / clip review | 採用判定、manifest 更新、除外理由の記録 |
+| `p900` render / QA | QA reviewer / runtime summary review | final report 生成、完了判定、run closeout |
+
+禁止事項:
+
+- `state.txt` を置き換える、または subagent が直接 final status を確定する
+- hybridization を自動承認する
+- 複数 subagent に `story.md` / `script.md` / `video_manifest.md` を同時編集させる
+- 親会話だけにある未記録情報へ依存する
+- evidence なしの事実追加を canonical artifact に入れる
+
+統合手順:
+
+1. subagent output を読む
+2. canonical artifact に採用する差分を選ぶ
+3. `state.txt` に prompt / output / review summary を append する
+4. verifier または stage review を通す
+5. finding が残る場合は、修正 task を再度 bounded subagent に渡す
 
 ## Model/providers
 

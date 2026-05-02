@@ -17,6 +17,14 @@ video_metadata:
   aspect_ratio: "9:16"
   resolution: "1080x1920"
 
+subagent_trace:
+  - subagent_id: "image-prompt-judgment-001"
+    role: "narration_review|duration_stretch_review|asset_continuity_review|image_prompt_judgment|clip_review|qa_review"
+    input_artifact: "output/<topic>_<timestamp>/video_manifest.md"
+    output_artifact: "output/<topic>_<timestamp>/logs/review/image_prompt.judgment.md"
+    accepted_by_main: false
+    reason: "string"
+
 # === 素材管理 ===
 assets:
   character_bible:

@@ -5,29 +5,64 @@ story_metadata:
   created_at: "ISO8601"
   pattern_used: "hidden_truth|counterintuitive|mystery|hero|emotional"
 
-# Creative selection（推奨: 複数案→選択）
+subagent_trace:
+  - subagent_id: "story-candidate-audit-001"
+    role: "story_candidate|source_vs_creative_audit|grounding_audit"
+    input_artifact: "output/<topic>_<timestamp>/research.md"
+    output_artifact: "output/<topic>_<timestamp>/scratch/story_candidate_a.md"
+    accepted_by_main: false
+    reason: "string"
+
+outcome_contract:
+  goal: "research.md を、後続 stage が迷わず使える story.md に変換する"
+  success_criteria:
+    - "p100 の story_materials / source_passages / variants / conflicts から scene / beat / emotion curve を作る"
+    - "protagonist / world / conflict / transformation / theme が scene 分解済みである"
+    - "primary hook と opening が具体的な事実または強い物語状況を持つ"
+    - "各 scene が research refs を持ち、創作補完と事実主張を混同しない"
+    - "各 scene が purpose / conflict / turn / affect / visualizable_action / grounding_note を持つ"
+    - "hybridization が必要な場合は approval_status が approved である"
+    - "下流で 1 clip = 1意図 に分けられる scene 意図が残っている"
+  source_vs_creative_boundary:
+    source_backed:
+      - "史実"
+      - "数値"
+      - "固有名詞"
+      - "文献差分"
+      - "伝承バリエーション"
+    creative_allowed:
+      - "感情曲線"
+      - "視点"
+      - "会話"
+      - "画作り"
+      - "象徴表現"
+    ask_before:
+      - "research にない事実主張を追加する"
+      - "矛盾する複数ソースを同一シーンや設定として混成する"
+
+# Creative selection（必須: 複数案→選択）
 #
 # 目的:
 # - “創造”で多様性を出し、“選択”でスコアが高い案を採用する。
 # - Hero's Journey への当てはめは必須ではない（フレームワークは道具）。
+# - 候補の numeric score は author が自己採点せず、p230 story_review.md の subagent 評価で付ける。
 selection:
   candidates:
     - candidate_id: "A"
       logline: "string"
+      fact_basis_refs: ["research.engagement.hooks[0]"]
+      creative_inventions:
+        - element: "string"
+          purpose: "dramatic_compression|composite_character|visual_symbol|dialogue"
+          does_not_contradict_refs: true
       why_it_scores: ["string"]
-      score_hint:
-        engagement: 0.0
-        coherence: 0.0
-        production_fit: 0.0
       requires_hybridization_approval: false
       conflicts_referenced: ["research.conflicts[C1]"]
     - candidate_id: "B"
       logline: "string"
+      fact_basis_refs: ["research.story_baseline.beat_sheet[0]"]
+      creative_inventions: []
       why_it_scores: ["string"]
-      score_hint:
-        engagement: 0.0
-        coherence: 0.0
-        production_fit: 0.0
       requires_hybridization_approval: false
       conflicts_referenced: []
   chosen_candidate_id: "A"
@@ -43,6 +78,14 @@ hybridization:
     risks: ["string"]
     mitigations: ["string"]
     question_for_user: "このハイブリッド（混成）で進めてよいですか？"
+
+ask_before_edit:
+  required_when:
+    - "mixing incompatible research conflicts"
+    - "changing approved protagonist/theme/reveal order"
+    - "inventing events presented as factual"
+    - "dropping a source-backed beat for pacing"
+  question_for_user: "この変更は事実関係または承認済み構成を変えます。進めてよいですか？"
 
 story_structure:
   protagonist:
@@ -62,16 +105,39 @@ story_structure:
   theme:
     governing_thought: "string"
 
+story_decomposition:
+  source_material_refs: ["research.story_materials.chronological_events[E1]", "research.source_passages[P1]"]
+  beat_strategy: "string"
+  emotion_curve_summary: "string"
+  notes_on_ignored_or_deferred_material: ["string"]
+
 script:
   scenes:
     - scene_id: 1
       phase: "opening|development|ordeal|transformation|ending"
+      purpose: "この scene が物語全体で果たす役割"
+      conflict: "この scene 内の内的/外的/構造的な葛藤"
+      turn: "この scene で変わる状況・認識・関係"
+      affect:
+        label_hint: "curiosity|awe|dread|grief|panic|relief|aftertaste"
+        audience_job: "hook|bond|strain|release|aftertaste"
+      visualizable_action: "画面化できる人物行動・状態変化・象徴の動き"
+      grounding_note: "research の confidence / verification / uncertainty を短く判断文に圧縮する"
       narration: "string"
       visual: "string"
       # Mapping back to research for traceability (運用: idが無い場合は短い引用でも可)
       research_refs: ["research.engagement.hooks[0]", "research.story_baseline.beat_sheet[0]"]
+      creative_inventions: ["必要時のみ: invented symbol / dialogue / psychology"]
     - scene_id: 2
       phase: "opening|development|ordeal|transformation|ending"
+      purpose: "string"
+      conflict: "string"
+      turn: "string"
+      affect:
+        label_hint: "string"
+        audience_job: "string"
+      visualizable_action: "string"
+      grounding_note: "string"
       narration: "string"
       visual: "string"
       research_refs: []
@@ -85,3 +151,10 @@ engagement_design:
 quality_scores:
   engagement_potential: 0.0
   information_accuracy: 0.0
+  success_criteria:
+    viewer_takeaway: "string"
+    must_remember: ["string"]
+    must_not_misunderstand: ["string"]
+  scope_boundaries:
+    factual_claims_locked: true
+    creative_license_declared: true

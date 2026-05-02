@@ -121,7 +121,7 @@ output/<topic>_<timestamp>/
 - 画像: Google Nano Banana 2（`tool: "google_nanobanana_2"`）
 - 画像（代替）: Gemini 3.1 Flash Image（`tool: "gemini_3_1_flash_image"` / `gemini-3.1-flash-image-preview`）
 - 画像（代替）: SeaDream / Seedream 4.5（`tool: "seadream"` + `SEADREAM_*`）
-- Codex built-in image generation は標準画像基盤としては使わない
+- Codex built-in image generation（現行想定モデル: `gpt-image-2`）は標準画像基盤としては使わない
 - ただし `reference_count == 0` の image request は、互換 lane 名 `execution_lane=bootstrap_builtin` で Codex built-in image generation に回す
 - `reference_count > 0` の image request は `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` の標準 lane に残す
 - `scripts/generate-assets-from-manifest.py` を no-reference のまま標準 provider で実行すると、deterministic error を返して `$toc-no-reference-image-runner` へ誘導する
@@ -163,7 +163,7 @@ output/<topic>_<timestamp>/
 - `100` 番台ごとに大工程を割り当てる
   - `p100`: research
   - `p200`: story
-  - `p300`: visual planning
+  - `p300`: visual planning（`visual_value.md` で visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / p400-p600-p700 handoff を決める）
   - `p400`: script / narration draft / human changes
   - `p500`: narration / audio runtime
   - `p600`: asset
@@ -183,6 +183,13 @@ output/<topic>_<timestamp>/
   - `p910`, `p920`, `p930`
 - story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
 - `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
+- p300 done 条件:
+  - `visual_value.md` が存在する
+  - 主要 story scene に `scene_visual_values[]` の coverage がある
+  - `asset_bible_candidates` と `anchor_cut_candidates` が列挙されている
+  - `reference_strategy` と `regeneration_risks[]` がある
+  - `handoff_to_p400_p600_p700` がある
+  - p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を作らない
 - `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - slot 状態を手で残したい場合は次を使う
 

@@ -13,6 +13,62 @@
 - 旧 contract は `image_prompt` を公開 stage とし、audio stage は後段だった。
 - 新 contract では `scene_implementation` を公開 stage とし、audio-first を前提にする。
 
+## 0. Core Terms / Glossary
+
+この repo では、物語上の単位、生成実行の単位、設計書の単位を混同しない。
+
+- `scene` / シーン
+  - 物語上のまとまり。1つの出来事、場所、感情変化、または段落を表す。
+  - 例: 「亀を助ける」「竜宮城に着く」「故郷に戻る」。
+  - `script.md.scenes[]` と `video_manifest.md.scenes[]` の基本単位。
+- `cut` / カット
+  - scene を映像として実装するための小単位。
+  - 1つの画、短い動き、反応、間、transition、または narration beat を担う。
+  - cut の枠は script / skeleton manifest で作り、production manifest で image / audio / video の実行情報を持つ。
+  - cut は `audio`, `image_generation`, `video_generation`, `scene_contract` などの部品を束ねる統合単位であり、audio そのものとは別概念。
+- `audio` / 音声
+  - cut または scene に属する narration runtime。
+  - `tts_text`, voice, prompt contract, generated audio path, actual duration を持つ。
+  - 概念上は cut の部品だが、実 TTS 秒数が後続の video duration / hold / render を決めるため、stage としては p500 / narration で先に確定する。
+- `visual`
+  - cut または scene が画として何を伝えるかを表す設計領域。
+  - `visual_beat`, `scene_contract`, `image_generation`, `still_image_plan`, `reference_usage` などを含む。
+  - visual planning stage では、cut prompt そのものではなく、visual identity / scene visual value / anchor / reference strategy を決める。
+- `asset`
+  - 複数 cut / scene で visual identity を固定するための再利用可能な素材。
+  - character, object, location, reusable still を含む。
+  - 単発 cut の便利画像ではなく、continuity anchor として扱う。
+- `design document` / 設計書
+  - 生成物を直接作るファイルではなく、後続 stage が迷わないための仕様・判断基準・契約。
+  - 例: `visual_value.md`, `asset_plan.md`, `video_manifest.md`, `docs/*`, `workflow/*`。
+  - run artifact の設計書は、その stage の source of truth または handoff として扱う。
+- `manifest`
+  - 実行可能な生成契約。
+  - `video_manifest.md` は scene / cut / audio / image / video / asset reference を materialize し、生成スクリプトが読む正本。
+- `render unit`
+  - 最終 video request / clip list に載る動画単位。
+  - 複数 cut を1つの動画として生成・連結したい場合、scene の `render_units[]` が cut 群を束ねる。
+
+責務の関係:
+
+```text
+Scene
+  Cut
+    audio: narration runtime and actual duration
+    visual: image prompt, still plan, references, visual contract
+    video: motion prompt, duration, generated clip
+  RenderUnit(optional): one generated video unit that can bundle multiple cuts
+```
+
+標準順序:
+
+- p300 visual planning: cut を作る前に、visual identity / visual value / anchor / reference strategy を決める。
+- p400 script: scene / cut skeleton と narration / tts_text を作る。
+- p500 narration: cut audio を生成し、実 duration を確定する。
+- p600 asset: cut で使う reusable asset / reference を設計・生成する。
+- p700 scene implementation: audio duration と asset references を使って cut の image / video 実装を作る。
+- p800/p900 video/render: render unit / clip list / final render を作る。
+
 ## 1. State schema（ジョブ状態）
 
 `docs/orchestration-and-ops.md` のマニフェストを最小化し、
@@ -55,6 +111,9 @@ stage.story.audit.report=logs/grounding/story.audit.json
 stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
 stage.story.playbooks.report=logs/grounding/story.playbooks.json
 stage.story.playbooks.selected_count=0
+review.story.status=pending|approved|changes_requested
+review.story.subagent.prompt=logs/review/story.subagent_prompt.md
+review.story.subagent.prompt.generated_at=ISO8601
 stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.script.grounding.status=ready|missing_docs|missing_inputs
 stage.script.grounding.report=logs/grounding/script.json
@@ -114,6 +173,7 @@ review.policy.narration=required|optional
 artifact.research=output/<topic>_<timestamp>/research.md
 artifact.research_review=output/<topic>_<timestamp>/research_review.md
 artifact.story=output/<topic>_<timestamp>/story.md
+artifact.story_review=output/<topic>_<timestamp>/story_review.md
 artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 artifact.script=output/<topic>_<timestamp>/script.md
 artifact.script_review=output/<topic>_<timestamp>/script_review.md
@@ -238,6 +298,7 @@ slot.pXXX.note=string
 - `p100`: research
 - `p200`: story
 - `p300`: visual planning
+  - `visual_value.md` を正本として、cut 作成前に visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / downstream handoff を決める
 - `p400`: script / narration draft / human changes
 - `p500`: narration / audio runtime
 - `p600`: asset
@@ -250,6 +311,22 @@ slot.pXXX.note=string
 - story 固有の差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` にのみ載せる
 - slot の意味や順序を story ごとに変更しない
 - `p000_index.md` はこの固定 slot contract を run progress の正本として要約する
+- `p800` は個別 clip / scene compile の生成までを担い、最終結合前に全 scene compile の audio/video stream を正規化できる状態で終える
+- `p900` は最終 render / QA の責務として、scene compile をそのまま `concat -c copy` しない。最終結合前に全 scene compile を同一仕様へ正規化する
+  - video: `1280x720` または run の target size、`24fps`、`yuv420p`
+  - audio: `AAC`, `44100Hz`, `stereo`
+  - 理由: `mono -> stereo` など channel layout が途中で変わると、concat 境界以降でジャミング音・ノイズ化が発生するため
+
+p300 done 条件:
+
+- `visual_value.md` が存在する
+- 主要 story scene に `scene_visual_values[]` の coverage がある
+- `asset_bible_candidates` が列挙されている
+- `anchor_cut_candidates` が列挙されている
+- `reference_strategy` がある
+- `regeneration_risks[]` がある
+- `handoff_to_p400_p600_p700` がある
+- 本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を p300 で作っていない
 
 ### 1.1 `status` と `stage.*.status` の役割分担
 
@@ -668,7 +745,7 @@ location の例外ルール:
   - `coverage`
   - `conflict_readiness`
   - `structure_readiness`
-  - `scene_mapping`
+  - `story_material_readiness`
 - script
   - `arc_coverage`
   - `scene_specificity`

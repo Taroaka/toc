@@ -26,6 +26,7 @@
 
 ## Read Next
 
+- 用語集: `docs/data-contracts.md` の "Core Terms / Glossary"
 - 調査: `docs/information-gathering.md`
 - 感情設計: `docs/affect-design.md`
 - 物語化: `docs/story-creation.md`
@@ -58,6 +59,7 @@
 - grounding readset: `output/<topic>_<timestamp>/logs/grounding/<stage>.readset.json`
 - grounding audit result: `output/<topic>_<timestamp>/logs/grounding/<stage>.audit.json`
 - subagent audit prompt: `output/<topic>_<timestamp>/logs/grounding/<stage>.subagent_prompt.md`
+- story review subagent prompt: `output/<topic>_<timestamp>/logs/review/story.subagent_prompt.md`
 - image judgment subagent prompt: `output/<topic>_<timestamp>/logs/review/image_prompt.subagent_prompt.md`
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`
 - fixed slot workflow: `p100`-`p900` plus fine-grained slots (`p110`, `p120`, ... `p930`) are global across all stories
@@ -89,6 +91,25 @@ python scripts/verify-pipeline.py --run-dir output/<topic>_<timestamp> --flow to
 ```bash
 scripts/ai/session-bootstrap.sh
 ```
+
+## Request Intake
+
+ガイド、プロンプト、運用ルールの見直し依頼では、作業前に Goal / Success criteria / Scope を確認する。
+
+確認すること:
+
+- Goal: ユーザーが達成したい最終状態
+- Success criteria: 何が満たされれば完了か
+- Scope: 変更対象ファイルと、変更してはいけないファイル
+- Evidence: 参照すべき記事・資料・既存ルール
+- Decision rule: 不足や衝突がある場合に質問すべき条件
+
+判断ルール:
+
+- Goal / Success criteria / Scope が読み取れる場合は、最小変更で進める
+- 変更対象や変更禁止ファイルが曖昧な場合は、編集前に質問する
+- ユーザーの最新指示と既存ルールが衝突する場合は、どちらを優先するか質問する
+- 手順が未指定なだけなら、既存 repo ルールに従って進める
 
 ## Agent Stage Design Docs
 
@@ -131,15 +152,17 @@ grounding preflight の正本:
 2. まず `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行する
 3. 返ってきた `readset_path` の `global_docs -> stage_docs -> templates -> inputs` の順に読む
 4. `stage.<name>.grounding.status=ready` かつ `stage.<name>.audit.status=passed` のときだけ成果物を更新する
-5. 必要なら `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行し、その出力をそのまま contextless subagent に渡す
+5. subagent を呼ぶ場合も、メインエージェントが `readset_path` を確定してから、必要 artifact path / 目的 / 出力先だけを渡す。親会話の未記録文脈を前提にしない
+6. `state.txt` / `p000_index.md` / canonical artifact の最終更新、slot 更新、承認判断はメインエージェントだけが行う。subagent 出力は draft / audit / review / scratch として扱い、メインが採否判断して統合する
+7. 必要なら `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行し、その出力をそのまま contextless subagent に渡す
    - prompt artifact は `logs/grounding/<stage>.subagent_prompt.md` に保存され、`state.txt` には `stage.<name>.subagent.prompt=...` が追記される
-6. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
+8. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
    - prompt artifact は `logs/review/image_prompt.subagent_prompt.md` に保存され、`state.txt` には `review.image_prompt.subagent.prompt=...` が追記される
-7. audio-only 生成後に尺が target 未満だった場合は、次を使って duration review 用 prompt artifact を生成する
+9. audio-only 生成後に尺が target 未満だった場合は、次を使って duration review 用 prompt artifact を生成する
    - `python scripts/build-subagent-duration-scene-review-prompt.py --run-dir <run_dir> --min-seconds <target> --actual-seconds <actual> [--flow <flow>]`
    - `python scripts/build-subagent-duration-narration-review-prompt.py --run-dir <run_dir> --min-seconds <target> --actual-seconds <actual> [--flow <flow>]`
    - prompt artifact は `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` に保存される
-8. 標準運用では prompt builder を直接叩く前に `python scripts/check-audio-duration-gate.py --manifest <run_dir>/video_manifest.md --run-dir <run_dir>` を使い、実尺 gate と prompt 生成を一度に行う
+10. 標準運用では prompt builder を直接叩く前に `python scripts/check-audio-duration-gate.py --manifest <run_dir>/video_manifest.md --run-dir <run_dir>` を使い、実尺 gate と prompt 生成を一度に行う
 
 multi-agent が使える環境では、コンテキストを fork しない audit 専用 subagent に `scripts/audit-stage-grounding.py` を実行させてよい。ただし story / script / manifest などの content artifact は編集させず、hard gate は state / report artifact と verifier に置く。
 

@@ -2,81 +2,83 @@
 #
 # NOTE:
 # - これはMVP向けの最小スキーマ。
+# - p100 は scene 分割ではなく、p200 が物語化できる素材を厚く残す。
 # - 情報量を最大化したい場合は `workflow/research-template.production.yaml` を推奨。
 topic: "string"
 aliases: ["string"]
 
-# Story-first baseline (必須)
-story_baseline:
-  # 「そもそもどんな話か」を最優先で明確化する。
-  # 小ネタ/裏話/逸話はこの後でよい。
-  canonical_synopsis:
-    one_liner: "string"
-    short_summary: "string" # 5-10行程度。誰が/何を求め/何が起き/どう決着するか。
-    beat_sheet:
-      - beat: "string"      # 10-20個程度の箇条書き（時系列）
+# Story materials（必須）
+story_materials:
+  canonical_story_dump: "string" # 原話/通俗版/重要版の筋を省略しすぎず厚めに書く。
+  chronological_events:
+    - event_id: "E1"
+      event: "string"            # scene ではなく出来事単位。
+      sources: ["S1"]
+      confidence: 0.0
   characters:
-    protagonist: "string"
-    key_allies: ["string"]
-    key_antagonists: ["string"]
-    core_goal: "string"
-    stakes: "string"
-    setting: "string"
+    - character_id: "C1"
+      name: "string"
+      role: "string"
+      motivations: ["string"]
+      relationships:
+        - target: "C2"
+          relation: "string"
+  setting:
+    places: ["string"]
+    time_or_era: "string"
+    world_rules: ["string"]
+  symbols_and_themes:
+    - item_id: "SYM1"
+      item: "string"
+      meaning: "string"
+      evidence_refs: ["P1"]
+  emotional_material:
+    - emotion: "string"
+      trigger: "string"
+      story_value: "string"
+  adaptation_options:
+    - option_id: "A1"
+      proposal: "string"
+      source_basis: ["S1"]
+      risks: ["string"]
 
-# Scene plan (必須)
-#
-# 目的:
-# - 後続の story/script/manifest で、調査した情報を scene に割り当てられるようにする。
-# - 「小ネタばかり」にならないよう、まずストーリーを scene で分割して骨格を固定する。
-#
-# ルール（運用）:
-# - scene_id は原則 1..20（最低20）。
-# - 全体に効く情報は scene_id の opening / ending（例: 1, 19, 20）へ寄せる。
-# - 途中のネタは該当 scene_id（複数可）へ割り当てる。
-scene_plan:
-  min_scene_count: 20
-  scenes:
-    - scene_id: 1
-      role: "opening|development|turn|climax|ending"
-      beat_summary: "string"      # 1-2行
-      desired_emotion: "string"   # wonder/tension/relief...
-    - scene_id: 2
-      role: "opening|development|turn|climax|ending"
-      beat_summary: "string"
-      desired_emotion: "string"
+# Sources（必須）
+source_inventory:
+  - source_id: "S1"
+    title: "string"
+    url: "string"
+    type: "primary|academic|encyclopedia|news|blog|video|other"
+    reliability: "high|medium|low"
+    accessed_at: "ISO8601"
+    notes: "string"
 
-# Structure / framework notes（任意・参考）
-#
-# 注意:
-# - Hero's Journey（英雄の旅）への当てはめは「公式チェック」ではなく、見落とし防止の道具に留める。
-# - fit が low でも失格ではない（物語価値は登場人物/世界観の多様性と、選択で作る）。
-hero_story_validation:
-  hero_journey_fit:
-    fit: "high|medium|low"
-    rationale: "string"
-    missing_or_weak_beats: ["string"]
-  narrative_arc:
-    inciting_incident: "string"
-    midpoint: "string"
-    climax: "string"
-    resolution: "string"
+source_passages:
+  - passage_id: "P1"
+    source_id: "S1"
+    passage: "string"            # 短い抜粋または要約。長文引用しない。
+    evidence_note: "string"
+    confidence: 0.0
 
-# Conflicts & selection cues（推奨）
-#
-# 目的:
-# - 複数文献で矛盾がある場合に、後段（director/scriptwriter）が「選択」できる材料を残す。
-# - 矛盾する要素の“ハイブリッド（混成）”は高得点になり得る一方で破綻リスクが高い。
-#   混成を単一シーン/設定として確定させる場合は、人間承認が必要（運用）。
+# Variants / conflicts（必須）
+variants:
+  - variant_id: "V1"
+    name: "string"
+    differences: ["string"]
+    impact_on_story: "string"
+    sources: ["S1"]
+
 conflicts:
   - conflict_id: "C1"
     topic: "string"
     accounts:
       - account_id: "A"
         claim: "string"
-        sources: ["string"]
+        sources: ["S1"]
+        confidence: 0.0
       - account_id: "B"
         claim: "string"
-        sources: ["string"]
+        sources: ["S2"]
+        confidence: 0.0
     impact_on_story: "string"
     selection_notes:
       recommended_choice: "A|B|both_separated|hybrid_requires_approval"
@@ -87,48 +89,50 @@ conflicts:
       risks: ["string"]
       mitigations: ["string"]
 
-hypothesis:
-  initial_hypothesis:
-    statement: "string"
-    rationale: "string"
-    assumptions:
-      - assumption: "string"
-        testable: true
-
-issue_tree:
-  root_question: "string"
-  branches:
-    - issue: "string"
-      type: "what|why|how"
-      status: "not_started|in_progress|answered|blocked"
-      answer: "string"
+facts:
+  items:
+    - fact_id: "F1"
+      claim: "string"
+      kind: "plot|character|setting|theme|symbol|historical_context|interpretation|other"
       confidence: 0.0
-
-knowledge_graph:
-  nodes:
-    - id: "string"
-      type: "Person|Place|Event|Concept"
-      label: "string"
-  edges:
-    - from: "string"
-      to: "string"
-      relation: "string"
+      verification: "verified|partially_verified|unverified"
+      sources: ["S1"]
+      notes: "string"
 
 engagement:
   hooks:
-    - type: "mystery|counterintuitive|hidden_truth|emotional"
+    - hook_id: "H1"
+      type: "mystery|counterintuitive|hidden_truth|emotional|connection|controversy"
       content: "string"
       curiosity_score: 0.0
-      scene_ids: [1]     # this hook best fits which scene(s)
+      supporting_facts: ["F1"]
+
+open_questions:
+  - question_id: "Q1"
+    question: "string"
+    known_theories: ["string"]
+    investigation_status: "unverified|in_progress|verified"
+    sources: ["S1"]
+
+handoff_to_story:
+  recommended_focus: ["string"]
+  must_preserve: ["string"]
+  avoid_overstating: ["string"]
+  selection_questions_for_p200: ["string"]
+
+# Optional only: p200 を拘束しない粗い使い所メモ。
+suggested_story_usage:
+  - material_ref: "F1|H1|P1|E1"
+    suggested_position: "opening|development|midpoint|climax|ending|any"
+    rationale: "string"
 
 metadata:
   collected_at: "ISO8601"
-  sources_used: ["string"]
+  sources_used: ["S1"]
   confidence_score: 0.0
 
-# Evaluator contract（推奨）
 evaluation_contract:
-  target_questions: ["string"]          # この調査で必ず答える問い
-  must_cover: ["string"]                # synopsis / beat / setting など必須アンカー
-  must_resolve_conflicts: ["string"]    # conflicts.topic として必ず扱う論点
-  done_when: ["string"]                 # evaluator と共有する完了条件
+  target_questions: ["string"]
+  must_cover: ["canonical_story_dump", "chronological_events", "source_passages", "conflicts"]
+  must_resolve_conflicts: ["string"]
+  done_when: ["p200 が追加調査なしで scene/beat 候補を作れる"]

@@ -30,6 +30,18 @@ stages:
     optional_playbooks: []
     requires_approved_input: []
 
+  visual_value:
+    required_docs:
+      - docs/story-creation.md
+      - docs/data-contracts.md
+    required_templates:
+      - workflow/visual-value-template.yaml
+    required_inputs:
+      - research.md
+      - story.md
+    optional_playbooks: []
+    requires_approved_input: []
+
   script:
     required_docs:
       - docs/script-creation.md

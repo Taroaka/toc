@@ -18,6 +18,14 @@ script_metadata:
     default_stability_profile: "creative"
     text_policy: "hiragana_plus_audio_tags"
 
+subagent_trace:
+  - subagent_id: "scene-draft-001"
+    role: "scene_draft|narration_draft|script_review"
+    input_artifact: "output/<topic>_<timestamp>/story.md"
+    output_artifact: "output/<topic>_<timestamp>/scratch/script_scene01.md"
+    accepted_by_main: false
+    reason: "string"
+
 human_change_requests:
   - request_id: "hr-001"
     source: "human_script_review"
@@ -42,6 +50,9 @@ human_change_requests:
           must_avoid: []
           done_when: ["string"]
     status: "pending|normalized|applied|verified|waived"
+    requires_user_approval: true
+    approval_reason: "changes_facts|changes_reveal|changes_scope|changes_asset_plan|other"
+    approval_status: "not_needed|pending|approved|rejected"
     resolution_notes: ""
     applied_manifest_targets: ["scene3.1_cut2.1:image_generation"]
 
@@ -78,6 +89,11 @@ scenes:
     narrative:
       phase: "ordinary_world"
       purpose: "string"
+    source_grounding:
+      factual_refs: ["story.script.scenes[0].research_refs[0]"]
+      inherited_story_refs: ["source_story:scene_id=1"]
+      creative_invention_notes: []
+      uncertainty_notes: []
     affect:
       intended:
         valence: 0.0
@@ -101,6 +117,11 @@ scenes:
           spoken_body: "string"
           stability_profile: "creative|natural|robust|\"\""
         visual_beat: "string"
+        source_grounding:
+          factual_refs: ["story.script.scenes[0].research_refs[0]"]
+          inherited_story_refs: ["source_story:scene_id=1"]
+          creative_invention_notes: []
+          uncertainty_notes: []
         human_review:
           status: "pending|approved|changes_requested"
           notes: ""

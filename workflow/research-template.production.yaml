@@ -1,89 +1,66 @@
-# Production research output template (story-first + scene_id mapping)
+# Production research output template (story-material-first)
 #
 # 目的:
-# - 調査は「増やせるのはここだけ」なので、後段で削れるだけの量を出す。
-# - story/script/scene制作が“迷わず”着手できる材料（ストーリー骨格・根拠・scene配賦）を揃える。
+# - p100 は「構成表を作る工程」ではなく、後段で削れるだけの物語素材を増やす工程。
+# - p200 が scene / beat / emotion curve / candidate selection を作れるよう、原話・版差・根拠を厚く残す。
+# - scene_plan と scene_ids は任意メモ。必須化しない。
 #
 # 注意:
-# - ここはコードで強制されない（運用テンプレ）。
 # - 出典が不十分な項目は "unverified" を明記し、後で検証できる形で残す。
+# - 長文引用は避け、source_passages は短い抜粋または要約に留める。
 topic: "string"
 aliases: ["string"]
 
-# === 0) Story-first baseline（最優先・必須） ===
-story_baseline:
-  canonical_synopsis:
-    one_liner: "string"
-    short_summary: "string"  # 5-10行
-    beat_sheet:
-      - beat: "string"       # 20-40個（最低20推奨）
-        scene_ids: [1]       # scene_plan へ配賦したID
-        confidence: 0.0
-        sources: ["string"]  # source_id or URL
-  characters:
-    protagonist: "string"
-    key_allies: ["string"]
-    key_antagonists: ["string"]
-    core_goal: "string"
-    stakes: "string"
-    setting: "string"
-  themes:
-    - theme: "string"
-      why_it_matters: "string"
-      scene_ids: [1]
-  tone_and_genre:
-    genre: "string"
-    tone: "string"
-    audience: "string"
-
-# === 1) Scene plan（必須: scene_id を保持） ===
-scene_plan:
-  min_scene_count: 20
-  scenes:
-    - scene_id: 1
-      role: "opening|development|turn|climax|ending"
-      beat_summary: "string"      # 1-2行
-      desired_emotion: "string"   # wonder/tension/relief...
-      key_visuals: ["string"]     # 舞台装置/象徴
-      key_dialogue_or_voiceover: "string"
-      continuity_requirements:
-        from_prev: "string"
-        to_next: "string"
-
-# === 2) Structure / framework notes（任意・参考） ===
-#
-# 注意:
-# - Hero's Journey（英雄の旅）への当てはめは「公式チェック」ではなく、見落とし防止の道具に留める。
-# - fit が low でも失格ではない（物語価値は登場人物/世界観の多様性と、選択で作る）。
-hero_story_validation:
-  hero_journey_fit:
-    fit: "high|medium|low"
-    rationale: "string"
-    missing_or_weak_beats: ["string"]
-  narrative_arc:
-    inciting_incident: "string"
-    midpoint: "string"
-    climax: "string"
-    resolution: "string"
-
-# === 3) Issue tree（調査の設計） ===
-issue_tree:
-  root_question: "string"
-  branches:
-    - issue: "string"
-      type: "what|why|how"
-      status: "not_started|in_progress|answered|blocked"
-      answer: "string"
+# === 0) Story materials（最優先・必須） ===
+story_materials:
+  canonical_story_dump: "string" # 20-60行目安。誰が/何を求め/何が起き/どう決着するかを厚く書く。
+  chronological_events:
+    - event_id: "E1"
+      event: "string"            # scene ではなく出来事単位
+      story_function: "setup|turn|reversal|revelation|climax|aftermath"
+      involved_characters: ["C1"]
+      source_refs: ["S1", "P1"]
       confidence: 0.0
-      scene_ids: [1]
-      evidence:
-        - claim: "string"
-          sources: ["string"]  # source_id or URL
-          quote: "string"      # 重要箇所の短い抜粋（短文）
-          supports: true
+  characters:
+    - character_id: "C1"
+      name: "string"
+      role: "string"
+      motivations: ["string"]
+      relationships:
+        - target: "C2"
+          relation: "string"
+          evidence_refs: ["P1"]
+      ambiguity_or_variant_notes: "string"
+  setting:
+    places:
+      - place_id: "L1"
+        name: "string"
+        description: "string"
+        source_refs: ["S1"]
+    time_or_era: "string"
+    world_rules:
+      - rule: "string"
+        evidence_refs: ["P1"]
+  symbols_and_themes:
+    - item_id: "SYM1"
+      item: "string"
+      meaning: "string"
+      story_value: "string"
+      evidence_refs: ["P1"]
+  emotional_material:
+    - emotion: "string"
+      trigger: "string"
+      why_it_matters: "string"
+      source_refs: ["S1"]
+  adaptation_options:
+    - option_id: "A1"
+      proposal: "string"
+      source_basis: ["S1"]
+      expected_gain: "string"
+      risks: ["string"]
 
-# === 4) Sources（必須: 出典の棚卸し） ===
-sources:
+# === 1) Sources（必須: 出典の棚卸し） ===
+source_inventory:
   - source_id: "S1"
     title: "string"
     url: "string"
@@ -92,32 +69,22 @@ sources:
     accessed_at: "ISO8601"
     notes: "string"
 
-# === 5) Primary sources / variants（可能なら厚めに） ===
-primary_sources:
-  - edition_id: "P1"
-    title: "string"
-    url: "string"
-    extracted_summary: "string"
-    key_passages:
-      - passage: "string"
-        scene_ids: [1]
-        source_id: "S1"
-    variants_notes: "string"
+source_passages:
+  - passage_id: "P1"
+    source_id: "S1"
+    passage: "string"
+    evidence_note: "string"
+    related_material_refs: ["E1", "F1", "SYM1"]
+    confidence: 0.0
 
+# === 2) Variants / conflicts（必須: p200 の選択材料） ===
 variants:
   - variant_id: "V1"
     name: "string"
     differences: ["string"]
     impact_on_story: "string"
-    scene_ids: [1]
-    sources: ["string"]
+    source_refs: ["S1"]
 
-# === 5.5) Conflicts & selection cues（推奨） ===
-#
-# 目的:
-# - 複数文献で矛盾がある場合に、後段（director/scriptwriter）が「選択」できる材料を残す。
-# - 矛盾する要素の“ハイブリッド（混成）”は高得点になり得る一方で破綻リスクが高い。
-#   混成を単一シーン/設定として確定させる場合は、人間承認が必要（運用）。
 conflicts:
   - conflict_id: "C1"
     topic: "string"
@@ -141,43 +108,41 @@ conflicts:
       risks: ["string"]
       mitigations: ["string"]
 
-# === 6) Facts & claims（映像/台本に使える粒度） ===
+# === 3) Facts & claims（映像/台本に使える粒度） ===
 facts:
   items:
     - fact_id: "F1"
       claim: "string"
       kind: "plot|character|setting|theme|symbol|historical_context|interpretation|other"
-      scene_ids: [1]
       confidence: 0.0
       verification: "verified|partially_verified|unverified"
-      sources: ["string"]
+      sources: ["S1"]
       notes: "string"
 
-# === 7) Engagement / hooks（scene配賦付き） ===
+# === 4) Engagement / open questions（scene配賦ではなく素材価値） ===
 engagement:
   hooks:
     - hook_id: "H1"
       type: "mystery|counterintuitive|hidden_truth|emotional|connection|controversy"
       content: "string"
       curiosity_score: 0.0
-      scene_ids: [1]
       supporting_facts: ["F1"]
   tension_points:
     - tension_id: "T1"
       topic: "string"
       positions: ["string"]
       narrative_potential: "string"
-      scene_ids: [1]
-      sources: ["string"]
-  open_questions:
-    - question_id: "Q1"
-      question: "string"
-      known_theories: ["string"]
-      investigation_status: "unverified|in_progress|verified"
-      scene_ids: [1]
-      sources: ["string"]
+      sources: ["S1"]
 
-# === 8) Synthesis（So what / governing thought） ===
+open_questions:
+  - question_id: "Q1"
+    question: "string"
+    known_theories: ["string"]
+    investigation_status: "unverified|in_progress|verified"
+    sources: ["S1"]
+    p200_handling: "ignore|treat_as_hypothesis|ask_user|additional_research"
+
+# === 5) Synthesis / handoff（p200へ渡す判断材料） ===
 synthesis:
   governing_thought: "string"
   scqa:
@@ -188,10 +153,23 @@ synthesis:
   insight_groups:
     - group_theme: "string"
       synthesized_insight: "string"
-      supporting_items: ["F1", "H1"]
-      scene_ids: [1]
+      supporting_items: ["F1", "H1", "P1"]
 
-# === 9) Production notes（映像化の注意点） ===
+handoff_to_story:
+  recommended_focus: ["string"]
+  must_preserve: ["string"]
+  avoid_overstating: ["string"]
+  selection_questions_for_p200: ["string"]
+  likely_candidate_angles:
+    - candidate_hint: "string"
+      supporting_refs: ["E1", "F1", "H1"]
+
+# Optional only: p200 を拘束しない粗い使い所メモ。
+suggested_story_usage:
+  - material_ref: "F1|H1|P1|E1"
+    suggested_position: "opening|development|midpoint|climax|ending|any"
+    rationale: "string"
+
 production_notes:
   do:
     - "string"

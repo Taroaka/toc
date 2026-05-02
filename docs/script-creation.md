@@ -6,6 +6,31 @@
 
 このドキュメントは、`docs/story-creation.md` で設計した物語を、`docs/video-generation.md` の技術仕様に適合する具体的な台本に変換するための手順を定義する。
 
+## Outcome Contract
+
+Script stage のゴールは、承認済みの `story.md` を、物語意図・reveal 順序・research grounding を保ったまま
+制作可能な `script.md` に変換すること。既存手順はこのゴールを満たすための作業分解として扱う。
+
+### Success criteria
+
+- 各 scene が purpose / intended affect / visual beat / narration boundary / timing / `done_when` を持つ
+- 事実主張は story / research の参照に紐づき、創作補完は production 上の演出として区別されている
+- narration と `tts_text` は script 側を正本とし、映像生成 prompt の主要ソースにしない
+- reveal 順序、主人公、theme、承認済み human request を、無断で変更していない
+- provider 固有の prompt syntax と実行管理は `video_manifest.md` 側に渡せる粒度で残っている
+
+### Scope boundaries
+
+- script で決める: scene 目的、見せる情報、隠す情報、ナレーション、TTS 文字列、視覚 beat、尺の目安
+- manifest へ渡す: provider prompt、asset path、生成結果、採用判定、実行 wiring
+- 編集前に確認する: 事実関係、theme、主人公、reveal 順序、承認済み human request、変更禁止 scope
+
+### Subagent use
+
+- scene draft、narration draft、script review は scene / cut 単位で contextless subagent に任せてよい
+- subagent には `story.md`、`visual_value.md`、stage readset、担当 scene / cut、出力先 scratch path だけを渡す
+- `script.md`、skeleton `video_manifest.md`、human change の採否、`subagent_trace` はメインエージェントが統合する
+
 ### 位置づけ
 
 ```
@@ -16,7 +41,7 @@
 ### 入力
 
 - `output/stories/{topic}_{timestamp}.md` - 物語スクリプト（story-creation.md出力）
-- `output/<topic>_<timestamp>/visual_value.md` - 中盤の視覚報酬パート設計（あれば参照）
+- `output/<topic>_<timestamp>/visual_value.md` - p300 visual planning 正本（あれば参照。visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / handoff を含む）
 - 物語構造、感情曲線、エンゲージメント設計
 - `docs/affect-design.md` - Russell 系の valence / arousal 補助レイヤー
 - `docs/video-generation.md` - 汎用の動画生成原則
@@ -71,9 +96,17 @@
 ### 1.4 視覚化価値パートの扱い
 
 `visual_value.md` がある場合、Scriptwriter はそれを
-**中盤の視覚報酬** として script に取り込む。
+**visual planning 正本** として読み、scene / cut skeleton が守る visual value を script に取り込む。
 
 基本ルール:
+
+- `global_visual_identity` と `scene_visual_values[]` を、台本の視覚方針と scene/cut skeleton に反映する
+- `anchor_cut_candidates[]` は、後続 manifest / asset stage が判断できるよう selector と意図を残す
+- `asset_bible_candidates` は、p600 の `asset_plan.md` で materialize できるよう使用箇所を保つ
+- `reference_strategy` と `regeneration_risks[]` は、human change や later prompt authoring で失われないようにする
+- `value_parts[]` がある場合だけ、中盤の silent visual payoff として扱う
+
+silent visual payoff の互換ルール:
 
 - 配置は動画全体の `20% - 80%`
 - 1パート `4-6` カット
@@ -94,6 +127,14 @@ evaluation_contract:
   must_cover: ["主人公の目的", "転機"]
   must_avoid: ["TODO", "未定"]
   done_when: ["主要 phase が揃う", "各 scene が research を参照する"]
+  success_criteria:
+    - "視聴者が外部説明なしに scene goal を理解できる"
+    - "事実主張が story / research へ追跡できる"
+    - "創作補完が明示され、research と矛盾していない"
+    - "承認済みの reveal 順序や scope を無断変更していない"
+  scope_boundaries:
+    can_change: ["scene wording", "visual specificity", "timing within target duration"]
+    ask_before_changing: ["facts", "theme", "protagonist", "reveal order", "approved human requests"]
   reveal_constraints:
     - subject_type: "character"
       subject_id: "guide_princess"
@@ -811,6 +852,11 @@ affect:
 ```
 1. 物語スクリプト読み込み
    └→ output/stories/{topic}_{timestamp}.md
+
+1.5. Goal / Success / Scope 確認
+   ├→ viewer takeaway / must_cover / reveal_constraints を確認
+   ├→ fact / creative boundary と ask-before-edit 条件を確認
+   └→ 変更禁止 scope があれば先に固定
 
 2. キャラクター抽出
    ├→ protagonist情報の抽出

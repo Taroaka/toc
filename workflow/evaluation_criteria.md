@@ -14,12 +14,12 @@ ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
 ### 1. Research
 
 - sources 数
-- canonical synopsis の有無
-- beat sheet の量
-- scene plan の coverage
+- canonical story dump / legacy synopsis の有無
+- chronological events / legacy beat sheet の量
+- source passages / facts / handoff_to_story の有無
 - conflicts の棚卸し
 - confidence score
-- scene_id 配賦
+- scene_plan / scene_id は任意参考であり research 合否条件にしない
 
 ### 2. Story
 

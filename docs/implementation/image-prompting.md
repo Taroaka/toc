@@ -283,6 +283,7 @@ still 生成の既定実行対象:
   - shared request file は直接編集させず、scene 単位の scratch rewrite を出させる
   - メインエージェントがそれを統合して `image_generation_requests.md` を更新する
   - この scene 分割は image generation run ごとに再現できるよう、順番・担当範囲・統合手順を固定する
+  - 採用した rewrite と理由は `subagent_trace` または review artifact に残す
 - scene image prompt は「場面全体の説明」ではなく、**その動画を始める最初の1フレーム**として書く
 - したがって `太郎が話し、乙姫がうなずく` のような mid-action 完了形は弱い
 - ここで重要なのは抽象的に `動き出す直前` と書くことではなく、**その場面では何が最初の1フレームに見えるべきかを具体化すること**

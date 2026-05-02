@@ -13,27 +13,41 @@ from toc.harness import append_state_snapshot, parse_state_file
 
 def _good_research_yaml() -> str:
     sources = "\n".join(f"  - title: source{i}\n    url: https://example.com/{i}" for i in range(12))
-    scene_plan = "\n".join(f"    - scene_id: {i}\n      summary: scene {i}" for i in range(1, 21))
     beat_sheet = "\n".join(f"        - beat: beat{i}\n          scene_ids: [{i}]" for i in range(1, 21))
+    source_passages = "\n".join(
+        f"  - passage_id: P{i}\n    source_id: S1\n    passage: passage {i}\n    evidence_note: evidence {i}\n    confidence: 0.9"
+        for i in range(1, 3)
+    )
+    facts = "\n".join(
+        f"    - fact_id: F{i}\n      claim: fact {i}\n      kind: plot\n      confidence: 0.9\n      verification: verified\n      sources: [S1]\n      notes: \"\""
+        for i in range(1, 11)
+    )
     return "\n".join(
         [
             "```yaml",
             "sources:",
             sources,
-            "scene_plan:",
-            "  scenes:",
-            scene_plan,
             "story_baseline:",
             "  canonical_synopsis:",
             "    short_summary: summary",
             "    beat_sheet:",
             beat_sheet,
             "conflicts: []",
+            "source_passages:",
+            source_passages,
+            "facts:",
+            "  items:",
+            facts,
+            "handoff_to_story:",
+            "  recommended_focus: [\"focus\"]",
+            "  must_preserve: [\"preserve\"]",
+            "  avoid_overstating: [\"avoid\"]",
+            "  selection_questions_for_p200: [\"question\"]",
             "evaluation_contract:",
             "  target_questions: [\"summary\"]",
             "  must_cover: [\"summary\"]",
             "  must_resolve_conflicts: []",
-            "  done_when: [\"scene plan と beat sheet が埋まる\"]",
+            "  done_when: [\"story materials と根拠が埋まる\"]",
             "metadata:",
             "  confidence_score: 0.9",
             "```",
@@ -43,30 +57,48 @@ def _good_research_yaml() -> str:
 
 
 def _good_story_yaml() -> str:
-    return (
-        "```yaml\n"
-        "selection:\n"
-        "  candidates:\n"
-        "    - candidate_id: \"A\"\n"
-        "      logline: \"王道案\"\n"
-        "      why_it_scores: [\"clear\"]\n"
-        "      score_hint:\n"
-        "        engagement: 0.9\n"
-        "        coherence: 0.9\n"
-        "        production_fit: 0.9\n"
-        "      requires_hybridization_approval: false\n"
-        "  chosen_candidate_id: \"A\"\n"
-        "  rationale: \"最も安定している\"\n"
-        "hybridization:\n"
-        "  approval_status: \"not_needed\"\n"
-        "script:\n"
-        "  scenes:\n"
-        "    - scene_id: 1\n"
-        "      phase: \"opening\"\n"
-        "      narration: \"導入です。\"\n"
-        "      visual: \"導入の情景\"\n"
-        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]\n"
-        "```\n"
+    scene_lines: list[str] = []
+    for i in range(1, 21):
+        scene_lines.extend(
+            [
+                f"    - scene_id: {i}",
+                "      phase: \"development\"",
+                f"      purpose: \"Scene {i} の役割\"",
+                f"      conflict: \"Scene {i} の葛藤\"",
+                f"      turn: \"Scene {i} の転換\"",
+                "      affect:",
+                "        label_hint: \"curiosity\"",
+                "        audience_job: \"hook\"",
+                f"      visualizable_action: \"Scene {i} の画面化可能な行動\"",
+                f"      grounding_note: \"Scene {i} は research refs に基づき、心理描写は演出補完\"",
+                f"      narration: \"Scene {i} の語り\"",
+                f"      visual: \"Scene {i} の情景\"",
+                f"      research_refs: [\"research.story_baseline.canonical_synopsis.beat_sheet[{i - 1}]\"]",
+            ]
+        )
+    return "\n".join(
+        [
+            "```yaml",
+            "selection:",
+            "  candidates:",
+            "    - candidate_id: \"A\"",
+            "      logline: \"王道案\"",
+            "      why_it_scores: [\"clear\"]",
+            "      requires_hybridization_approval: false",
+            "    - candidate_id: \"B\"",
+            "      logline: \"別視点案\"",
+            "      why_it_scores: [\"fresh\"]",
+            "      requires_hybridization_approval: false",
+            "  chosen_candidate_id: \"A\"",
+            "  rationale: \"最も安定している\"",
+            "hybridization:",
+            "  approval_status: \"not_needed\"",
+            "script:",
+            "  scenes:",
+            *scene_lines,
+            "```",
+            "",
+        ]
     )
 
 
@@ -96,6 +128,15 @@ def _ensure_story_ready(run_dir: Path) -> None:
     append_state_snapshot(run_dir / "state.txt", {"review.story.status": "approved"})
 
 
+def _ensure_script_ready(run_dir: Path) -> None:
+    script_path = run_dir / "script.md"
+    if not script_path.exists():
+        script_path.write_text(
+            "```yaml\nscript:\n  scenes:\n    - scene_id: 1\n      phase: opening\n      summary: \"十分な長さの台本本文です。十分な長さの台本本文です。\"\n      research_refs: [\"research.story_materials\"]\n```\n",
+            encoding="utf-8",
+        )
+
+
 def _ensure_video_generation_ready(run_dir: Path) -> None:
     append_state_snapshot(
         run_dir / "state.txt",
@@ -109,6 +150,8 @@ def _ensure_video_generation_ready(run_dir: Path) -> None:
 def _resolve_ready_grounding(run_dir: Path, *stages: str, flow: str = "toc-run") -> None:
     if any(stage in {"story", "script", "image_prompt", "scene_implementation", "video_generation"} for stage in stages):
         _ensure_story_ready(run_dir)
+    if any(stage in {"image_prompt", "scene_implementation", "video_generation"} for stage in stages):
+        _ensure_script_ready(run_dir)
     if any(stage in {"image_prompt", "scene_implementation", "video_generation"} for stage in stages):
         append_state_snapshot(run_dir / "state.txt", {"review.duration_fit.status": "passed"})
     if "video_generation" in stages:
@@ -185,6 +228,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             commands = [
                 "scripts/review-research-stage.py",
+                "scripts/review-story-stage.py",
                 "scripts/review-script-stage.py",
                 "scripts/review-manifest-stage.py",
                 "scripts/review-video-stage.py",
@@ -201,12 +245,16 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["eval.research.status"], "approved")
+            self.assertEqual(state["eval.story.status"], "approved")
+            self.assertEqual(state["review.story.status"], "approved")
             self.assertEqual(state["eval.script.status"], "approved")
             self.assertEqual(state["eval.manifest.status"], "approved")
             self.assertEqual(state["eval.video.status"], "approved")
+            self.assertEqual(state["artifact.story_review"], str((run_dir / "story_review.md").resolve()))
             self.assertIn("eval.manifest.rubric.beat_clarity", state)
             self.assertIn("eval.video.overall_rubric", state)
             self.assertTrue((run_dir / "research_review.md").exists())
+            self.assertTrue((run_dir / "story_review.md").exists())
             self.assertTrue((run_dir / "script_review.md").exists())
             self.assertTrue((run_dir / "manifest_review.md").exists())
             self.assertTrue((run_dir / "video_review.md").exists())

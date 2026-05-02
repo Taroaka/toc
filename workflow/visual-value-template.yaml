@@ -3,23 +3,150 @@ visual_value_metadata:
   source_research: "output/<topic>_<timestamp>/research.md"
   source_story: "output/<topic>_<timestamp>/story.md"
   created_at: "<ISO8601>"
-  purpose: "物語本筋では語り切られないが、動画生成AIで実写風に見せると視聴価値が高い中盤パートを定義する"
+  purpose: "p300 visual planning source of truth: define visual identity, scene visual value, anchor/reference strategy, asset bible candidates, regeneration risks, and p400/p600/p700 handoff"
+
+global_visual_identity:
+  visual_style: "実写、シネマティック、story topic に合う一貫した画作り"
+  camera_principles:
+    - "scene の物語価値が読める構図を優先する"
+    - "cut prompt ではなく、後続 stage が守る視覚原則として書く"
+  lighting_color_principles:
+    - "場所ごとの光環境と人物/物体の固有色の優先順位を明示する"
+  continuity_principles:
+    - "同じ人物、場所、小道具、状態差分は後続 asset/reference で固定する"
+  forbidden:
+    - "text overlay"
+    - "watermark"
+    - "logo"
+    - "subtitles"
+  notes:
+    - "ここでは本番 image prompt / motion prompt は書かない"
+
+scene_visual_values:
+  - scene_selector: "scene01"
+    story_function: "この scene が物語上担う役割"
+    visual_value: "観客に画として何を理解・体感させるか"
+    must_show:
+      - "映像で落とすと物語価値が弱くなる要素"
+    must_avoid:
+      - "後続 prompt が流れやすい誤表現"
+    emotional_payload: "この scene の視覚的な感情到達点"
+    continuity_hooks:
+      - "次 scene / 後半で再利用する視覚要素"
+    p400_script_notes:
+      - "script / cut skeleton 作成時に守ること"
+
+anchor_cut_candidates:
+  - selector: "scene01_cut01"
+    proposed_still_mode: "generate_still"
+    anchor_role: "character_anchor|location_anchor|object_anchor|state_transition|visual_value_hold|other"
+    why_anchor_needed: "この cut を anchor 化しないと後続で何がブレるか"
+    reuse_targets:
+      - "sceneXX_cutYY"
+    bridge_or_reuse_candidates:
+      - selector: "scene01_cut02"
+        proposed_still_mode: "reuse_anchor|bridge"
+        reason: "新規 still ではなく anchor reuse / bridge で足りる理由"
+
+asset_bible_candidates:
+  characters:
+    - asset_id: "protagonist"
+      story_purpose: "物語上の役割"
+      fixed_identity:
+        - "顔、髪型、衣装、年齢感など、後続で変えてはいけない要素"
+      candidate_reference_views:
+        - "front"
+        - "side"
+        - "back"
+        - "refstrip"
+      used_by_selectors:
+        - "scene01_cut01"
+      p600_handoff: "asset_plan.md で設計・review すべきこと"
+  objects:
+    - asset_id: "primary_object"
+      story_purpose: "反復する小道具 / setpiece の役割"
+      fixed_identity:
+        - "silhouette、材質、装飾、比率など"
+      candidate_reference_views:
+        - "hero"
+        - "detail"
+      used_by_selectors:
+        - "sceneXX_cutYY"
+      p600_handoff: "object_bible / reference image として固定すべき理由"
+  locations:
+    - asset_id: "primary_location"
+      story_purpose: "反復する場所 / 状態差分の役割"
+      fixed_identity:
+        - "spatial identity、主要構造、光環境など"
+      relation_to_other_locations: "independent|same_place_variant|background_glimpse|foreground_anchor"
+      used_by_selectors:
+        - "sceneXX_cutYY"
+      p600_handoff: "location_bible / reference_usage へ渡す判断"
+  reusable_stills:
+    - asset_id: "key_visual_anchor"
+      source_selector: "sceneXX_cutYY"
+      story_purpose: "後続 cut の continuity anchor としての役割"
+      fixed_identity:
+        - "same camera、同じ状態差分、同じ構図など"
+      p600_handoff: "reusable still として asset_plan.md に載せる理由"
+
+reference_strategy:
+  required_reference_assets:
+    - asset_id: "protagonist"
+      reference_type: "character_reference"
+      required_before_stage: "p600"
+      reason: "人物同一性を固定するため"
+  reference_usage_rules:
+    - situation: "別エリアから主エリアが奥に見える"
+      mode: "background_glimpse"
+      rule: "location derived_from ではなく cut 側の reference_usage で表す"
+  no_reference_allowed:
+    - case: "独立 location anchor の初期 seed"
+      reason: "参照入力なしの bootstrap として作れるため"
+  color_and_lighting_priority:
+    - "環境光と人物/物体の固有色が衝突する場合の優先順位を書く"
+
+regeneration_risks:
+  - risk_id: "risk_01"
+    affected_selectors:
+      - "sceneXX_cutYY"
+    failure_mode: "後続生成で起きそうなブレや再生成原因"
+    prevention_rule: "p600/p700 に渡す予防指示"
+    owner_stage: "p400|p600|p700"
+
+handoff_to_p400_p600_p700:
+  p400_script:
+    must_preserve:
+      - "scene/cut skeleton に残す visual value"
+    must_not_do:
+      - "p300 で未承認の新規主筋を追加しない"
+  p600_asset:
+    must_create_or_review:
+      - "asset_bible_candidates から asset_plan.md へ渡す候補"
+    review_focus:
+      - "visual identity と continuity anchor として十分か"
+  p700_scene_implementation:
+    must_materialize:
+      - "anchor_cut_candidates と reference_strategy を video_manifest.md に反映する"
+    review_focus:
+      - "prompt / references / still_image_plan が p300 の意図と矛盾しないか"
 
 value_parts:
   - part_id: "midroll_visual_payoff_01"
-    title: "例: 竜宮城の中身を探索する"
+    optional: true
+    title: "例: 中盤の視覚報酬パート"
     placement_window:
       start_percent: 20
       end_percent: 80
       preferred_percent: 50
-      rationale: "最序盤や最終盤ではなく、中盤の視覚報酬として置く"
+      rationale: "最序盤や最終盤ではなく、中盤の視覚報酬として置く場合に使う"
     why_this_matters:
       - "読者は名前を知っているが、細部を見たことがない要素を報酬化する"
       - "高価な実物セットなしでは難しい壮大さを、生成AI前提で視覚化する"
     ai_visualization_advantage:
       no_physical_set_required: true
       spectacle_scale: "巨大建築 / 異界 / 群体 / 発光 / 流体 / 変形"
-      notes: "文字説明ではなく、形・光・動き・機構で価値を伝える。Ryugu 系では乙姫をすぐ見せず、探索と発見を先に置く"
+      notes: "文字説明ではなく、形・光・動き・機構で価値を伝える"
     related_objects:
       - "tbd_object_id"
     cut_plan:
@@ -29,25 +156,6 @@ value_parts:
         focus: "主役となる場所 / 物 / 現象"
         description: "何が見えるかを1-2文で具体的に"
         viewer_payoff: "このカットで何を感じさせるか"
-      - cut_id: 2
-        duration_seconds: 4
-        narration: ""
-        focus: "主役となる場所 / 物 / 現象"
-        description: "何が見えるかを1-2文で具体的に"
-        viewer_payoff: "このカットで何を感じさせるか"
-      - cut_id: 3
-        duration_seconds: 4
-        narration: ""
-        focus: "主役となる場所 / 物 / 現象"
-        description: "何が見えるかを1-2文で具体的に"
-        viewer_payoff: "このカットで何を感じさせるか"
-      - cut_id: 4
-        duration_seconds: 4
-        narration: ""
-        focus: "主役となる場所 / 物 / 現象"
-        description: "何が見えるかを1-2文で具体的に"
-        viewer_payoff: "このカットで何を感じさせるか"
     notes:
-      - "1価値パートあたり 4-6カットを基本にする"
-      - "ナレーションは入れず、映像だけで満足感を作る"
-      - "Ryugu 系は、門→回廊→中庭→大広間→入口の順で探索を積み、乙姫は最後まで温存する"
+      - "silent midroll visual payoff が必要な run だけ使う"
+      - "本番 cut prompt ではなく、script / manifest に落とす前の設計メモとして扱う"

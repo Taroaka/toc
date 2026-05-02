@@ -151,6 +151,9 @@
 #   review.policy.story=required|optional
 #   review.policy.image=required|optional
 #   review.policy.narration=required|optional
+#   review.story.status=pending|approved|changes_requested
+#   review.story.subagent.prompt=logs/review/story.subagent_prompt.md
+#   review.story.subagent.prompt.generated_at=ISO8601
 #   artifact.video_manifest=output/<topic>_<timestamp>/video_manifest.md
 #   manifest.video_manifest.phase=skeleton|production
 #   review.hybridization.status=pending|approved|rejected
@@ -216,6 +219,7 @@
 #   artifact.research=output/<topic>_<timestamp>/research.md
 #   artifact.research_review=output/<topic>_<timestamp>/research_review.md
 #   artifact.story=output/<topic>_<timestamp>/story.md
+#   artifact.story_review=output/<topic>_<timestamp>/story_review.md
 #   artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 #   artifact.script=output/<topic>_<timestamp>/script.md
 #   artifact.script_review=output/<topic>_<timestamp>/script_review.md
@@ -251,7 +255,7 @@
 #   eval.research.rubric.coverage=0.0-1.0
 #   eval.research.rubric.conflict_readiness=0.0-1.0
 #   eval.research.rubric.structure_readiness=0.0-1.0
-#   eval.research.rubric.scene_mapping=0.0-1.0
+#   eval.research.rubric.story_material_readiness=0.0-1.0
 #   eval.story.score=0.0-1.0
 #   eval.script.score=0.0-1.0
 #   eval.script.status=approved|changes_requested

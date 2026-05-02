@@ -147,18 +147,18 @@ STAGES: tuple[StageSpec, ...] = (
         title="Visual Planning",
         slots=_stage_slots(
             {
-                "00": "visual planning source-of-truth",
+                "00": "visual planning source-of-truth: visual identity, scene visual value, anchors, references, risks, handoff",
                 "10": "visual planning evaluator / subagent review",
                 "20": "visual planning human review",
-                "50": "visual planning appendix / transitional notes",
+                "50": "p400/p600/p700 handoff appendix / transitional notes",
             }
         ),
         state_keys=("stage.visual_value.status",),
         source_of_truth="visual_value.md",
         evaluator="visual planning evaluator",
         human_review="visual planning source doc",
-        request_target="scene planning handoff",
-        outputs="visual planning docs",
+        request_target="p400/p600/p700 visual planning handoff",
+        outputs="visual_value.md",
         default_owner="subagent",
         planned_artifacts=(("p300", "visual_value.md"),),
     ),
@@ -352,12 +352,19 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             state_keys=("stage.story.grounding.status", "stage.story.audit.status"),
         ),
         SlotSpec("p220", "Story Authoring", "author story.md", planned_artifacts=("story.md",), state_keys=("stage.story.status",)),
-        SlotSpec("p230", "Story Review", "story review and approval handoff", default_requirement="optional"),
+        SlotSpec(
+            "p230",
+            "Story Review",
+            "story review and approval handoff",
+            planned_artifacts=("story_review.md",),
+            state_keys=("review.story.status",),
+            default_requirement="optional",
+        ),
     ),
     "p300": (
-        SlotSpec("p310", "Visual Value", "visual value and visual planning source docs", planned_artifacts=("visual_value.md",), default_requirement="optional"),
-        SlotSpec("p320", "Visual Planning Review", "visual planning review, scene outline, and continuity handoff", default_requirement="optional"),
-        SlotSpec("p330", "Visual Planning Appendix", "continuity and reveal appendix", default_requirement="optional"),
+        SlotSpec("p310", "Visual Value", "author visual_value.md as p300 visual planning source-of-truth", planned_artifacts=("visual_value.md",), default_requirement="optional"),
+        SlotSpec("p320", "Visual Planning Review", "review visual identity, scene visual value, anchor/reference strategy, and regeneration risks", default_requirement="optional"),
+        SlotSpec("p330", "Visual Planning Appendix", "p400/p600/p700 handoff and transitional notes", default_requirement="optional"),
     ),
     "p400": (
         SlotSpec(
