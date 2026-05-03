@@ -176,7 +176,22 @@ class TestVerifyPipeline(unittest.TestCase):
                         for i in range(1, 13)
                     ]
                     + [
-                        "conflicts: []",
+                        "conflicts:",
+                        "  - conflict_id: \"C1\"",
+                        "    topic: \"採用する桃太郎像\"",
+                        "    accounts:",
+                        "      - account_id: \"A\"",
+                        "        claim: \"英雄譚として扱う\"",
+                        "        sources: [\"S1\"]",
+                        "        confidence: 0.9",
+                        "      - account_id: \"B\"",
+                        "        claim: \"教訓譚として扱う\"",
+                        "        sources: [\"S2\"]",
+                        "        confidence: 0.8",
+                        "    impact_on_story: \"p200 の候補比較に使う\"",
+                        "    selection_notes:",
+                        "      recommended_choice: \"both_separated\"",
+                        "      rationale: \"候補比較で分けて扱える\"",
                         "source_passages:",
                     ]
                     + [
@@ -329,7 +344,22 @@ class TestVerifyPipeline(unittest.TestCase):
                         for i in range(1, 13)
                     ]
                     + [
-                        "conflicts: []",
+                        "conflicts:",
+                        "  - conflict_id: \"C1\"",
+                        "    topic: \"採用する浦島太郎像\"",
+                        "    accounts:",
+                        "      - account_id: \"A\"",
+                        "        claim: \"時間断絶譚として扱う\"",
+                        "        sources: [\"S1\"]",
+                        "        confidence: 0.9",
+                        "      - account_id: \"B\"",
+                        "        claim: \"約束破りの教訓譚として扱う\"",
+                        "        sources: [\"S2\"]",
+                        "        confidence: 0.8",
+                        "    impact_on_story: \"p200 の候補比較に使う\"",
+                        "    selection_notes:",
+                        "      recommended_choice: \"both_separated\"",
+                        "      rationale: \"候補比較で分けて扱える\"",
                         "source_passages:",
                     ]
                     + [

@@ -32,6 +32,27 @@ EXPERIENCE_TEMPLATES: dict[str, Path] = {
 SCENE_CONTE_TEMPLATE = Path("workflow/scene-conte-template.md")
 VISUAL_VALUE_TEMPLATE = Path("workflow/visual-value-template.yaml")
 
+STAGE_TARGETS: dict[str, str] = {
+    "100": "p100",
+    "p100": "p100",
+    "research": "p100",
+    "200": "p200",
+    "p200": "p200",
+    "story": "p200",
+    "300": "p300",
+    "p300": "p300",
+    "visual": "p300",
+    "visual_value": "p300",
+    "400": "p400",
+    "p400": "p400",
+    "450": "p450",
+    "p450": "p450",
+    "script": "p450",
+    "500": "p500",
+    "p500": "p500",
+    "narration": "p500",
+}
+
 
 def sanitize_topic(topic: str) -> str:
     topic = topic.strip().replace(" ", "_")
@@ -71,12 +92,56 @@ def ensure_skeleton_manifest(manifest_text: str) -> str:
     return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
 
 
+def normalize_stage_target(value: str) -> str:
+    key = value.strip().lower().removeprefix("--stage=").replace("-", "_")
+    if key not in STAGE_TARGETS:
+        allowed = ", ".join(sorted(STAGE_TARGETS))
+        raise argparse.ArgumentTypeError(f"unknown stage target: {value!r}; expected one of {allowed}")
+    return STAGE_TARGETS[key]
+
+
+def finish_scaffold(
+    state_path: Path,
+    topic: str,
+    run_dir: Path,
+    stage_target: str,
+    updates: dict[str, str] | None = None,
+    *,
+    legacy_done: bool = False,
+) -> None:
+    if legacy_done:
+        payload = {
+            "timestamp": now_iso(),
+            "topic": topic,
+            "status": "DONE",
+            "runtime.stage": "immersive_ride_scaffolded",
+        }
+    else:
+        payload = {
+            "timestamp": now_iso(),
+            "topic": topic,
+            "status": stage_target.upper(),
+            "runtime.stage": f"immersive_ride_scaffolded_{stage_target}",
+            "runtime.stage_target": stage_target,
+        }
+    if updates:
+        payload.update(updates)
+    append_state_block(state_path, payload)
+    print(f"Run dir: {run_dir.resolve()}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold an immersive run folder.")
     parser.add_argument("--topic", required=True, help="Video topic (used for folder name).")
     parser.add_argument("--timestamp", default=None, help="Timestamp (YYYYMMDD_HHMM).")
     parser.add_argument("--base", default="output", help="Base output directory.")
     parser.add_argument("--run-dir", default=None, help="Override run directory path.")
+    parser.add_argument(
+        "--stage",
+        type=normalize_stage_target,
+        default=None,
+        help="Stop target: research|story|visual_value|script|narration or p100/100, p200/200, p300/300, p400/400, p450/450, p500/500.",
+    )
     parser.add_argument(
         "--experience",
         choices=sorted(EXPERIENCE_TEMPLATES.keys()),
@@ -95,6 +160,8 @@ def main() -> None:
     parser.add_argument("--image-review", choices=["required", "optional"], default=None)
     parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
     args = parser.parse_args()
+    stage_target = args.stage or "p500"
+    legacy_default = args.stage is None
 
     topic_raw = args.topic
     topic_slug = sanitize_topic(topic_raw)
@@ -141,8 +208,31 @@ def main() -> None:
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", force=args.force)
     maybe_run_stage_grounding(run_dir, "research", flow="immersive")
+    if stage_target == "p100":
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stage_target,
+            {"artifact.research": str((run_dir / "research.md").resolve())},
+        )
+        return
+
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", force=args.force)
     maybe_run_stage_grounding(run_dir, "story", flow="immersive")
+    if stage_target == "p200":
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stage_target,
+            {
+                "artifact.research": str((run_dir / "research.md").resolve()),
+                "artifact.story": str((run_dir / "story.md").resolve()),
+            },
+        )
+        return
+
     if VISUAL_VALUE_TEMPLATE.exists():
         visual_value = (
             VISUAL_VALUE_TEMPLATE.read_text(encoding="utf-8")
@@ -153,8 +243,38 @@ def main() -> None:
         write_text(run_dir / "visual_value.md", visual_value, force=args.force)
     else:
         write_text(run_dir / "visual_value.md", "# 視覚化価値パート（visual value）\n\nTODO\n", force=args.force)
+    maybe_run_stage_grounding(run_dir, "visual_value", flow="immersive")
+    if stage_target == "p300":
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stage_target,
+            {
+                "artifact.research": str((run_dir / "research.md").resolve()),
+                "artifact.story": str((run_dir / "story.md").resolve()),
+                "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
+            },
+        )
+        return
+
     write_text(run_dir / "script.md", "# 台本（没入型 / cinematic）\n\nTODO\n", force=args.force)
     maybe_run_stage_grounding(run_dir, "script", flow="immersive")
+    if stage_target == "p400":
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stage_target,
+            {
+                "artifact.research": str((run_dir / "research.md").resolve()),
+                "artifact.story": str((run_dir / "story.md").resolve()),
+                "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
+                "artifact.script": str((run_dir / "script.md").resolve()),
+            },
+        )
+        return
+
     if SCENE_CONTE_TEMPLATE.exists():
         tmpl = SCENE_CONTE_TEMPLATE.read_text(encoding="utf-8")
         tmpl = (
@@ -189,22 +309,41 @@ def main() -> None:
         write_text(run_dir / "video_manifest.md", ensure_skeleton_manifest(tmpl), force=args.force)
     else:
         write_text(run_dir / "video_manifest.md", "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n", force=args.force)
+
+    if stage_target == "p450":
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stage_target,
+            {
+                "immersive.experience": str(experience),
+                "artifact.research": str((run_dir / "research.md").resolve()),
+                "artifact.story": str((run_dir / "story.md").resolve()),
+                "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
+                "artifact.script": str((run_dir / "script.md").resolve()),
+                "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+            },
+        )
+        return
+
     maybe_run_stage_grounding(run_dir, "narration", flow="immersive")
 
-    append_state_block(
+    finish_scaffold(
         state_path,
+        topic_raw,
+        run_dir,
+        stage_target,
         {
-            "timestamp": now_iso(),
-            "topic": topic_raw,
-            "status": "DONE",
-            "runtime.stage": "immersive_ride_scaffolded",
             "immersive.experience": str(experience),
+            "artifact.research": str((run_dir / "research.md").resolve()),
+            "artifact.story": str((run_dir / "story.md").resolve()),
             "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
+            "artifact.script": str((run_dir / "script.md").resolve()),
             "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
         },
+        legacy_done=legacy_default,
     )
-
-    print(f"Run dir: {run_dir.resolve()}")
 
 
 if __name__ == "__main__":

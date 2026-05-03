@@ -68,6 +68,7 @@ def build_subagent_story_review_prompt(*, run_dir: Path, flow: str | None = None
         "- Score selection candidates yourself; do not accept author self-scoring as final.",
         "",
         "Return markdown suitable for writing to `story_review.md` with this compact structure:",
+        f"Target report path: `{story_review_path}`.",
         "# Story Evaluator Review",
         "",
         "- status: approved|changes_requested",

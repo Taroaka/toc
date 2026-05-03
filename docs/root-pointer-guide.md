@@ -111,6 +111,12 @@ scripts/ai/session-bootstrap.sh
 - ユーザーの最新指示と既存ルールが衝突する場合は、どちらを優先するか質問する
 - 手順が未指定なだけなら、既存 repo ルールに従って進める
 
+全体設計 / 正本ドキュメントへ汎用ルールを追加するとき:
+
+- 人物名・地名・道具名・scene 固有イベントは、原則として直接入れない
+- 作品固有の判断は抽象カテゴリへ置き換える（例: 固有人物 -> 後続 scene で reveal する人物、固有場所 -> 非日常エリア、固有道具 -> 禁忌の対象物）
+- 作品別の具体判断は run artifact（`script.md`, `video_manifest.md`, `human_change_requests[]` など）へ残す
+
 ## Agent Stage Design Docs
 
 各エージェントステップは **作業開始前** に対応する設計書を読み、grounding preflight を通す。全 stage 共通で `docs/system-architecture.md` を読み、その上で stage ごとの設計書へ入る。install 可能な stage skill は `skills/toc-<stage>/SKILL.md` を正本とする。

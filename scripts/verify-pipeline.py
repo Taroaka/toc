@@ -187,7 +187,9 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
             legacy_passages.extend(as_list(source.get("key_passages")))
     beat_sheet = nested_get(data, ["story_baseline", "canonical_synopsis", "beat_sheet"], [])
     conflicts = data.get("conflicts")
-    facts = nested_get(data, ["facts", "items"], [])
+    conflict_items = as_list(conflicts)
+    facts_value = data.get("facts")
+    facts = as_list(facts_value.get("items")) if isinstance(facts_value, dict) else as_list(facts_value)
     handoff_to_story = data.get("handoff_to_story")
     confidence = nested_get(data, ["metadata", "confidence_score"])
     synopsis = nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"]) or nested_get(

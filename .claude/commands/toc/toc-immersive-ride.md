@@ -20,6 +20,13 @@ ToC（TikTok Story Creator）で「没入型（実写シネマティック体験
 /toc-immersive-ride --topic "桃太郎" --stage script
 ```
 
+p番号で止めたい場合（`p` なしの数字も可）:
+
+```text
+/toc-immersive-ride --topic "桃太郎" --stage p300
+/toc-immersive-ride --topic "桃太郎" --stage 300
+```
+
 ## コンセプト（experience別）
 
 共通:
@@ -87,9 +94,19 @@ topic
 
 $ARGUMENTS:
 - `--topic "<topic>"` (required)
-- `--stage video|script` (optional, default: `video`)
+- `--stage video|script|research|story|visual_value|narration|asset|scene_implementation|video_generation|render|p100|100|p200|200|p300|300|p400|400|p450|450|p500|500|p600|600|p700|700|p800|800|p900|900` (optional, default: `video`)
   - `video`: 完成動画まで生成する（API + ffmpeg を含む）
   - `script`: `research.md` / `story.md` / `script.md` / `video_manifest.md` まで作って止める
+  - `p100` / `100` / `research`: `research.md` まで
+  - `p200` / `200` / `story`: `story.md` まで
+  - `p300` / `300` / `visual_value`: `visual_value.md` まで
+  - `p400` / `400`: `script.md` まで
+  - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
+  - `p500` / `500` / `narration`: narration / audio runtime gate まで
+  - `p600` / `600` / `asset`: reusable asset stage まで
+  - `p700` / `700` / `scene_implementation`: production manifest / image request stage まで
+  - `p800` / `800` / `video_generation`: video request / clip generation stage まで
+  - `p900` / `900` / `render` / `video`: final render / QA まで
 - `--experience cinematic_story|cloud_island_walk|ride_action_boat` (optional, default: `cloud_island_walk`)
   - `cinematic_story`: 物語を映画的に見せる（ボート/真鍮バーの固定仕様は使わない）
   - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
@@ -102,23 +119,34 @@ $ARGUMENTS:
 
 ## 実行手順（このコマンドが実行すること）
 
+`--stage` は inclusive stop target として扱う。`300` は `p300`、`900` は `p900` のように正規化し、指定した p番号より後段の stage は開始しない。
+
 1) run dir を作成する（`output/<topic>_<timestamp>/`）
    - `<timestamp>` は `YYYYMMDD_HHMM` を使う
 2) run dir に `state.txt`（追記型）を作成し、`runtime.stage=init` を追記する
 3) Deep Research（エージェント: `deep-researcher`）
    - 出力先は run dir の `research.md` とする（`output/research/` だけに出して終わらない）
+   - `--stage p100|100|research` の場合はここで停止する
 4) Story（エージェント: `director`）
    - 入力: `research.md`
    - 出力: `story.md`
+   - `--stage p200|200|story` の場合はここで停止する
 5) Visual Value（エージェント: `visual-value-ideator`）
    - 入力: `research.md` + `story.md`
    - 出力: `visual_value.md`
+   - `--stage p300|300|visual_value` の場合はここで停止する
 6) Script + Manifest（エージェント: `immersive-scriptwriter`）
    - 入力: `story.md` + `visual_value.md`（必要なら `research.md` も参照）
    - 出力: `script.md` と `video_manifest.md`
-7) `--stage video` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
+   - `--stage p400|400` の場合は `script.md` までで停止する
+   - `--stage p450|450|script` の場合は skeleton `video_manifest.md` までで停止する
+7) `--stage p500|500|narration` 以降の場合は narration / audio runtime gate まで進め、p500 指定なら停止する
+8) `--stage p600|600|asset` 以降の場合は reusable asset stage まで進め、p600 指定なら停止する
+9) `--stage p700|700|scene_implementation` 以降の場合は production manifest / image request stage まで進め、p700 指定なら停止する
+10) `--stage p800|800|video_generation` 以降の場合は video request / clip generation stage まで進め、p800 指定なら停止する
+11) `--stage video|p900|900|render` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
    - `scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>`
-8) `state.txt` に最終状態（`runtime.stage=done` と成果物パス）を追記する
+12) `state.txt` に最終状態（`runtime.stage=done` と成果物パス）を追記する
    - `runtime.render.status=started|success|failed`
    - `artifact.video=output/<topic>_<timestamp>/video.mp4`
    - `review.video.status=pending`（人間が最終判定で `approved` を付ける）

@@ -545,8 +545,10 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
             legacy_passages.extend(as_list(source.get("key_passages")))
     beat_sheet = nested_get(data, ["story_baseline", "canonical_synopsis", "beat_sheet"], [])
     conflicts = data.get("conflicts")
-    conflict_topics = [str(item.get("topic") or "").strip() for item in as_list(conflicts) if isinstance(item, dict) and str(item.get("topic") or "").strip()]
-    facts = nested_get(data, ["facts", "items"], [])
+    conflict_items = as_list(conflicts)
+    conflict_topics = [str(item.get("topic") or "").strip() for item in conflict_items if isinstance(item, dict) and str(item.get("topic") or "").strip()]
+    facts_value = data.get("facts")
+    facts = as_list(facts_value.get("items")) if isinstance(facts_value, dict) else as_list(facts_value)
     handoff_to_story = data.get("handoff_to_story")
     confidence = nested_get(data, ["metadata", "confidence_score"])
     synopsis = nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"]) or nested_get(
@@ -1297,7 +1299,8 @@ def append_stage_review_state(*, run_dir: Path, stage: str, stage_result: dict[s
     }
     state_updates = dict(updates)
     state_updates[f"eval.{stage}.status"] = "approved" if stage_result["passed"] else "changes_requested"
-    state_updates[f"review.{stage}.status"] = "approved" if stage_result["passed"] else "changes_requested"
+    if stage == "story":
+        state_updates["review.story.status"] = "approved" if stage_result["passed"] else "changes_requested"
     state_updates[f"eval.{stage}.findings"] = str(finding_count)
     state_updates[f"eval.{stage}.reason_keys"] = ",".join(stage_result.get("reason_keys") or [])
     state_updates[f"eval.{stage}.overall_rubric"] = f"{float(stage_result.get('overall_rubric', 0.0)):.4f}"

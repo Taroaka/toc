@@ -15,6 +15,17 @@ Claude Code の slash command を起点に、最小限の入力（topic）で
   - `--topic`（必須）
   - `--dry-run`（任意。外部生成APIは呼ばない）
   - `--config`（任意。`config/system.yaml` を差し替え）
+  - `--stage`（任意。default: `video`）
+    - `p100` / `100` / `research`: `research.md` まで
+    - `p200` / `200` / `story`: `story.md` まで
+    - `p300` / `300` / `visual_value`: `visual_value.md` まで
+    - `p400` / `400`: `script.md` まで
+    - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
+    - `p500` / `500` / `narration`: narration / audio runtime gate まで
+    - `p600` / `600` / `asset`: reusable asset stage まで
+    - `p700` / `700` / `scene_implementation`: production manifest / image request stage まで
+    - `p800` / `800` / `video_generation`: video request / clip generation stage まで
+    - `p900` / `900` / `render` / `video`: final render / QA まで
   - `--experience`（任意。default: `cloud_island_walk`）
     - `cinematic_story`: 物語を映画的に見せる（視点は必要に応じて。固定デバイスを前提にしない）
     - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン

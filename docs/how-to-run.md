@@ -81,6 +81,13 @@ API をまだ使わず、story/script/manifest draft まで進めたい場合:
 /toc-immersive-ride --topic "かぐや姫" --stage script --experience cinematic_story --review-policy drafts
 ```
 
+p番号で止めたい場合は、`p300` と `300` のどちらも使える:
+
+```text
+/toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
+/toc-immersive-ride --topic "かぐや姫" --stage 300 --experience cinematic_story
+```
+
 ## 期待される出力（/toc-run）
 
 ```
@@ -171,6 +178,17 @@ output/<topic>_<timestamp>/
   - `p800`: video
   - `p900`: render / QA / runtime
 - これらの slot 意味は固定契約で、story ごとに変えない
+- `/toc-immersive-ride --stage` は `p100` / `100` のような p番号指定を受け付ける
+  - `p100|100|research`: `research.md` まで
+  - `p200|200|story`: `story.md` まで
+  - `p300|300|visual_value`: `visual_value.md` まで
+  - `p400|400`: `script.md` まで
+  - `p450|450|script`: skeleton `video_manifest.md` まで
+  - `p500|500|narration`: narration / audio runtime gate まで
+  - `p600|600|asset`: reusable asset stage まで
+  - `p700|700|scene_implementation`: production manifest / image request stage まで
+  - `p800|800|video_generation`: video request / clip generation stage まで
+  - `p900|900|render|video`: final render / QA まで
 - 細番号も固定 slot contract の一部として扱う
   - `p110`, `p120`, `p130`
   - `p210`, `p220`, `p230`

@@ -103,6 +103,7 @@ def main() -> None:
     else:
         visual_value = "# 視覚化価値パート（visual value）\n\nTODO\n"
     write_text(run_dir / "visual_value.md", visual_value, args.force)
+    maybe_run_stage_grounding(run_dir, "visual_value", flow="toc-run")
     write_text(run_dir / "script.md", "# 台本（script）\n\nTODO\n", args.force)
     maybe_run_stage_grounding(run_dir, "script", flow="toc-run")
 
