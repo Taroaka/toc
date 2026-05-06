@@ -38,6 +38,7 @@ dashboard.md
 # Build outputs
 dist/
 build/
+*.tsbuildinfo
 
 # Generated videos (temporary)
 output/

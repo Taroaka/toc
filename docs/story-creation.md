@@ -28,7 +28,7 @@
 ### 出力
 
 - `output/<topic>_<timestamp>/story.md` - 物語スクリプト
-- `output/<topic>_<timestamp>/visual_value.md` - p300 visual planning 正本（後続エージェントが作成）
+- `output/<topic>_<timestamp>/visual_value.md` - p300 visual planning 正本（後続エージェントが作成。要件正本は `docs/data-contracts.md`）
 - 動画用台本（任意の長さに対応）
 
 ### 下流 prompt 設計への受け渡し
@@ -53,7 +53,7 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - `story.md` が `workflow/story-template.yaml` の主要フィールドを満たしている
 - protagonist / world / conflict / transformation / theme が、p200 で scene に分解された粒度で書かれている
 - p100 の素材から scene / beat / emotion curve / candidate selection が明示的に作られている
-- p200 は 20 scene 単位の物語骨格までを担当し、cut 分割は後続 stage に渡す
+- p200 は原則 20 scene 単位の物語骨格までを担当し、短尺/限定 flow では 8 scene 以上の dense grounded scenes でもよい。cut 分割は後続 stage に渡す
 - 各 scene は `purpose / conflict / turn / affect / visualizable_action / grounding_note` を持ち、単なる一行要約で終わらせない
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
 - 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
@@ -490,7 +490,7 @@ accuracy_checklist:
 ### Phase 5: 視覚化価値パートへの handoff
 
 `story.md` を確定した後、Scriptwriter に直接渡す前に
-**Visual Value Ideator** が `visual_value.md` を作る。これは中盤の視覚報酬メモに限定せず、p400 / p600 / p700 が迷わないための visual planning 正本として扱う。
+**Visual Value Ideator** が `visual_value.md` を作る。これは p300 visual planning の成果物であり、中盤の視覚報酬メモに限定せず、p400 / p600 / p700 が迷わないための正本として扱う。canonical p300 要件は `docs/data-contracts.md` の "Canonical p300 done 条件" を参照する。
 
 目的:
 
@@ -759,7 +759,7 @@ sources:
 ## Handoff Artifact: `visual_value.md`
 
 Visual Value Ideator は `workflow/visual-value-template.yaml` を基に、
-次のような構造で `visual_value.md` を作る。p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt は作らない。
+次のような構造で `visual_value.md` を作る。これは p300 の planning artifact であり、canonical generation stage の成果物ではない。p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt は作らない。
 
 ```yaml
 visual_value_metadata:
@@ -832,13 +832,8 @@ value_parts:
 
 p300 done 条件:
 
-- `visual_value.md` が存在する
-- 主要 story scene に `scene_visual_values[]` の coverage がある
-- `asset_bible_candidates` が列挙されている
-- `anchor_cut_candidates` が列挙されている
-- `reference_strategy` がある
-- `regeneration_risks[]` がある
-- `handoff_to_p400_p600_p700` がある
+- 正本は `docs/data-contracts.md` の "Canonical p300 done 条件"。
+- 本書のサンプル構造は template usage の補助であり、要件差分をここに増やさない。
 
 ---
 

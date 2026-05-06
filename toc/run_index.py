@@ -7,14 +7,19 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from toc.review_loop import REVIEW_LOOP_SLOT_BY_CODE
+except ModuleNotFoundError:  # pragma: no cover - compatibility for validator fixture copies
+    REVIEW_LOOP_SLOT_BY_CODE = {}
+
 
 DEFAULT_SLOT_MEANINGS: dict[str, str] = {
     "00": "source-of-truth",
-    "10": "evaluator / subagent review",
-    "20": "human review",
-    "30": "request freeze / execution manifest",
-    "40": "generated outputs",
-    "50": "appendix / transitional / exclusions / backups / migration / runtime notes",
+    "10": "grounding / preflight",
+    "20": "authoring / primary work",
+    "30": "evaluator-improvement loop / review",
+    "40": "request freeze / generation readiness",
+    "50": "generated outputs / appendix / transitional / exclusions / backups / migration / runtime notes",
 }
 
 ROLE_ORDER = {
@@ -107,8 +112,9 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "research source-of-truth",
-                "10": "research evaluator / subagent review",
-                "20": "research human review",
+                "10": "research grounding",
+                "20": "research authoring",
+                "30": "research evaluator-improvement loop",
             }
         ),
         state_keys=("stage.research.status",),
@@ -119,8 +125,8 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="research.md",
         default_owner="subagent",
         planned_artifacts=(
-            ("p100", "research.md"),
-            ("p110", "research_review.md"),
+            ("p120", "research.md"),
+            ("p130", "research_review.md"),
         ),
     ),
     StageSpec(
@@ -129,8 +135,9 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "story source-of-truth",
-                "10": "story evaluator / subagent review",
-                "20": "story human review",
+                "10": "story grounding",
+                "20": "story authoring",
+                "30": "story evaluator-improvement loop",
             }
         ),
         state_keys=("stage.story.status",),
@@ -140,7 +147,7 @@ STAGES: tuple[StageSpec, ...] = (
         request_target="-",
         outputs="story.md",
         default_owner="subagent",
-        planned_artifacts=(("p200", "story.md"),),
+        planned_artifacts=(("p220", "story.md"), ("p230", "story_review.md")),
     ),
     StageSpec(
         bucket="p300",
@@ -148,9 +155,9 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "visual planning source-of-truth: visual identity, scene visual value, anchors, references, risks, handoff",
-                "10": "visual planning evaluator / subagent review",
-                "20": "visual planning human review",
-                "50": "p400/p600/p700 handoff appendix / transitional notes",
+                "10": "visual value authoring",
+                "20": "visual planning evaluator-improvement loop",
+                "30": "p400/p600/p700 handoff appendix / transitional notes",
             }
         ),
         state_keys=("stage.visual_value.status",),
@@ -160,7 +167,7 @@ STAGES: tuple[StageSpec, ...] = (
         request_target="p400/p600/p700 visual planning handoff",
         outputs="visual_value.md",
         default_owner="subagent",
-        planned_artifacts=(("p300", "visual_value.md"),),
+        planned_artifacts=(("p310", "visual_value.md"),),
     ),
     StageSpec(
         bucket="p400",
@@ -168,9 +175,11 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "script source-of-truth",
-                "10": "script evaluator / subagent review",
-                "20": "script human review",
-                "30": "human change log / structured review edits",
+                "10": "script grounding",
+                "20": "script authoring",
+                "30": "script evaluator-improvement loop",
+                "40": "human change log / structured review edits",
+                "50": "skeleton manifest materialization",
             }
         ),
         state_keys=("stage.script.status",),
@@ -181,8 +190,9 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="script.md",
         default_owner="subagent",
         planned_artifacts=(
-            ("p400", "script.md"),
-            ("p410", "script_review.md"),
+            ("p420", "script.md"),
+            ("p430", "script_review.md"),
+            ("p450", "video_manifest.md"),
         ),
     ),
     StageSpec(
@@ -191,12 +201,13 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "narration runtime source-of-truth",
-                "10": "narration-ready manifest sync / review",
-                "20": "tts request / generation",
-                "30": "duration fit gate",
-                "40": "scene stretch review",
-                "50": "narration stretch review",
-                "60": "audio qa / human review handoff",
+                "10": "narration grounding",
+                "20": "narration text evaluator-improvement loop",
+                "30": "tts request / generation",
+                "40": "duration fit gate",
+                "50": "scene stretch review",
+                "60": "narration stretch review",
+                "70": "audio qa / human review handoff",
             }
         ),
         state_keys=("stage.narration.status",),
@@ -214,11 +225,14 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "asset plan source-of-truth",
-                "10": "asset evaluator / subagent review",
-                "20": "asset human review",
-                "30": "asset generation manifests / request freeze",
-                "40": "asset outputs",
-                "50": "asset appendix / test variants / transitional notes",
+                "10": "asset grounding",
+                "20": "reusable asset inventory",
+                "30": "asset plan authoring",
+                "40": "asset evaluator-improvement loop",
+                "50": "asset plan fixes",
+                "60": "asset requests",
+                "70": "asset generation",
+                "80": "asset continuity check",
             }
         ),
         state_keys=("stage.asset.status", "stage.asset_plan_review.status", "stage.asset_generation.status"),
@@ -229,7 +243,7 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="assets/characters/**, assets/objects/**, assets/locations/**, assets/test/**",
         default_owner="generator",
         planned_artifacts=(
-            ("p600", "asset_plan.md"),
+            ("p630", "asset_plan.md"),
             ("p660", "asset_generation_requests.md"),
         ),
     ),
@@ -239,11 +253,13 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "production manifest source-of-truth",
-                "10": "hard scene evaluator / semantic review",
-                "20": "scene human review",
-                "30": "generation ready / request freeze",
-                "40": "scene image outputs",
-                "50": "scene appendix / transitional prompt artifacts",
+                "10": "scene implementation grounding",
+                "20": "production manifest / prompt authoring",
+                "30": "hard scene evaluator-improvement loop",
+                "40": "judgment evaluator-improvement loop",
+                "50": "generation ready / request freeze",
+                "60": "scene image outputs",
+                "70": "image qa / fix loop",
             }
         ),
         state_keys=("stage.scene_implementation.status", "stage.image_prompt_review.status", "stage.image_generation.status"),
@@ -254,7 +270,7 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="assets/scenes/**",
         default_owner="generator",
         planned_artifacts=(
-            ("p700", "video_manifest.md"),
+            ("p720", "video_manifest.md"),
             ("p730", "manifest_review.md"),
             ("p750", "image_generation_requests.md"),
         ),
@@ -265,11 +281,11 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "video generation plan / handoff",
-                "10": "motion / video review",
-                "20": "video human review",
+                "10": "video grounding",
+                "20": "motion / video evaluator-improvement loop",
                 "30": "video generation requests / clip plan",
                 "40": "video clip outputs",
-                "50": "video appendix / exclusions / transitional notes",
+                "50": "video evaluator-improvement loop / exclusions",
             }
         ),
         state_keys=("stage.video.status", "stage.video_generation.status"),
@@ -286,10 +302,9 @@ STAGES: tuple[StageSpec, ...] = (
         title="Render / QA / Runtime",
         slots=_stage_slots(
             {
-                "00": "render inputs / concat lists",
-                "10": "eval report",
-                "20": "human-facing run report",
-                "30": "runtime state / machine-facing status",
+                "10": "render inputs / concat lists",
+                "20": "final render",
+                "30": "qa evaluator-improvement loop / runtime summary",
                 "40": "final render outputs",
                 "50": "runtime appendix / logs / backups / scratch",
             }
@@ -302,10 +317,10 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="video.mp4 / shorts/**",
         default_owner="render pipeline",
         planned_artifacts=(
-            ("p900", "video_clips.txt"),
-            ("p900", "video_narration_list.txt"),
-            ("p910", "eval_report.json"),
-            ("p920", "run_report.md"),
+            ("p910", "video_clips.txt"),
+            ("p910", "video_narration_list.txt"),
+            ("p930", "eval_report.json"),
+            ("p930", "run_report.md"),
             ("p930", "state.txt"),
             ("p930", "run_status.json"),
         ),
@@ -337,7 +352,13 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             state_keys=("stage.research.grounding.status", "stage.research.audit.status"),
         ),
         SlotSpec("p120", "Research Authoring", "author research.md", planned_artifacts=("research.md",), state_keys=("stage.research.status",)),
-        SlotSpec("p130", "Research Review", "research evaluator and review pass", planned_artifacts=("research_review.md",), default_requirement="optional"),
+        SlotSpec(
+            "p130",
+            "Research Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after research authoring; each round uses 5 independent critics and 1 aggregator",
+            planned_artifacts=("research_review.md",),
+            default_requirement="optional",
+        ),
     ),
     "p200": (
         SlotSpec(
@@ -354,8 +375,8 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec("p220", "Story Authoring", "author story.md", planned_artifacts=("story.md",), state_keys=("stage.story.status",)),
         SlotSpec(
             "p230",
-            "Story Review",
-            "story review and approval handoff",
+            "Story Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after story authoring; each round uses 5 independent critics and 1 aggregator",
             planned_artifacts=("story_review.md",),
             state_keys=("review.story.status",),
             default_requirement="optional",
@@ -363,7 +384,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
     ),
     "p300": (
         SlotSpec("p310", "Visual Value", "author visual_value.md as p300 visual planning source-of-truth", planned_artifacts=("visual_value.md",), default_requirement="optional"),
-        SlotSpec("p320", "Visual Planning Review", "review visual identity, scene visual value, anchor/reference strategy, and regeneration risks", default_requirement="optional"),
+        SlotSpec(
+            "p320",
+            "Visual Planning Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after visual planning authoring; each round uses 5 independent critics and 1 aggregator",
+            default_requirement="optional",
+        ),
         SlotSpec("p330", "Visual Planning Appendix", "p400/p600/p700 handoff and transitional notes", default_requirement="optional"),
     ),
     "p400": (
@@ -379,7 +405,13 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             state_keys=("stage.script.grounding.status", "stage.script.audit.status"),
         ),
         SlotSpec("p420", "Script Authoring", "author script.md and narration text source", planned_artifacts=("script.md",), state_keys=("stage.script.status",)),
-        SlotSpec("p430", "Script Review", "script evaluator and review pass", planned_artifacts=("script_review.md",), default_requirement="optional"),
+        SlotSpec(
+            "p430",
+            "Script Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after script authoring; each round uses 5 independent critics and 1 aggregator",
+            planned_artifacts=("script_review.md",),
+            default_requirement="optional",
+        ),
         SlotSpec("p440", "Human Changes / Narration Sync", "human change log and narration synchronization", default_requirement="optional"),
         SlotSpec("p450", "Skeleton Manifest Materialization", "materialize or update narration-ready skeleton video_manifest.md", planned_artifacts=("video_manifest.md",), default_requirement="required"),
     ),
@@ -395,7 +427,13 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             ),
             state_keys=("stage.narration.grounding.status", "stage.narration.audit.status"),
         ),
-        SlotSpec("p520", "Narration Text Review", "review narration text before TTS", planned_artifacts=("narration_text_review.md", "narration_review.md"), default_requirement="optional"),
+        SlotSpec(
+            "p520",
+            "Narration Text Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after narration text authoring and before TTS; each round uses 5 independent critics and 1 aggregator",
+            planned_artifacts=("narration_text_review.md", "narration_review.md"),
+            default_requirement="optional",
+        ),
         SlotSpec("p530", "TTS Request / Generation", "prepare and run TTS generation", default_requirement="optional"),
         SlotSpec("p540", "Duration Fit Gate", "check actual audio-driven runtime against the target minimum duration", default_requirement="optional"),
         SlotSpec("p550", "Scene Stretch Review", "scene-level duration expansion review prompt and report", default_requirement="optional"),
@@ -416,7 +454,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         ),
         SlotSpec("p620", "Reusable Asset Inventory", "inventory recurring characters, objects, and locations", default_requirement="optional"),
         SlotSpec("p630", "Asset Plan Authoring", "author asset_plan.md", planned_artifacts=("asset_plan.md",), default_requirement="optional"),
-        SlotSpec("p640", "Asset Review", "review and approve reusable asset plan", default_requirement="optional"),
+        SlotSpec(
+            "p640",
+            "Asset Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds after asset plan authoring and before reusable asset generation; each round uses 5 independent critics and 1 aggregator",
+            default_requirement="optional",
+        ),
         SlotSpec("p650", "Asset Plan Fixes", "apply asset review fixes and approval notes", default_requirement="optional"),
         SlotSpec(
             "p660",
@@ -443,15 +486,15 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec("p720", "Production Manifest / Prompt Authoring", "author and revise production video_manifest.md for cut-level prompts", planned_artifacts=("video_manifest.md",)),
         SlotSpec(
             "p730",
-            "Hard Scene Review",
-            "run deterministic function review for production manifest and prompts",
+            "Hard Scene Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds for deterministic scene/prompt blockers; each round uses 5 independent critics and 1 aggregator",
             planned_artifacts=("manifest_review.md", "image_prompt_story_review.md"),
             default_requirement="optional",
         ),
         SlotSpec(
             "p740",
-            "Judgment Review",
-            "contextless subagent or judgment artifacts for semantic image review",
+            "Judgment Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds for semantic scene/image judgment; each round uses 5 independent critics and 1 aggregator",
             default_requirement="optional",
             state_keys=("review.image_prompt.judgment.status",),
         ),
@@ -477,15 +520,31 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             ),
             state_keys=("stage.video_generation.grounding.status", "stage.video_generation.audit.status"),
         ),
-        SlotSpec("p820", "Motion / Video Review", "motion prompt review and video request review", default_requirement="optional"),
+        SlotSpec(
+            "p820",
+            "Motion / Video Eval/Improve Loop",
+            "up to 5 evaluator-improvement rounds for motion prompts and video requests; each round uses 5 independent critics and 1 aggregator",
+            default_requirement="optional",
+        ),
         SlotSpec("p830", "Video Requests", "freeze video generation requests", planned_artifacts=("video_generation_requests.md",), default_requirement="optional"),
         SlotSpec("p840", "Video Generation", "generate video clips", default_requirement="optional"),
-        SlotSpec("p850", "Video Review / Exclusions", "video review and exclusion appendix", default_requirement="optional"),
+        SlotSpec(
+            "p850",
+            "Video Eval/Improve Loop / Exclusions",
+            "up to 5 evaluator-improvement rounds for generated clips and exclusion decisions; each round uses 5 independent critics and 1 aggregator",
+            default_requirement="optional",
+        ),
     ),
     "p900": (
         SlotSpec("p910", "Render Inputs", "freeze concat lists and render inputs", planned_artifacts=("video_clips.txt", "video_narration_list.txt"), default_requirement="optional"),
         SlotSpec("p920", "Final Render", "render final deliverables", default_requirement="optional"),
-        SlotSpec("p930", "QA / Runtime Summary", "run report, eval report, and state sync", planned_artifacts=("state.txt", "run_status.json", "run_report.md", "eval_report.json"), default_requirement="optional"),
+        SlotSpec(
+            "p930",
+            "QA Eval/Improve Loop / Runtime Summary",
+            "up to 5 evaluator-improvement rounds for final QA plus run report, eval report, and state sync; each round uses 5 independent critics and 1 aggregator",
+            planned_artifacts=("state.txt", "run_status.json", "run_report.md", "eval_report.json"),
+            default_requirement="optional",
+        ),
     ),
 }
 
@@ -494,6 +553,7 @@ SLOT_BY_CODE = {slot.code: slot for slots in SLOT_CONTRACTS.values() for slot in
 PENDING_GATE_TARGETS: dict[str, tuple[str, str, str]] = {
     "research_review": ("p100", "research review", "research.md / research_review.md"),
     "story_review": ("p200", "story review", "story.md"),
+    "visual_value_review": ("p300", "visual planning review", "visual_value.md / visual_value_review.md"),
     "script_review": ("p400", "script human review", "script.md"),
     "asset_review": ("p600", "asset human review", "asset_plan.md / asset_generation_requests.md"),
     "image_prompt_review": ("p700", "scene implementation review", "video_manifest.md / image_generation_requests.md"),
@@ -506,6 +566,7 @@ PENDING_GATE_TARGETS: dict[str, tuple[str, str, str]] = {
 PENDING_GATE_REVIEW_KEYS: tuple[tuple[str, str], ...] = (
     ("research_review", "review.research.status"),
     ("story_review", "review.story.status"),
+    ("visual_value_review", "review.visual_value.status"),
     ("script_review", "review.script.status"),
     ("asset_review", "review.asset.status"),
     ("image_prompt_review", "review.image_prompt.status"),
@@ -592,6 +653,16 @@ def _summarize_slot_status(slot: SlotSpec, state: dict[str, str], entries: list[
     if explicit:
         return explicit
 
+    loop_spec = REVIEW_LOOP_SLOT_BY_CODE.get(slot.code)
+    if loop_spec is not None:
+        loop_status = state.get(f"eval.{loop_spec.stage}.loop.status", "").strip().lower()
+        if loop_status == "running":
+            return "in_progress"
+        if loop_status == "passed":
+            return "done"
+        if loop_status in {"pending", "changes_requested", "failed"}:
+            return loop_status
+
     values = [_normalize_review_status(state.get(key, "")) for key in slot.state_keys if state.get(key, "").strip()]
     values = [value for value in values if value]
     if values:
@@ -609,6 +680,11 @@ def _summarize_slot_status(slot: SlotSpec, state: dict[str, str], entries: list[
             return "pending"
 
     if entries:
+        if loop_spec is not None:
+            if any(entry.rel_path.endswith("aggregated_review.md") for entry in entries):
+                return "done"
+            if all("/prompts/" in entry.rel_path for entry in entries):
+                return "pending"
         return "done"
     return "pending"
 
@@ -617,24 +693,36 @@ def _slot_requirement(slot: SlotSpec, state: dict[str, str]) -> str:
     return state.get(f"slot.{slot.code}.requirement", "").strip().lower() or slot.default_requirement
 
 
-def _current_position(state: dict[str, str]) -> tuple[str, str]:
+def _next_required_human_review(state: dict[str, str]) -> str:
     pending = _pending_gates(state)
     if pending:
-        bucket, label, target = PENDING_GATE_TARGETS[pending[0]]
-        return f"{bucket} {STAGE_BY_BUCKET[bucket].title} / awaiting {label}", target
+        return PENDING_GATE_TARGETS[pending[0]][2]
+    return "-"
 
+
+def _current_position(state: dict[str, str]) -> str:
     for bucket in reversed(STAGE_ORDER):
         summary = _summarize_stage_status(STAGE_BY_BUCKET[bucket], state)
-        if summary.startswith(("failed", "awaiting_approval", "in_progress")):
-            return f"{bucket} {STAGE_BY_BUCKET[bucket].title} / {summary}", "-"
+        if summary.startswith(("failed", "in_progress")):
+            return f"{bucket} {STAGE_BY_BUCKET[bucket].title} / {summary}"
 
     runtime_stage = state.get("runtime.stage", "").strip()
     if runtime_stage:
-        return f"runtime.stage={runtime_stage}", "-"
+        return f"runtime.stage={runtime_stage}"
     status = state.get("status", "").strip()
     if status:
-        return f"status={status}", "-"
-    return "unknown", "-"
+        return f"status={status}"
+
+    for bucket in reversed(STAGE_ORDER):
+        summary = _summarize_stage_status(STAGE_BY_BUCKET[bucket], state)
+        if summary.startswith("awaiting_approval"):
+            return f"{bucket} {STAGE_BY_BUCKET[bucket].title} / {summary}"
+
+    pending = _pending_gates(state)
+    if pending:
+        bucket, label, _target = PENDING_GATE_TARGETS[pending[0]]
+        return f"{bucket} {STAGE_BY_BUCKET[bucket].title} / pending human review gate: {label}"
+    return "unknown"
 
 
 def _normalize_rel_path(rel_path: str) -> str:
@@ -691,6 +779,12 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         return InventoryEntry(rel, "p550", "log", "scene stretch review artifact")
     if rel.startswith("logs/review/duration_narration"):
         return InventoryEntry(rel, "p560", "log", "narration stretch review artifact")
+    eval_match = re.match(r"^logs/eval/([^/]+)/", rel)
+    if eval_match:
+        stage_name = eval_match.group(1)
+        for spec in REVIEW_LOOP_SLOT_BY_CODE.values():
+            if spec.stage == stage_name:
+                return InventoryEntry(rel, spec.slot_codes[0], "log", f"{stage_name} evaluator-improvement loop artifact")
 
     if Path(rel).name == "video_manifest.md":
         manifest_path = (run_dir / rel).resolve() if run_dir is not None else None
@@ -824,7 +918,8 @@ def build_run_index_markdown(run_dir: Path, *, state: dict[str, str] | None = No
     existing_paths = {entry.rel_path for entry in entries}
     grouped = _group_entries(entries)
     counts = _counts(entries)
-    current_position, next_review_target = _current_position(flat_state)
+    current_position = _current_position(flat_state)
+    next_review_target = _next_required_human_review(flat_state)
     pending = _pending_gates(flat_state)
 
     lines: list[str] = [
@@ -856,6 +951,8 @@ def build_run_index_markdown(run_dir: Path, *, state: dict[str, str] | None = No
             "- `slot.pXXX.requirement=required|optional`",
             "- `slot.pXXX.skip_reason=string`",
             "- `slot.pXXX.note=string`",
+            "- `slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed`",
+            "- `slot.pXXX.review_loop.current_round=0-5`",
         ]
     )
     lines += [

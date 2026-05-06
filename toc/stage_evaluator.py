@@ -289,25 +289,39 @@ def _research_rubric(
     source_passages: list[Any],
     facts: list[Any],
     handoff_to_story: Any,
+    conflict_items: list[Any],
     conflict_topics: list[str],
 ) -> dict[str, float]:
     confidence = nested_get(data, ["metadata", "confidence_score"])
     confidence_score = float(confidence) if isinstance(confidence, (int, float)) else 0.0
     event_count = len(chronological_events) or len(beat_sheet)
+    canonical_story = nested_get(data, ["story_materials", "canonical_story_dump"]) or nested_get(
+        data, ["story_baseline", "canonical_synopsis", "short_summary"]
+    )
+    compact_pack_ok = compact_research_pack_ok(
+        sources=sources,
+        passage_count=len(source_passages),
+        canonical_story=canonical_story,
+        conflict_items=conflict_items,
+        handoff_to_story=handoff_to_story,
+    )
+    source_grounding = 1.0 if compact_pack_ok else score_from_ratio(len(sources), 12)
+    event_coverage = 1.0 if compact_pack_ok else score_from_ratio(event_count, 20)
+    fact_coverage = 1.0 if compact_pack_ok else score_from_ratio(len(facts), 30)
+    passage_coverage = 1.0 if compact_pack_ok else score_from_ratio(len(source_passages), 10)
     material_readiness = round(
         (
-            score_from_ratio(event_count, 20)
-            + score_from_ratio(len(source_passages), 10)
-            + score_from_ratio(len(facts), 30)
+            event_coverage
+            + passage_coverage
+            + fact_coverage
             + (1.0 if handoff_to_story else 0.0)
         )
         / 4,
         4,
     )
-    canonical_story = nested_get(data, ["story_materials", "canonical_story_dump"]) or nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"])
     return {
-        "source_grounding": score_from_ratio(len(sources), 12),
-        "coverage": round((score_from_ratio(event_count, 20) + score_from_ratio(len(facts), 30)) / 2, 4),
+        "source_grounding": source_grounding,
+        "coverage": round((event_coverage + fact_coverage) / 2, 4),
         "conflict_readiness": round((1.0 if conflict_topics else 0.9), 4),
         "structure_readiness": round((1.0 if canonical_story else 0.5) * max(confidence_score, 0.5), 4),
         "story_material_readiness": material_readiness,
@@ -322,6 +336,35 @@ STORY_REQUIRED_SCENE_FIELDS = [
     "visualizable_action",
     "grounding_note",
 ]
+
+
+def compact_research_pack_ok(
+    *,
+    sources: list[Any],
+    passage_count: int,
+    canonical_story: Any,
+    conflict_items: list[Any],
+    handoff_to_story: Any,
+) -> bool:
+    """Accept focused research when it is grounded enough to avoid count padding."""
+    has_canonical = non_empty(canonical_story)
+    has_conflict_or_handoff = bool(conflict_items) or non_empty(handoff_to_story)
+    has_source_grounding = len(sources) >= 3 or (len(sources) >= 1 and passage_count >= 5)
+    return has_canonical and has_source_grounding and passage_count >= 3 and has_conflict_or_handoff
+
+
+def dense_story_scene_count(scenes: list[Any]) -> int:
+    return sum(
+        1
+        for scene in scenes
+        if isinstance(scene, dict)
+        and all(non_empty(scene.get(field)) for field in STORY_REQUIRED_SCENE_FIELDS)
+        and bool(as_list(scene.get("research_refs")))
+    )
+
+
+def story_scene_coverage_ok(scenes: list[Any]) -> bool:
+    return len(scenes) >= 20 or dense_story_scene_count(scenes) >= 8
 
 
 def _story_scene_field_presence(scenes: list[Any], field: str) -> float:
@@ -370,6 +413,167 @@ def _story_rubric(*, candidates: list[Any], chosen_id: Any, rationale: Any, scen
     }
 
 
+def _scene_selector_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("scene"):
+        raw = raw[len("scene") :]
+    if "_cut" in raw:
+        raw = raw.split("_cut", 1)[0]
+    raw = raw.replace("-", ".").replace("_", ".")
+    parts = [part for part in raw.split(".") if part]
+    normalized_parts: list[str] = []
+    for part in parts:
+        if part.isdigit():
+            normalized_parts.append(str(int(part)))
+        else:
+            normalized_parts.append(part)
+    return ".".join(normalized_parts)
+
+
+def _story_scene_keys(run_dir: Path) -> set[str]:
+    path = run_dir / "story.md"
+    if not path.exists():
+        return set()
+    _, data = load_structured_document(path)
+    scenes = as_list(nested_get(data, ["script", "scenes"], [])) or as_list(data.get("scenes"))
+    keys = set()
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            continue
+        key = _scene_selector_key(scene.get("scene_id") or scene.get("scene_selector") or index + 1)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _major_scene_coverage_ok(story_keys: set[str], covered_story_keys: set[str], scene_value_count: int) -> bool:
+    if scene_value_count <= 0:
+        return False
+    if not story_keys:
+        return True
+    if story_keys <= covered_story_keys:
+        return True
+    minimum_major_coverage = min(len(story_keys), 8)
+    return len(covered_story_keys) >= minimum_major_coverage
+
+
+def _has_template_placeholder(text: str) -> bool:
+    return any(marker in text for marker in ("REPLACE_ME", "EXAMPLE_ONLY", "TEMPLATE_ONLY"))
+
+
+def _asset_bible_candidate_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if not isinstance(value, dict):
+        return 0
+    count = 0
+    for item in value.values():
+        count += len(as_list(item))
+    return count
+
+
+def _production_manifest_issues(run_dir: Path) -> list[str]:
+    manifest_path = run_dir / "video_manifest.md"
+    if not manifest_path.exists():
+        return []
+    _, data = load_structured_document(manifest_path)
+    issues: list[str] = []
+    for selector, node in _iter_manifest_nodes_with_selectors(data):
+        image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
+        video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
+        prompt = str(image_generation.get("prompt") or "").strip()
+        motion_prompt = str(video_generation.get("motion_prompt") or "").strip()
+        if prompt:
+            issues.append(f"{selector}:image_generation.prompt")
+        if motion_prompt:
+            issues.append(f"{selector}:video_generation.motion_prompt")
+    return issues
+
+
+def _p300_production_artifact_issues(run_dir: Path) -> list[str]:
+    issues: list[str] = []
+    for filename in ("asset_generation_requests.md", "image_generation_requests.md", "video_generation_requests.md", "video.mp4"):
+        if (run_dir / filename).exists():
+            issues.append(filename)
+    shorts_dir = run_dir / "shorts"
+    if shorts_dir.exists() and any(shorts_dir.rglob("*")):
+        issues.append("shorts")
+    scene_video_paths = sorted((run_dir / "scenes").glob("scene*/video.mp4"))
+    if scene_video_paths:
+        issues.extend(str(path.relative_to(run_dir)) for path in scene_video_paths[:20])
+    for rel in ("assets/scenes", "assets/videos", "assets/characters", "assets/objects", "assets/locations", "assets/test"):
+        path = run_dir / rel
+        if path.exists() and any(path.rglob("*")):
+            issues.append(rel)
+    issues.extend(_production_manifest_issues(run_dir))
+    return sorted(set(issues))
+
+
+def check_visual_value(run_dir: Path, profile: str, *, forbid_production_artifacts: bool = True) -> tuple[dict[str, Any], dict[str, str]]:
+    path = run_dir / "visual_value.md"
+    checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    updates: dict[str, str] = {}
+
+    add_check(checks, "visual_value.file_exists", path.exists(), f"{path.name} exists")
+    if not path.exists():
+        return make_stage("visual_value", path.name, checks), updates
+
+    text, data = load_structured_document(path)
+    add_check(
+        checks,
+        "visual_value.no_template_placeholders",
+        not _has_template_placeholder(text),
+        "visual_value.md does not contain REPLACE_ME/EXAMPLE_ONLY template markers",
+        kind="rubric",
+    )
+    if profile == "standard":
+        add_check(checks, "visual_value.no_todo", not has_todo(text), "visual_value.md does not contain TODO/TBD markers", kind="rubric")
+    _append_grounding_checks(checks, run_dir=run_dir, stage="visual_value")
+
+    scene_values = as_list(data.get("scene_visual_values"))
+    scene_value_keys = {
+        _scene_selector_key(item.get("scene_selector") or item.get("scene_id"))
+        for item in scene_values
+        if isinstance(item, dict)
+    }
+    scene_value_keys.discard("")
+    story_keys = _story_scene_keys(run_dir)
+    covered_story_keys = story_keys & scene_value_keys
+    missing_story_keys = sorted(story_keys - scene_value_keys, key=lambda item: dotted_id_sort_key(item))
+    asset_candidate_count = _asset_bible_candidate_count(data.get("asset_bible_candidates"))
+    anchor_candidates = as_list(data.get("anchor_cut_candidates"))
+    reference_strategy = data.get("reference_strategy")
+    regeneration_risks = as_list(data.get("regeneration_risks"))
+    handoff = data.get("handoff_to_p400_p600_p700") if isinstance(data.get("handoff_to_p400_p600_p700"), dict) else {}
+    handoff_keys = {"p400_script", "p600_asset", "p700_scene_implementation"}
+    production_issues = _p300_production_artifact_issues(run_dir) if forbid_production_artifacts else []
+
+    details["scene_visual_value_count"] = len(scene_values)
+    details["story_scene_count"] = len(story_keys)
+    details["covered_story_scene_count"] = len(covered_story_keys)
+    if missing_story_keys:
+        details["missing_story_scene_selectors"] = ",".join(f"scene{key}" for key in missing_story_keys[:20])
+    if production_issues:
+        details["p300_production_artifact_issues"] = ", ".join(production_issues[:20])
+
+    add_check(checks, "visual_value.structured", bool(data), "visual_value.md contains structured YAML output", kind="rubric")
+    add_check(checks, "visual_value.global_identity", isinstance(data.get("global_visual_identity"), dict) and bool(data.get("global_visual_identity")), "global_visual_identity is present", kind="rubric")
+    coverage_ok = _major_scene_coverage_ok(story_keys, covered_story_keys, len(scene_values))
+    add_check(checks, "visual_value.scene_coverage", coverage_ok, "scene_visual_values cover all story scenes or at least the major story scenes", kind="rubric")
+    add_check(checks, "visual_value.asset_bible_candidates", asset_candidate_count >= 1, f"asset_bible_candidates are listed (got {asset_candidate_count})", kind="rubric")
+    add_check(checks, "visual_value.anchor_cut_candidates", len(anchor_candidates) >= 1, f"anchor_cut_candidates are listed (got {len(anchor_candidates)})", kind="rubric")
+    add_check(checks, "visual_value.reference_strategy", isinstance(reference_strategy, dict) and bool(reference_strategy), "reference_strategy is present", kind="rubric")
+    add_check(checks, "visual_value.regeneration_risks", len(regeneration_risks) >= 1, f"regeneration_risks are listed (got {len(regeneration_risks)})", kind="rubric")
+    add_check(checks, "visual_value.handoff", handoff_keys.issubset(set(handoff)), "handoff_to_p400_p600_p700 includes p400_script, p600_asset, and p700_scene_implementation", kind="rubric")
+    add_check(checks, "visual_value.no_p300_production_artifacts", not production_issues, "p300 has no production cut prompts, image/video request files, or generated asset/video artifacts", kind="rubric")
+
+    updates["eval.visual_value.score"] = f"{score_from_checks(checks):.4f}"
+    return make_stage("visual_value", path.name, checks, details=details), updates
+
+
 def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "story.md"
     checks: list[dict[str, Any]] = []
@@ -400,7 +604,13 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
     add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
     add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
-    add_check(checks, "story.scenes", len(scenes) >= 20, f"story includes at least 20 scenes (got {len(scenes)})", kind="rubric")
+    add_check(
+        checks,
+        "story.scenes",
+        story_scene_coverage_ok(scenes),
+        f"story has >= 20 scenes or >= 8 dense grounded scenes (got scenes={len(scenes)}, dense_grounded={dense_story_scene_count(scenes)})",
+        kind="rubric",
+    )
 
     for field in STORY_REQUIRED_SCENE_FIELDS:
         missing = [
@@ -555,6 +765,7 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
         data, ["story_baseline", "canonical_synopsis", "one_liner"]
     )
     canonical_story_dump = nested_get(data, ["story_materials", "canonical_story_dump"])
+    canonical_story = canonical_story_dump or synopsis
     contract = data.get("evaluation_contract") if isinstance(data.get("evaluation_contract"), dict) else {}
     flattened = flatten_without_keys(data, excluded={"evaluation_contract"})
 
@@ -576,13 +787,27 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
             add_check(checks, "research.contract_must_cover_unmet", False, "research does not yet cover all required anchors.", kind="rubric")
         if must_resolve and not all(term in "\n".join(conflict_topics) for term in must_resolve):
             add_check(checks, "research.contract_conflict_unmet", False, "research conflicts do not yet cover all required conflict topics.", kind="rubric")
-    add_check(checks, "research.sources", len(sources) >= 12, f"sources >= 12 (got {len(sources)})", kind="rubric")
     story_materials_ok = bool(story_materials) or non_empty(synopsis)
+    passage_count = len(source_passages) or len(legacy_passages)
+    compact_pack_ok = compact_research_pack_ok(
+        sources=sources,
+        passage_count=passage_count,
+        canonical_story=canonical_story,
+        conflict_items=conflict_items,
+        handoff_to_story=handoff_to_story,
+    )
+    add_check(
+        checks,
+        "research.sources",
+        len(sources) >= 12 or compact_pack_ok,
+        f"sources meet broad target >= 12 or compact grounded pack is present (got sources={len(sources)}, passages={passage_count})",
+        kind="rubric",
+    )
     add_check(checks, "research.story_materials", story_materials_ok, "story_materials or legacy story baseline is present", kind="rubric")
     add_check(
         checks,
         "research.canonical_story",
-        non_empty(canonical_story_dump) or non_empty(synopsis),
+        non_empty(canonical_story),
         "canonical story dump or legacy synopsis is present",
         kind="rubric",
     )
@@ -590,13 +815,18 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     add_check(
         checks,
         "research.chronological_events",
-        event_count >= 20,
-        f"chronological events or legacy beats >= 20 (got {event_count})",
+        event_count >= 20 or compact_pack_ok,
+        f"chronological coverage meets broad target >= 20 or compact grounded pack is present (got events={event_count}, passages={passage_count})",
         kind="rubric",
     )
-    passage_count = len(source_passages) or len(legacy_passages)
     add_check(checks, "research.source_passages", passage_count >= 1, f"source passages are present (got {passage_count})", kind="rubric")
-    add_check(checks, "research.facts", len(as_list(facts)) >= 10, f"facts >= 10 (got {len(as_list(facts))})", kind="rubric")
+    add_check(
+        checks,
+        "research.facts",
+        len(as_list(facts)) >= 10 or compact_pack_ok,
+        f"facts meet broad target >= 10 or compact grounded pack is present (got facts={len(as_list(facts))}, passages={passage_count})",
+        kind="rubric",
+    )
     add_check(checks, "research.conflicts_field", conflicts is not None, "conflicts field is present", kind="rubric")
     add_check(checks, "research.handoff_to_story", bool(handoff_to_story), "handoff_to_story is present", kind="rubric")
 
@@ -610,6 +840,7 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
         source_passages=source_passages or legacy_passages,
         facts=as_list(facts),
         handoff_to_story=handoff_to_story,
+        conflict_items=conflict_items,
         conflict_topics=conflict_topics,
     )
     _append_rubric_findings(checks=checks, stage="research", rubric_scores=rubric_scores)
@@ -1231,6 +1462,8 @@ def evaluate_stage(run_dir: Path, *, stage: str, profile: str, flow: str | None 
         result, updates = check_research(run_dir, profile)
     elif stage == "story":
         result, updates = check_story(run_dir, profile)
+    elif stage == "visual_value":
+        result, updates = check_visual_value(run_dir, profile)
     elif stage == "script":
         if resolved_flow == "scene-series":
             result, updates = check_script_scene_series(run_dir, profile)

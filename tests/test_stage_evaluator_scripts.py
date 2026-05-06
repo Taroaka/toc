@@ -9,6 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, parse_state_file
+from toc import stage_evaluator as STAGE_EVALUATOR
 
 
 def _good_research_yaml() -> str:
@@ -178,6 +179,51 @@ def _resolve_ready_grounding(run_dir: Path, *stages: str, flow: str = "toc-run")
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
+    def test_stage_evaluator_accepts_compact_grounded_research_pack(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0010"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "research.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "story_baseline:",
+                        "  canonical_synopsis:",
+                        "    short_summary: compact but grounded canonical story",
+                        "sources:",
+                        "  - source_id: S1",
+                        "    title: Primary",
+                        "    url: https://example.com/primary",
+                        "source_passages:",
+                    ]
+                    + [
+                        f"  - passage_id: P{i}\n    source_id: S1\n    passage: passage {i}\n    evidence_note: evidence {i}\n    confidence: 0.9"
+                        for i in range(1, 6)
+                    ]
+                    + [
+                        "conflicts:",
+                        "  - conflict_id: C1",
+                        "    topic: variant choice",
+                        "    accounts: []",
+                        "handoff_to_story:",
+                        "  recommended_focus: [focus]",
+                        "metadata:",
+                        "  confidence_score: 0.9",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_research(run_dir, "fast")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["research.sources"])
+            self.assertTrue(checks["research.chronological_events"])
+            self.assertTrue(checks["research.facts"])
+            self.assertGreaterEqual(stage["rubric_scores"]["source_grounding"], 0.6)
+
     def test_stage_evaluator_scripts_update_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0000"

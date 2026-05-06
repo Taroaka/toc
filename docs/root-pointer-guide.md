@@ -75,10 +75,10 @@
   - manual/chat では `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を標準入口として使う
   - 返ってきた JSON の `readset_path` を起点に、`global_docs -> stage_docs -> templates -> inputs` の順で読む
 - `scripts/resolve-stage-grounding.py` と `scripts/audit-stage-grounding.py` は `prepare-stage-context.py` の下位処理として扱う
-  - `python scripts/resolve-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
+  - `python scripts/resolve-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation|render|qa --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
   - `stage.<name>.grounding.status=ready` を確認できない限り、当該 stage を開始しない
   - stage 完了扱いに進めてよいのは grounding が `ready` のときだけ
-  - `python scripts/audit-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp>` を続けて実行し、`stage.<name>.audit.status=passed` を確認する
+  - `python scripts/audit-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation|render|qa --run-dir output/<topic>_<timestamp>` を続けて実行し、`stage.<name>.audit.status=passed` を確認する
   - slot を skip / optional として残したいときは `python scripts/toc-state.py set-slot --run-dir output/<topic>_<timestamp> --slot p640 --status skipped --requirement optional --skip-reason "<reason>"` を使う
   - fixed `p-slot` contract を触ったら `python scripts/validate-slot-contract.py` を実行する
 
@@ -123,7 +123,7 @@ scripts/ai/session-bootstrap.sh
 
 変更内容:
 - production order を audio-first に切り替えた
-- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
 
 修正理由:
 - 最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから
@@ -140,6 +140,8 @@ scripts/ai/session-bootstrap.sh
 | asset | `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
 | scene_implementation | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
 | video_generation | `docs/video-generation.md` | `workflow/playbooks/video-generation/` |
+| render | `docs/implementation/video-integration.md` | `workflow/playbooks/video-generation/` |
+| qa | `docs/orchestration-and-ops.md` | `workflow/playbooks/video-generation/` |
 
 grounding preflight の正本:
 

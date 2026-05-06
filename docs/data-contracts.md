@@ -3,7 +3,7 @@
 本書は `todo.txt` の 6) Data contracts を具体化する。
 
 変更内容:
-- production order を audio-first へ切り替え、固定 workflow の後半を `narration -> asset -> scene_implementation -> video_generation` に再編した。
+- production order を audio-first へ切り替え、固定 workflow の後半を `narration -> asset -> scene_implementation -> video_generation -> render -> qa` に再編した。
 - `video_manifest.md` に `manifest_phase: skeleton|production` を追加した。
 
 修正理由:
@@ -114,6 +114,15 @@ stage.story.playbooks.selected_count=0
 review.story.status=pending|approved|changes_requested
 review.story.subagent.prompt=logs/review/story.subagent_prompt.md
 review.story.subagent.prompt.generated_at=ISO8601
+eval.story.loop.status=pending|running|passed|changes_requested|failed
+eval.story.loop.max_rounds=5
+eval.story.loop.current_round=0
+eval.story.loop.final_report=story_review.md
+eval.story.loop.round_01.critic_1=logs/eval/story/round_01/critic_1.md
+eval.story.loop.round_01.critic_1_prompt=logs/eval/story/round_01/prompts/critic_1.prompt.md
+eval.story.loop.round_01.critic_5=logs/eval/story/round_01/critic_5.md
+eval.story.loop.round_01.critic_5_prompt=logs/eval/story/round_01/prompts/critic_5.prompt.md
+eval.story.loop.round_01.aggregated_review=logs/eval/story/round_01/aggregated_review.md
 stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.script.grounding.status=ready|missing_docs|missing_inputs
 stage.script.grounding.report=logs/grounding/script.json
@@ -211,6 +220,57 @@ eval.narration.unresolved_entries=0
 ---
 ```
 
+### 1.0 Authoring-after evaluator-improvement loop
+
+Authoring の直後に置かれる review slot は、一回限りの採点ではなく **最大 5 round の evaluator-improvement loop** として扱う。
+
+対象 slot:
+
+- `p130`: research authoring 後の review
+- `p230`: story authoring 後の review
+- `p320`: visual planning authoring 後の review
+- `p430`: script authoring 後の review
+- `p520`: narration text authoring 後の review
+- `p640`: asset plan authoring 後の review
+- `p730` / `p740`: scene implementation authoring 後の hard review / judgment review
+- `p820` / `p850`: motion / video authoring 後の review
+- `p930`: final QA / runtime summary 後の review
+
+各 round の構成:
+
+- critic agent: 5 agents
+  - それぞれ独立に同じ canonical artifact と stage readset を読み、rubric finding を出す
+  - critic は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
+- aggregator: 1 agent
+  - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
+  - aggregator も canonical artifact を直接編集しない
+- orchestrator / main agent:
+  - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
+  - 修正後、同じ review slot の次 round を実行する
+
+停止条件:
+
+- aggregator が `passed` を返したら loop を終了し、対応 stage を次 slot へ進める
+- aggregator が `changes_requested` を返し、round < 5 なら orchestrator が修正して次 round を実行する
+- round 5 後も `changes_requested` なら `eval.<stage>.loop.status=changes_requested` とし、human review / explicit override なしに次工程へ進めない
+
+state key pattern:
+
+```text
+eval.<stage>.loop.status=pending|running|passed|changes_requested|failed
+eval.<stage>.loop.max_rounds=5
+eval.<stage>.loop.current_round=0-5
+eval.<stage>.loop.final_report=<stage>_review.md
+eval.<stage>.loop.round_01.critic_1=logs/eval/<stage>/round_01/critic_1.md
+eval.<stage>.loop.round_01.critic_1_prompt=logs/eval/<stage>/round_01/prompts/critic_1.prompt.md
+eval.<stage>.loop.round_01.critic_5=logs/eval/<stage>/round_01/critic_5.md
+eval.<stage>.loop.round_01.critic_5_prompt=logs/eval/<stage>/round_01/prompts/critic_5.prompt.md
+eval.<stage>.loop.round_01.aggregator_prompt=logs/eval/<stage>/round_01/prompts/aggregator.prompt.md
+eval.<stage>.loop.round_01.aggregated_review=logs/eval/<stage>/round_01/aggregated_review.md
+```
+
+`eval.<stage>.*` summary は loop の最新 round / aggregator 結果から更新する。critic 個別 report は根拠 artifact、aggregator report は gate 判定の正本、canonical artifact の最終差分は orchestrator の編集を正本とする。
+
 `video_manifest.md` top-level contract:
 
 ```text
@@ -269,6 +329,8 @@ output/<topic>_<timestamp>/run_status.json
 - current run inventory
 - file-to-stage mapping
 
+`current_position` は現在の stage / runtime progress を示す。未承認の human review gate が残っている場合も、進行中の stage を上書きせず、`next_required_human_review` と `pending_gates` に分けて表示する。
+
 番号運用は navigation layer だが、slot contract は固定である。
 
 - `100` 番台ごとに大工程を割り当てる
@@ -282,6 +344,8 @@ output/<topic>_<timestamp>/run_status.json
 
 ### 1.0.2 Fixed p-slot workflow contract
 
+Canonical p300 requirements live in this section. Other docs may summarize p300, but this section is the source of truth for what `visual_value.md` must contain and what p300 must not produce.
+
 `p100` から `p900` までの slot 意味は、すべての story で共通の固定契約とする。story ごとの差分は slot の意味を変えるのではなく、各 slot の状態と要件で表現する。
 
 各 slot は次の generic keys を持つ。
@@ -291,6 +355,8 @@ slot.pXXX.status=pending|in_progress|awaiting_approval|done|failed|skipped
 slot.pXXX.requirement=required|optional
 slot.pXXX.skip_reason=string
 slot.pXXX.note=string
+slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed
+slot.pXXX.review_loop.current_round=0-5
 ```
 
 固定 slot の意味:
@@ -306,6 +372,20 @@ slot.pXXX.note=string
 - `p800`: video
 - `p900`: render / QA / runtime
 
+stage target resolution:
+
+- `p100` / `100` / `research` -> `p130` research review handoff
+- `p200` / `200` / `story` -> `p230` story review handoff
+- `p300` / `300` / `visual_value` -> `p330` visual planning handoff
+- `p400` / `400` -> `p450` script handoff / skeleton manifest materialization
+- `p500` / `500` / `narration` -> `p570` audio QA / human review handoff
+- `p600` / `600` / `asset` -> `p680` asset continuity / human review handoff
+- `p700` / `700` / `scene_implementation` -> `p750` generation-ready handoff
+- `p800` / `800` / `video_generation` -> `p850` video review / exclusions handoff
+- `p900` / `900` / `render` / `video` -> `p930` final QA / runtime handoff
+
+100 番台の coarse p-number target は stage 開始 slot ではなく、対応 stage の human-review handoff slot まで進める。細番号 target（例: `p450`）はその slot を直接指す。
+
 運用ルール:
 
 - story 固有の差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` にのみ載せる
@@ -317,7 +397,7 @@ slot.pXXX.note=string
   - audio: `AAC`, `44100Hz`, `stereo`
   - 理由: `mono -> stereo` など channel layout が途中で変わると、concat 境界以降でジャミング音・ノイズ化が発生するため
 
-p300 done 条件:
+Canonical p300 done 条件:
 
 - `visual_value.md` が存在する
 - 主要 story scene に `scene_visual_values[]` の coverage がある
@@ -338,7 +418,13 @@ p300 done 条件:
   - `state.txt` を見るだけで「調査済み」「ナレーション済み」「render 済み」が読める粒度
   - `awaiting_approval` は「作業自体は終わったが、ユーザー承認待ちで次工程に進めない」を意味する
 
-標準 stage:
+canonical generation stage と p-slot stage の扱い:
+
+- canonical production / generation stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
+- `visual_value` は p300 visual planning を追跡するための stage key / grounding entry であり、画像・動画・asset を生成する canonical generation stage ではない
+- `--stage p300|300|visual_value` は `p330` visual planning handoff まで進める同義指定として扱う
+
+標準 stage keys:
 
 - `stage.research`
 - `stage.story`
@@ -348,7 +434,6 @@ p300 done 条件:
 - `stage.asset`
 - `stage.scene_implementation`
 - `stage.video_generation`
-- `stage.narration`
 - `stage.render`
 - `stage.qa`
 

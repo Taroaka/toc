@@ -20,14 +20,15 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | Job queue | In-process async queue | Simple and sufficient for MVP |
 | State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
 | Providers | LLM via LangChain; image=Google Nano Banana 2 / Gemini 3.1 Flash Image; video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
-| API boundary | Claude Code entrypoint (slash command) | Keep surface area small |
+| API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
+| Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible while preserving one canonical writer |
 
 ## Component diagram
 
 ```mermaid
 graph TD
-  CC[Claude Code Slash Command] --> ORCH[LangGraph Orchestrator]
+  AC[Assistant Command: Codex primary / Claude compatible] --> ORCH[LangGraph Orchestrator]
   ORCH --> QUEUE[In-process Job Queue]
   QUEUE --> WORKERS[Workers]
   WORKERS --> PROVIDERS[Image/Video/TTS/LLM Providers]
@@ -39,7 +40,7 @@ graph TD
 
 ## Deployment mode
 
-- MVP: local-only, Claude Codeで起動（slash command）。
+- MVP: local-only, Codex 主軸の assistant command で起動（Claude Code slash command 互換も維持）。
 - Future: containerized deployment with dev/staging/prod environments.
 
 ## Execution model
@@ -50,11 +51,15 @@ graph TD
 - Parallelism policy (MVP):
   - Core flow is sequential and gate-driven.
   - Audio-first production order is fixed as:
-    - `RESEARCH -> STORY -> SCRIPT -> NARRATION -> ASSET -> SCENE_IMPLEMENTATION -> VIDEO -> RENDER/QA`
+    - `RESEARCH -> STORY -> SCRIPT -> NARRATION -> ASSET -> SCENE_IMPLEMENTATION -> VIDEO -> RENDER -> QA`
   - Parallelism is allowed only inside a stage whose upstream gate is already complete.
     - `ASSET`: recurring still generation can run in parallel.
     - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production`.
     - `VIDEO`: clip generation can fan out after still inputs and duration gates are complete.
+  - Authoring-after review slots use bounded review parallelism:
+    - each round launches 5 independent critic agents against the same artifact/readset
+    - 1 aggregator agent merges critic findings into the round gate result
+    - maximum 5 rounds; unresolved findings after round 5 require human review or explicit override
 
 ## Storage strategy
 
@@ -65,7 +70,7 @@ graph TD
 ## Job queue / executor
 
 - In-process queue with worker pool.
-- Tasks are stage-scoped (RESEARCH, STORY, SCRIPT, VIDEO, QA).
+- Tasks are stage-scoped (RESEARCH, STORY, SCRIPT, NARRATION, ASSET, SCENE_IMPLEMENTATION, VIDEO, RENDER, QA).
 - Retry logic is handled at the LangGraph edge level (future task).
 
 ## Task granularity (MVP)
@@ -78,7 +83,8 @@ graph TD
   - `ASSET` → produces reusable recurring still assets
   - `SCENE_IMPLEMENTATION` → produces the production manifest and scene still outputs
   - `VIDEO` → produces motion clips
-  - `RENDER/QA` → produces `video.mp4` and review outputs
+  - `RENDER` → produces `video.mp4`
+  - `QA` → produces final review outputs
 - Scene-level tasks exist inside `SCRIPT`, `SCENE_IMPLEMENTATION`, and `VIDEO`:
   - `SCRIPT` subtask: draft one scene and narration beat from the approved story plan.
   - `SCENE_IMPLEMENTATION` subtask: implement one approved scene/cut into production prompt fields.
@@ -109,7 +115,7 @@ graph TD
   - target 未満なら scene / narration stretch review prompt を生成して停止し、人レビューへは進めない。
 - production order は audio-first を採用する。
   - `script` で scene / narration draft を確定したあと、`video_manifest.md` はまず `manifest_phase: skeleton` で materialize する。
-  - その後に `narration -> asset -> scene implementation -> video -> render` の順で進める。
+  - その後に `narration -> asset -> scene implementation -> video -> render -> qa` の順で進める。
   - 理由は、最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから。asset / scene / video を先に固定すると、後から尺ズレで recut が発生しやすい。
 - したがって「script draft までは人承認なしで進める」のような運用差分は、prompt の解釈ではなく run 初期 state で表現する。
 - チャット起点の stage 実行も同じ state / grounding 契約の上で扱う。
@@ -117,6 +123,11 @@ graph TD
   - `audit-stage-grounding.py` で readset を監査
   - `logs/grounding/<stage>.readset.json` を「読むべき対象の正本」とする
   - これにより slash command とチャット実行の前提を揃える
+- authoring 直後の review slot は、単発 review ではなく最大 5 round の evaluator-improvement loop とする。
+  - 1 round は 5 critic agents + 1 aggregator で構成する
+  - critic / aggregator は `state.txt`、`p000_index.md`、canonical artifact を直接編集しない
+  - メインエージェントが aggregator report を読み、採用する修正だけを canonical artifact に反映する
+  - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` で停止し、人間 review / override を待つ
 
 ## Fixed P-Slot Contract
 
@@ -133,35 +144,49 @@ graph TD
 - 旧仕様では `p500 asset -> p600 image -> p700 video -> p800 audio` だった。
 - 新仕様では audio-first に切り替え、asset / scene / video は実尺確定後へ移動した。
 
+`visual_value` は p300 visual planning を grounding / state で追跡するための stage key であり、canonical generation stage ではない。canonical p300 done 条件は `docs/data-contracts.md` の "Canonical p300 done 条件" を正本とする。
+
 - `p100` ごとに大工程を固定する。
 - `p110` 以降の細番号も全作品で固定契約として扱う。
 - 作品差分は slot meaning を変えず、`slot.<code>.status` / `slot.<code>.requirement` / `slot.<code>.skip_reason` / `slot.<code>.note` で表す。
 - `p000_index.md` は fixed slot contract に基づく run-local source-of-truth とする。
+- slash / stage target で `p100` / `p300` のような 100 番台の coarse p-number を指定した場合は、stage 開始 slot ではなく、対応 stage の human-review handoff slot まで進める。
+- coarse stage target resolution:
+  - `p100` -> `p130`
+  - `p200` -> `p230`
+  - `p300` -> `p330`
+  - `p400` -> `p450`
+  - `p500` -> `p570`
+  - `p600` -> `p680`
+  - `p700` -> `p750`
+  - `p800` -> `p850`
+  - `p900` -> `p930`
+- 細番号 target（例: `p450`）はその slot を直接指す。
 
 標準 slot:
 
 - `p100`: research
   - `p110`: grounding
   - `p120`: authoring
-  - `p130`: review
+  - `p130`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
 - `p200`: story
   - `p210`: grounding
   - `p220`: authoring
-  - `p230`: review
+  - `p230`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
 - `p300`: visual planning
   - `p310`: visual value authoring (`visual_value.md`)
-  - `p320`: visual planning review
+  - `p320`: visual planning evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p330`: p400 / p600 / p700 handoff appendix
-  - done when: `visual_value.md` exists, major scenes have visual value coverage, asset bible candidates and anchor candidates are listed, reference strategy and regeneration risks are documented, and p400/p600/p700 handoff exists
+  - done when: see `docs/data-contracts.md` "Canonical p300 done 条件"
 - `p400`: script / narration text / human changes
   - `p410`: grounding
   - `p420`: authoring
-  - `p430`: review
+  - `p430`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p440`: human changes / narration sync
   - `p450`: skeleton manifest materialization
 - `p500`: narration / audio runtime
   - `p510`: narration grounding
-  - `p520`: narration text review
+  - `p520`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p530`: TTS request / generation
   - `p540`: duration fit gate
   - `p550`: scene stretch review
@@ -171,7 +196,7 @@ graph TD
   - `p610`: asset grounding
   - `p620`: reusable asset inventory
   - `p630`: asset plan authoring
-  - `p640`: asset review
+  - `p640`: asset evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p650`: asset plan fixes
   - `p660`: asset requests
   - `p670`: asset generation
@@ -179,21 +204,21 @@ graph TD
 - `p700`: scene implementation
   - `p710`: scene implementation grounding
   - `p720`: production manifest / prompt authoring
-  - `p730`: hard scene review
-  - `p740`: judgment review
+  - `p730`: hard scene evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p740`: judgment evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p750`: generation ready
   - `p760`: image generation
   - `p770`: image QA / fix loop
 - `p800`: video
   - `p810`: video grounding
-  - `p820`: motion / video review
+  - `p820`: motion / video evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p830`: video requests
   - `p840`: video generation
-  - `p850`: video review / exclusions
+  - `p850`: video evaluator-improvement review loop / exclusions (max 5 rounds; 5 critics + 1 aggregator per round)
 - `p900`: render / QA / runtime
   - `p910`: render inputs
   - `p920`: final render
-  - `p930`: QA / runtime summary
+  - `p930`: QA evaluator-improvement review loop / runtime summary (max 5 rounds; 5 critics + 1 aggregator per round)
 
 ## Subagent Orchestration Policy
 
@@ -219,6 +244,13 @@ slot ごとの標準分担:
 | `p700` scene implementation | scene/cut prompt rewrite / image prompt judgment | production manifest 統合、review finding の採否 |
 | `p800` video | clip generation fan-out / clip review | 採用判定、manifest 更新、除外理由の記録 |
 | `p900` render / QA | QA reviewer / runtime summary review | final report 生成、完了判定、run closeout |
+
+Authoring-after review loop の標準分担:
+
+- critic agents: 5 agents per round。rubric finding と修正候補を isolated report に出す
+- aggregator: 1 agent per round。5 critic reports を統合し、`passed|changes_requested` と unresolved findings を返す
+- main agent: aggregator report を根拠に canonical artifact を更新し、次 round 実行または gate close を決める
+- max rounds: 5。round 5 後の unresolved finding は human review / explicit override に回す
 
 禁止事項:
 
@@ -251,7 +283,7 @@ slot ごとの標準分担:
 
 ## API boundaries / module ownership
 
-- MVP: Claude Code の呼び出しが起点（slash command）。
+- MVP: Codex 主軸の assistant command が起点（Claude Code slash command 互換も維持）。
 - CLIやHTTPサーバは対象外（将来拡張）。
 - Proposed internal modules:
   - `app/orchestrator`: LangGraph topology and run logic

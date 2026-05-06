@@ -3,7 +3,7 @@
 本書は `todo.txt` の 15) Documentation に対応する。
 
 ## 前提
-- 起点は Claude Code の slash command（例: `/toc-run`, `/toc-scene-series`, `/toc-immersive-ride`）
+- 起点は assistant command（Codex 主軸。Claude Code slash command 互換: `/toc-run`, `/toc-scene-series`, `/toc-immersive-ride`）
 - 成果物は `output/<topic>_<timestamp>/` に生成される
 - 成果物（`research.md` / `story.md` / `script.md` / `video_manifest.md` 等）の本文は **日本語**で記述する（ユーザーがそのまま修正できるように）
   - 例外: ツール名 / ファイルパス / コード / 固有名詞はそのまま（必要なら英語併記はOK）
@@ -32,7 +32,7 @@ scripts/uv-sync.sh
 
 ## 実行（想定）
 
-Claude Code で以下を実行:
+Codex/Claude Code の assistant command で以下を実行:
 
 ```
 /toc-run "桃太郎" --dry-run
@@ -81,7 +81,7 @@ API をまだ使わず、story/script/manifest draft まで進めたい場合:
 /toc-immersive-ride --topic "かぐや姫" --stage script --experience cinematic_story --review-policy drafts
 ```
 
-p番号で止めたい場合は、`p300` と `300` のどちらも使える:
+p番号ターゲットは、`p300` と `300` のどちらも使える。`p100` / `p300` のような 100 番台指定は、その stage の human-review handoff slot まで進める:
 
 ```text
 /toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
@@ -178,17 +178,24 @@ output/<topic>_<timestamp>/
   - `p800`: video
   - `p900`: render / QA / runtime
 - これらの slot 意味は固定契約で、story ごとに変えない
+- authoring 直後の review slot は最大 5 round の evaluator-improvement loop として実行する
+  - 各 round は 5 critic agents + 1 aggregator
+  - critic は独立 report のみを書き、canonical artifact / `state.txt` / `p000_index.md` を直接編集しない
+  - aggregator は 5 critic report を統合して `passed|changes_requested` を返す
+  - メインエージェントが aggregator report から採用する修正だけを canonical artifact へ反映する
+  - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` として停止し、人間 review / override を待つ
 - `/toc-immersive-ride --stage` は `p100` / `100` のような p番号指定を受け付ける
-  - `p100|100|research`: `research.md` まで
-  - `p200|200|story`: `story.md` まで
-  - `p300|300|visual_value`: `visual_value.md` まで
-  - `p400|400`: `script.md` まで
+  - 100 番台の stage target は、stage 冒頭ではなく、その stage の human-review handoff slot まで進める
+  - `p100|100|research`: `p130` research review handoff まで
+  - `p200|200|story`: `p230` story review handoff まで
+  - `p300|300|visual_value`: `p330` visual planning handoff まで（`visual_value.md` + p400/p600/p700 handoff）
+  - `p400|400`: `p450` script handoff / skeleton manifest materialization まで
   - `p450|450|script`: skeleton `video_manifest.md` まで
-  - `p500|500|narration`: narration / audio runtime gate まで
-  - `p600|600|asset`: reusable asset stage まで
-  - `p700|700|scene_implementation`: production manifest / image request stage まで
-  - `p800|800|video_generation`: video request / clip generation stage まで
-  - `p900|900|render|video`: final render / QA まで
+  - `p500|500|narration`: `p570` audio QA / human review handoff まで
+  - `p600|600|asset`: `p680` asset continuity / human review handoff まで
+  - `p700|700|scene_implementation`: `p750` generation-ready handoff まで
+  - `p800|800|video_generation`: `p850` video review / exclusions handoff まで
+  - `p900|900|render|video`: `p930` final QA / runtime handoff まで
 - 細番号も固定 slot contract の一部として扱う
   - `p110`, `p120`, `p130`
   - `p210`, `p220`, `p230`
@@ -202,11 +209,8 @@ output/<topic>_<timestamp>/
 - story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
 - `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
 - p300 done 条件:
-  - `visual_value.md` が存在する
-  - 主要 story scene に `scene_visual_values[]` の coverage がある
-  - `asset_bible_candidates` と `anchor_cut_candidates` が列挙されている
-  - `reference_strategy` と `regeneration_risks[]` がある
-  - `handoff_to_p400_p600_p700` がある
+  - 正本は `docs/data-contracts.md` の "Canonical p300 done 条件"
+  - 要約: `visual_value.md` に scene visual value coverage、asset / anchor candidates、reference strategy、regeneration risks、p400/p600/p700 handoff がある
   - p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を作らない
 - `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - slot 状態を手で残したい場合は次を使う
@@ -254,6 +258,11 @@ python scripts/sync-narration-from-script.py \
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
+  - authoring-after review slot では、これらの evaluator review は最大 5 round の improvement loop として扱う
+  - review-loop prompt は `python scripts/build-review-loop-round.py --run-dir output/<run> --slot p230 --round 1` のように slot 番号で materialize できる
+  - 1 round は 5 critic agents が独立評価し、1 aggregator が統合判定する
+  - `eval.*` summary は最新 aggregator result を反映する
+  - round 途中の critic prompt は `logs/eval/<stage>/round_01/prompts/critic_1.prompt.md` 形式、critic report は `logs/eval/<stage>/round_01/critic_1.md` 形式、aggregator report は `logs/eval/<stage>/round_01/aggregated_review.md` に残す
   - research は `research.md.evaluation_contract`
   - script は `script.md.evaluation_contract`
   - scene/cut は `video_manifest.md.scenes[].cuts[].scene_contract`
@@ -414,18 +423,23 @@ python scripts/review-video-stage.py \
 
 `state.txt` は、各作業の **開始時** と **完了時** に追記するのを基本とする。
 
-標準 stage:
+canonical production / generation stage:
 
 - `stage.research`
 - `stage.story`
-- `stage.visual_value`
 - `stage.script`
 - `stage.narration`
 - `stage.asset`
-- `stage.video_generation`
 - `stage.scene_implementation`
+- `stage.video_generation`
 - `stage.render`
 - `stage.qa`
+
+p-slot planning stage key:
+
+- `stage.visual_value`
+
+`stage.visual_value` は `p300` / `300` / `visual_value` 指定で使う grounding・進捗 key であり、canonical generation stage ではない。これらの stage target は `p330` visual planning handoff まで進める。
 
 legacy compatibility keys:
 
@@ -513,6 +527,17 @@ legacy compatibility keys:
   - `eval.image_prompt.unresolved_entries=...`
   - `eval.narration.score=...`
   - `eval.narration.unresolved_entries=...`
+- evaluator-improvement loop 実行中:
+  - `eval.<stage>.loop.status=pending|running|passed|changes_requested|failed`
+  - `eval.<stage>.loop.max_rounds=5`
+  - `eval.<stage>.loop.current_round=1-5`
+  - `eval.<stage>.loop.final_report=<stage>_review.md`
+  - `eval.<stage>.loop.round_01.critic_1=logs/eval/<stage>/round_01/critic_1.md`
+  - `eval.<stage>.loop.round_01.critic_1_prompt=logs/eval/<stage>/round_01/prompts/critic_1.prompt.md`
+  - `eval.<stage>.loop.round_01.critic_5=logs/eval/<stage>/round_01/critic_5.md`
+  - `eval.<stage>.loop.round_01.critic_5_prompt=logs/eval/<stage>/round_01/prompts/critic_5.prompt.md`
+  - `eval.<stage>.loop.round_01.aggregator_prompt=logs/eval/<stage>/round_01/prompts/aggregator.prompt.md`
+  - `eval.<stage>.loop.round_01.aggregated_review=logs/eval/<stage>/round_01/aggregated_review.md`
 - render 開始:
   - `status=VIDEO`
   - `stage.render.status=in_progress`

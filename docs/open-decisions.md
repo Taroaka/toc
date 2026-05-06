@@ -13,8 +13,8 @@
 - LLM provider is LangChain (API-based)
 - 候補整理/調査リスト: `docs/video-production-research.md`
 
-## Claude Code entrypoint
-- `/toc-run` の実装方法（Claude Code側の具体設定）
+## Assistant command entrypoint
+- `/toc-run` の実装方法（Codex 主軸。Claude Code 側の互換 command pack 設定も含む）
 
 ## Rendering details
 - 字幕（SRT）の生成方法

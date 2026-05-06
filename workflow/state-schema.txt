@@ -31,6 +31,8 @@
 #   slot.pXXX.requirement=required|optional
 #   slot.pXXX.skip_reason=string
 #   slot.pXXX.note=string
+#   slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed
+#   slot.pXXX.review_loop.current_round=0-5
 #   stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.research.started_at=ISO8601
 #   stage.research.finished_at=ISO8601
@@ -250,6 +252,16 @@
 #   eval.research.score=0.0-1.0
 #   eval.research.status=approved|changes_requested
 #   eval.research.findings=0
+#   eval.research.loop.status=pending|running|passed|changes_requested|failed
+#   eval.research.loop.current_round=0-5
+#   eval.research.loop.max_rounds=5
+#   eval.research.loop.final_report=research_review.md
+#   eval.research.loop.round_01.critic_1=logs/eval/research/round_01/critic_1.md
+#   eval.research.loop.round_01.critic_1_prompt=logs/eval/research/round_01/prompts/critic_1.prompt.md
+#   eval.research.loop.round_01.critic_5=logs/eval/research/round_01/critic_5.md
+#   eval.research.loop.round_01.critic_5_prompt=logs/eval/research/round_01/prompts/critic_5.prompt.md
+#   eval.research.loop.round_01.aggregator_prompt=logs/eval/research/round_01/prompts/aggregator.prompt.md
+#   eval.research.loop.round_01.aggregated_review=logs/eval/research/round_01/aggregated_review.md
 #   eval.research.overall_rubric=0.0-1.0
 #   eval.research.rubric.source_grounding=0.0-1.0
 #   eval.research.rubric.coverage=0.0-1.0

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from toc.harness import sync_run_status
-from toc.run_index import classify_run_file
+from toc.run_index import SLOT_BY_CODE, build_run_index_markdown, classify_run_file
 
 
 class TestRunIndex(unittest.TestCase):
@@ -45,8 +45,9 @@ class TestRunIndex(unittest.TestCase):
             sync_run_status(run_dir)
 
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            self.assertIn("current_position: `p400 Script / Narration Text / Human Changes / awaiting script human review`", index_text)
+            self.assertIn("current_position: `status=SCRIPT`", index_text)
             self.assertIn("next_required_human_review: `script.md`", index_text)
+            self.assertIn("pending_gates: `script_review`", index_text)
             self.assertIn("`p540` | Narration / Audio Runtime Stage | `optional` | Duration Fit Gate", index_text)
             self.assertIn("#### p110 Research Grounding", index_text)
             self.assertIn("- requirement: `required`", index_text)
@@ -78,3 +79,32 @@ class TestRunIndex(unittest.TestCase):
             self.assertEqual(grounding_entry.slot, "p510")
             self.assertEqual(state_entry.slot, "p930")
             self.assertIn("scene subrun", grounding_entry.note)
+
+    def test_current_position_uses_runtime_progress_before_pending_review_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_run_index_position_") as td:
+            run_dir = Path(td) / "out" / "topic_20990101_0000"
+            run_dir.mkdir(parents=True)
+            (run_dir / "story.md").write_text("# story\n", encoding="utf-8")
+            (run_dir / "visual_value.md").write_text("# visual\n", encoding="utf-8")
+
+            index_text = build_run_index_markdown(
+                run_dir,
+                state={
+                    "runtime.stage": "P300",
+                    "status": "P300",
+                    "stage.story.status": "awaiting_approval",
+                    "gate.story_review": "required",
+                    "review.story.status": "pending",
+                },
+            )
+
+            self.assertIn("current_position: `runtime.stage=P300`", index_text)
+            self.assertIn("next_required_human_review: `story.md`", index_text)
+            self.assertIn("pending_gates: `story_review`", index_text)
+
+    def test_review_slot_labels_mention_improvement_loop(self) -> None:
+        review_slots = ("p130", "p230", "p320", "p430", "p520", "p640", "p730", "p740", "p820", "p850", "p930")
+
+        for slot_code in review_slots:
+            with self.subTest(slot=slot_code):
+                self.assertIn("Improve Loop", SLOT_BY_CODE[slot_code].title)

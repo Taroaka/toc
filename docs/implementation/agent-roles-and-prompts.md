@@ -8,9 +8,9 @@
 
 ## 実行モデル
 
-- 起点は Claude Code の slash command
+- 起点は Codex 主軸の assistant command（Claude Code slash command 互換も維持）
 - 統括エージェントが `state.txt` を更新
-- 役割別の振る舞いは `.claude/agents/*.md` に定義する（例: `director`）
+- 役割別の振る舞いはこのドキュメントと stage readset を正本にし、Claude Code 互換の agent pack は `.claude/agents/*.md` に置く（例: `director`）
 
 ## 役割と責務
 
@@ -23,6 +23,9 @@
   - `p100`-`p900` の依存順序、review policy、approval gate を管理する
   - subagent に渡す入力を artifact path / 目的 / 出力先へ限定する
   - subagent の draft / audit / review / scratch output を読み、canonical artifact へ採用する差分を選ぶ
+  - authoring 直後の review slot では、最大 5 round の evaluator-improvement loop を管理する
+  - 各 round で 5 critic agents と 1 aggregator agent を isolated output に限定して起動する
+  - aggregator report のうち採用する修正だけを canonical artifact へ反映し、次 round / gate close / human handoff を決める
   - `state.txt` と `p000_index.md` を append / update し、stage verifier へつなぐ
 - 禁止:
   - subagent に未読の親文脈を前提にさせる
@@ -34,7 +37,7 @@
 - 入力: `research.md`
 - 出力: `story.md`
 - 参照: `docs/story-creation.md`
-- エージェント定義: `.claude/agents/director.md`
+- Claude Code 互換 agent 定義: `.claude/agents/director.md`
 
 ### Visual Value Ideator
 - 入力: `research.md` + `story.md`
@@ -45,7 +48,7 @@
   - p400 / p600 / p700 が迷わない判断基準を `visual_value.md` に残す
   - silent visual payoff は p300 の一部機能であり、必要な run だけ `value_parts[]` に定義する
   - 文字ではなく、形 / 光 / 動き / 機構 / ショー性で伝える価値を優先する
-- エージェント定義: `.claude/agents/visual-value-ideator.md`
+- Claude Code 互換 agent 定義: `.claude/agents/visual-value-ideator.md`
 
 ### Scriptwriter
 - 入力: `story.md` + `visual_value.md` + scene plan
@@ -67,7 +70,7 @@
   - middle では、進展 / トラブル / 揺れを支える
   - ending では、解決 / 帰結 / 余韻を支える
   - 序盤では「無理に抽象的な内面や意味づけを足す」より、物語の入り口として自然であることを優先する
-- エージェント定義: `.claude/agents/narration-writer.md`
+- Claude Code 互換 agent 定義: `.claude/agents/narration-writer.md`
 
 ### YouTube Thumbnail Prompt Writer
 - 入力: ユーザーが指定した物語名（必須）
@@ -79,7 +82,7 @@
   - 文字は既成フォントに寄せず、物語イメージから発想した独創的な造形にする
   - 背景は物語内容に合わせるが、文字可読性を最優先する
   - YouTube thumbnail 向けに `16:9`、`1280x720` 以上、高コントラスト、スマホ視認性を明記する
-- エージェント定義: `.claude/agents/youtube-thumbnail-prompt-writer.md`
+- Claude Code 互換 agent 定義: `.claude/agents/youtube-thumbnail-prompt-writer.md`
 
 ### Reviewer（Director兼務可）
 - 入力: scene draft / script
@@ -87,11 +90,14 @@
 
 ### Stage Evaluator
 - 入力: `research.md` / `script.md` / `video_manifest.md` / `video.mp4`
-- 出力: stage review report + `state.txt` の `eval.<stage>.*`
+- 出力: critic report / aggregator report + `state.txt` の `eval.<stage>.*`
 - 役割:
-  - generator の出力を rubic/check 単位で採点する
-  - `approved|changes_requested` を返す
+  - authoring-after review slot では最大 5 round の evaluator-improvement loop として動く
+  - 各 round では 5 critic agents が generator の出力を rubric/check 単位で独立採点する
+  - 1 aggregator agent が critic finding を統合し、`passed|changes_requested` を返す
   - fail reason を次の修正 action に分解する
+  - round 5 後も `changes_requested` の場合は human review / explicit override に回す
+  - critic / aggregator は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
 
 ### QA / Compliance
 - 入力: `research.md`, `story.md`, `script.md`, `video.mp4`
@@ -101,18 +107,18 @@
 ### Series Planner（scene-series）
 - 入力: `story.md` / `script.md`
 - 出力: `series_plan.md`
-- エージェント定義: `.claude/agents/series-planner.md`
+- Claude Code 互換 agent 定義: `.claude/agents/series-planner.md`
 
 ### Scene Evidence Researcher（scene-series）
 - 入力: `research.md` + `series_plan.md`（question）
 - 出力: `scenes/sceneXX/evidence.md`
-- エージェント定義: `.claude/agents/scene-evidence-researcher.md`
+- Claude Code 互換 agent 定義: `.claude/agents/scene-evidence-researcher.md`
 
 ### Scene Scriptwriter（scene-series）
 - 入力: `scenes/sceneXX/evidence.md`
 - 出力: `scenes/sceneXX/script.md`（30–60s）
 - 品質ゲート: シーン必要性（ストーリー前進 / 矛盾・停滞なし / 登場人物の不可欠性 / テーマ整合）を自己点検して出力末尾に記録
-- エージェント定義: `.claude/agents/scene-scriptwriter.md`
+- Claude Code 互換 agent 定義: `.claude/agents/scene-scriptwriter.md`
 
 ## プロンプト構成
 

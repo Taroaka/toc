@@ -4,7 +4,7 @@
 
 ## 目的
 
-Claude Code の slash command を起点に、最小限の入力（topic）で
+Codex 主軸の assistant command を起点に、Claude Code slash command 互換も保ちながら、最小限の入力（topic）で
 「没入型（実写シネマティック体験）」動画を **1本**生成する。
 （視点は experience / scene の意図に応じて選び、必ずしも一人称POVに固定しない）
 
@@ -16,16 +16,17 @@ Claude Code の slash command を起点に、最小限の入力（topic）で
   - `--dry-run`（任意。外部生成APIは呼ばない）
   - `--config`（任意。`config/system.yaml` を差し替え）
   - `--stage`（任意。default: `video`）
-    - `p100` / `100` / `research`: `research.md` まで
-    - `p200` / `200` / `story`: `story.md` まで
-    - `p300` / `300` / `visual_value`: `visual_value.md` まで
-    - `p400` / `400`: `script.md` まで
+    - `p100` / `100` / `research`: `p130` research review handoff まで
+    - `p200` / `200` / `story`: `p230` story review handoff まで
+    - `p300` / `300` / `visual_value`: `p330` visual planning handoff まで
+    - `p400` / `400`: `p450` script handoff / skeleton manifest materialization まで
     - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
-    - `p500` / `500` / `narration`: narration / audio runtime gate まで
-    - `p600` / `600` / `asset`: reusable asset stage まで
-    - `p700` / `700` / `scene_implementation`: production manifest / image request stage まで
-    - `p800` / `800` / `video_generation`: video request / clip generation stage まで
-    - `p900` / `900` / `render` / `video`: final render / QA まで
+    - `p500` / `500` / `narration`: `p570` audio QA / human review handoff まで
+    - `p600` / `600` / `asset`: `p680` asset continuity / human review handoff まで
+    - `p700` / `700` / `scene_implementation`: `p750` generation-ready handoff まで
+    - `p800` / `800` / `video_generation`: `p850` video review / exclusions handoff まで
+    - `p900` / `900` / `render` / `video`: `p930` final QA / runtime handoff まで
+    - 100 番台の coarse p-number target は stage 冒頭ではなく、対応 stage の human-review handoff slot まで進める。細番号 target はその slot を直接指す。
   - `--experience`（任意。default: `cloud_island_walk`）
     - `cinematic_story`: 物語を映画的に見せる（視点は必要に応じて。固定デバイスを前提にしない）
     - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン

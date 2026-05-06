@@ -12,7 +12,7 @@
 ## 現状（すでにあるもの）
 
 - 物語/台本/マニフェストのスキーマと作り方: `docs/story-creation.md`, `docs/script-creation.md`, `docs/video-generation.md`
-- Director（監督）エージェント定義: `.claude/agents/director.md`
+- Director（監督）Claude Code 互換 agent 定義: `.claude/agents/director.md`
 - 動画マニフェストテンプレ: `workflow/video-manifest-template.md`
 - 合成（結合）系の補助: `scripts/build-clip-lists.py`, `scripts/render-video.sh`
 - 未決定事項の集約: `docs/open-decisions.md`（Providers / subtitles / BGM/SFX 等）

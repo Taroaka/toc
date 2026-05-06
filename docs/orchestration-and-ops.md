@@ -1,8 +1,8 @@
 # Orchestration / QA / Compliance / Publishing
 
 変更内容:
-- production order を audio-first に切り替え、公開 workflow を `narration -> asset -> scene implementation -> video` に再編した。
-- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation` に揃えた。
+- production order を audio-first に切り替え、公開 workflow を `narration -> asset -> scene implementation -> video -> render -> qa` に再編した。
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa` に揃えた。
 
 修正理由:
 - 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が late recut を減らせるため。
@@ -160,7 +160,7 @@ grounding 状態と証跡:
 - `stage.<name>.audit.report=logs/grounding/<stage>.audit.json`
 - `stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md`
 - `review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md`
-- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`
+- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
 - evaluator / verifier では互換 alias として `manifest=scene_implementation`, `image_prompt=scene_implementation`, `video=video_generation` を許可する
 
 run 開始時に固定する review policy:

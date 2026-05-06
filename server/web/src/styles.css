@@ -1,0 +1,207 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #0e1113;
+}
+
+.shell {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 390px;
+  background:
+    linear-gradient(90deg, rgba(215, 255, 79, 0.045) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    #0e1113;
+  background-size: 28px 28px;
+}
+
+.workspace,
+.chatPane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace {
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.topbar {
+  height: 72px;
+  padding: 12px 18px;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(14px);
+}
+
+.mark {
+  background: #d7ff4f !important;
+  color: #0e1113 !important;
+}
+
+.controls {
+  padding: 14px 18px 10px;
+  flex-shrink: 0;
+}
+
+.tabs {
+  min-height: 40px;
+}
+
+.countPanel {
+  padding: 12px 14px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(23, 27, 31, 0.86);
+  border-radius: 8px;
+}
+
+.gridScroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px 18px 18px;
+}
+
+.promptGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.promptCard {
+  background: rgba(23, 27, 31, 0.94) !important;
+  border-color: rgba(255, 255, 255, 0.13) !important;
+}
+
+.refOption {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.refOption img {
+  width: 38px;
+  height: 26px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.candidateGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-height: 150px;
+}
+
+.candidate {
+  min-height: 130px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  cursor: pointer;
+  background: #101417;
+}
+
+.candidate.selected {
+  border-color: #d7ff4f;
+  box-shadow: 0 0 0 1px rgba(215, 255, 79, 0.45);
+}
+
+.candidate.existing {
+  opacity: 0.72;
+}
+
+.candidate img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.bulkFooter {
+  flex-shrink: 0;
+  min-height: 64px;
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(14, 17, 19, 0.96);
+}
+
+.chatPane {
+  background: rgba(18, 21, 24, 0.98);
+}
+
+.chatHead {
+  padding: 14px;
+  flex-shrink: 0;
+}
+
+.chatMark {
+  background: #82d8ff !important;
+  color: #0e1113 !important;
+}
+
+.messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  max-width: 92%;
+  border-radius: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: rgba(215, 255, 79, 0.12);
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+@media (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .chatPane {
+    display: none;
+  }
+
+  .promptGrid {
+    grid-template-columns: 1fr;
+  }
+}
+

@@ -27,6 +27,7 @@ from toc.harness import (  # noqa: E402
     sync_run_status,
     write_json,
 )
+from toc.stage_evaluator import check_visual_value  # noqa: E402
 
 
 def has_todo(text: str) -> bool:
@@ -54,6 +55,35 @@ STORY_REQUIRED_SCENE_FIELDS = [
     "visualizable_action",
     "grounding_note",
 ]
+
+
+def compact_research_pack_ok(
+    *,
+    sources: list[Any],
+    passage_count: int,
+    canonical_story: Any,
+    conflict_items: list[Any],
+    handoff_to_story: Any,
+) -> bool:
+    """Accept focused research when it is grounded enough to avoid count padding."""
+    has_canonical = non_empty(canonical_story)
+    has_conflict_or_handoff = bool(conflict_items) or non_empty(handoff_to_story)
+    has_source_grounding = len(sources) >= 3 or (len(sources) >= 1 and passage_count >= 5)
+    return has_canonical and has_source_grounding and passage_count >= 3 and has_conflict_or_handoff
+
+
+def dense_story_scene_count(scenes: list[Any]) -> int:
+    return sum(
+        1
+        for scene in scenes
+        if isinstance(scene, dict)
+        and all(non_empty(scene.get(field)) for field in STORY_REQUIRED_SCENE_FIELDS)
+        and bool(as_list(scene.get("research_refs")))
+    )
+
+
+def story_scene_coverage_ok(scenes: list[Any]) -> bool:
+    return len(scenes) >= 20 or dense_story_scene_count(scenes) >= 8
 
 
 def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
@@ -196,6 +226,7 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
         data, ["story_baseline", "canonical_synopsis", "one_liner"]
     )
     canonical_story_dump = nested_get(data, ["story_materials", "canonical_story_dump"])
+    canonical_story = canonical_story_dump or synopsis
 
     details["sources"] = len(sources)
     details["event_count"] = len(as_list(chronological_events)) or len(as_list(beat_sheet))
@@ -203,8 +234,23 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     details["fact_count"] = len(as_list(facts))
 
     add_check(checks, "research.structured", bool(data), "research.md contains structured YAML output")
-    add_check(checks, "research.sources", len(sources) >= 12, f"sources >= 12 (got {len(sources)})", kind="rubric")
     story_materials_ok = bool(story_materials) or non_empty(synopsis)
+    passage_count = len(source_passages) or len(legacy_passages)
+    compact_pack_ok = compact_research_pack_ok(
+        sources=sources,
+        passage_count=passage_count,
+        canonical_story=canonical_story,
+        conflict_items=conflict_items,
+        handoff_to_story=handoff_to_story,
+    )
+    source_coverage_ok = len(sources) >= 12 or compact_pack_ok
+    add_check(
+        checks,
+        "research.sources",
+        source_coverage_ok,
+        f"sources meet broad target >= 12 or compact grounded pack is present (got sources={len(sources)}, passages={passage_count})",
+        kind="rubric",
+    )
     add_check(
         checks,
         "research.story_materials",
@@ -215,7 +261,7 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     add_check(
         checks,
         "research.canonical_story",
-        non_empty(canonical_story_dump) or non_empty(synopsis),
+        non_empty(canonical_story),
         "canonical story dump or legacy synopsis is present",
         kind="rubric",
     )
@@ -223,11 +269,10 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     add_check(
         checks,
         "research.chronological_events",
-        event_count >= 20,
-        f"chronological events or legacy beats >= 20 (got {event_count})",
+        event_count >= 20 or compact_pack_ok,
+        f"chronological coverage meets broad target >= 20 or compact grounded pack is present (got events={event_count}, passages={passage_count})",
         kind="rubric",
     )
-    passage_count = len(source_passages) or len(legacy_passages)
     add_check(
         checks,
         "research.source_passages",
@@ -238,8 +283,8 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     add_check(
         checks,
         "research.facts",
-        len(as_list(facts)) >= 10,
-        f"facts >= 10 (got {len(as_list(facts))})",
+        len(as_list(facts)) >= 10 or compact_pack_ok,
+        f"facts meet broad target >= 10 or compact grounded pack is present (got facts={len(as_list(facts))}, passages={passage_count})",
         kind="rubric",
     )
     add_check(checks, "research.conflicts_field", conflicts is not None, "conflicts field is present", kind="rubric")
@@ -282,7 +327,13 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
     add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
     add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
-    add_check(checks, "story.scenes", len(scenes) >= 20, f"story includes at least 20 scenes (got {len(scenes)})", kind="rubric")
+    add_check(
+        checks,
+        "story.scenes",
+        story_scene_coverage_ok(scenes),
+        f"story has >= 20 scenes or >= 8 dense grounded scenes (got scenes={len(scenes)}, dense_grounded={dense_story_scene_count(scenes)})",
+        kind="rubric",
+    )
 
     for field in STORY_REQUIRED_SCENE_FIELDS:
         missing = [
@@ -561,7 +612,80 @@ def check_video_scene_series(run_dir: Path) -> tuple[dict[str, Any], dict[str, s
     return make_stage("video", "scenes/*/video.mp4", checks, details={"scene_count": len(scene_dirs)}), {}
 
 
-def build_report(run_dir: Path, flow: str, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
+STAGE_TARGETS = {
+    "p130": ["research"],
+    "p230": ["research", "story"],
+    "p330": ["research", "story", "visual_value"],
+    "p450": ["research", "story", "visual_value", "script", "manifest"],
+    "p570": ["research", "story", "visual_value", "script", "manifest"],
+    "p680": ["research", "story", "visual_value", "script", "manifest"],
+    "p750": ["research", "story", "visual_value", "script", "manifest"],
+    "p850": ["research", "story", "visual_value", "script", "manifest"],
+    "p930": ["research", "story", "visual_value", "script", "manifest", "video"],
+}
+for _slot in range(110, 931, 10):
+    _bucket = (_slot // 100) * 100
+    if _slot < 200:
+        _stages = ["research"]
+    elif _slot < 300:
+        _stages = ["research", "story"]
+    elif _slot < 400:
+        _stages = ["research", "story", "visual_value"]
+    elif _slot < 900:
+        _stages = ["research", "story", "visual_value", "script", "manifest"]
+    else:
+        _stages = ["research", "story", "visual_value", "script", "manifest", "video"]
+    STAGE_TARGETS.setdefault(f"p{_slot}", _stages)
+
+STAGE_TARGET_ALIASES = {
+    "100": "p130",
+    "p100": "p130",
+    "research": "p130",
+    "200": "p230",
+    "p200": "p230",
+    "story": "p230",
+    "300": "p330",
+    "p300": "p330",
+    "visual": "p330",
+    "visual_value": "p330",
+    "400": "p450",
+    "p400": "p450",
+    "450": "p450",
+    "script": "p450",
+    "500": "p570",
+    "p500": "p570",
+    "narration": "p570",
+    "600": "p680",
+    "p600": "p680",
+    "asset": "p680",
+    "700": "p750",
+    "p700": "p750",
+    "scene_implementation": "p750",
+    "800": "p850",
+    "p800": "p850",
+    "video_generation": "p850",
+    "900": "p930",
+    "p900": "p930",
+    "render": "p930",
+    "video": "p930",
+    "done": "p930",
+}
+
+
+def normalize_stage_target(value: str | None) -> str:
+    if not value:
+        return "p930"
+    normalized = value.strip().lower()
+    if normalized.isdigit():
+        normalized = f"p{normalized}"
+    if normalized in STAGE_TARGET_ALIASES:
+        return STAGE_TARGET_ALIASES[normalized]
+    if normalized in STAGE_TARGETS:
+        return normalized
+    raise ValueError(f"Unsupported stage target: {value}")
+
+
+def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p900") -> tuple[dict[str, Any], dict[str, str]]:
     state_path = run_dir / "state.txt"
     if not state_path.exists():
         append_state_snapshot(
@@ -575,31 +699,53 @@ def build_report(run_dir: Path, flow: str, profile: str) -> tuple[dict[str, Any]
 
     stage_updates: dict[str, str] = {}
     stages: list[dict[str, Any]] = []
+    target = normalize_stage_target(stage_target)
+    enabled_stages = set(STAGE_TARGETS[target])
 
-    research_stage, updates = check_research(run_dir, profile)
-    stages.append(research_stage)
-    stage_updates.update(updates)
-
-    story_stage, updates = check_story(run_dir, profile)
-    stages.append(story_stage)
-    stage_updates.update(updates)
-
-    if flow == "scene-series":
-        script_stage, updates = check_script_scene_series(run_dir, profile)
-        manifest_stage, updates2 = check_manifest_scene_series(run_dir, profile)
-        video_stage, updates3 = check_video_scene_series(run_dir)
+    if "research" in enabled_stages:
+        research_stage, updates = check_research(run_dir, profile)
+        stages.append(research_stage)
         stage_updates.update(updates)
-        stage_updates.update(updates2)
-        stage_updates.update(updates3)
-    else:
-        script_stage, updates = check_script_single(run_dir, profile)
-        manifest_stage, updates2 = check_manifest_single(run_dir, profile, flow)
-        video_stage, updates3 = check_video_single(run_dir)
-        stage_updates.update(updates)
-        stage_updates.update(updates2)
-        stage_updates.update(updates3)
 
-    stages.extend([script_stage, manifest_stage, video_stage])
+    if "story" in enabled_stages:
+        story_stage, updates = check_story(run_dir, profile)
+        stages.append(story_stage)
+        stage_updates.update(updates)
+
+    if "visual_value" in enabled_stages:
+        target_slot_number = int(target.removeprefix("p"))
+        forbid_p300_production = 300 <= target_slot_number < 400
+        visual_value_stage, updates = check_visual_value(
+            run_dir,
+            profile,
+            forbid_production_artifacts=forbid_p300_production,
+        )
+        stages.append(visual_value_stage)
+        stage_updates.update(updates)
+
+    if "script" in enabled_stages:
+        if flow == "scene-series":
+            script_stage, updates = check_script_scene_series(run_dir, profile)
+        else:
+            script_stage, updates = check_script_single(run_dir, profile)
+        stages.append(script_stage)
+        stage_updates.update(updates)
+
+    if "manifest" in enabled_stages:
+        if flow == "scene-series":
+            manifest_stage, updates = check_manifest_scene_series(run_dir, profile)
+        else:
+            manifest_stage, updates = check_manifest_single(run_dir, profile, flow)
+        stages.append(manifest_stage)
+        stage_updates.update(updates)
+
+    if "video" in enabled_stages:
+        if flow == "scene-series":
+            video_stage, updates = check_video_scene_series(run_dir)
+        else:
+            video_stage, updates = check_video_single(run_dir)
+        stages.append(video_stage)
+        stage_updates.update(updates)
 
     overall_score = round(sum(stage["score"] for stage in stages) / len(stages), 4) if stages else 0.0
     overall_passed = all(stage["passed"] for stage in stages)
@@ -608,6 +754,7 @@ def build_report(run_dir: Path, flow: str, profile: str) -> tuple[dict[str, Any]
         "run_dir": str(run_dir.resolve()),
         "flow": flow,
         "profile": profile,
+        "stage_target": target,
         "overall": {
             "passed": overall_passed,
             "score": overall_score,
@@ -626,6 +773,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         f"- Generated at: {report['generated_at']}",
         f"- Flow: `{report['flow']}`",
         f"- Profile: `{report['profile']}`",
+        f"- Stage target: `{report.get('stage_target', 'p900')}`",
         f"- Overall: `{'PASS' if overall['passed'] else 'FAIL'}` ({overall['score']:.2%})",
         f"- Run dir: `{run_dir}`",
         f"- Run status: `{run_dir / 'run_status.json'}`",
@@ -637,7 +785,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "| --- | --- | --- |",
     ]
 
-    for stage_name in ["research", "story", "script", "manifest", "video"]:
+    for stage_name in ["research", "story", "visual_value", "script", "manifest", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue
@@ -651,7 +799,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "",
     ]
 
-    for stage_name in ["research", "story", "script", "manifest", "video"]:
+    for stage_name in ["research", "story", "visual_value", "script", "manifest", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue
@@ -676,7 +824,9 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
             "",
         ]
         for stage_name in overall["failed_stages"]:
-            lines.append(f"- Fix `{stage_name}` findings, then rerun `python scripts/verify-pipeline.py --run-dir {run_dir} --flow {report['flow']} --profile {report['profile']}`.")
+            lines.append(
+                f"- Fix `{stage_name}` findings, then rerun `python scripts/verify-pipeline.py --run-dir {run_dir} --flow {report['flow']} --profile {report['profile']} --stage-target {report.get('stage_target', 'p900')}`."
+            )
         lines.append("")
 
     return "\n".join(lines)
@@ -687,10 +837,15 @@ def main() -> int:
     parser.add_argument("--run-dir", required=True, help="Path to output/<topic>_<timestamp>/")
     parser.add_argument("--flow", required=True, choices=["toc-run", "scene-series", "immersive"])
     parser.add_argument("--profile", default="standard", choices=["fast", "standard"])
+    parser.add_argument("--stage-target", "--p-slot", default="p900", help="Verify artifacts only through this p-slot/stage target (for example p300).")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    report, updates = build_report(run_dir, args.flow, args.profile)
+    try:
+        stage_target = normalize_stage_target(args.stage_target)
+    except ValueError as exc:
+        parser.error(str(exc))
+    report, updates = build_report(run_dir, args.flow, args.profile, stage_target)
 
     report_path = eval_report_path(run_dir)
     write_json(report_path, report)

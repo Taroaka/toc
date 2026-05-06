@@ -11,7 +11,7 @@
 
 ## Output contract
 - `story_materials.canonical_story_dump`
-- `story_materials.chronological_events`（20+）
+- `story_materials.chronological_events`（20+ 目安。少数でも canonical material / source_passages / conflicts / handoff が強ければ padding しない）
 - `source_inventory` / `source_passages`
 - `variants` / `conflicts`
 - `facts.items`

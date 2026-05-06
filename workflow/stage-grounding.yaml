@@ -31,6 +31,8 @@ stages:
     requires_approved_input: []
 
   visual_value:
+    # p300 visual planning grounding entry. This tracks visual_value.md
+    # authoring/review; it is not a canonical generation stage.
     required_docs:
       - docs/story-creation.md
       - docs/data-contracts.md

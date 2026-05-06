@@ -1,12 +1,17 @@
 visual_value_metadata:
-  topic: "<topic>"
-  source_research: "output/<topic>_<timestamp>/research.md"
-  source_story: "output/<topic>_<timestamp>/story.md"
-  created_at: "<ISO8601>"
+  template_status: "TEMPLATE_ONLY_REPLACE_ALL_REPLACE_ME_AND_EXAMPLE_ONLY_VALUES"
+  topic: "REPLACE_ME_TOPIC"
+  source_research: "REPLACE_ME_RUN_DIR/research.md"
+  source_story: "REPLACE_ME_RUN_DIR/story.md"
+  created_at: "REPLACE_ME_ISO8601_TIMESTAMP"
   purpose: "p300 visual planning source of truth: define visual identity, scene visual value, anchor/reference strategy, asset bible candidates, regeneration risks, and p400/p600/p700 handoff"
+  authoring_rules:
+    - "REPLACE_ME_* values are unfinished placeholders and must not survive into visual_value.md."
+    - "EXAMPLE_ONLY_* values show shape only; replace or delete them before treating the file as stage output."
+    - "Do not copy example IDs such as EXAMPLE_ONLY_scene01 into production selectors."
 
 global_visual_identity:
-  visual_style: "実写、シネマティック、story topic に合う一貫した画作り"
+  visual_style: "REPLACE_ME: 実写、シネマティック等。この run 固有の一貫した画作りを書く"
   camera_principles:
     - "scene の物語価値が読める構図を優先する"
     - "cut prompt ではなく、後続 stage が守る視覚原則として書く"
@@ -23,96 +28,96 @@ global_visual_identity:
     - "ここでは本番 image prompt / motion prompt は書かない"
 
 scene_visual_values:
-  - scene_selector: "scene01"
-    story_function: "この scene が物語上担う役割"
-    visual_value: "観客に画として何を理解・体感させるか"
+  - scene_selector: "REPLACE_ME_scene_selector"
+    story_function: "REPLACE_ME: この scene が物語上担う役割"
+    visual_value: "REPLACE_ME: 観客に画として何を理解・体感させるか"
     must_show:
-      - "映像で落とすと物語価値が弱くなる要素"
+      - "REPLACE_ME: 映像で落とすと物語価値が弱くなる要素"
     must_avoid:
-      - "後続 prompt が流れやすい誤表現"
-    emotional_payload: "この scene の視覚的な感情到達点"
+      - "REPLACE_ME: 後続 prompt が流れやすい誤表現"
+    emotional_payload: "REPLACE_ME: この scene の視覚的な感情到達点"
     continuity_hooks:
-      - "次 scene / 後半で再利用する視覚要素"
+      - "REPLACE_ME: 次 scene / 後半で再利用する視覚要素"
     p400_script_notes:
-      - "script / cut skeleton 作成時に守ること"
+      - "REPLACE_ME: script / cut skeleton 作成時に守ること"
 
 anchor_cut_candidates:
-  - selector: "scene01_cut01"
-    proposed_still_mode: "generate_still"
-    anchor_role: "character_anchor|location_anchor|object_anchor|state_transition|visual_value_hold|other"
-    why_anchor_needed: "この cut を anchor 化しないと後続で何がブレるか"
+  - selector: "REPLACE_ME_sceneXX_cutYY"
+    proposed_still_mode: "REPLACE_ME_ONE_OF_generate_still_reuse_anchor_bridge"
+    anchor_role: "REPLACE_ME_ONE_OF_character_anchor_location_anchor_object_anchor_state_transition_visual_value_hold_other"
+    why_anchor_needed: "REPLACE_ME: この cut を anchor 化しないと後続で何がブレるか"
     reuse_targets:
-      - "sceneXX_cutYY"
+      - "REPLACE_ME_sceneXX_cutYY"
     bridge_or_reuse_candidates:
-      - selector: "scene01_cut02"
-        proposed_still_mode: "reuse_anchor|bridge"
-        reason: "新規 still ではなく anchor reuse / bridge で足りる理由"
+      - selector: "EXAMPLE_ONLY_scene01_cut02"
+        proposed_still_mode: "EXAMPLE_ONLY_reuse_anchor_or_bridge"
+        reason: "EXAMPLE ONLY: 新規 still ではなく anchor reuse / bridge で足りる理由"
 
 asset_bible_candidates:
   characters:
-    - asset_id: "protagonist"
-      story_purpose: "物語上の役割"
+    - asset_id: "REPLACE_ME_character_asset_id"
+      story_purpose: "REPLACE_ME: 物語上の役割"
       fixed_identity:
-        - "顔、髪型、衣装、年齢感など、後続で変えてはいけない要素"
+        - "REPLACE_ME: 顔、髪型、衣装、年齢感など、後続で変えてはいけない要素"
       candidate_reference_views:
-        - "front"
-        - "side"
-        - "back"
-        - "refstrip"
+        - "EXAMPLE_ONLY_front"
+        - "EXAMPLE_ONLY_side"
+        - "EXAMPLE_ONLY_back"
+        - "EXAMPLE_ONLY_refstrip"
       used_by_selectors:
-        - "scene01_cut01"
-      p600_handoff: "asset_plan.md で設計・review すべきこと"
+        - "REPLACE_ME_sceneXX_cutYY"
+      p600_handoff: "REPLACE_ME: asset_plan.md で設計・review すべきこと"
   objects:
-    - asset_id: "primary_object"
-      story_purpose: "反復する小道具 / setpiece の役割"
+    - asset_id: "REPLACE_ME_object_asset_id"
+      story_purpose: "REPLACE_ME: 反復する小道具 / setpiece の役割"
       fixed_identity:
-        - "silhouette、材質、装飾、比率など"
+        - "REPLACE_ME: silhouette、材質、装飾、比率など"
       candidate_reference_views:
-        - "hero"
-        - "detail"
+        - "EXAMPLE_ONLY_hero"
+        - "EXAMPLE_ONLY_detail"
       used_by_selectors:
-        - "sceneXX_cutYY"
-      p600_handoff: "object_bible / reference image として固定すべき理由"
+        - "REPLACE_ME_sceneXX_cutYY"
+      p600_handoff: "REPLACE_ME: object_bible / reference image として固定すべき理由"
   locations:
-    - asset_id: "primary_location"
-      story_purpose: "反復する場所 / 状態差分の役割"
+    - asset_id: "REPLACE_ME_location_asset_id"
+      story_purpose: "REPLACE_ME: 反復する場所 / 状態差分の役割"
       fixed_identity:
-        - "spatial identity、主要構造、光環境など"
-      relation_to_other_locations: "independent|same_place_variant|background_glimpse|foreground_anchor"
+        - "REPLACE_ME: spatial identity、主要構造、光環境など"
+      relation_to_other_locations: "REPLACE_ME_ONE_OF_independent_same_place_variant_background_glimpse_foreground_anchor"
       used_by_selectors:
-        - "sceneXX_cutYY"
-      p600_handoff: "location_bible / reference_usage へ渡す判断"
+        - "REPLACE_ME_sceneXX_cutYY"
+      p600_handoff: "REPLACE_ME: location_bible / reference_usage へ渡す判断"
   reusable_stills:
-    - asset_id: "key_visual_anchor"
-      source_selector: "sceneXX_cutYY"
-      story_purpose: "後続 cut の continuity anchor としての役割"
+    - asset_id: "REPLACE_ME_reusable_still_asset_id"
+      source_selector: "REPLACE_ME_sceneXX_cutYY"
+      story_purpose: "REPLACE_ME: 後続 cut の continuity anchor としての役割"
       fixed_identity:
-        - "same camera、同じ状態差分、同じ構図など"
-      p600_handoff: "reusable still として asset_plan.md に載せる理由"
+        - "REPLACE_ME: same camera、同じ状態差分、同じ構図など"
+      p600_handoff: "REPLACE_ME: reusable still として asset_plan.md に載せる理由"
 
 reference_strategy:
   required_reference_assets:
-    - asset_id: "protagonist"
-      reference_type: "character_reference"
-      required_before_stage: "p600"
-      reason: "人物同一性を固定するため"
+    - asset_id: "REPLACE_ME_asset_id"
+      reference_type: "REPLACE_ME_reference_type"
+      required_before_stage: "REPLACE_ME_stage_id"
+      reason: "REPLACE_ME: 人物同一性などを固定するため"
   reference_usage_rules:
-    - situation: "別エリアから主エリアが奥に見える"
-      mode: "background_glimpse"
-      rule: "location derived_from ではなく cut 側の reference_usage で表す"
+    - situation: "EXAMPLE ONLY: 別エリアから主エリアが奥に見える"
+      mode: "EXAMPLE_ONLY_background_glimpse"
+      rule: "EXAMPLE ONLY: location derived_from ではなく cut 側の reference_usage で表す"
   no_reference_allowed:
-    - case: "独立 location anchor の初期 seed"
-      reason: "参照入力なしの bootstrap として作れるため"
+    - case: "EXAMPLE ONLY: 独立 location anchor の初期 seed"
+      reason: "EXAMPLE ONLY: 参照入力なしの bootstrap として作れるため"
   color_and_lighting_priority:
-    - "環境光と人物/物体の固有色が衝突する場合の優先順位を書く"
+    - "REPLACE_ME: 環境光と人物/物体の固有色が衝突する場合の優先順位を書く"
 
 regeneration_risks:
-  - risk_id: "risk_01"
+  - risk_id: "REPLACE_ME_risk_id"
     affected_selectors:
-      - "sceneXX_cutYY"
-    failure_mode: "後続生成で起きそうなブレや再生成原因"
-    prevention_rule: "p600/p700 に渡す予防指示"
-    owner_stage: "p400|p600|p700"
+      - "REPLACE_ME_sceneXX_cutYY"
+    failure_mode: "REPLACE_ME: 後続生成で起きそうなブレや再生成原因"
+    prevention_rule: "REPLACE_ME: p600/p700 に渡す予防指示"
+    owner_stage: "REPLACE_ME_ONE_OF_p400_p600_p700"
 
 handoff_to_p400_p600_p700:
   p400_script:
@@ -132,14 +137,15 @@ handoff_to_p400_p600_p700:
       - "prompt / references / still_image_plan が p300 の意図と矛盾しないか"
 
 value_parts:
-  - part_id: "midroll_visual_payoff_01"
+  - part_id: "EXAMPLE_ONLY_midroll_visual_payoff_01"
     optional: true
-    title: "例: 中盤の視覚報酬パート"
+    example_only: true
+    title: "EXAMPLE ONLY: 中盤の視覚報酬パート"
     placement_window:
       start_percent: 20
       end_percent: 80
       preferred_percent: 50
-      rationale: "最序盤や最終盤ではなく、中盤の視覚報酬として置く場合に使う"
+      rationale: "EXAMPLE ONLY: 最序盤や最終盤ではなく、中盤の視覚報酬として置く場合に使う"
     why_this_matters:
       - "読者は名前を知っているが、細部を見たことがない要素を報酬化する"
       - "高価な実物セットなしでは難しい壮大さを、生成AI前提で視覚化する"
@@ -148,14 +154,14 @@ value_parts:
       spectacle_scale: "巨大建築 / 異界 / 群体 / 発光 / 流体 / 変形"
       notes: "文字説明ではなく、形・光・動き・機構で価値を伝える"
     related_objects:
-      - "tbd_object_id"
+      - "REPLACE_ME_object_asset_id"
     cut_plan:
-      - cut_id: 1
+      - cut_id: "EXAMPLE_ONLY_1"
         duration_seconds: 4
-        narration: ""
-        focus: "主役となる場所 / 物 / 現象"
-        description: "何が見えるかを1-2文で具体的に"
-        viewer_payoff: "このカットで何を感じさせるか"
+        narration: "REPLACE_ME_OR_EMPTY_STRING"
+        focus: "REPLACE_ME: 主役となる場所 / 物 / 現象"
+        description: "REPLACE_ME: 何が見えるかを1-2文で具体的に"
+        viewer_payoff: "REPLACE_ME: このカットで何を感じさせるか"
     notes:
       - "silent midroll visual payoff が必要な run だけ使う"
       - "本番 cut prompt ではなく、script / manifest に落とす前の設計メモとして扱う"

@@ -9,3 +9,8 @@ google-genai
 
 # YAML parsing (used by scripts and E2E runner)
 pyyaml
+
+# Local /line + /image_gen web app
+fastapi
+uvicorn
+line-bot-sdk

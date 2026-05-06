@@ -14,6 +14,13 @@
 
 短く言うと、表の顔は `AIで世界中のナラティブを語り継ぐチャンネル`、裏の価値は `物語名から動画完成までを自動化する制作システム`。
 
+## Marketing Funnel Rule
+
+- YouTube は `リスト集客` の主戦場。動画内で売り切らない。
+- YouTube 概要欄は `中間導線`。視聴者を制作ノート、改善提案、相談フォームへ進める場所にする。
+- セールスは YouTube 本体ではなく、LP、フォーム、DM、個別相談で行う。
+- YouTube の長尺動画を `原液` とし、X / Instagram / Shorts / newsletter / LP へ横展開する。
+
 ## Folder Structure
 
 ```text
