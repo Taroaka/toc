@@ -61,6 +61,7 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].id, "scene1_cut1")
+        self.assertEqual(items[0].asset_type, "reusable_still")
         self.assertEqual(items[0].prompt, "cinematic prompt\nline two")
         self.assertEqual(items[0].references, ["assets/characters/hero.png", "assets/objects/box.png"])
         self.assertEqual(items[0].reference_count, 2)
@@ -88,12 +89,12 @@ class ImageGenParserTests(unittest.TestCase):
             output = run_dir / "assets/scenes/scene01.png"
             candidate.parent.mkdir(parents=True)
             output.parent.mkdir(parents=True)
-            candidate.write_bytes(b"new")
+            candidate.write_bytes(PNG_BYTES)
             output.write_bytes(b"old")
 
             result = image_gen.insert_candidate(run_dir, candidate, "assets/scenes/scene01.png")
 
-            self.assertEqual(output.read_bytes(), b"new")
+            self.assertEqual(output.read_bytes(), PNG_BYTES)
             self.assertIsNotNone(result["backup"])
             self.assertTrue((run_dir / str(result["backup"])).exists())
 
@@ -112,7 +113,7 @@ class ImageGenParserTests(unittest.TestCase):
             run_dir = Path(tmp)
             candidate = run_dir / "assets/test/image_gen_candidates/scene1/candidate_01.png"
             candidate.parent.mkdir(parents=True)
-            candidate.write_bytes(b"new")
+            candidate.write_bytes(PNG_BYTES)
 
             with self.assertRaises(ValueError):
                 image_gen.insert_candidate(run_dir, candidate, "video_manifest.md")
@@ -120,11 +121,19 @@ class ImageGenParserTests(unittest.TestCase):
 
 class ImageGenApiTests(unittest.TestCase):
     def test_runs_endpoint_lists_output_folders(self) -> None:
-        with TestClient(app) as client:
-            response = client.get("/api/image-gen/runs")
+        with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+            with TestClient(app) as client:
+                response = client.get("/api/image-gen/runs")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("runs", response.json())
+
+    def test_api_requires_token_when_not_configured(self) -> None:
+        with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "", "TOC_SERVER_AUTH_DISABLED": ""}):
+            with TestClient(app) as client:
+                response = client.get("/api/image-gen/runs")
+
+        self.assertEqual(response.status_code, 401)
 
     def test_generate_uses_saved_path_and_does_not_scan_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,26 +160,74 @@ class ImageGenApiTests(unittest.TestCase):
                 async def generate_image(self, **_kwargs):
                     return FakeResult()
 
-            with patch("server.app.ROOT", Path(tmp)), patch("server.app.CodexAppServerClient", FakeClient):
-                with TestClient(app) as client:
-                    response = client.post(
-                        "/api/image-gen/generate",
-                        json={
-                            "run_id": "sample_run",
-                            "kind": "scene",
-                            "item_id": "scene1_cut1",
-                            "prompt": "prompt",
-                            "references": [],
-                            "candidate_count": 1,
-                        },
-                    )
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/generate",
+                            json={
+                                "run_id": "sample_run",
+                                "kind": "scene",
+                                "item_id": "scene1_cut1",
+                                "prompt": "prompt",
+                                "references": [],
+                                "candidate_count": 1,
+                            },
+                        )
 
             self.assertEqual(response.status_code, 200)
             path = response.json()["candidates"][0]["path"]
             self.assertEqual((run_dir / path).read_bytes(), PNG_BYTES)
 
+    def test_download_zip_rejects_non_candidate_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.txt").write_text("secret", encoding="utf-8")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", Path(tmp)):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/download-zip",
+                            json={"run_id": "sample_run", "paths": ["state.txt"]},
+                        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_download_zip_accepts_candidate_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            candidate = run_dir / "assets/test/image_gen_candidates/scene1/candidate_01.png"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(PNG_BYTES)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", Path(tmp)):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/download-zip",
+                            json={
+                                "run_id": "sample_run",
+                                "paths": ["assets/test/image_gen_candidates/scene1/candidate_01.png"],
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/zip")
+
+    def test_insert_candidate_rejects_invalid_candidate_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            candidate = run_dir / "assets/test/image_gen_candidates/scene1/candidate_01.png"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"not a png")
+
+            with self.assertRaises(ValueError):
+                image_gen.insert_candidate(run_dir, candidate, "assets/scenes/scene01.png")
+
     def test_api_requires_token_when_configured(self) -> None:
-        with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "secret"}):
+        with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "secret", "TOC_SERVER_AUTH_DISABLED": ""}):
             with TestClient(app) as client:
                 blocked = client.get("/api/image-gen/runs")
                 allowed = client.get("/api/image-gen/runs", headers={"X-ToC-Local-Token": "secret"})
@@ -179,8 +236,9 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200)
 
     def test_invalid_run_id_returns_400(self) -> None:
-        with TestClient(app) as client:
-            response = client.get("/api/image-gen/requests?run_id=../x&kind=scene")
+        with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+            with TestClient(app) as client:
+                response = client.get("/api/image-gen/requests?run_id=../x&kind=scene")
 
         self.assertEqual(response.status_code, 400)
 
@@ -190,9 +248,10 @@ class ImageGenApiTests(unittest.TestCase):
             run_dir.mkdir(parents=True)
             (run_dir / "video_manifest.md").write_text("manifest", encoding="utf-8")
 
-            with patch("server.app.ROOT", Path(tmp)):
-                with TestClient(app) as client:
-                    response = client.get("/api/image-gen/file?run_id=sample_run&path=video_manifest.md")
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", Path(tmp)):
+                    with TestClient(app) as client:
+                        response = client.get("/api/image-gen/file?run_id=sample_run&path=video_manifest.md")
 
         self.assertEqual(response.status_code, 400)
 
@@ -226,28 +285,29 @@ class ImageGenApiTests(unittest.TestCase):
                     test_case.assertEqual(kwargs["run_dir"].name, "parent")
                     return FakeResult()
 
-            with patch("server.app.ROOT", root), patch("server.app.CodexAppServerClient", FakeClient):
-                with TestClient(app) as client:
-                    response = client.post(
-                        "/api/image-gen/generate-bulk",
-                        json={
-                            "run_id": "parent",
-                            "kind": "scene",
-                            "items": [
-                                {
-                                    "run_id": "child",
-                                    "kind": "asset",
-                                    "item_id": "scene1_cut1",
-                                    "prompt": "prompt",
-                                    "references": [],
-                                    "candidate_count": 1,
-                                }
-                            ],
-                        },
-                    )
-                    generated_exists = (
-                        parent_run / "assets/test/image_gen_candidates/scene1_cut1/candidate_01.png"
-                    ).resolve().exists()
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/generate-bulk",
+                            json={
+                                "run_id": "parent",
+                                "kind": "scene",
+                                "items": [
+                                    {
+                                        "run_id": "child",
+                                        "kind": "asset",
+                                        "item_id": "scene1_cut1",
+                                        "prompt": "prompt",
+                                        "references": [],
+                                        "candidate_count": 1,
+                                    }
+                                ],
+                            },
+                        )
+                        generated_exists = (
+                            parent_run / "assets/test/image_gen_candidates/scene1_cut1/candidate_01.png"
+                        ).resolve().exists()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(generated_exists)

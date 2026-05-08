@@ -24,6 +24,16 @@
 - `/toc-immersive-ride`
 - 実行方法の正本: `docs/how-to-run.md`
 
+## Server Roles
+
+`server/` はローカル FastAPI server の同居レイヤーで、役割は次の2つに分ける。
+
+- LINE: `/line/webhook` と互換 `/webhook` を受ける LINE bot 用。route は `server/line_app.py`、実処理は `server/line_bot.py` に置く。
+- Image generation app: `/image_gen`, `/api/image-gen/*`, `/api/chat/turn` を受ける画像生成 Web App 用。route は `server/image_gen_app.py`、md parser / candidate / zip / repo insert などのドメイン処理は `server/image_gen.py` に置く。
+
+`server/app.py` は shared entrypoint として扱い、共通 middleware、static mount、router 組み立てだけに寄せる。LINE 側と image generation app 側の責務を混ぜない。
+`/image_gen` と `/api/*` は `TOC_SERVER_TOKEN` 必須で fail closed にする。ローカル検証で明示的に外す場合だけ `TOC_SERVER_AUTH_DISABLED=1` を使う。
+
 ## Read Next
 
 - 用語集: `docs/data-contracts.md` の "Core Terms / Glossary"
@@ -32,6 +42,7 @@
 - 物語化: `docs/story-creation.md`
 - 台本: `docs/script-creation.md`
 - 動画生成: `docs/video-generation.md`
+- Web UI / brand design: `server/web/docs/brand-design/README.md`
 - marketing/SNS: `marketing/README.md`
 - 運用/QA: `docs/orchestration-and-ops.md`
 - エージェント運用: `docs/implementation/assistant-tooling.md`

@@ -10,15 +10,35 @@ body {
   background: #0e1113;
 }
 
+:root {
+  --museum-bg: var(--lg-deep-black);
+  --museum-surface: var(--lg-bg-solid);
+  --museum-surface-solid: rgba(16, 20, 23, 0.96);
+  --museum-line: var(--lg-border);
+  --museum-line-strong: var(--lg-border-strong);
+  --museum-primary: var(--lg-glass-cyan);
+  --museum-primary-soft: rgba(142, 232, 255, 0.16);
+  --museum-chat: var(--lg-museum-amber);
+  --museum-chat-soft: rgba(246, 211, 101, 0.14);
+  --surface-editor: #111619;
+  --surface-frame: #12171a;
+  --surface-elevated: #171d21;
+  --line-subtle: rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.24);
+  --text-muted: rgba(217, 228, 234, 0.68);
+}
+
 .shell {
   height: 100vh;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 390px;
   background:
-    linear-gradient(90deg, rgba(215, 255, 79, 0.045) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 12% -10%, rgba(246, 211, 101, 0.09), transparent 28%),
+    linear-gradient(90deg, rgba(142, 232, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
     #0e1113;
-  background-size: 28px 28px;
+  background-size: auto, 28px 28px, 28px 28px, auto;
+  background-repeat: no-repeat, repeat, repeat, no-repeat;
 }
 
 .workspace,
@@ -33,35 +53,166 @@ body {
 }
 
 .topbar {
+  position: relative;
   height: 72px;
   padding: 12px 18px;
   flex-direction: row !important;
   align-items: center;
   justify-content: space-between;
   flex-shrink: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(14px);
+  border-radius: 0 !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.022) 42%, rgba(0, 0, 0, 0.15)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 24%, transparent 76%, rgba(255, 255, 255, 0.025)),
+    rgba(18, 23, 27, 0.68) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(128%);
+  backdrop-filter: blur(14px) saturate(128%);
+}
+
+.glassTopbar {
+  border-width: 0 0 1px !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  box-shadow:
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 30px rgba(0, 0, 0, 0.22) !important;
+}
+
+.glassTopbar::after {
+  content: "";
+  position: absolute;
+  right: 18px;
+  bottom: 0;
+  left: 18px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.34), transparent);
+  opacity: 0.48;
+}
+
+.glassTopbar::before {
+  content: "";
+  position: absolute;
+  right: 18px;
+  top: 0;
+  left: 18px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.24), transparent);
+  opacity: 0.5;
 }
 
 .mark {
-  background: #d7ff4f !important;
+  background: #8ee8ff !important;
   color: #0e1113 !important;
 }
 
 .controls {
+  --lg-blur: 14px;
+  --lg-saturate: 130%;
+  --lg-shine:
+    linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.06) 44%, rgba(142, 232, 255, 0.12) 50%, rgba(142, 232, 255, 0.06) 56%, transparent),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 18px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 38%);
+  --lg-inner-border: rgba(255, 255, 255, 0.045);
   padding: 14px 18px 10px;
   flex-shrink: 0;
+  border-width: 0 0 1px !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(31, 38, 43, 0.78), rgba(18, 23, 27, 0.68)),
+    linear-gradient(0deg, rgba(142, 232, 255, 0.045), transparent 34%) !important;
+  background-size: 18px 100%, auto, auto !important;
+  box-shadow:
+    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+    0 12px 30px rgba(0, 0, 0, 0.2) !important;
+}
+
+.glassControls {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 1.3fr) minmax(260px, 0.9fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.controlStation {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-color: var(--line-subtle) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 42%),
+    var(--surface-elevated) !important;
+}
+
+.stationLabel {
+  color: var(--text-muted);
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.targetStation {
+  gap: 6px;
 }
 
 .tabs {
   min-height: 40px;
 }
 
+.assetSubTabs {
+  min-height: 34px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent),
+    rgba(16, 20, 23, 0.76);
+}
+
+.assetSubTabs .MuiTab-root {
+  min-height: 28px;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+
+.assetSubTabs .Mui-selected {
+  background: linear-gradient(180deg, rgba(142, 232, 255, 0.24), rgba(142, 232, 255, 0.1));
+  box-shadow:
+    inset 0 0 0 1px rgba(142, 232, 255, 0.28),
+    0 4px 12px rgba(142, 232, 255, 0.08);
+}
+
 .countPanel {
   padding: 12px 14px 4px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(23, 27, 31, 0.86);
-  border-radius: 8px;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  background:
+    linear-gradient(90deg, rgba(142, 232, 255, 0.09) 0 2px, transparent 2px 100%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.055) 0 1px, transparent 1px 12px),
+    var(--museum-surface-solid) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.controls .MuiSlider-root {
+  color: var(--museum-primary);
+}
+
+.controls .MuiSlider-rail {
+  opacity: 1;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px 10px),
+    rgba(255, 255, 255, 0.11);
+}
+
+.controls .MuiSlider-track {
+  background: linear-gradient(90deg, rgba(142, 232, 255, 0.28), rgba(142, 232, 255, 0.72));
+}
+
+.controls .MuiSlider-thumb {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 0 0 6px rgba(142, 232, 255, 0.1) !important;
 }
 
 .gridScroll {
@@ -77,9 +228,124 @@ body {
   gap: 14px;
 }
 
+.emptyGallery {
+  grid-column: 1 / -1;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
 .promptCard {
-  background: rgba(23, 27, 31, 0.94) !important;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(246, 211, 101, 0.045), transparent 10%),
+    var(--museum-surface-solid) !important;
   border-color: rgba(255, 255, 255, 0.13) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(246, 211, 101, 0.12),
+    0 16px 36px rgba(0, 0, 0, 0.24) !important;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.promptCard::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 12px;
+  left: 12px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+  opacity: 0.45;
+}
+
+.promptCard:hover {
+  border-color: var(--museum-line-strong) !important;
+}
+
+.promptCard:focus-within {
+  border-color: rgba(246, 211, 101, 0.58) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(246, 211, 101, 0.34),
+    0 0 0 3px rgba(246, 211, 101, 0.16),
+    0 16px 36px rgba(0, 0, 0, 0.24) !important;
+}
+
+.promptCard.is-generating {
+  border-color: rgba(142, 232, 255, 0.42) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(246, 211, 101, 0.18),
+    0 0 0 1px rgba(142, 232, 255, 0.16),
+    0 16px 36px rgba(0, 0, 0, 0.24) !important;
+}
+
+.promptCard .MuiInputBase-root {
+  background: rgba(8, 10, 12, 0.44);
+}
+
+.promptEditor .MuiInputBase-root {
+  background: var(--surface-editor) !important;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+}
+
+.promptCardContent {
+  padding: 14px !important;
+}
+
+.promptLayout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.72fr) minmax(340px, 1.28fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.editorColumn,
+.comparisonWall {
+  min-width: 0;
+}
+
+.comparisonWall {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(142, 232, 255, 0.04), transparent 20%),
+    var(--surface-frame);
+}
+
+.comparisonHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cardProgress {
+  position: absolute !important;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px !important;
+  border-radius: 8px 8px 0 0;
+}
+
+.promptCard.is-generating::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -34%;
+  width: 34%;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.82), transparent);
+  animation: prompt-rim-sweep 1.45s ease-in-out infinite;
 }
 
 .refOption {
@@ -96,6 +362,38 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
+.referenceRail {
+  min-height: 58px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(9, 12, 14, 0.72);
+}
+
+.referenceThumb {
+  position: relative;
+  flex: 0 0 124px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 24px;
+  gap: 6px;
+  align-items: center;
+  padding: 5px;
+  border: 1px solid rgba(142, 232, 255, 0.18);
+  border-radius: 7px;
+  background: rgba(18, 23, 27, 0.9);
+}
+
+.referenceThumb img {
+  width: 46px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
 .candidateGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -104,35 +402,127 @@ body {
 }
 
 .candidate {
-  min-height: 130px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 8px;
+  --lg-shine:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.012)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.12), transparent 12%, transparent 88%, rgba(255, 255, 255, 0.09));
+  --lg-inner-border: rgba(255, 255, 255, 0.035);
+  min-height: 156px;
+  height: 100%;
   padding: 6px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   justify-content: center;
-  cursor: pointer;
-  background: #101417;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05), transparent 7%, transparent 93%, rgba(255, 255, 255, 0.035)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.014)),
+    rgba(16, 20, 23, 0.94) !important;
+  border-color: rgba(255, 255, 255, 0.13) !important;
+  contain: paint;
 }
 
-.candidate.selected {
-  border-color: #d7ff4f;
-  box-shadow: 0 0 0 1px rgba(215, 255, 79, 0.45);
+.candidate.is-interactive:hover {
+  transform: none !important;
+  border-color: rgba(255, 255, 255, 0.24) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 18px 34px rgba(0, 0, 0, 0.28) !important;
+}
+
+.candidate.is-selected {
+  border-color: var(--museum-primary) !important;
+  background:
+    linear-gradient(90deg, rgba(142, 232, 255, 0.18), transparent 10%, transparent 90%, rgba(142, 232, 255, 0.12)),
+    linear-gradient(180deg, rgba(142, 232, 255, 0.09), rgba(255, 255, 255, 0.02)),
+    rgba(16, 20, 23, 0.94) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 1px rgba(142, 232, 255, 0.48),
+    0 0 24px rgba(142, 232, 255, 0.16),
+    0 18px 34px rgba(0, 0, 0, 0.34) !important;
+}
+
+.candidate.lg-status-rim--error {
+  border-color: rgba(255, 112, 112, 0.58) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 112, 112, 0.2),
+    0 12px 28px rgba(0, 0, 0, 0.28) !important;
 }
 
 .candidate.existing {
-  opacity: 0.72;
+  color: rgba(255, 255, 255, 0.68);
+  border-color: rgba(255, 255, 255, 0.1) !important;
 }
 
 .candidate img {
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: 100%;
   object-fit: cover;
   border-radius: 5px;
+  transform: none !important;
+}
+
+.candidateMedia {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    rgba(8, 11, 13, 0.88);
+  background-size: 14px 14px;
+}
+
+.candidateMessage {
+  margin: 0 !important;
+  color: var(--text-muted);
+  font-weight: 800 !important;
+}
+
+.placeholderCandidate .candidateMedia {
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+}
+
+.candidate.is-adopted {
+  border-color: rgba(100, 233, 165, 0.54) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(100, 233, 165, 0.18),
+    0 0 20px rgba(100, 233, 165, 0.1),
+    0 14px 30px rgba(0, 0, 0, 0.28) !important;
+}
+
+.candidate > p:first-child {
+  display: -webkit-box;
+  min-height: 84px;
+  max-height: 84px;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  text-align: center;
+}
+
+.candidateLabel {
+  min-height: 18px;
+}
+
+.promptCard {
+  content-visibility: auto;
+  contain-intrinsic-size: 760px 560px;
 }
 
 .bulkFooter {
+  --lg-blur: 18px;
+  --lg-saturate: 135%;
+  --lg-shine:
+    linear-gradient(0deg, rgba(255, 255, 255, 0.18), transparent 38%),
+    linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.08) 48%, rgba(142, 232, 255, 0.14) 52%, transparent),
+    linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.24));
   flex-shrink: 0;
   min-height: 64px;
   padding: 10px 18px;
@@ -140,21 +530,60 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(14, 17, 19, 0.96);
+  border-width: 1px 0 0 !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(0deg, rgba(255, 255, 255, 0.09), transparent 48%),
+    linear-gradient(180deg, rgba(23, 27, 31, 0.82), rgba(10, 13, 15, 0.9)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 -18px 28px rgba(255, 255, 255, 0.055),
+    0 -18px 40px rgba(0, 0, 0, 0.34) !important;
+}
+
+.bulkFooter .insertAction {
+  box-shadow:
+    0 0 0 1px rgba(142, 232, 255, 0.36),
+    0 10px 26px rgba(142, 232, 255, 0.14) !important;
+}
+
+.bulkFooter .insertAction.Mui-disabled {
+  box-shadow: none !important;
 }
 
 .chatPane {
-  background: rgba(18, 21, 24, 0.98);
+  --lg-blur: 18px;
+  --lg-saturate: 132%;
+  --lg-tone: rgba(246, 211, 101, 0.92);
+  --lg-tone-soft: var(--museum-chat-soft);
+  --lg-tone-border: rgba(246, 211, 101, 0.36);
+  --lg-shine:
+    linear-gradient(90deg, rgba(246, 211, 101, 0.26), rgba(246, 211, 101, 0.08) 10%, transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.065), transparent 46%);
+  background:
+    linear-gradient(90deg, rgba(246, 211, 101, 0.11), rgba(246, 211, 101, 0.035) 13%, transparent 30%),
+    rgba(18, 21, 24, 0.88) !important;
+  border-width: 0 0 0 1px !important;
+  border-color: rgba(246, 211, 101, 0.24) !important;
+  border-radius: 0 !important;
+  box-shadow:
+    inset 1px 0 0 rgba(246, 211, 101, 0.28),
+    -16px 0 40px rgba(0, 0, 0, 0.26) !important;
 }
 
 .chatHead {
+  --lg-shine:
+    linear-gradient(90deg, rgba(246, 211, 101, 0.3), rgba(246, 211, 101, 0.08) 18%, transparent 46%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 44%);
   padding: 14px;
   flex-shrink: 0;
+  border-width: 0 0 1px !important;
+  border-radius: 0 !important;
+  border-color: rgba(246, 211, 101, 0.22) !important;
 }
 
 .chatMark {
-  background: #82d8ff !important;
+  background: #f6d365 !important;
   color: #0e1113 !important;
 }
 
@@ -177,18 +606,146 @@ body {
 
 .bubble.user {
   align-self: flex-end;
-  background: rgba(215, 255, 79, 0.12);
+  background: rgba(31, 69, 78, 0.82);
+  border-color: rgba(142, 232, 255, 0.22);
 }
 
 .bubble.assistant {
   align-self: flex-start;
-  background: rgba(255, 255, 255, 0.055);
+  background: rgba(22, 23, 21, 0.94);
+  border-color: rgba(246, 211, 101, 0.24);
 }
 
 .composer {
   flex-shrink: 0;
   padding: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(246, 211, 101, 0.055), transparent),
+    rgba(13, 16, 18, 0.36);
+}
+
+.chatStatus {
+  flex-shrink: 0;
+  padding: 10px 12px;
+}
+
+.chatItemContext {
+  display: block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approvalBlock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(246, 211, 101, 0.16);
+  background: rgba(246, 211, 101, 0.08);
+}
+
+.chatHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chatClose,
+.mobileChatButton {
+  display: none !important;
+}
+
+.chatBackdrop {
+  display: none;
+}
+
+@keyframes prompt-rim-sweep {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(390%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .promptCard.is-generating::after {
+    animation: none;
+    left: 12px;
+    width: calc(100% - 24px);
+    opacity: 0.42;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glassTopbar,
+  .controls,
+  .bulkFooter,
+  .chatPane,
+  .chatHead,
+  .promptCard,
+  .comparisonWall,
+  .referenceRail,
+  .candidate,
+  .bubble,
+  .composer,
+  .promptCard .MuiInputBase-root {
+    background: #171b1f !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .controls,
+  .bulkFooter,
+  .chatPane,
+  .promptCard,
+  .candidate {
+    box-shadow: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  body,
+  .shell,
+  .workspace,
+  .topbar,
+  .controls,
+  .promptCard,
+  .comparisonWall,
+  .referenceRail,
+  .referenceThumb,
+  .candidate,
+  .bulkFooter,
+  .chatPane,
+  .chatHead,
+  .bubble,
+  .composer {
+    color: CanvasText !important;
+    border-color: ButtonBorder !important;
+    background: Canvas !important;
+    box-shadow: none !important;
+  }
+
+  .mark,
+  .chatMark,
+  .candidate.is-selected,
+  .candidate.is-adopted,
+  .candidate.lg-status-rim--error {
+    color: HighlightText !important;
+    border-color: Highlight !important;
+    background: Highlight !important;
+  }
+
+  .candidateMessage,
+  .stationLabel {
+    color: CanvasText !important;
+  }
 }
 
 @media (max-width: 1100px) {
@@ -197,11 +754,64 @@ body {
   }
 
   .chatPane {
-    display: none;
+    position: fixed !important;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    height: min(78vh, 680px);
+    display: flex;
+    border-width: 1px 0 0 !important;
+    transform: translateY(105%);
+    transition: transform 180ms ease;
+  }
+
+  .chatPane.is-open {
+    transform: translateY(0);
+  }
+
+  .chatBackdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    display: block;
+    background: rgba(0, 0, 0, 0.48);
+  }
+
+  .chatClose,
+  .mobileChatButton {
+    display: inline-flex !important;
   }
 
   .promptGrid {
     grid-template-columns: 1fr;
   }
+
+  .glassControls {
+    grid-template-columns: 1fr;
+  }
 }
 
+@media (max-width: 700px) {
+  .topbar {
+    height: auto;
+    min-height: 72px;
+  }
+
+  .promptLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .candidateGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .bulkFooter {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bulkFooter .MuiStack-root {
+    flex-wrap: wrap;
+  }
+}

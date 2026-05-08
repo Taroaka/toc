@@ -22,6 +22,7 @@ REQUEST_FILE_BY_KIND = {
 class ImageRequestItem:
     id: str
     kind: str
+    asset_type: str | None
     tool: str | None
     output: str | None
     prompt: str
@@ -149,6 +150,7 @@ def parse_request_markdown(text: str, *, kind: str, run_dir: Path) -> list[Image
             ImageRequestItem(
                 id=item_id,
                 kind=kind,
+                asset_type=str(metadata.get("asset_type") or "").strip() or None,
                 tool=str(metadata.get("tool") or "").strip() or None,
                 output=output,
                 prompt=prompt,
@@ -263,6 +265,7 @@ def backup_existing(target: Path, run_dir: Path) -> Path | None:
 def insert_candidate(run_dir: Path, candidate: Path, output: str) -> dict[str, str | None]:
     run_dir = run_dir.resolve()
     require_candidate_path(run_dir, candidate)
+    validate_image_bytes(candidate)
     require_assets_output(run_dir, output)
     target = resolve_run_relative(run_dir, output)
     backup = backup_existing(target, run_dir)
@@ -292,6 +295,7 @@ def item_to_api(item: ImageRequestItem) -> dict[str, Any]:
     return {
         "id": item.id,
         "kind": item.kind,
+        "assetType": item.asset_type,
         "tool": item.tool,
         "output": item.output,
         "prompt": item.prompt,
