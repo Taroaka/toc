@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Migrate existing runs to the audio-first p-slot contract."""
+"""Migrate existing runs to the asset/image-first p-slot contract.
+
+The filename is kept for compatibility with older local workflows that call
+this migration script directly.
+"""
 
 from __future__ import annotations
 
@@ -17,32 +21,28 @@ from toc.harness import append_state_snapshot, parse_state_file, sync_run_status
 
 
 SLOT_REMAP = {
-    "p510": "p610",
-    "p520": "p620",
-    "p530": "p630",
-    "p540": "p640",
-    "p550": "p650",
-    "p560": "p660",
-    "p570": "p670",
-    "p580": "p680",
-    "p610": "p710",
-    "p620": "p720",
-    "p630": "p730",
-    "p640": "p740",
-    "p650": "p750",
-    "p660": "p760",
-    "p670": "p770",
-    "p710": "p810",
-    "p720": "p820",
-    "p730": "p830",
-    "p740": "p840",
-    "p750": "p850",
-    "p810": "p520",
-    "p820": "p530",
-    "p830": "p540",
-    "p840": "p550",
-    "p850": "p560",
-    "p860": "p570",
+    "p510": "p710",
+    "p520": "p720",
+    "p530": "p730",
+    "p540": "p740",
+    "p550": "p740",
+    "p560": "p740",
+    "p570": "p750",
+    "p610": "p510",
+    "p620": "p520",
+    "p630": "p530",
+    "p640": "p540",
+    "p650": "p550",
+    "p660": "p560",
+    "p670": "p570",
+    "p680": "p570",
+    "p710": "p610",
+    "p720": "p620",
+    "p730": "p630",
+    "p740": "p640",
+    "p750": "p650",
+    "p760": "p660",
+    "p770": "p670",
 }
 
 STATE_PREFIX_REMAP = {
@@ -140,9 +140,9 @@ def migrate_run(run_dir: Path, *, refresh_grounding: bool) -> dict[str, bool]:
     state = parse_state_file(run_dir / "state.txt")
     updates = _migrate_state_keys(state, run_dir)
     if manifest_changed:
-        updates["migration.audio_first.manifest_phase"] = "production"
+        updates["migration.asset_image_first.manifest_phase"] = "production"
     if renamed:
-        updates["migration.audio_first.grounding_files_renamed"] = "true"
+        updates["migration.asset_image_first.grounding_files_renamed"] = "true"
     if updates:
         append_state_snapshot(run_dir / "state.txt", updates)
     else:
@@ -158,7 +158,7 @@ def migrate_run(run_dir: Path, *, refresh_grounding: bool) -> dict[str, bool]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Migrate runs to the audio-first p-slot contract.")
+    parser = argparse.ArgumentParser(description="Migrate runs to the asset/image-first p-slot contract.")
     parser.add_argument("--run-dir", default=None, help="Single run directory to migrate.")
     parser.add_argument("--output-root", default="output", help="Output root to scan when --run-dir is omitted.")
     parser.add_argument("--refresh-grounding", action="store_true", help="Regenerate narration/asset/scene/video grounding after migration.")

@@ -66,6 +66,12 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 ### 1.1 `assets.object_bible[]`
 
+<!-- image-gen-setting:item:start -->
+アイテムや舞台装置は `assets.object_bible` を正本にする。
+silhouette、材質、装飾、縮尺感、工芸の痕跡、物語上の役割を映像だけで伝える。
+看板、刻印、銘板、字幕、説明的 UI に頼らず、形、光、構造、ショー性で理解させる。
+<!-- image-gen-setting:item:end -->
+
 - `object_id: string`（例: `ryugu_palace`, `tamatebako`）
 - `kind: "setpiece"|"artifact"|"phenomenon"`（最小3種）
 - `reference_images: [string, ...]`（必須・非空）
@@ -191,6 +197,12 @@ assets:
   - `human_review_ok` は evaluator finding の例外許容であり、asset bible 改稿要求の正本には使わない
 
 ### 5.1 location_bible
+
+<!-- image-gen-setting:location:start -->
+場所は `assets.location_bible` を正本にする。
+spatial identity、主要構造、光環境、場所固有の空気を固定し、同じ場所の状態差分か、別エリアとして扱うべきかを明確にする。
+別エリアから他エリアを見せる場合は、派生ではなく `reference_usage.mode=background_glimpse` などの見え関係として扱う。
+<!-- image-gen-setting:location:end -->
 
 場所そのものを再利用する修正要求は `object_bible` へ押し込まず、`assets.location_bible[]` を使う。
 

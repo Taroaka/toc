@@ -38,7 +38,7 @@ class TestMigrateAudioFirstSlotContract(unittest.TestCase):
                 "\n".join(
                     [
                         "topic=桃太郎",
-                        "slot.p830.status=done",
+                        "slot.p530.status=done",
                         "stage.image_prompt.grounding.status=ready",
                         "stage.image_prompt.grounding.report=logs/grounding/image_prompt.json",
                         "---",
@@ -64,7 +64,7 @@ class TestMigrateAudioFirstSlotContract(unittest.TestCase):
             self.assertIn("manifest_phase: production", manifest)
 
             state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(state.get("slot.p540.status"), "done")
+            self.assertEqual(state.get("slot.p730.status"), "done")
             self.assertEqual(state.get("stage.scene_implementation.grounding.status"), "ready")
             self.assertEqual(
                 state.get("stage.scene_implementation.grounding.report"),
@@ -99,8 +99,8 @@ class TestMigrateAudioFirstSlotContract(unittest.TestCase):
                 "\n".join(
                     [
                         "topic=かぐや姫",
-                        "slot.p830.status=done",
-                        "slot.p540.status=failed",
+                        "slot.p530.status=done",
+                        "slot.p730.status=failed",
                         "stage.image_prompt.grounding.status=ready",
                         "stage.scene_implementation.grounding.status=missing_inputs",
                         "---",
@@ -125,7 +125,7 @@ class TestMigrateAudioFirstSlotContract(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(state.get("slot.p540.status"), "failed")
+            self.assertEqual(state.get("slot.p730.status"), "failed")
             self.assertEqual(state.get("stage.scene_implementation.grounding.status"), "missing_inputs")
             self.assertTrue((grounding_dir / "image_prompt.json").exists())
             self.assertTrue((grounding_dir / "scene_implementation.json").exists())

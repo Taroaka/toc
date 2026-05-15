@@ -4,7 +4,7 @@ visual_value_metadata:
   source_research: "REPLACE_ME_RUN_DIR/research.md"
   source_story: "REPLACE_ME_RUN_DIR/story.md"
   created_at: "REPLACE_ME_ISO8601_TIMESTAMP"
-  purpose: "p300 visual planning source of truth: define visual identity, scene visual value, anchor/reference strategy, asset bible candidates, regeneration risks, and p400/p600/p700 handoff"
+  purpose: "p300 visual planning source of truth: define visual identity, scene visual value, anchor/reference strategy, asset bible candidates, regeneration risks, and p400/p500/p600/p700 handoff"
   authoring_rules:
     - "REPLACE_ME_* values are unfinished placeholders and must not survive into visual_value.md."
     - "EXAMPLE_ONLY_* values show shape only; replace or delete them before treating the file as stage output."
@@ -66,7 +66,7 @@ asset_bible_candidates:
         - "EXAMPLE_ONLY_refstrip"
       used_by_selectors:
         - "REPLACE_ME_sceneXX_cutYY"
-      p600_handoff: "REPLACE_ME: asset_plan.md で設計・review すべきこと"
+      p500_handoff: "REPLACE_ME: asset_plan.md で設計・review すべきこと"
   objects:
     - asset_id: "REPLACE_ME_object_asset_id"
       story_purpose: "REPLACE_ME: 反復する小道具 / setpiece の役割"
@@ -77,7 +77,7 @@ asset_bible_candidates:
         - "EXAMPLE_ONLY_detail"
       used_by_selectors:
         - "REPLACE_ME_sceneXX_cutYY"
-      p600_handoff: "REPLACE_ME: object_bible / reference image として固定すべき理由"
+      p500_handoff: "REPLACE_ME: object_bible / reference image として固定すべき理由"
   locations:
     - asset_id: "REPLACE_ME_location_asset_id"
       story_purpose: "REPLACE_ME: 反復する場所 / 状態差分の役割"
@@ -86,14 +86,14 @@ asset_bible_candidates:
       relation_to_other_locations: "REPLACE_ME_ONE_OF_independent_same_place_variant_background_glimpse_foreground_anchor"
       used_by_selectors:
         - "REPLACE_ME_sceneXX_cutYY"
-      p600_handoff: "REPLACE_ME: location_bible / reference_usage へ渡す判断"
+      p500_handoff: "REPLACE_ME: location_bible / reference_usage へ渡す判断"
   reusable_stills:
     - asset_id: "REPLACE_ME_reusable_still_asset_id"
       source_selector: "REPLACE_ME_sceneXX_cutYY"
       story_purpose: "REPLACE_ME: 後続 cut の continuity anchor としての役割"
       fixed_identity:
         - "REPLACE_ME: same camera、同じ状態差分、同じ構図など"
-      p600_handoff: "REPLACE_ME: reusable still として asset_plan.md に載せる理由"
+      p500_handoff: "REPLACE_ME: reusable still として asset_plan.md に載せる理由"
 
 reference_strategy:
   required_reference_assets:
@@ -116,25 +116,30 @@ regeneration_risks:
     affected_selectors:
       - "REPLACE_ME_sceneXX_cutYY"
     failure_mode: "REPLACE_ME: 後続生成で起きそうなブレや再生成原因"
-    prevention_rule: "REPLACE_ME: p600/p700 に渡す予防指示"
-    owner_stage: "REPLACE_ME_ONE_OF_p400_p600_p700"
+    prevention_rule: "REPLACE_ME: p500/p600/p700 に渡す予防指示"
+    owner_stage: "REPLACE_ME_ONE_OF_p400_p500_p600_p700"
 
-handoff_to_p400_p600_p700:
+handoff_to_p400_p500_p600_p700:
   p400_script:
     must_preserve:
       - "scene/cut skeleton に残す visual value"
     must_not_do:
       - "p300 で未承認の新規主筋を追加しない"
-  p600_asset:
+  p500_asset:
     must_create_or_review:
       - "asset_bible_candidates から asset_plan.md へ渡す候補"
     review_focus:
       - "visual identity と continuity anchor として十分か"
-  p700_scene_implementation:
+  p600_scene_implementation:
     must_materialize:
       - "anchor_cut_candidates と reference_strategy を video_manifest.md に反映する"
     review_focus:
       - "prompt / references / still_image_plan が p300 の意図と矛盾しないか"
+  p700_narration:
+    must_preserve:
+      - "scene image と矛盾しない narration の視点・距離感"
+    review_focus:
+      - "visual を説明しすぎず、音声で補うべき意味だけを足しているか"
 
 value_parts:
   - part_id: "EXAMPLE_ONLY_midroll_visual_payoff_01"

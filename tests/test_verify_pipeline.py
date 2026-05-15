@@ -164,29 +164,32 @@ def _good_visual_value_yaml(topic: str = "桃太郎", scene_count: int = 20) -> 
             "      fixed_identity: [\"年齢感と衣装\"]",
             "      candidate_reference_views: [\"front\"]",
             "      used_by_selectors: [\"scene01_cut01\"]",
-            "      p600_handoff: \"人物 bible で固定する\"",
+            "      p500_handoff: \"人物 bible で固定する\"",
             "reference_strategy:",
             "  required_reference_assets:",
             "    - asset_id: \"protagonist\"",
             "      reference_type: \"character_reference\"",
-            "      required_before_stage: \"p600\"",
+            "      required_before_stage: \"p500\"",
             "      reason: \"人物同一性を固定するため\"",
             "regeneration_risks:",
             "  - risk_id: \"risk_01\"",
             "    affected_selectors: [\"scene01_cut01\"]",
             "    failure_mode: \"人物の見た目がぶれる\"",
             "    prevention_rule: \"参照を固定する\"",
-            "    owner_stage: \"p600\"",
-            "handoff_to_p400_p600_p700:",
+            "    owner_stage: \"p500\"",
+            "handoff_to_p400_p500_p600_p700:",
             "  p400_script:",
             "    must_preserve: [\"視覚価値\"]",
             "    must_not_do: [\"未承認の新規主筋を追加しない\"]",
-            "  p600_asset:",
+            "  p500_asset:",
             "    must_create_or_review: [\"protagonist\"]",
             "    review_focus: [\"同一性\"]",
-            "  p700_scene_implementation:",
+            "  p600_scene_implementation:",
             "    must_materialize: [\"anchor_cut_candidates\"]",
             "    review_focus: [\"p300 の意図と矛盾しない\"]",
+            "  p700_narration:",
+            "    must_preserve: [\"視覚と矛盾しない語り\"]",
+            "    review_focus: [\"説明しすぎない\"]",
             "```",
             "",
         ]
@@ -222,7 +225,7 @@ def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
             "review.duration_fit.status": "passed",
         },
     )
-    for stage in ["research", "story", "script", "image_prompt", "video_generation"]:
+    for stage in ["research", "story", "script", "asset", "scene_implementation", "narration", "video_generation"]:
         result = _run_grounding(run_dir, stage, flow=flow)
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
@@ -233,6 +236,16 @@ def _resolve_ready_p300_grounding(run_dir: Path, *, flow: str) -> None:
         result = _run_grounding(run_dir, stage, flow=flow)
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
+
+
+def _write_downstream_generation_artifacts(run_dir: Path) -> None:
+    (run_dir / "asset_plan.md").write_text("# Asset Plan\n\nasset plan body\n", encoding="utf-8")
+    (run_dir / "asset_generation_requests.md").write_text("# Asset Generation Requests\n\nrequest body\n", encoding="utf-8")
+    (run_dir / "image_generation_requests.md").write_text("# Image Generation Requests\n\nrequest body\n", encoding="utf-8")
+    (run_dir / "narration_text_review.md").write_text("# Narration Text Review\n\napproved\n", encoding="utf-8")
+    (run_dir / "asset_generation_manifest.md").write_text("generated: true\n", encoding="utf-8")
+    (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
+    (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
 
 
 class TestVerifyPipeline(unittest.TestCase):
@@ -392,6 +405,15 @@ class TestVerifyPipeline(unittest.TestCase):
     def test_verify_pipeline_stage_targets_p400_and_default_include_visual_value(self) -> None:
         self.assertIn("visual_value", VERIFY_MODULE.STAGE_TARGETS["p450"])
         self.assertIn("visual_value", VERIFY_MODULE.STAGE_TARGETS[VERIFY_MODULE.normalize_stage_target(None)])
+
+    def test_verify_pipeline_stage_targets_follow_downstream_order(self) -> None:
+        self.assertIn("asset", VERIFY_MODULE.STAGE_TARGETS["p570"])
+        self.assertNotIn("image", VERIFY_MODULE.STAGE_TARGETS["p570"])
+        self.assertIn("image", VERIFY_MODULE.STAGE_TARGETS["p680"])
+        self.assertNotIn("narration", VERIFY_MODULE.STAGE_TARGETS["p680"])
+        self.assertIn("narration", VERIFY_MODULE.STAGE_TARGETS["p750"])
+        self.assertNotIn("video", VERIFY_MODULE.STAGE_TARGETS["p750"])
+        self.assertIn("video", VERIFY_MODULE.STAGE_TARGETS["p930"])
 
     def test_verify_pipeline_p300_accepts_major_scene_visual_value_coverage(self) -> None:
         import tempfile
@@ -683,6 +705,9 @@ class TestVerifyPipeline(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _write_downstream_generation_artifacts(run_dir)
+            (run_dir / "assets" / "scenes" / "scene10.png").write_bytes(b"image")
+            (run_dir / "assets" / "audio" / "scene10.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_p300_grounding(run_dir, flow="immersive")
             _resolve_ready_grounding(run_dir, flow="immersive")
@@ -858,6 +883,9 @@ class TestVerifyPipeline(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            _write_downstream_generation_artifacts(run_dir)
+            (run_dir / "assets" / "scenes" / "scene40_1.png").write_bytes(b"image")
+            (run_dir / "assets" / "audio" / "scene40_1.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_p300_grounding(run_dir, flow="immersive")
             _resolve_ready_grounding(run_dir, flow="immersive")
@@ -991,6 +1019,9 @@ class TestVerifyPipeline(unittest.TestCase):
             (run_dir / "story.md").write_text(_good_story_yaml("桃太郎"), encoding="utf-8")
             (run_dir / "script.md").write_text("# Script\n\n十分な長さの script 本文です。十分な長さの script 本文です。\n", encoding="utf-8")
             (run_dir / "video_manifest.md").write_text("```yaml\nvideo_metadata:\n  topic: \"桃太郎\"\n  experience: \"cinematic_story\"\nscenes:\n  - scene_id: 1\n    cuts:\n      - cut_id: 1\n        cut_role: \"main\"\n        image_generation:\n          tool: \"google_nanobanana_2\"\n          character_ids: []\n          object_ids: []\n          prompt: |\n            画面内テキストなし。\n          output: \"assets/scenes/scene01.png\"\n        video_generation:\n          tool: \"kling_3_0\"\n          duration_seconds: 5\n          output: \"assets/scenes/scene01.mp4\"\n        audio:\n          narration:\n            text: \"桃太郎が歩く。\"\n            tool: \"elevenlabs\"\n            output: \"assets/audio/scene01.mp3\"\n```\n", encoding="utf-8")
+            _write_downstream_generation_artifacts(run_dir)
+            (run_dir / "assets" / "scenes" / "scene01.png").write_bytes(b"image")
+            (run_dir / "assets" / "audio" / "scene01.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_grounding(run_dir, flow="immersive")
             (run_dir / "logs" / "grounding" / "script.readset.json").unlink()

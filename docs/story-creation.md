@@ -810,17 +810,20 @@ regeneration_risks:
     affected_selectors: ["sceneXX_cutYY"]
     failure_mode: "string"
     prevention_rule: "string"
-    owner_stage: "p400|p600|p700"
+    owner_stage: "p400|p500|p600|p700"
 
-handoff_to_p400_p600_p700:
+handoff_to_p400_p500_p600_p700:
   p400_script:
     must_preserve: ["string"]
     must_not_do: ["string"]
-  p600_asset:
+  p500_asset:
     must_create_or_review: ["string"]
     review_focus: ["string"]
-  p700_scene_implementation:
+  p600_scene_implementation:
     must_materialize: ["string"]
+    review_focus: ["string"]
+  p700_narration:
+    must_preserve: ["string"]
     review_focus: ["string"]
 
 value_parts:

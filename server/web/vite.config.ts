@@ -6,7 +6,7 @@ export default defineConfig({
   base: '/image_gen/',
   server: {
     proxy: {
-      '/api': process.env.VITE_API_PROXY_TARGET ?? 'http://127.0.0.1:13000',
+      '/api': process.env.VITE_API_PROXY_TARGET ?? 'http://127.0.0.1:8000',
     },
   },
 });

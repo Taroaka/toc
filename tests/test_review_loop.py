@@ -36,10 +36,10 @@ class TestReviewLoop(unittest.TestCase):
             "p230",
             "p320",
             "p430",
-            "p520",
+            "p540",
+            "p630",
             "p640",
-            "p730",
-            "p740",
+            "p720",
             "p820",
             "p850",
             "p930",
@@ -65,7 +65,7 @@ class TestReviewLoop(unittest.TestCase):
         self.assertEqual(updates["eval.story.loop.current_round"], "1")
         self.assertEqual(updates["eval.story.loop.max_rounds"], "5")
         self.assertEqual(updates["eval.story.loop.final_report"], "story_review.md")
-        self.assertEqual(stage_for_slot("p740"), "scene_implementation_judgment")
+        self.assertEqual(stage_for_slot("p640"), "scene_implementation_judgment")
         self.assertEqual(stage_for_slot("850"), "video_generation_review")
 
     def test_aggregated_review_requires_five_critics(self) -> None:
@@ -132,8 +132,8 @@ class TestReviewLoop(unittest.TestCase):
     def test_paired_review_surfaces_have_distinct_loop_artifacts(self) -> None:
         self.assertEqual(critic_relpath("scene_implementation_hard", 1, 1).as_posix(), "logs/eval/scene_implementation_hard/round_01/critic_1.md")
         self.assertEqual(critic_relpath("scene_implementation_judgment", 1, 1).as_posix(), "logs/eval/scene_implementation_judgment/round_01/critic_1.md")
-        self.assertEqual(classify_run_file("logs/eval/scene_implementation_hard/round_01/aggregated_review.md").slot, "p730")
-        self.assertEqual(classify_run_file("logs/eval/scene_implementation_judgment/round_01/aggregated_review.md").slot, "p740")
+        self.assertEqual(classify_run_file("logs/eval/scene_implementation_hard/round_01/aggregated_review.md").slot, "p630")
+        self.assertEqual(classify_run_file("logs/eval/scene_implementation_judgment/round_01/aggregated_review.md").slot, "p640")
         self.assertEqual(classify_run_file("logs/eval/video_generation_motion/round_01/aggregated_review.md").slot, "p820")
         self.assertEqual(classify_run_file("logs/eval/video_generation_review/round_01/aggregated_review.md").slot, "p850")
 

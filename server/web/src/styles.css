@@ -16,10 +16,15 @@ body {
   --museum-surface-solid: rgba(16, 20, 23, 0.96);
   --museum-line: var(--lg-border);
   --museum-line-strong: var(--lg-border-strong);
-  --museum-primary: var(--lg-glass-cyan);
-  --museum-primary-soft: rgba(142, 232, 255, 0.16);
-  --museum-chat: var(--lg-museum-amber);
-  --museum-chat-soft: rgba(246, 211, 101, 0.14);
+  --museum-primary: var(--lg-glass-orange);
+  --museum-primary-soft: rgba(255, 122, 26, 0.16);
+  --museum-chat: color-mix(in srgb, var(--lg-museum-amber) 72%, var(--lg-legend-orange) 28%);
+  --museum-chat-soft: rgba(255, 151, 43, 0.14);
+  --legend-gold: rgba(255, 224, 138, 0.96);
+  --legend-amber: rgba(255, 190, 74, 0.82);
+  --legend-orange: rgba(255, 122, 26, 0.72);
+  --legend-orange-soft: rgba(255, 122, 26, 0.12);
+  --legend-glass-line: rgba(255, 190, 74, 0.34);
   --surface-editor: #111619;
   --surface-frame: #12171a;
   --surface-elevated: #171d21;
@@ -33,12 +38,12 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 390px;
   background:
-    radial-gradient(circle at 12% -10%, rgba(246, 211, 101, 0.09), transparent 28%),
-    linear-gradient(90deg, rgba(142, 232, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    radial-gradient(circle at 12% -10%, rgba(255, 224, 138, 0.13), transparent 28%),
+    radial-gradient(circle at 72% 0%, rgba(255, 122, 26, 0.1), transparent 27%),
+    radial-gradient(circle at 96% 74%, rgba(255, 179, 71, 0.06), transparent 31%),
+    linear-gradient(180deg, rgba(255, 245, 214, 0.026), transparent 34%),
     #0e1113;
-  background-size: auto, 28px 28px, 28px 28px, auto;
-  background-repeat: no-repeat, repeat, repeat, no-repeat;
+  background-repeat: no-repeat;
 }
 
 .workspace,
@@ -62,20 +67,26 @@ body {
   flex-shrink: 0;
   border-radius: 0 !important;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.022) 42%, rgba(0, 0, 0, 0.15)),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 24%, transparent 76%, rgba(255, 255, 255, 0.025)),
-    rgba(18, 23, 27, 0.68) !important;
-  -webkit-backdrop-filter: blur(14px) saturate(128%);
-  backdrop-filter: blur(14px) saturate(128%);
+    radial-gradient(120% 160% at 14% -40%, rgba(255, 245, 214, 0.16), transparent 34%),
+    radial-gradient(80% 150% at 72% -28%, rgba(255, 122, 26, 0.12), transparent 38%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.018) 48%, rgba(0, 0, 0, 0.16)),
+    linear-gradient(90deg, rgba(255, 179, 71, 0.055), transparent 28%, transparent 74%, rgba(255, 122, 26, 0.06)),
+    rgba(18, 23, 27, 0.86) !important;
+  -webkit-backdrop-filter: blur(10px) saturate(118%) brightness(1.02);
+  backdrop-filter: blur(10px) saturate(118%) brightness(1.02);
 }
 
 .glassTopbar {
   border-width: 0 0 1px !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
   box-shadow:
-    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 10px 30px rgba(0, 0, 0, 0.22) !important;
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 12px 0 22px rgba(255, 224, 138, 0.034),
+    inset -12px 0 24px rgba(255, 122, 26, 0.05),
+    inset -10px 0 20px rgba(0, 0, 0, 0.12),
+    0 10px 26px rgba(0, 0, 0, 0.22),
+    0 0 34px rgba(255, 122, 26, 0.055) !important;
 }
 
 .glassTopbar::after {
@@ -86,8 +97,8 @@ body {
   left: 18px;
   height: 1px;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.34), transparent);
-  opacity: 0.48;
+  background: linear-gradient(90deg, transparent, rgba(255, 224, 138, 0.46), rgba(255, 122, 26, 0.28), transparent);
+  opacity: 0.62;
 }
 
 .glassTopbar::before {
@@ -102,31 +113,121 @@ body {
   opacity: 0.5;
 }
 
+.topbarTitleBlock {
+  min-width: 0;
+}
+
+.topbarActions {
+  min-width: 0;
+}
+
+.topbarRunSelect {
+  width: min(34vw, 360px);
+  min-width: 240px !important;
+}
+
+.topbarRunSelect .MuiInputBase-root {
+  height: 40px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent),
+    rgba(9, 12, 14, 0.62);
+}
+
 .mark {
-  background: #8ee8ff !important;
-  color: #0e1113 !important;
+  background:
+    radial-gradient(circle at 28% 18%, rgba(255, 245, 214, 0.42), transparent 34%),
+    radial-gradient(circle at 82% 88%, rgba(255, 122, 26, 0.28), transparent 44%),
+    linear-gradient(145deg, rgba(255, 224, 138, 0.28), rgba(255, 122, 26, 0.14)),
+    rgba(18, 14, 10, 0.74) !important;
+  color: rgba(255, 224, 138, 0.98) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.22),
+    0 0 18px rgba(255, 179, 71, 0.24),
+    0 0 32px rgba(255, 122, 26, 0.12);
+}
+
+.progressMiniChip {
+  height: 20px !important;
+}
+
+.MuiChip-colorPrimary {
+  color: rgba(255, 245, 214, 0.94) !important;
+  border: 1px solid var(--legend-glass-line) !important;
+  background:
+    radial-gradient(120% 140% at 18% 0%, rgba(255, 245, 214, 0.18), transparent 34%),
+    linear-gradient(135deg, rgba(255, 224, 138, 0.16), rgba(255, 179, 71, 0.18) 38%, rgba(255, 122, 26, 0.13)),
+    rgba(22, 17, 12, 0.42) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.16),
+    0 0 18px rgba(255, 179, 71, 0.12),
+    0 0 26px rgba(255, 122, 26, 0.08);
+}
+
+.MuiButton-containedPrimary {
+  color: rgba(255, 232, 170, 0.96) !important;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 190, 74, 0.48) !important;
+  background:
+    radial-gradient(130% 120% at 18% 0%, rgba(255, 245, 214, 0.2), transparent 36%),
+    radial-gradient(120% 130% at 92% 100%, rgba(255, 122, 26, 0.16), transparent 42%),
+    linear-gradient(135deg, rgba(255, 224, 138, 0.23), rgba(255, 179, 71, 0.16) 44%, rgba(255, 122, 26, 0.12)),
+    rgba(21, 16, 11, 0.74) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.2),
+    0 0 0 1px rgba(255, 224, 138, 0.16),
+    0 12px 28px rgba(255, 139, 44, 0.13),
+    0 0 34px rgba(255, 122, 26, 0.11) !important;
+}
+
+.MuiButton-containedPrimary:hover {
+  background:
+    radial-gradient(130% 120% at 18% 0%, rgba(255, 245, 214, 0.26), transparent 36%),
+    radial-gradient(120% 130% at 92% 100%, rgba(255, 122, 26, 0.21), transparent 42%),
+    linear-gradient(135deg, rgba(255, 224, 138, 0.3), rgba(255, 179, 71, 0.2) 44%, rgba(255, 122, 26, 0.16)),
+    rgba(24, 18, 12, 0.78) !important;
+}
+
+.MuiButton-outlinedPrimary,
+.MuiIconButton-colorPrimary {
+  color: rgba(255, 205, 102, 0.96) !important;
+  filter: drop-shadow(0 0 7px rgba(255, 122, 26, 0.12));
+}
+
+.MuiLinearProgress-root {
+  background-color: rgba(255, 209, 102, 0.1) !important;
+}
+
+.MuiLinearProgress-bar {
+  background:
+    linear-gradient(90deg, rgba(255, 122, 26, 0.72), rgba(255, 190, 74, 0.9), rgba(255, 245, 214, 0.74)) !important;
 }
 
 .controls {
-  --lg-blur: 14px;
-  --lg-saturate: 130%;
+  --lg-blur: 10px;
+  --lg-saturate: 118%;
   --lg-shine:
-    linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.06) 44%, rgba(142, 232, 255, 0.12) 50%, rgba(142, 232, 255, 0.06) 56%, transparent),
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 18px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 38%);
-  --lg-inner-border: rgba(255, 255, 255, 0.045);
+    radial-gradient(120% 140% at 12% -40%, rgba(255, 245, 214, 0.13), transparent 34%),
+    radial-gradient(80% 130% at 92% 0%, rgba(255, 122, 26, 0.1), transparent 44%),
+    linear-gradient(112deg, transparent 16%, rgba(255, 224, 138, 0.075) 38%, rgba(255, 122, 26, 0.06) 50%, transparent 72%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 42%);
+  --lg-inner-border: rgba(255, 255, 255, 0.09);
   padding: 14px 18px 10px;
   flex-shrink: 0;
   border-width: 0 0 1px !important;
   border-radius: 0 !important;
   background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(31, 38, 43, 0.78), rgba(18, 23, 27, 0.68)),
-    linear-gradient(0deg, rgba(142, 232, 255, 0.045), transparent 34%) !important;
-  background-size: 18px 100%, auto, auto !important;
+    radial-gradient(120% 120% at 0% -30%, rgba(255, 245, 214, 0.07), transparent 38%),
+    radial-gradient(90% 150% at 100% -22%, rgba(255, 122, 26, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(34, 42, 48, 0.88), rgba(16, 20, 23, 0.9)),
+    linear-gradient(0deg, rgba(255, 122, 26, 0.052), transparent 34%) !important;
   box-shadow:
-    inset 0 -1px 0 rgba(255, 255, 255, 0.09),
-    0 12px 30px rgba(0, 0, 0, 0.2) !important;
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 10px 28px rgba(0, 0, 0, 0.22) !important;
 }
 
 .glassControls {
@@ -143,6 +244,7 @@ body {
   gap: 8px;
   border-color: var(--line-subtle) !important;
   background:
+    radial-gradient(120% 120% at 92% 0%, rgba(255, 122, 26, 0.055), transparent 46%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 42%),
     var(--surface-elevated) !important;
 }
@@ -155,6 +257,10 @@ body {
 
 .targetStation {
   gap: 6px;
+}
+
+.repoStation {
+  justify-content: center;
 }
 
 .tabs {
@@ -178,41 +284,125 @@ body {
 }
 
 .assetSubTabs .Mui-selected {
-  background: linear-gradient(180deg, rgba(142, 232, 255, 0.24), rgba(142, 232, 255, 0.1));
+  background:
+    radial-gradient(120% 120% at 18% 0%, rgba(255, 245, 214, 0.14), transparent 40%),
+    linear-gradient(180deg, rgba(255, 224, 138, 0.15), rgba(255, 122, 26, 0.09));
   box-shadow:
-    inset 0 0 0 1px rgba(142, 232, 255, 0.28),
-    0 4px 12px rgba(142, 232, 255, 0.08);
+    inset 0 0 0 1px rgba(255, 190, 74, 0.34),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.18),
+    0 4px 12px rgba(255, 122, 26, 0.1);
+}
+
+.workspaceTabs {
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(9, 12, 14, 0.58);
+}
+
+.workspaceTabs .MuiTab-root {
+  min-height: 32px;
+  border-radius: 6px;
+}
+
+.videoModeSummary {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(83, 221, 255, 0.14);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(83, 221, 255, 0.06), transparent 62%),
+    rgba(8, 11, 13, 0.72);
 }
 
 .countPanel {
   padding: 12px 14px 4px;
   border-color: rgba(255, 255, 255, 0.12) !important;
   background:
-    linear-gradient(90deg, rgba(142, 232, 255, 0.09) 0 2px, transparent 2px 100%),
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.055) 0 1px, transparent 1px 12px),
+    radial-gradient(120% 120% at 94% 0%, rgba(255, 122, 26, 0.09), transparent 44%),
+    linear-gradient(180deg, rgba(255, 190, 74, 0.07), transparent 44%),
     var(--museum-surface-solid) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
 }
 
 .controls .MuiSlider-root {
   color: var(--museum-primary);
+  padding-block: 15px 18px;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.controls .MuiSlider-root.Mui-active,
+.controls .MuiSlider-root:active {
+  cursor: grabbing;
 }
 
 .controls .MuiSlider-rail {
   opacity: 1;
+  height: 8px;
+  border-radius: 999px;
   background:
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px 10px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent),
     rgba(255, 255, 255, 0.11);
 }
 
 .controls .MuiSlider-track {
-  background: linear-gradient(90deg, rgba(142, 232, 255, 0.28), rgba(142, 232, 255, 0.72));
+  height: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 122, 26, 0.44), rgba(255, 190, 74, 0.84), rgba(255, 224, 138, 0.72));
+  transition: width 90ms linear;
 }
 
 .controls .MuiSlider-thumb {
+  width: 20px;
+  height: 20px;
+  background:
+    radial-gradient(circle at 28% 24%, rgba(255, 245, 214, 0.88), rgba(255, 224, 138, 0.5) 34%, rgba(255, 122, 26, 0.28)),
+    rgba(16, 12, 8, 0.72) !important;
+  transition:
+    box-shadow 120ms ease,
+    transform 120ms ease;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.28),
-    0 0 0 6px rgba(142, 232, 255, 0.1) !important;
+    0 0 0 6px rgba(255, 122, 26, 0.13) !important;
+}
+
+.controls .MuiSlider-thumb:hover,
+.controls .MuiSlider-thumb.Mui-focusVisible {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    0 0 0 9px rgba(255, 179, 71, 0.15) !important;
+}
+
+.controls .MuiSlider-thumb.Mui-active {
+  transform: scale(1.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    0 0 0 12px rgba(255, 179, 71, 0.18) !important;
+}
+
+.controls .MuiSlider-mark {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.42);
+}
+
+.controls .MuiSlider-markLabel {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.controls .MuiSlider-valueLabel {
+  border: 1px solid rgba(255, 209, 102, 0.28);
+  border-radius: 8px;
+  background: rgba(13, 18, 21, 0.96);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.26);
 }
 
 .gridScroll {
@@ -228,6 +418,54 @@ body {
   gap: 14px;
 }
 
+.videoCutGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+.sceneCutTabsBar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(83, 221, 255, 0.14);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(83, 221, 255, 0.075), transparent 36%),
+    rgba(12, 17, 20, 0.96);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 10px 24px rgba(0, 0, 0, 0.2);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.sceneCutTabs {
+  min-width: 0;
+  min-height: 36px;
+  padding: 3px;
+  border: 1px solid rgba(83, 221, 255, 0.13);
+  border-radius: 8px;
+  background: rgba(6, 10, 13, 0.72);
+}
+
+.sceneCutTabs .MuiTab-root {
+  min-height: 30px;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+
+.sceneCutTabs .Mui-selected {
+  background:
+    linear-gradient(180deg, rgba(83, 221, 255, 0.14), transparent 46%),
+    rgba(83, 221, 255, 0.08);
+}
+
 .emptyGallery {
   grid-column: 1 / -1;
   min-height: 220px;
@@ -237,15 +475,78 @@ body {
   gap: 8px;
 }
 
+.runProgressPanel {
+  width: min(760px, 100%);
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.runProgressHeader {
+  min-width: 0;
+}
+
+.runStageRail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runStageRail .MuiChip-root {
+  max-width: 100%;
+}
+
+.stageCatalog {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.stageCatalogGroup {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.stageCatalogTitle {
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.slotList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.slotRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.slotRow .MuiChip-root {
+  height: 22px;
+}
+
 .promptCard {
   position: relative;
   overflow: hidden;
   background:
-    linear-gradient(90deg, rgba(246, 211, 101, 0.045), transparent 10%),
+    radial-gradient(110% 130% at 96% 0%, rgba(255, 122, 26, 0.055), transparent 42%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.048), rgba(255, 122, 26, 0.026) 12%, transparent 28%),
     var(--museum-surface-solid) !important;
   border-color: rgba(255, 255, 255, 0.13) !important;
   box-shadow:
-    inset 3px 0 0 rgba(246, 211, 101, 0.12),
+    inset 3px 0 0 rgba(255, 190, 74, 0.15),
+    inset -1px 0 0 rgba(255, 122, 26, 0.08),
     0 16px 36px rgba(0, 0, 0, 0.24) !important;
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
@@ -258,8 +559,8 @@ body {
   left: 12px;
   height: 1px;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent);
-  opacity: 0.45;
+  background: linear-gradient(90deg, transparent, rgba(255, 224, 138, 0.22), rgba(255, 122, 26, 0.14), transparent);
+  opacity: 0.58;
 }
 
 .promptCard:hover {
@@ -267,18 +568,23 @@ body {
 }
 
 .promptCard:focus-within {
-  border-color: rgba(246, 211, 101, 0.58) !important;
+  border-color: rgba(255, 190, 74, 0.6) !important;
   box-shadow:
-    inset 3px 0 0 rgba(246, 211, 101, 0.34),
-    0 0 0 3px rgba(246, 211, 101, 0.16),
+    inset 3px 0 0 rgba(255, 190, 74, 0.36),
+    inset -1px 0 0 rgba(255, 122, 26, 0.22),
+    0 0 0 3px rgba(255, 122, 26, 0.13),
+    0 0 28px rgba(255, 190, 74, 0.1),
     0 16px 36px rgba(0, 0, 0, 0.24) !important;
 }
 
 .promptCard.is-generating {
-  border-color: rgba(142, 232, 255, 0.42) !important;
+  border-color: transparent !important;
   box-shadow:
-    inset 3px 0 0 rgba(246, 211, 101, 0.18),
-    0 0 0 1px rgba(142, 232, 255, 0.16),
+    inset 3px 0 0 rgba(255, 190, 74, 0.2),
+    inset -1px 0 0 rgba(255, 122, 26, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 28px rgba(83, 221, 255, 0.16),
+    0 0 34px rgba(255, 112, 199, 0.12),
     0 16px 36px rgba(0, 0, 0, 0.24) !important;
 }
 
@@ -316,7 +622,8 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(142, 232, 255, 0.04), transparent 20%),
+    radial-gradient(120% 100% at 100% 0%, rgba(255, 122, 26, 0.052), transparent 42%),
+    linear-gradient(90deg, rgba(255, 190, 74, 0.048), transparent 20%),
     var(--surface-frame);
 }
 
@@ -327,25 +634,36 @@ body {
   gap: 8px;
 }
 
-.cardProgress {
-  position: absolute !important;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 2px !important;
-  border-radius: 8px 8px 0 0;
-}
-
 .promptCard.is-generating::after {
   content: "";
   position: absolute;
-  top: 0;
-  left: -34%;
-  width: 34%;
-  height: 2px;
+  inset: 0;
+  padding: 1px;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.82), transparent);
-  animation: prompt-rim-sweep 1.45s ease-in-out infinite;
+  border-radius: inherit;
+  --prompt-rainbow-angle: 0deg;
+  background: conic-gradient(
+    from var(--prompt-rainbow-angle),
+    #ff4d6d,
+    #ffb347,
+    #f6d365,
+    #64e9a5,
+    #53ddff,
+    #8a7dff,
+    #ff70c7,
+    #ff4d6d
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: prompt-rainbow-rim 1.35s linear infinite;
+  opacity: 0.96;
+  z-index: 1;
 }
 
 .refOption {
@@ -382,9 +700,11 @@ body {
   gap: 6px;
   align-items: center;
   padding: 5px;
-  border: 1px solid rgba(142, 232, 255, 0.18);
+  border: 1px solid rgba(255, 190, 74, 0.24);
   border-radius: 7px;
-  background: rgba(18, 23, 27, 0.9);
+  background:
+    linear-gradient(135deg, rgba(255, 224, 138, 0.045), rgba(255, 122, 26, 0.03)),
+    rgba(18, 23, 27, 0.9);
 }
 
 .referenceThumb img {
@@ -392,6 +712,197 @@ body {
   height: 32px;
   object-fit: cover;
   border-radius: 5px;
+}
+
+.videoCutCard {
+  overflow: hidden;
+  border-color: rgba(83, 221, 255, 0.14) !important;
+  background:
+    radial-gradient(110% 120% at 96% 0%, rgba(255, 122, 26, 0.045), transparent 44%),
+    linear-gradient(90deg, rgba(83, 221, 255, 0.05), transparent 18%, transparent 82%, rgba(255, 190, 74, 0.04)),
+    var(--museum-surface-solid) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(83, 221, 255, 0.14),
+    inset -1px 0 0 rgba(255, 122, 26, 0.08),
+    0 16px 36px rgba(0, 0, 0, 0.22) !important;
+}
+
+.videoCutCardContent {
+  padding: 14px !important;
+}
+
+.videoCutHeader {
+  min-width: 0;
+  margin-bottom: 10px;
+}
+
+.videoCutCard .sceneVideoPanel {
+  margin-top: 0;
+}
+
+.sceneVideoPanel {
+  margin-top: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid rgba(83, 221, 255, 0.16);
+  border-radius: 8px;
+  background:
+    radial-gradient(100% 120% at 100% 0%, rgba(255, 122, 26, 0.052), transparent 42%),
+    linear-gradient(90deg, rgba(83, 221, 255, 0.055), transparent 18%, transparent 82%, rgba(255, 190, 74, 0.045)),
+    rgba(9, 13, 16, 0.78);
+}
+
+.videoPromptEditor .MuiInputBase-root {
+  background: var(--surface-editor) !important;
+  border: 1px solid rgba(83, 221, 255, 0.14);
+}
+
+.videoSettingsGrid,
+.videoFrameGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.videoFrameGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.videoReferenceRail {
+  min-height: 58px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 7px;
+  border: 1px solid rgba(83, 221, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(6, 10, 13, 0.68);
+}
+
+.videoReferenceThumb {
+  border-color: rgba(83, 221, 255, 0.2);
+}
+
+.videoCandidateWall {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(83, 221, 255, 0.045), transparent 18%),
+    rgba(14, 18, 21, 0.72);
+}
+
+.videoCandidateGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.videoCandidateSlot {
+  position: relative;
+  min-height: 0;
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+  border: 1px dashed rgba(83, 221, 255, 0.2);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.032) 1px, transparent 1px),
+    rgba(8, 11, 13, 0.84);
+  background-size: 14px 14px;
+}
+
+.videoCandidateSlot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 7px;
+}
+
+.videoCandidateSlot video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #000;
+}
+
+.videoCandidateSlot.is-error {
+  border-color: rgba(255, 96, 96, 0.42);
+  background:
+    linear-gradient(90deg, rgba(255, 96, 96, 0.08), transparent 42%),
+    rgba(18, 10, 10, 0.86);
+}
+
+.videoCandidateProgress {
+  height: 4px !important;
+  border-radius: 999px;
+  background: rgba(83, 221, 255, 0.08) !important;
+}
+
+.videoSlotLabel {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  left: 8px;
+  min-width: 0;
+  padding: 4px 7px;
+  overflow: hidden;
+  border-radius: 6px;
+  color: rgba(255, 245, 214, 0.94);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(5, 8, 10, 0.64);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.videoSlotPlaceholder {
+  color: var(--text-muted);
+  font-weight: 900 !important;
+}
+
+.videoCandidateSlot.is-output {
+  color: rgba(255, 190, 74, 0.94);
+  border-style: solid;
+  border-color: rgba(255, 190, 74, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 245, 214, 0.12),
+    0 0 20px rgba(255, 122, 26, 0.08);
+}
+
+.videoCandidateSlot.is-output svg {
+  font-size: 34px;
+}
+
+.addCutCard {
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  border-style: dashed !important;
+  border-color: rgba(255, 190, 74, 0.32) !important;
+  background:
+    radial-gradient(120% 120% at 100% 0%, rgba(255, 122, 26, 0.08), transparent 42%),
+    linear-gradient(135deg, rgba(255, 224, 138, 0.075), transparent 42%),
+    rgba(16, 20, 23, 0.74) !important;
+}
+
+.addCutIcon {
+  color: rgba(255, 190, 74, 0.92);
+  font-size: 34px !important;
+  filter: drop-shadow(0 0 10px rgba(255, 122, 26, 0.2));
 }
 
 .candidateGrid {
@@ -432,13 +943,16 @@ body {
 .candidate.is-selected {
   border-color: var(--museum-primary) !important;
   background:
-    linear-gradient(90deg, rgba(142, 232, 255, 0.18), transparent 10%, transparent 90%, rgba(142, 232, 255, 0.12)),
-    linear-gradient(180deg, rgba(142, 232, 255, 0.09), rgba(255, 255, 255, 0.02)),
+    radial-gradient(120% 120% at 92% 100%, rgba(255, 122, 26, 0.18), transparent 42%),
+    linear-gradient(90deg, rgba(255, 190, 74, 0.2), transparent 10%, transparent 90%, rgba(255, 122, 26, 0.15)),
+    linear-gradient(180deg, rgba(255, 224, 138, 0.1), rgba(255, 255, 255, 0.02)),
     rgba(16, 20, 23, 0.94) !important;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 0 0 1px rgba(142, 232, 255, 0.48),
-    0 0 24px rgba(142, 232, 255, 0.16),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.24),
+    0 0 0 1px rgba(255, 190, 74, 0.52),
+    0 0 24px rgba(255, 179, 71, 0.18),
+    0 0 36px rgba(255, 122, 26, 0.12),
     0 18px 34px rgba(0, 0, 0, 0.34) !important;
 }
 
@@ -477,6 +991,15 @@ body {
   background-size: 14px 14px;
 }
 
+.candidateMedia.is-clickable {
+  cursor: zoom-in;
+}
+
+.candidateMedia.is-clickable:focus-visible {
+  outline: 2px solid rgba(255, 190, 74, 0.95);
+  outline-offset: 2px;
+}
+
 .candidateMessage {
   margin: 0 !important;
   color: var(--text-muted);
@@ -511,17 +1034,166 @@ body {
   min-height: 18px;
 }
 
+.imageEnlargeDialog .MuiDialog-paper {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    radial-gradient(120% 120% at 12% -20%, rgba(255, 245, 214, 0.08), transparent 36%),
+    linear-gradient(180deg, rgba(29, 35, 40, 0.98), rgba(12, 15, 18, 0.98)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 28px 70px rgba(0, 0, 0, 0.58) !important;
+}
+
+.imageEnlargeTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.imageEnlargeContent {
+  display: grid;
+  place-items: center;
+  min-height: min(70vh, 760px);
+  padding: 14px !important;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    rgba(7, 10, 12, 0.9);
+  background-size: 18px 18px;
+}
+
+.imageEnlargePreview {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: 74vh;
+  object-fit: contain;
+  border-radius: 7px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.16),
+    0 20px 54px rgba(0, 0, 0, 0.48);
+}
+
 .promptCard {
   content-visibility: auto;
   contain-intrinsic-size: 760px 560px;
 }
 
+.videoCutCard {
+  content-visibility: auto;
+  contain-intrinsic-size: 980px 620px;
+}
+
+.narrationCutCard,
+.renderCutCard {
+  overflow: hidden;
+  border-color: rgba(255, 190, 74, 0.2) !important;
+  background:
+    radial-gradient(110% 130% at 96% 0%, rgba(255, 122, 26, 0.06), transparent 44%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.055), transparent 18%, transparent 82%, rgba(83, 221, 255, 0.035)),
+    var(--museum-surface-solid) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(255, 190, 74, 0.18),
+    inset -1px 0 0 rgba(255, 122, 26, 0.1),
+    0 16px 36px rgba(0, 0, 0, 0.22) !important;
+  content-visibility: auto;
+  contain-intrinsic-size: 980px 520px;
+}
+
+.renderCutCard {
+  border-color: rgba(100, 233, 165, 0.16) !important;
+  box-shadow:
+    inset 3px 0 0 rgba(100, 233, 165, 0.14),
+    0 16px 36px rgba(0, 0, 0, 0.22) !important;
+}
+
+.narrationCutCardContent,
+.renderCutCardContent {
+  padding: 14px !important;
+}
+
+.narrationPanel,
+.renderPanel {
+  margin-top: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background:
+    radial-gradient(120% 120% at 100% 0%, rgba(255, 122, 26, 0.045), transparent 44%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.04), transparent 18%),
+    rgba(9, 13, 16, 0.78);
+}
+
+.narrationPanel .MuiInputBase-root,
+.renderPanel .MuiInputBase-root {
+  background: var(--surface-editor) !important;
+}
+
+.narrationSettingsGrid,
+.renderSettingsGrid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.3fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.renderSettingsGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.audioReviewBox {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.audioReviewBox audio,
+.renderAudioSlot audio {
+  width: 100%;
+  min-width: 0;
+}
+
+.renderMediaGrid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(220px, 0.8fr);
+  gap: 10px;
+}
+
+.renderMediaSlot,
+.renderAudioSlot {
+  min-height: 96px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(6, 10, 13, 0.68);
+}
+
+.renderMediaSlot {
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  overflow: hidden;
+}
+
+.renderMediaSlot video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+
 .bulkFooter {
-  --lg-blur: 18px;
-  --lg-saturate: 135%;
+  --lg-blur: 10px;
+  --lg-saturate: 118%;
   --lg-shine:
-    linear-gradient(0deg, rgba(255, 255, 255, 0.18), transparent 38%),
-    linear-gradient(90deg, transparent, rgba(142, 232, 255, 0.08) 48%, rgba(142, 232, 255, 0.14) 52%, transparent),
+    radial-gradient(90% 130% at 20% 110%, rgba(255, 255, 255, 0.1), transparent 34%),
+    radial-gradient(80% 120% at 88% 120%, rgba(255, 122, 26, 0.12), transparent 42%),
+    linear-gradient(0deg, rgba(255, 224, 138, 0.08), transparent 40%),
     linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.24));
   flex-shrink: 0;
   min-height: 64px;
@@ -533,58 +1205,162 @@ body {
   border-width: 1px 0 0 !important;
   border-radius: 0 !important;
   background:
-    linear-gradient(0deg, rgba(255, 255, 255, 0.09), transparent 48%),
-    linear-gradient(180deg, rgba(23, 27, 31, 0.82), rgba(10, 13, 15, 0.9)) !important;
+    radial-gradient(110% 150% at 16% 130%, rgba(255, 255, 255, 0.06), transparent 38%),
+    radial-gradient(90% 150% at 82% 130%, rgba(255, 122, 26, 0.07), transparent 42%),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.06), transparent 48%),
+    linear-gradient(180deg, rgba(26, 31, 35, 0.92), rgba(9, 12, 14, 0.95)) !important;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13),
-    inset 0 -18px 28px rgba(255, 255, 255, 0.055),
-    0 -18px 40px rgba(0, 0, 0, 0.34) !important;
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24),
+    inset 0 -14px 24px rgba(255, 224, 138, 0.032),
+    inset 0 -18px 26px rgba(255, 122, 26, 0.032),
+    0 -12px 32px rgba(0, 0, 0, 0.3) !important;
 }
 
 .bulkFooter .insertAction {
   box-shadow:
-    0 0 0 1px rgba(142, 232, 255, 0.36),
-    0 10px 26px rgba(142, 232, 255, 0.14) !important;
+    0 0 0 1px rgba(255, 190, 74, 0.42),
+    0 10px 26px rgba(255, 179, 71, 0.16),
+    0 0 32px rgba(255, 122, 26, 0.12) !important;
 }
 
 .bulkFooter .insertAction.Mui-disabled {
   box-shadow: none !important;
 }
 
+.settingsDialog .MuiDialog-paper {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #171b1f;
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+}
+
+.settingsDialog .MuiDialogTitle-root {
+  font-weight: 900;
+}
+
+.settingsTabs {
+  min-height: 42px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.settingsStatusRow {
+  min-height: 28px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.createRunStatusRow {
+  min-height: 28px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.createRunStatusBar {
+  position: relative;
+  min-height: 30px;
+  padding: 2px 4px;
+}
+
+.createRunStatusProgress {
+  position: absolute !important;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px !important;
+}
+
+.settingsSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.settingsSourcePane,
+.settingsDraftPane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settingsTextArea .MuiInputBase-root {
+  align-items: flex-start;
+  border-radius: 8px;
+  background: #111619;
+}
+
+.settingsTextArea textarea {
+  font-family: "IBM Plex Sans", "Noto Sans JP", "Helvetica Neue", sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.settingsActions {
+  gap: 8px;
+  padding: 12px 20px;
+}
+
 .chatPane {
-  --lg-blur: 18px;
-  --lg-saturate: 132%;
-  --lg-tone: rgba(246, 211, 101, 0.92);
+  --lg-blur: 10px;
+  --lg-saturate: 118%;
+  --lg-shine-opacity: 0;
+  --lg-tone: rgba(255, 190, 74, 0.92);
   --lg-tone-soft: var(--museum-chat-soft);
-  --lg-tone-border: rgba(246, 211, 101, 0.36);
+  --lg-tone-border: rgba(255, 190, 74, 0.38);
   --lg-shine:
-    linear-gradient(90deg, rgba(246, 211, 101, 0.26), rgba(246, 211, 101, 0.08) 10%, transparent 34%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.065), transparent 46%);
+    radial-gradient(120% 100% at -20% 8%, rgba(255, 255, 255, 0.11), transparent 36%),
+    radial-gradient(110% 130% at 100% 6%, rgba(255, 122, 26, 0.08), transparent 42%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.18), rgba(255, 122, 26, 0.06) 14%, transparent 38%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 46%);
   background:
-    linear-gradient(90deg, rgba(246, 211, 101, 0.11), rgba(246, 211, 101, 0.035) 13%, transparent 30%),
-    rgba(18, 21, 24, 0.88) !important;
+    radial-gradient(120% 140% at -20% 12%, rgba(255, 255, 255, 0.055), transparent 40%),
+    radial-gradient(100% 120% at 100% 6%, rgba(255, 122, 26, 0.065), transparent 44%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.09), rgba(255, 122, 26, 0.03) 14%, transparent 32%),
+    rgba(18, 21, 24, 0.93) !important;
   border-width: 0 0 0 1px !important;
-  border-color: rgba(246, 211, 101, 0.24) !important;
+  border-color: rgba(255, 190, 74, 0.26) !important;
   border-radius: 0 !important;
   box-shadow:
-    inset 1px 0 0 rgba(246, 211, 101, 0.28),
-    -16px 0 40px rgba(0, 0, 0, 0.26) !important;
+    inset 1px 0 0 rgba(255, 255, 255, 0.14),
+    inset -1px 0 0 rgba(0, 0, 0, 0.24),
+    -12px 0 34px rgba(0, 0, 0, 0.24) !important;
+}
+
+.chatPane::before,
+.chatPane::after,
+.chatPane .lg::before,
+.chatPane .lg::after {
+  animation: none !important;
+  transition: none !important;
 }
 
 .chatHead {
+  --lg-shine-opacity: 0;
   --lg-shine:
-    linear-gradient(90deg, rgba(246, 211, 101, 0.3), rgba(246, 211, 101, 0.08) 18%, transparent 46%),
+    linear-gradient(90deg, rgba(255, 224, 138, 0.28), rgba(255, 122, 26, 0.08) 20%, transparent 48%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 44%);
   padding: 14px;
   flex-shrink: 0;
   border-width: 0 0 1px !important;
   border-radius: 0 !important;
-  border-color: rgba(246, 211, 101, 0.22) !important;
+  border-color: rgba(255, 190, 74, 0.24) !important;
 }
 
 .chatMark {
-  background: #f6d365 !important;
-  color: #0e1113 !important;
+  background:
+    radial-gradient(circle at 28% 18%, rgba(255, 245, 214, 0.42), transparent 34%),
+    radial-gradient(circle at 82% 88%, rgba(255, 122, 26, 0.26), transparent 44%),
+    linear-gradient(145deg, rgba(255, 224, 138, 0.26), rgba(255, 122, 26, 0.14)),
+    rgba(18, 14, 10, 0.74) !important;
+  color: rgba(255, 224, 138, 0.98) !important;
 }
 
 .messages {
@@ -606,8 +1382,10 @@ body {
 
 .bubble.user {
   align-self: flex-end;
-  background: rgba(31, 69, 78, 0.82);
-  border-color: rgba(142, 232, 255, 0.22);
+  background:
+    linear-gradient(135deg, rgba(255, 224, 138, 0.06), rgba(255, 122, 26, 0.08)),
+    rgba(70, 43, 20, 0.68);
+  border-color: rgba(255, 190, 74, 0.26);
 }
 
 .bubble.assistant {
@@ -621,7 +1399,7 @@ body {
   padding: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.12);
   background:
-    linear-gradient(180deg, rgba(246, 211, 101, 0.055), transparent),
+    linear-gradient(180deg, rgba(255, 224, 138, 0.055), rgba(255, 122, 26, 0.026), transparent),
     rgba(13, 16, 18, 0.36);
 }
 
@@ -644,8 +1422,10 @@ body {
   flex-direction: column;
   gap: 3px;
   padding: 8px 12px;
-  border-top: 1px solid rgba(246, 211, 101, 0.16);
-  background: rgba(246, 211, 101, 0.08);
+  border-top: 1px solid rgba(255, 190, 74, 0.18);
+  background:
+    linear-gradient(90deg, rgba(255, 224, 138, 0.06), rgba(255, 122, 26, 0.045)),
+    rgba(246, 211, 101, 0.055);
 }
 
 .chatHead {
@@ -664,22 +1444,22 @@ body {
   display: none;
 }
 
-@keyframes prompt-rim-sweep {
-  from {
-    transform: translateX(0);
-  }
+@property --prompt-rainbow-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
 
+@keyframes prompt-rainbow-rim {
   to {
-    transform: translateX(390%);
+    --prompt-rainbow-angle: 1turn;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .promptCard.is-generating::after {
     animation: none;
-    left: 12px;
-    width: calc(100% - 24px);
-    opacity: 0.42;
+    opacity: 0.78;
   }
 }
 
@@ -690,6 +1470,12 @@ body {
   .chatPane,
   .chatHead,
   .promptCard,
+  .videoCutCard,
+  .sceneVideoPanel,
+  .videoReferenceRail,
+  .videoCandidateWall,
+  .videoCandidateSlot,
+  .addCutCard,
   .comparisonWall,
   .referenceRail,
   .candidate,
@@ -705,6 +1491,7 @@ body {
   .bulkFooter,
   .chatPane,
   .promptCard,
+  .videoCutCard,
   .candidate {
     box-shadow: none !important;
   }
@@ -717,9 +1504,15 @@ body {
   .topbar,
   .controls,
   .promptCard,
+  .videoCutCard,
+  .sceneVideoPanel,
   .comparisonWall,
   .referenceRail,
+  .videoReferenceRail,
+  .videoCandidateWall,
+  .videoCandidateSlot,
   .referenceThumb,
+  .addCutCard,
   .candidate,
   .bulkFooter,
   .chatPane,
@@ -762,12 +1555,17 @@ body {
     height: min(78vh, 680px);
     display: flex;
     border-width: 1px 0 0 !important;
-    transform: translateY(105%);
-    transition: transform 180ms ease;
+    visibility: hidden;
+    transform: none;
+    transition: none;
   }
 
   .chatPane.is-open {
-    transform: translateY(0);
+    visibility: visible;
+  }
+
+  .settingsSplit {
+    grid-template-columns: 1fr;
   }
 
   .chatBackdrop {
@@ -790,12 +1588,31 @@ body {
   .glassControls {
     grid-template-columns: 1fr;
   }
+
+  .stageCatalog {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 700px) {
   .topbar {
     height: auto;
     min-height: 72px;
+    flex-direction: column !important;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .topbarActions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .topbarRunSelect {
+    width: min(100%, 360px);
+    min-width: 0 !important;
+    flex: 1 1 220px;
   }
 
   .promptLayout {
@@ -803,6 +1620,16 @@ body {
   }
 
   .candidateGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .videoSettingsGrid,
+  .videoFrameGrid,
+  .narrationSettingsGrid,
+  .renderSettingsGrid,
+  .renderMediaGrid,
+  .audioReviewBox,
+  .sceneCutTabsBar {
     grid-template-columns: 1fr;
   }
 

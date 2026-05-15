@@ -45,7 +45,12 @@ from toc.immersive_manifest import (
     scene_selector_tokens,
     selector_matches,
 )
-from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID, ElevenLabsClient, ElevenLabsConfig
+from toc.providers.elevenlabs import (
+    DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+    DEFAULT_ELEVENLABS_VOICE_ID,
+    ElevenLabsClient,
+    ElevenLabsConfig,
+)
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
 from toc.providers.kling import KlingClient, KlingConfig
@@ -1985,6 +1990,7 @@ def _generate_single_audio_scene(
             voice_id=str((args.elevenlabs_voice_id or DEFAULT_ELEVENLABS_VOICE_ID)),
             model_id=args.elevenlabs_model_id or "eleven_v3",
             output_format=args.elevenlabs_output_format or "mp3_44100_128",
+            language_code=args.elevenlabs_language_code or DEFAULT_ELEVENLABS_LANGUAGE_CODE,
             text=tts_text,
             out_path=out_path,
             duration_seconds=normalize_dur,
@@ -2894,6 +2900,7 @@ def generate_elevenlabs_tts(
     voice_id: str,
     model_id: str,
     output_format: str,
+    language_code: str,
     text: str,
     out_path: Path,
     duration_seconds: int | None,
@@ -2907,6 +2914,7 @@ def generate_elevenlabs_tts(
     payload: dict = {
         "text": text,
         "model_id": model_id,
+        "language_code": language_code,
         "voice_settings": {
             "stability": 0.35,
             "similarity_boost": 0.75,
@@ -2934,6 +2942,7 @@ def generate_elevenlabs_tts(
                 voice_id=voice_id,
                 model_id=model_id,
                 output_format=output_format,
+                language_code=language_code,
                 voice_settings=payload["voice_settings"],
             )
             break
@@ -4165,7 +4174,7 @@ def main() -> None:
     parser.add_argument(
         "--ignore-duration-fit-gate",
         action="store_true",
-        help="Allow image/video generation even if review.duration_fit.status=changes_requested.",
+        help="Allow video generation even if review.duration_fit.status=changes_requested.",
     )
     parser.add_argument(
         "--skip-image-prompt-review",
@@ -4405,6 +4414,7 @@ def main() -> None:
     parser.add_argument("--elevenlabs-voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
     parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--elevenlabs-output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
+    parser.add_argument("--elevenlabs-language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
     parser.add_argument("--tts-prompt-prefix", default="", help="Optional text prepended to every TTS input.")
     parser.add_argument("--tts-prompt-suffix", default="", help="Optional text appended to every TTS input.")
     parser.add_argument("--macos-say-voice", default=_env("MACOS_SAY_VOICE", ""), help="Voice name for macos_say TTS (macOS only).")
@@ -4415,6 +4425,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if not args.elevenlabs_language_code:
+        args.elevenlabs_language_code = DEFAULT_ELEVENLABS_LANGUAGE_CODE
     if args.test_image_variants < 0:
         raise SystemExit("--test-image-variants must be >= 0")
     if args.test_image_variants and not args.force:
@@ -4444,7 +4456,7 @@ def main() -> None:
 
     base_dir = Path(args.base_dir) if args.base_dir else manifest_path.parent
     state_path = base_dir / "state.txt"
-    if args.skip_audio and not (args.skip_images and args.skip_videos) and not args.ignore_duration_fit_gate and state_path.exists():
+    if args.skip_audio and not args.skip_videos and not args.ignore_duration_fit_gate and state_path.exists():
         state = parse_state_file(state_path)
         if state.get("review.duration_fit.status", "").strip().lower() == "changes_requested":
             raise SystemExit(
@@ -4452,7 +4464,7 @@ def main() -> None:
                 f"  Review prompts:\n"
                 f"  - {base_dir / 'logs/review/duration_scene.subagent_prompt.md'}\n"
                 f"  - {base_dir / 'logs/review/duration_narration.subagent_prompt.md'}\n"
-                "  Resolve the duration-fit review before generating images/videos, or pass --ignore-duration-fit-gate."
+                "  Resolve the duration-fit review before generating videos, or pass --ignore-duration-fit-gate."
             )
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
 
@@ -4481,8 +4493,7 @@ def main() -> None:
     if production_stage_generation_requested and manifest_phase != "production":
         raise SystemExit(
             "Manifest is still in skeleton phase.\n"
-            "  Run narration review / TTS / duration sync first, then promote video_manifest.md to manifest_phase=production\n"
-            "  before generating scene-implementation images or videos."
+            "  Promote video_manifest.md to manifest_phase=production before generating scene images or videos."
         )
 
     if not args.skip_images and not args.skip_image_prompt_review and manifest_phase == "production" and not is_asset_stage_request:
@@ -4819,6 +4830,7 @@ def main() -> None:
                     voice_id=voice_id,
                     model_id=args.elevenlabs_model_id,
                     output_format=args.elevenlabs_output_format,
+                    language_code=args.elevenlabs_language_code,
                 )
             )
 
@@ -5029,7 +5041,28 @@ def main() -> None:
         seadream_client=seadream_client,
     )
 
-    # Pass 2: videos
+    # Pass 2: audio (TTS). The production order is images/assets -> narration -> videos.
+    audio_scenes: list[SceneSpec] = []
+    for scene in scenes:
+        if not _scene_matches_filter(scene, scene_filter):
+            continue
+        if _scene_is_deleted(scene):
+            continue
+        if args.skip_audio or not scene.narration_output:
+            continue
+        audio_scenes.append(scene)
+
+    audio_max_concurrency = max(1, min(int(args.audio_max_concurrency or 1), 12))
+    _generate_audio_scenes_in_parallel(
+        audio_scenes=audio_scenes,
+        audio_max_concurrency=audio_max_concurrency,
+        base_dir=base_dir,
+        args=args,
+        log_dir=log_dir,
+        elevenlabs_client=elevenlabs_client,
+    )
+
+    # Pass 3: videos
     video_targets_in_order: list[VideoRenderTargetSpec] = []
     if manifest_phase == "production":
         for target in video_render_targets:
@@ -5309,27 +5342,6 @@ def main() -> None:
                     prev_chain_first_frame = chain_frame
                 except FileNotFoundError:
                     prev_chain_first_frame = None
-
-    # Pass 3: audio (TTS)
-    audio_scenes: list[SceneSpec] = []
-    for scene in scenes:
-        if not _scene_matches_filter(scene, scene_filter):
-            continue
-        if _scene_is_deleted(scene):
-            continue
-        if args.skip_audio or not scene.narration_output:
-            continue
-        audio_scenes.append(scene)
-
-    audio_max_concurrency = max(1, min(int(args.audio_max_concurrency or 1), 12))
-    _generate_audio_scenes_in_parallel(
-        audio_scenes=audio_scenes,
-        audio_max_concurrency=audio_max_concurrency,
-        base_dir=base_dir,
-        args=args,
-        log_dir=log_dir,
-        elevenlabs_client=elevenlabs_client,
-    )
 
     write_run_index(base_dir)
     print("Done.")

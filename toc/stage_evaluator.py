@@ -547,8 +547,10 @@ def check_visual_value(run_dir: Path, profile: str, *, forbid_production_artifac
     anchor_candidates = as_list(data.get("anchor_cut_candidates"))
     reference_strategy = data.get("reference_strategy")
     regeneration_risks = as_list(data.get("regeneration_risks"))
-    handoff = data.get("handoff_to_p400_p600_p700") if isinstance(data.get("handoff_to_p400_p600_p700"), dict) else {}
-    handoff_keys = {"p400_script", "p600_asset", "p700_scene_implementation"}
+    handoff = data.get("handoff_to_p400_p500_p600_p700") if isinstance(data.get("handoff_to_p400_p500_p600_p700"), dict) else {}
+    if not handoff:
+        handoff = data.get("handoff_to_p400_p600_p700") if isinstance(data.get("handoff_to_p400_p600_p700"), dict) else {}
+    handoff_keys = {"p400_script", "p500_asset", "p600_scene_implementation", "p700_narration"}
     production_issues = _p300_production_artifact_issues(run_dir) if forbid_production_artifacts else []
 
     details["scene_visual_value_count"] = len(scene_values)
@@ -567,7 +569,7 @@ def check_visual_value(run_dir: Path, profile: str, *, forbid_production_artifac
     add_check(checks, "visual_value.anchor_cut_candidates", len(anchor_candidates) >= 1, f"anchor_cut_candidates are listed (got {len(anchor_candidates)})", kind="rubric")
     add_check(checks, "visual_value.reference_strategy", isinstance(reference_strategy, dict) and bool(reference_strategy), "reference_strategy is present", kind="rubric")
     add_check(checks, "visual_value.regeneration_risks", len(regeneration_risks) >= 1, f"regeneration_risks are listed (got {len(regeneration_risks)})", kind="rubric")
-    add_check(checks, "visual_value.handoff", handoff_keys.issubset(set(handoff)), "handoff_to_p400_p600_p700 includes p400_script, p600_asset, and p700_scene_implementation", kind="rubric")
+    add_check(checks, "visual_value.handoff", handoff_keys.issubset(set(handoff)), "handoff includes p400_script, p500_asset, p600_scene_implementation, and p700_narration", kind="rubric")
     add_check(checks, "visual_value.no_p300_production_artifacts", not production_issues, "p300 has no production cut prompts, image/video request files, or generated asset/video artifacts", kind="rubric")
 
     updates["eval.visual_value.score"] = f"{score_from_checks(checks):.4f}"

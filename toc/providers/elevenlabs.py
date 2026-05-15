@@ -8,6 +8,7 @@ from typing import Any
 from toc.http import request_bytes
 
 DEFAULT_ELEVENLABS_VOICE_ID = "JOcmGzB8OFjY8MhjHHEf"  # Jun - Calm, Clear and Husky (ja)
+DEFAULT_ELEVENLABS_LANGUAGE_CODE = "ja"
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -24,6 +25,7 @@ class ElevenLabsConfig:
     voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID
     model_id: str = "eleven_v3"
     output_format: str = "mp3_44100_128"
+    language_code: str = DEFAULT_ELEVENLABS_LANGUAGE_CODE
 
     @staticmethod
     def from_env(
@@ -33,6 +35,7 @@ class ElevenLabsConfig:
         voice_id: str | None = None,
         model_id: str | None = None,
         output_format: str | None = None,
+        language_code: str | None = None,
     ) -> "ElevenLabsConfig":
         key = api_key or _env("ELEVENLABS_API_KEY")
         if not key:
@@ -46,6 +49,7 @@ class ElevenLabsConfig:
             voice_id=v_id,
             model_id=model_id or _env("ELEVENLABS_MODEL_ID", "eleven_v3") or "",
             output_format=output_format or _env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128") or "",
+            language_code=language_code or _env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE) or "",
         )
 
 
@@ -71,12 +75,16 @@ class ElevenLabsClient:
         voice_id: str | None = None,
         model_id: str | None = None,
         output_format: str | None = None,
+        language_code: str | None = None,
         voice_settings: dict[str, Any] | None = None,
         timeout_seconds: float = 180.0,
     ) -> bytes:
         v_id = voice_id or self.config.voice_id
         m_id = model_id or self.config.model_id
         fmt = output_format or self.config.output_format
+        lang = (
+            language_code if language_code is not None else self.config.language_code
+        ) or DEFAULT_ELEVENLABS_LANGUAGE_CODE
 
         base = self.config.api_base.rstrip("/")
         url = f"{base}/text-to-speech/{urllib.parse.quote(v_id)}"
@@ -87,6 +95,7 @@ class ElevenLabsClient:
             "text": text,
             "model_id": m_id,
         }
+        payload["language_code"] = lang
         if voice_settings is not None:
             payload["voice_settings"] = voice_settings
 

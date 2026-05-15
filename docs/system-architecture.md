@@ -78,10 +78,10 @@ graph TD
 - Base unit is a stage task aligned to LangGraph nodes:
   - `RESEARCH` → produces `research.md`
   - `STORY` → produces `story.md`
-  - `SCRIPT` → produces `script.md` and a narration-ready skeleton `video_manifest.md`
-  - `NARRATION` → produces reviewed TTS audio and confirmed runtime duration
+  - `SCRIPT` → produces `script.md` and a production skeleton `video_manifest.md`
   - `ASSET` → produces reusable recurring still assets
   - `SCENE_IMPLEMENTATION` → produces the production manifest and scene still outputs
+  - `NARRATION` → produces reviewed TTS audio and confirmed runtime duration
   - `VIDEO` → produces motion clips
   - `RENDER` → produces `video.mp4`
   - `QA` → produces final review outputs
@@ -90,9 +90,9 @@ graph TD
   - `SCENE_IMPLEMENTATION` subtask: implement one approved scene/cut into production prompt fields.
   - `VIDEO` subtask: generate motion clips for an approved scene/cut.
 - Asset-level tasks are split by stage:
-  - `NARRATION`: TTS generation and duration fit checks.
   - `ASSET`: character/object/location reference stills.
   - `SCENE_IMPLEMENTATION`: cut still generation.
+  - `NARRATION`: TTS generation and duration fit checks.
   - `VIDEO`: clip generation.
 - Granularity principles:
   - Keep core flow sequential and gate-driven.
@@ -113,10 +113,10 @@ graph TD
 - stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。
 - audio runtime は TTS 実行後の実尺を正本にし、`cinematic_story` は既定で 300 秒以上を target とする。
   - target 未満なら scene / narration stretch review prompt を生成して停止し、人レビューへは進めない。
-- production order は audio-first を採用する。
+- production order は asset/image-first を採用する。
   - `script` で scene / narration draft を確定したあと、`video_manifest.md` はまず `manifest_phase: skeleton` で materialize する。
-  - その後に `narration -> asset -> scene implementation -> video -> render -> qa` の順で進める。
-  - 理由は、最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから。asset / scene / video を先に固定すると、後から尺ズレで recut が発生しやすい。
+  - その後に `asset -> scene implementation / image -> narration -> video -> render -> qa` の順で進める。
+  - 理由は、asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため。
 - したがって「script draft までは人承認なしで進める」のような運用差分は、prompt の解釈ではなく run 初期 state で表現する。
 - チャット起点の stage 実行も同じ state / grounding 契約の上で扱う。
   - `resolve-stage-grounding.py` で contract を解決
@@ -133,16 +133,16 @@ graph TD
 
 変更内容:
 - fixed `p-slot` contract を production order に合わせて再編した。
-- 後半順序は `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video -> p900 render` に固定する。
-- `p450` を追加し、`video_manifest.md` を narration-ready skeleton manifest として先に materialize する。
+- 後半順序は `p500 asset -> p600 scene/image implementation -> p700 narration/audio -> p800 video -> p900 render` に固定する。
+- `p450` を追加し、`video_manifest.md` を production skeleton manifest として先に materialize する。
 
 修正理由:
-- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が late recut を減らせる。
-- 尺が target 未満のとき、padding で誤魔化さず scene / narration の再設計へ戻れるようにするため。
+- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げる。
+- 尺が target 未満のとき、padding で誤魔化さず narration / video の再設計へ戻れるようにするため。
 
 旧仕様との差分:
-- 旧仕様では `p500 asset -> p600 image -> p700 video -> p800 audio` だった。
-- 新仕様では audio-first に切り替え、asset / scene / video は実尺確定後へ移動した。
+- 旧仕様では `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video` だった。
+- 新仕様では asset/image-first に切り替え、narration は video の直前へ移動した。
 
 `visual_value` は p300 visual planning を grounding / state で追跡するための stage key であり、canonical generation stage ではない。canonical p300 done 条件は `docs/data-contracts.md` の "Canonical p300 done 条件" を正本とする。
 
@@ -184,31 +184,29 @@ graph TD
   - `p430`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p440`: human changes / narration sync
   - `p450`: skeleton manifest materialization
-- `p500`: narration / audio runtime
-  - `p510`: narration grounding
-  - `p520`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p530`: TTS request / generation
-  - `p540`: duration fit gate
-  - `p550`: scene stretch review
-  - `p560`: narration stretch review
-  - `p570`: audio QA / human review handoff
-- `p600`: asset
-  - `p610`: asset grounding
-  - `p620`: reusable asset inventory
-  - `p630`: asset plan authoring
-  - `p640`: asset evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p650`: asset plan fixes
-  - `p660`: asset requests
-  - `p670`: asset generation
-  - `p680`: asset continuity check
-- `p700`: scene implementation
-  - `p710`: scene implementation grounding
-  - `p720`: production manifest / prompt authoring
-  - `p730`: hard scene evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p740`: judgment evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p750`: generation ready
-  - `p760`: image generation
-  - `p770`: image QA / fix loop
+- `p500`: asset
+  - `p510`: asset grounding
+  - `p520`: reusable asset inventory
+  - `p530`: asset plan authoring
+  - `p540`: asset evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p550`: asset requests
+  - `p560`: asset generation
+  - `p570`: asset continuity check
+- `p600`: scene implementation / image
+  - `p610`: scene implementation grounding
+  - `p620`: production manifest / prompt authoring
+  - `p630`: hard scene evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p640`: judgment evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p650`: generation ready
+  - `p660`: image generation
+  - `p670`: image QA / fix loop
+  - `p680`: image human review handoff
+- `p700`: narration / audio runtime
+  - `p710`: narration grounding
+  - `p720`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p730`: TTS request / generation
+  - `p740`: duration fit gate
+  - `p750`: audio QA / human review handoff
 - `p800`: video
   - `p810`: video grounding
   - `p820`: motion / video evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
@@ -237,11 +235,11 @@ slot ごとの標準分担:
 | --- | --- | --- |
 | `p100` research | research scout / evidence collector | `research.md` への統合、source trace、slot 更新 |
 | `p200` story | story candidate / source-vs-creative audit | `story.md` 確定、hybridization 承認確認 |
-| `p300` visual planning | visual-value draft / visual payoff audit / anchor-reference-risk audit | `visual_value.md` 統合、story との矛盾確認、p400/p600/p700 handoff 確認 |
+| `p300` visual planning | visual-value draft / visual payoff audit / anchor-reference-risk audit | `visual_value.md` 統合、story との矛盾確認、p400/p500/p600/p700 handoff 確認 |
 | `p400` script | scene draft / narration draft | `script.md` と skeleton manifest の統合 |
-| `p500` narration | narration review / duration stretch review | TTS 実行判断、duration gate、manifest 反映 |
-| `p600` asset | asset brief / continuity review | asset plan 採用、request 発行、canonical asset 更新 |
-| `p700` scene implementation | scene/cut prompt rewrite / image prompt judgment | production manifest 統合、review finding の採否 |
+| `p500` asset | asset brief / continuity review | asset plan 採用、request 発行、canonical asset 更新 |
+| `p600` scene implementation | scene/cut prompt rewrite / image prompt judgment | production manifest 統合、review finding の採否 |
+| `p700` narration | narration review / duration stretch review | TTS 実行判断、duration gate、manifest 反映 |
 | `p800` video | clip generation fan-out / clip review | 採用判定、manifest 更新、除外理由の記録 |
 | `p900` render / QA | QA reviewer / runtime summary review | final report 生成、完了判定、run closeout |
 

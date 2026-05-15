@@ -111,11 +111,9 @@ def main() -> int:
                 "review.duration_fit.minimum_seconds": str(minimum_seconds),
                 "review.duration_fit.note": "no minimum runtime target configured",
                 "review.duration_fit.at": now_iso(),
-                "slot.p540.status": "skipped",
-                "slot.p540.requirement": "optional",
-                "slot.p550.status": "skipped",
-                "slot.p560.status": "skipped",
-                "slot.p570.status": "pending",
+                "slot.p740.status": "skipped",
+                "slot.p740.requirement": "optional",
+                "slot.p750.status": "pending",
             },
         )
         print(f"[skip] no minimum runtime target configured (actual={actual_seconds}s)")
@@ -130,13 +128,9 @@ def main() -> int:
                 "review.duration_fit.minimum_seconds": str(minimum_seconds),
                 "review.duration_fit.note": "actual audio-driven runtime satisfies the minimum target",
                 "review.duration_fit.at": now_iso(),
-                "slot.p540.status": "done",
-                "slot.p540.requirement": "required",
-                "slot.p550.status": "skipped",
-                "slot.p550.requirement": "optional",
-                "slot.p560.status": "skipped",
-                "slot.p560.requirement": "optional",
-                "slot.p570.status": "pending",
+                "slot.p740.status": "done",
+                "slot.p740.requirement": "required",
+                "slot.p750.status": "pending",
             },
         )
         print(f"[pass] actual runtime {actual_seconds}s meets minimum {minimum_seconds}s")
@@ -169,13 +163,9 @@ def main() -> int:
             "review.duration_fit.scene_prompt.generated_at": now_iso(),
             "review.duration_fit.narration_prompt": str(narration_prompt_path.relative_to(run_dir.resolve())),
             "review.duration_fit.narration_prompt.generated_at": now_iso(),
-            "slot.p540.status": "failed",
-            "slot.p540.requirement": "required",
-            "slot.p550.status": "pending",
-            "slot.p550.requirement": "required",
-            "slot.p560.status": "pending",
-            "slot.p560.requirement": "required",
-            "slot.p570.status": "blocked",
+            "slot.p740.status": "failed",
+            "slot.p740.requirement": "required",
+            "slot.p750.status": "blocked",
         },
     )
     print(

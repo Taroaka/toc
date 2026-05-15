@@ -1,15 +1,15 @@
 # Orchestration / QA / Compliance / Publishing
 
 変更内容:
-- production order を audio-first に切り替え、公開 workflow を `narration -> asset -> scene implementation -> video -> render -> qa` に再編した。
+- production order を asset/image-first に切り替え、公開 workflow を `asset -> scene implementation / image -> narration -> video -> render -> qa` に再編した。
 - canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa` に揃えた。
 
 修正理由:
-- 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が late recut を減らせるため。
+- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため。
 
 旧仕様との差分:
-- 旧運用は `image_prompt_review` / `image_generation` を公開 stage として前面に出し、audio runtime は後段だった。
-- 新運用は scene implementation を公開 stage にし、audio-first を固定する。
+- 旧運用は narration/audio を asset / image より前に置いていた。
+- 新運用は scene implementation を公開 stage にし、asset/image-first を固定する。
 
 運用設計ドキュメント（追加レイヤー）
 
@@ -194,7 +194,7 @@ run 直下には `p000_index.md` を置き、人間向けの入口にする。
 - 第1段階では binary / logs / scratch の物理 rename は行わず、navigation layer として番号を導入する
 - narration は
   - `p400`: narration draft / `tts_text` / human changes / skeleton manifest materialization
-  - `p500`: TTS 実行 / duration fit gate / audio handoff
+  - `p700`: TTS 実行 / duration fit gate / audio handoff
   の 2 層で扱う
 - 画像生成の request 改稿は、scene 単位で自然言語エージェントへ割り当てる
   - 各 scene agent は `script.md`、`video_manifest.md`、現在の request draft を読む

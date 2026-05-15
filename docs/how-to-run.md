@@ -161,20 +161,20 @@ output/<topic>_<timestamp>/
   をまとめる
   - 手動再生成: `python scripts/build-run-index.py --run-dir output/<topic>_<timestamp>`
 - 変更内容:
-  - fixed `p-slot` workflow を audio-first の production order に切り替えた
-  - `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video -> p900 render` を全 story 共通に固定した
+  - fixed `p-slot` workflow を asset/image-first の production order に切り替えた
+  - `p500 asset -> p600 scene/image implementation -> p700 narration/audio -> p800 video -> p900 render` を全 story 共通に固定した
 - 修正理由:
-  - 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が late recut を減らせるため
+  - 画像・asset を先に確定し、その visual 実体を見てから narration と video を仕上げるため
 - 旧仕様との差分:
-  - 旧順序は `p500 asset -> p600 image -> p700 video -> p800 audio` だった
+  - 旧順序は `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video` だった
 - `100` 番台ごとに大工程を割り当てる
   - `p100`: research
   - `p200`: story
   - `p300`: visual planning（`visual_value.md` で visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / p400-p600-p700 handoff を決める）
   - `p400`: script / narration draft / human changes
-  - `p500`: narration / audio runtime
-  - `p600`: asset
-  - `p700`: scene implementation
+  - `p500`: asset
+  - `p600`: scene implementation / image
+  - `p700`: narration / audio runtime
   - `p800`: video
   - `p900`: render / QA / runtime
 - これらの slot 意味は固定契約で、story ごとに変えない
@@ -188,12 +188,12 @@ output/<topic>_<timestamp>/
   - 100 番台の stage target は、stage 冒頭ではなく、その stage の human-review handoff slot まで進める
   - `p100|100|research`: `p130` research review handoff まで
   - `p200|200|story`: `p230` story review handoff まで
-  - `p300|300|visual_value`: `p330` visual planning handoff まで（`visual_value.md` + p400/p600/p700 handoff）
+  - `p300|300|visual_value`: `p330` visual planning handoff まで（`visual_value.md` + p400/p500/p600/p700 handoff）
   - `p400|400`: `p450` script handoff / skeleton manifest materialization まで
   - `p450|450|script`: skeleton `video_manifest.md` まで
-  - `p500|500|narration`: `p570` audio QA / human review handoff まで
-  - `p600|600|asset`: `p680` asset continuity / human review handoff まで
-  - `p700|700|scene_implementation`: `p750` generation-ready handoff まで
+  - `p500|500|asset`: `p570` asset continuity / human review handoff まで
+  - `p600|600|scene_implementation|image`: `p680` image review handoff まで
+  - `p700|700|narration`: `p750` audio QA / human review handoff まで
   - `p800|800|video_generation`: `p850` video review / exclusions handoff まで
   - `p900|900|render|video`: `p930` final QA / runtime handoff まで
 - 細番号も固定 slot contract の一部として扱う
@@ -203,14 +203,14 @@ output/<topic>_<timestamp>/
   - `p410`, `p420`, `p430`, `p440`, `p450`
   - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`
   - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`, `p680`
-  - `p710`, `p720`, `p730`, `p740`, `p750`, `p760`, `p770`
+  - `p710`, `p720`, `p730`, `p740`, `p750`
   - `p810`, `p820`, `p830`, `p840`, `p850`
   - `p910`, `p920`, `p930`
 - story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
 - `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
 - p300 done 条件:
   - 正本は `docs/data-contracts.md` の "Canonical p300 done 条件"
-  - 要約: `visual_value.md` に scene visual value coverage、asset / anchor candidates、reference strategy、regeneration risks、p400/p600/p700 handoff がある
+  - 要約: `visual_value.md` に scene visual value coverage、asset / anchor candidates、reference strategy、regeneration risks、p400/p500/p600/p700 handoff がある
   - p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を作らない
 - `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - slot 状態を手で残したい場合は次を使う

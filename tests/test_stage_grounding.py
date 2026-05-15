@@ -188,7 +188,7 @@ class TestStageGrounding(unittest.TestCase):
             (run_dir / "story.md").write_text(_good_story_yaml(), encoding="utf-8")
             (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
             (run_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
-            append_state_snapshot(run_dir / "state.txt", {"review.story.status": "approved", "review.duration_fit.status": "passed"})
+            append_state_snapshot(run_dir / "state.txt", {"review.story.status": "approved"})
 
             result = _run_grounding(run_dir, "image_prompt")
 
@@ -238,14 +238,13 @@ class TestStageGrounding(unittest.TestCase):
             (scene_dir / "script.md").write_text("# scene script\n", encoding="utf-8")
             (root_run_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
             (scene_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
-            append_state_snapshot(root_run_dir / "state.txt", {"review.story.status": "approved", "review.duration_fit.status": "passed"})
+            append_state_snapshot(root_run_dir / "state.txt", {"review.story.status": "approved"})
 
             report = run_stage_grounding(scene_dir, "image_prompt", flow="scene-series", retries=0, mark_stage_failure=False)
 
             self.assertEqual(report["status"], "ready")
             self.assertEqual(report["parent_run_dir"], str(root_run_dir.resolve()))
-            state_check = next(entry for entry in report["required_state_checks"] if entry["key"] == "review.duration_fit.status")
-            self.assertTrue(state_check["passed"])
+            self.assertFalse(report["required_state_checks"])
             scene_state = parse_state_file(scene_dir / "state.txt")
             self.assertEqual(scene_state["stage.scene_implementation.grounding.status"], "ready")
             self.assertEqual(scene_state["stage.scene_implementation.audit.status"], "passed")

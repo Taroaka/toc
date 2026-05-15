@@ -7,16 +7,16 @@
 # - Rollback by copying a previous block and appending it as the newest.
 #
 # 変更内容:
-# - production order を audio-first に切り替えた
-# - canonical grounding stage は narration / asset / scene_implementation / video_generation に再編した
+# - production order を asset/image-first に切り替えた
+# - canonical grounding stage は asset / scene_implementation / narration / video_generation に再編した
 # - video_manifest.md は manifest_phase=skeleton|production を持つ
 #
 # 修正理由:
-# - 実 TTS 秒数だけが最終尺の正本であり、scene / video をその後ろに置く方が運用が安定するため
+# - asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため
 #
 # 旧仕様との差分:
 # - 旧 schema は image_prompt stage を公開 stage とし、audio stage は後段だった
-# - 新 schema では scene_implementation を公開 stage とし、audio-first を前提にする
+# - 新 schema では scene_implementation を公開 stage とし、asset/image-first を前提にする
 #
 # Required keys (minimum):
 #   timestamp=ISO8601

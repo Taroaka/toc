@@ -3,15 +3,15 @@
 本書は `todo.txt` の 6) Data contracts を具体化する。
 
 変更内容:
-- production order を audio-first へ切り替え、固定 workflow の後半を `narration -> asset -> scene_implementation -> video_generation -> render -> qa` に再編した。
+- production order を asset/image-first へ切り替え、固定 workflow の後半を `asset -> scene_implementation/image -> narration -> video_generation -> render -> qa` に再編した。
 - `video_manifest.md` に `manifest_phase: skeleton|production` を追加した。
 
 修正理由:
-- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が duration drift に強いため。
+- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため。
 
 旧仕様との差分:
-- 旧 contract は `image_prompt` を公開 stage とし、audio stage は後段だった。
-- 新 contract では `scene_implementation` を公開 stage とし、audio-first を前提にする。
+- 旧 contract は narration/audio を asset / image より前に置いていた。
+- 新 contract では `scene_implementation` を公開 stage とし、asset/image-first を前提にする。
 
 ## 0. Core Terms / Glossary
 
@@ -29,7 +29,7 @@
 - `audio` / 音声
   - cut または scene に属する narration runtime。
   - `tts_text`, voice, prompt contract, generated audio path, actual duration を持つ。
-  - 概念上は cut の部品だが、実 TTS 秒数が後続の video duration / hold / render を決めるため、stage としては p500 / narration で先に確定する。
+  - 概念上は cut の部品だが、stage としては p700 / narration で、asset と scene image の後、video generation の前に確定する。
 - `visual`
   - cut または scene が画として何を伝えるかを表す設計領域。
   - `visual_beat`, `scene_contract`, `image_generation`, `still_image_plan`, `reference_usage` などを含む。
@@ -64,9 +64,9 @@ Scene
 
 - p300 visual planning: cut を作る前に、visual identity / visual value / anchor / reference strategy を決める。
 - p400 script: scene / cut skeleton と narration / tts_text を作る。
-- p500 narration: cut audio を生成し、実 duration を確定する。
-- p600 asset: cut で使う reusable asset / reference を設計・生成する。
-- p700 scene implementation: audio duration と asset references を使って cut の image / video 実装を作る。
+- p500 asset: cut で使う reusable asset / reference を設計・生成する。
+- p600 scene implementation / image: asset references を使って cut の image 実装を作る。
+- p700 narration: 確定した visual に合わせて cut audio を生成し、実 duration を確定する。
 - p800/p900 video/render: render unit / clip list / final render を作る。
 
 ## 1. State schema（ジョブ状態）
@@ -230,9 +230,9 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
 - `p230`: story authoring 後の review
 - `p320`: visual planning authoring 後の review
 - `p430`: script authoring 後の review
-- `p520`: narration text authoring 後の review
-- `p640`: asset plan authoring 後の review
-- `p730` / `p740`: scene implementation authoring 後の hard review / judgment review
+- `p540`: asset plan authoring 後の review
+- `p630` / `p640`: scene implementation authoring 後の hard review / judgment review
+- `p720`: narration text authoring 後の review
 - `p820` / `p850`: motion / video authoring 後の review
 - `p930`: final QA / runtime summary 後の review
 
@@ -339,7 +339,7 @@ output/<topic>_<timestamp>/run_status.json
 - 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
 - narration は
   - `p400`: narration draft / `tts_text` / script review / human changes / skeleton manifest materialization
-  - `p500`: TTS 実行 / duration fit gate / audio runtime handoff
+  - `p700`: TTS 実行 / duration fit gate / audio runtime handoff
   に分けて扱う
 
 ### 1.0.2 Fixed p-slot workflow contract
@@ -366,9 +366,9 @@ slot.pXXX.review_loop.current_round=0-5
 - `p300`: visual planning
   - `visual_value.md` を正本として、cut 作成前に visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / downstream handoff を決める
 - `p400`: script / narration draft / human changes
-- `p500`: narration / audio runtime
-- `p600`: asset
-- `p700`: scene implementation
+- `p500`: asset
+- `p600`: scene implementation / image
+- `p700`: narration / audio runtime
 - `p800`: video
 - `p900`: render / QA / runtime
 
@@ -378,9 +378,9 @@ stage target resolution:
 - `p200` / `200` / `story` -> `p230` story review handoff
 - `p300` / `300` / `visual_value` -> `p330` visual planning handoff
 - `p400` / `400` -> `p450` script handoff / skeleton manifest materialization
-- `p500` / `500` / `narration` -> `p570` audio QA / human review handoff
-- `p600` / `600` / `asset` -> `p680` asset continuity / human review handoff
-- `p700` / `700` / `scene_implementation` -> `p750` generation-ready handoff
+- `p500` / `500` / `asset` -> `p570` asset continuity / human review handoff
+- `p600` / `600` / `scene_implementation` / `image` -> `p680` image review handoff
+- `p700` / `700` / `narration` -> `p750` audio QA / human review handoff
 - `p800` / `800` / `video_generation` -> `p850` video review / exclusions handoff
 - `p900` / `900` / `render` / `video` -> `p930` final QA / runtime handoff
 
@@ -405,7 +405,7 @@ Canonical p300 done 条件:
 - `anchor_cut_candidates` が列挙されている
 - `reference_strategy` がある
 - `regeneration_risks[]` がある
-- `handoff_to_p400_p600_p700` がある
+- `handoff_to_p400_p500_p600_p700` がある
 - 本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を p300 で作っていない
 
 ### 1.1 `status` と `stage.*.status` の役割分担

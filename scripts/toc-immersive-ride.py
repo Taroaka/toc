@@ -70,7 +70,18 @@ STAGE_TARGETS: dict[str, str] = {
     "script": "p450",
     "500": "p570",
     "p500": "p570",
-    "narration": "p570",
+    "asset": "p570",
+    "600": "p680",
+    "p600": "p680",
+    "image": "p680",
+    "image_generation": "p680",
+    "scene_implementation": "p680",
+    "700": "p750",
+    "p700": "p750",
+    "narration": "p750",
+    "800": "p850",
+    "p800": "p850",
+    "video_generation": "p850",
 }
 for _big_stage, _handoff_slot in BIG_STAGE_HANDOFF_SLOTS.items():
     STAGE_TARGETS.setdefault(_big_stage, _handoff_slot)
@@ -108,25 +119,27 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
         "stage.narration.status": "pending",
         "runtime.scaffold.narration_status": "pending",
         "runtime.scaffold.audio_status": "pending",
-        "slot.p510.status": "pending",
-        "slot.p510.note": "scaffold grounding only; author narration runtime handoff before marking done",
-        "slot.p530.status": "pending",
-        "slot.p530.note": "scaffold audio directory only; generate narration audio before marking done",
+        "slot.p710.status": "pending",
+        "slot.p710.note": "scaffold grounding only; author narration runtime handoff before marking done",
+        "slot.p730.status": "pending",
+        "slot.p730.note": "scaffold audio directory only; generate narration audio before marking done",
     },
     "asset": {
         "stage.asset.status": "pending",
         "artifact.asset_plan.status": "scaffold",
-        "slot.p630.status": "pending",
-        "slot.p630.note": "scaffold placeholder; author asset_plan.md before marking done",
-        "slot.p660.status": "pending",
-        "slot.p660.note": "scaffold placeholder; materialize asset requests before generation",
-        "slot.p670.status": "pending",
-        "slot.p670.note": "scaffold only; reusable asset generation has not run",
+        "slot.p510.status": "pending",
+        "slot.p510.note": "scaffold grounding only; resolve asset stage context before marking done",
+        "slot.p530.status": "pending",
+        "slot.p530.note": "scaffold placeholder; author asset_plan.md before marking done",
+        "slot.p550.status": "pending",
+        "slot.p550.note": "scaffold placeholder; materialize asset requests before generation",
+        "slot.p560.status": "pending",
+        "slot.p560.note": "scaffold only; reusable asset generation has not run",
     },
     "scene_implementation": {
         "stage.scene_implementation.status": "pending",
-        "slot.p720.status": "pending",
-        "slot.p720.note": "skeleton manifest only; production cut prompts are not authored",
+        "slot.p620.status": "pending",
+        "slot.p620.note": "skeleton manifest only; production cut prompts are not authored",
     },
     "video_generation": {
         "stage.video_generation.status": "pending",
@@ -179,29 +192,29 @@ REVIEW_HANDOFF_UPDATES: dict[str, dict[str, str]] = {
         "stage.narration.status": "awaiting_approval",
         "review.narration.status": "pending",
         "gate.narration_review": "required",
-        "slot.p570.status": "pending",
-        "slot.p570.note": "audio QA / human review handoff scaffolded; generate audio before final approval when required",
+        "slot.p750.status": "pending",
+        "slot.p750.note": "audio QA / human review handoff scaffolded; generate audio before final approval when required",
     },
     "asset": {
         "stage.asset.status": "awaiting_approval",
         "review.asset.status": "pending",
         "gate.asset_review": "required",
-        "slot.p640.status": "pending",
-        "slot.p640.note": "asset evaluator-improvement loop prompts are ready for critic review",
-        "slot.p680.status": "pending",
-        "slot.p680.note": "asset continuity handoff ready for human review",
+        "slot.p540.status": "pending",
+        "slot.p540.note": "asset evaluator-improvement loop prompts are ready for critic review",
+        "slot.p570.status": "pending",
+        "slot.p570.note": "asset continuity handoff ready for human review",
     },
     "scene_implementation": {
         "stage.scene_implementation.status": "awaiting_approval",
         "review.image_prompt.status": "pending",
         "review.image_prompt.judgment.status": "pending",
         "gate.image_prompt_review": "required",
-        "slot.p730.status": "pending",
-        "slot.p730.note": "hard scene evaluator-improvement loop prompts are ready for critic review",
-        "slot.p740.status": "pending",
-        "slot.p740.note": "judgment evaluator-improvement loop prompts are ready for critic review",
-        "slot.p750.status": "pending",
-        "slot.p750.note": "generation-ready handoff ready for human review",
+        "slot.p630.status": "pending",
+        "slot.p630.note": "hard scene evaluator-improvement loop prompts are ready for critic review",
+        "slot.p640.status": "pending",
+        "slot.p640.note": "judgment evaluator-improvement loop prompts are ready for critic review",
+        "slot.p680.status": "pending",
+        "slot.p680.note": "image generation handoff ready for human review before narration",
     },
     "video_generation": {
         "stage.video_generation.status": "awaiting_approval",
@@ -258,6 +271,18 @@ def ensure_skeleton_manifest(manifest_text: str) -> str:
     if "manifest_phase:" in manifest_text:
         return manifest_text
     return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
+
+
+def ensure_production_manifest_file(manifest_path: Path) -> None:
+    if not manifest_path.exists():
+        return
+    text = manifest_path.read_text(encoding="utf-8")
+    if "manifest_phase:" in text:
+        updated = re.sub(r"(?m)^(\s*manifest_phase:\s*).*$", r"\1production", text, count=1)
+    else:
+        updated = text.replace("```yaml\n", "```yaml\nmanifest_phase: production\n", 1)
+    if updated != text:
+        manifest_path.write_text(updated, encoding="utf-8")
 
 
 def normalize_stage_target(value: str) -> str:
@@ -578,8 +603,6 @@ def main() -> None:
         )
         return
 
-    maybe_run_stage_grounding(run_dir, "narration", flow="immersive")
-    review_updates = materialize_review_loop_prompts(run_dir, stage="narration")
     common_artifacts = {
         "immersive.experience": str(experience),
         "artifact.research": str((run_dir / "research.md").resolve()),
@@ -589,22 +612,7 @@ def main() -> None:
         "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
     }
 
-    if not target_reaches(stop_slot, "p610"):
-        finish_scaffold(
-            state_path,
-            topic_raw,
-            run_dir,
-            stop_slot,
-            {
-                **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration"),
-                **review_updates,
-                **review_handoff_updates("narration"),
-                **common_artifacts,
-            },
-            legacy_done=legacy_default,
-        )
-        return
-
+    maybe_run_stage_grounding(run_dir, "asset", flow="immersive")
     write_text(run_dir / "asset_plan.md", "# Asset Plan\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_requests.md", "# Asset Generation Requests\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_manifest.md", "```yaml\nassets: []\n```\n", force=args.force)
@@ -614,23 +622,25 @@ def main() -> None:
         "artifact.asset_generation_requests": str((run_dir / "asset_generation_requests.md").resolve()),
         "artifact.asset_generation_manifest": str((run_dir / "asset_generation_manifest.md").resolve()),
     }
-    if not target_reaches(stop_slot, "p710"):
+    if not target_reaches(stop_slot, "p610"):
         finish_scaffold(
             state_path,
             topic_raw,
             run_dir,
             stop_slot,
             {
-                **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset"),
-                **review_updates,
+                **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset"),
                 **asset_review_updates,
                 **review_handoff_updates("asset"),
                 **common_artifacts,
                 **asset_artifacts,
             },
+            legacy_done=legacy_default,
         )
         return
 
+    ensure_production_manifest_file(run_dir / "video_manifest.md")
+    maybe_run_stage_grounding(run_dir, "scene_implementation", flow="immersive")
     write_text(run_dir / "image_prompt_story_review.md", "# Image Prompt Story Review\n\nTODO\n", force=args.force)
     write_text(run_dir / "image_generation_requests.md", "# Image Generation Requests\n\nTODO\n", force=args.force)
     scene_review_updates = merge_review_loop_updates(
@@ -642,6 +652,26 @@ def main() -> None:
         "artifact.image_prompt_story_review": str((run_dir / "image_prompt_story_review.md").resolve()),
         "artifact.image_generation_requests": str((run_dir / "image_generation_requests.md").resolve()),
     }
+    if not target_reaches(stop_slot, "p710"):
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stop_slot,
+            {
+                **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset", "scene_implementation"),
+                **asset_review_updates,
+                **scene_review_updates,
+                **review_handoff_updates("scene_implementation"),
+                **common_artifacts,
+                **asset_artifacts,
+                **scene_artifacts,
+            },
+        )
+        return
+
+    maybe_run_stage_grounding(run_dir, "narration", flow="immersive")
+    narration_review_updates = materialize_review_loop_prompts(run_dir, stage="narration")
     if not target_reaches(stop_slot, "p810"):
         finish_scaffold(
             state_path,
@@ -650,10 +680,10 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation"),
-                **review_updates,
+                **narration_review_updates,
                 **asset_review_updates,
                 **scene_review_updates,
-                **review_handoff_updates("scene_implementation"),
+                **review_handoff_updates("narration"),
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
@@ -674,7 +704,7 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation"),
-                **review_updates,
+                **narration_review_updates,
                 **asset_review_updates,
                 **scene_review_updates,
                 **video_review_updates,
@@ -697,7 +727,7 @@ def main() -> None:
         stop_slot,
         {
             **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation", "qa"),
-            **review_updates,
+            **narration_review_updates,
             **asset_review_updates,
             **scene_review_updates,
             **video_review_updates,

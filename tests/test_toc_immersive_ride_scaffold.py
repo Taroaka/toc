@@ -112,23 +112,21 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "narration.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "asset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.readset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.audit.json").exists())
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
             self.assertIn("status=DONE", state)
             self.assertIn("runtime.stage=immersive_ride_scaffolded", state)
             parsed_state = parse_state(run_dir / "state.txt")
-            self.assertEqual(parsed_state["stage.narration.status"], "awaiting_approval")
-            self.assertEqual(parsed_state["review.narration.status"], "pending")
-            self.assertEqual(parsed_state["runtime.scaffold.narration_status"], "pending")
-            self.assertEqual(parsed_state["runtime.scaffold.audio_status"], "pending")
+            self.assertEqual(parsed_state["stage.asset.status"], "awaiting_approval")
+            self.assertEqual(parsed_state["review.asset.status"], "pending")
             self.assertEqual(parsed_state["slot.p510.status"], "pending")
             self.assertEqual(parsed_state["slot.p530.status"], "pending")
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p500_section = markdown_section(index_text, "### p500 Narration / Audio Runtime Stage")
-            p510_section = markdown_subsection(index_text, "#### p510 Narration Grounding")
-            self.assertIn("- current_state: `awaiting_approval (narration)`", p500_section)
+            p500_section = markdown_section(index_text, "### p500 Asset Stage")
+            p510_section = markdown_subsection(index_text, "#### p510 Asset Grounding")
+            self.assertIn("- current_state: `awaiting_approval (asset)`", p500_section)
             self.assertIn("- status: `pending`", p510_section)
             manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             self.assertIn("manifest_phase: skeleton", manifest)
@@ -395,7 +393,7 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertIn("runtime.stage_target=p400", state)
             self.assertIn("runtime.stop_slot=p450", state)
 
-    def test_scaffold_p500_records_pending_narration_and_audio_state(self) -> None:
+    def test_scaffold_p500_records_pending_asset_state(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
@@ -424,21 +422,19 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             )
 
             run_dir = base / "テスト_トピック_20990101_0000"
-            self.assertTrue((run_dir / "logs" / "grounding" / "narration.json").exists())
+            self.assertTrue((run_dir / "logs" / "grounding" / "asset.json").exists())
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["runtime.stage_target"], "p500")
             self.assertEqual(state["runtime.stop_slot"], "p570")
-            self.assertEqual(state["stage.narration.status"], "awaiting_approval")
-            self.assertEqual(state["review.narration.status"], "pending")
-            self.assertEqual(state["runtime.scaffold.narration_status"], "pending")
-            self.assertEqual(state["runtime.scaffold.audio_status"], "pending")
+            self.assertEqual(state["stage.asset.status"], "awaiting_approval")
+            self.assertEqual(state["review.asset.status"], "pending")
             self.assertEqual(state["slot.p510.status"], "pending")
             self.assertEqual(state["slot.p530.status"], "pending")
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p500_section = markdown_section(index_text, "### p500 Narration / Audio Runtime Stage")
-            p510_section = markdown_subsection(index_text, "#### p510 Narration Grounding")
-            p530_section = markdown_subsection(index_text, "#### p530 TTS Request / Generation")
-            self.assertIn("- current_state: `awaiting_approval (narration)`", p500_section)
+            p500_section = markdown_section(index_text, "### p500 Asset Stage")
+            p510_section = markdown_subsection(index_text, "#### p510 Asset Grounding")
+            p530_section = markdown_subsection(index_text, "#### p530 Asset Plan Authoring")
+            self.assertIn("- current_state: `awaiting_approval (asset)`", p500_section)
             self.assertIn("- status: `pending`", p510_section)
             self.assertIn("- status: `pending`", p530_section)
 
@@ -449,20 +445,20 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             "p600": {
                 "runtime.stage_target": "p600",
                 "runtime.stop_slot": "p680",
-                "stage.asset.status": "awaiting_approval",
-                "review.asset.status": "pending",
-                "gate.asset_review": "required",
+                "stage.scene_implementation.status": "awaiting_approval",
+                "review.image_prompt.status": "pending",
+                "gate.image_prompt_review": "required",
                 "slot.p680.status": "pending",
-                "artifact": "asset_plan.md",
+                "artifact": "image_generation_requests.md",
             },
             "p700": {
                 "runtime.stage_target": "p700",
                 "runtime.stop_slot": "p750",
-                "stage.scene_implementation.status": "awaiting_approval",
-                "review.image_prompt.status": "pending",
-                "gate.image_prompt_review": "required",
+                "stage.narration.status": "awaiting_approval",
+                "review.narration.status": "pending",
+                "gate.narration_review": "required",
                 "slot.p750.status": "pending",
-                "artifact": "image_generation_requests.md",
+                "artifact": "video_manifest.md",
             },
             "p800": {
                 "runtime.stage_target": "p800",

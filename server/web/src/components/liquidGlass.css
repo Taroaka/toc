@@ -1,7 +1,11 @@
 :root {
   --lg-deep-black: #050608;
   --lg-deep-surface: #171c23;
-  --lg-glass-cyan: #8ee8ff;
+  --lg-glass-orange: #ffb347;
+  --lg-glass-gold: #ffd166;
+  --lg-legend-orange: #ff7a1a;
+  --lg-legend-ember: #ff9a2f;
+  --lg-legend-gold: #ffe08a;
   --lg-museum-amber: #f6d365;
   --lg-success-green: #64e9a5;
   --lg-warning-gold: #ffc857;
@@ -10,41 +14,51 @@
   --lg-white-hairline-strong: rgba(255, 255, 255, 0.23);
   --lg-ink: rgba(246, 250, 252, 0.94);
   --lg-ink-muted: rgba(217, 228, 234, 0.68);
-  --lg-bg: rgba(18, 23, 27, 0.54);
-  --lg-bg-strong: rgba(26, 32, 36, 0.72);
+  --lg-bg: rgba(18, 23, 27, 0.78);
+  --lg-bg-strong: rgba(28, 35, 40, 0.88);
   --lg-bg-solid: rgba(19, 24, 27, 0.94);
   --lg-border: var(--lg-white-hairline);
   --lg-border-strong: var(--lg-white-hairline-strong);
-  --lg-sheen: rgba(255, 255, 255, 0.16);
-  --lg-shadow: 0 16px 42px rgba(0, 0, 0, 0.28);
-  --lg-shadow-raised: 0 20px 54px rgba(0, 0, 0, 0.34);
-  --lg-inner-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(255, 255, 255, 0.045);
-  --lg-focus: rgba(246, 211, 101, 0.78);
-  --lg-tone: rgba(142, 232, 255, 0.86);
-  --lg-tone-soft: rgba(142, 232, 255, 0.11);
-  --lg-tone-border: rgba(142, 232, 255, 0.34);
+  --lg-sheen: rgba(255, 255, 255, 0.18);
+  --lg-edge-light: rgba(255, 255, 255, 0.28);
+  --lg-edge-dark: rgba(0, 0, 0, 0.28);
+  --lg-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+  --lg-shadow-raised: 0 18px 44px rgba(0, 0, 0, 0.34);
+  --lg-inner-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+    inset 1px 0 0 rgba(255, 255, 255, 0.07),
+    inset -1px 0 0 rgba(0, 0, 0, 0.18);
+  --lg-focus: rgba(255, 184, 64, 0.86);
+  --lg-tone: rgba(255, 159, 47, 0.9);
+  --lg-tone-soft: rgba(255, 128, 32, 0.14);
+  --lg-tone-border: rgba(255, 217, 112, 0.42);
 }
 
 .lg {
   --lg-padding-x: 16px;
   --lg-padding-y: 14px;
   --lg-radius: 8px;
-  --lg-blur: 18px;
-  --lg-saturate: 145%;
+  --lg-blur: 10px;
+  --lg-saturate: 118%;
   --lg-shine:
-    radial-gradient(circle at 16% 0%, var(--lg-sheen), transparent 22%),
-    linear-gradient(115deg, transparent 18%, rgba(255, 255, 255, 0.045) 42%, transparent 68%);
-  --lg-shine-opacity: 0.36;
-  --lg-inner-border: rgba(255, 255, 255, 0.04);
+    radial-gradient(105% 82% at 10% -20%, rgba(255, 245, 214, 0.26), transparent 32%),
+    radial-gradient(80% 90% at 88% 0%, rgba(255, 122, 26, 0.11), transparent 42%),
+    linear-gradient(115deg, transparent 16%, rgba(255, 224, 138, 0.08) 38%, rgba(255, 122, 26, 0.07) 48%, transparent 70%);
+  --lg-shine-opacity: 0.42;
+  --lg-inner-border: rgba(255, 255, 255, 0.1);
   position: relative;
   box-sizing: border-box;
   color: var(--lg-ink);
   border: 1px solid var(--lg-border);
   border-radius: var(--lg-radius);
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.095), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 26%),
     linear-gradient(180deg, var(--lg-bg-strong), var(--lg-bg));
-  box-shadow: var(--lg-shadow), var(--lg-inner-shadow);
+  box-shadow:
+    var(--lg-shadow),
+    0 0 26px rgba(255, 122, 26, 0.04),
+    var(--lg-inner-shadow);
   isolation: isolate;
 }
 
@@ -85,6 +99,11 @@
   z-index: -1;
 }
 
+.lg::before {
+  background-size: 100% 100%, 220% 100%;
+  animation: none;
+}
+
 .lg::after {
   content: "";
   position: absolute;
@@ -92,19 +111,26 @@
   pointer-events: none;
   border-radius: calc(var(--lg-radius) - 1px);
   border: 1px solid var(--lg-inner-border);
+  box-shadow:
+    inset 0 1px 0 var(--lg-edge-light),
+    inset 0 -1px 0 var(--lg-edge-dark),
+    inset 0 0 18px var(--lg-tone-soft),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
   z-index: -1;
 }
 
 .lg--clear {
-  --lg-bg: rgba(14, 19, 22, 0.2);
-  --lg-bg-strong: rgba(255, 255, 255, 0.055);
-  --lg-blur: 14px;
-  --lg-shine-opacity: 0.28;
+  --lg-bg: rgba(18, 23, 27, 0.68);
+  --lg-bg-strong: rgba(33, 40, 45, 0.78);
+  --lg-blur: 8px;
+  --lg-shine-opacity: 0.2;
 }
 
 .lg--frosted {
-  --lg-bg: rgba(16, 22, 26, 0.5);
-  --lg-bg-strong: rgba(33, 41, 47, 0.66);
+  --lg-bg: rgba(16, 22, 26, 0.76);
+  --lg-bg-strong: rgba(34, 42, 48, 0.86);
+  --lg-blur: 12px;
+  --lg-saturate: 122%;
 }
 
 .lg--layered {
@@ -122,26 +148,27 @@
   --lg-bg: var(--lg-bg-solid);
   --lg-bg-strong: rgba(31, 38, 43, 0.98);
   --lg-blur: 0px;
+  --lg-shine-opacity: 0.2;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 
 .lg--primary {
-  --lg-tone: rgba(142, 232, 255, 0.92);
-  --lg-tone-soft: rgba(142, 232, 255, 0.12);
-  --lg-tone-border: rgba(142, 232, 255, 0.38);
-  --lg-tone: color-mix(in srgb, var(--lg-glass-cyan) 92%, transparent);
-  --lg-tone-soft: color-mix(in srgb, var(--lg-glass-cyan) 12%, transparent);
-  --lg-tone-border: color-mix(in srgb, var(--lg-glass-cyan) 38%, transparent);
+  --lg-tone: rgba(255, 154, 47, 0.94);
+  --lg-tone-soft: rgba(255, 122, 26, 0.15);
+  --lg-tone-border: rgba(255, 224, 138, 0.46);
+  --lg-tone: color-mix(in srgb, var(--lg-legend-ember) 72%, var(--lg-glass-gold) 28%);
+  --lg-tone-soft: color-mix(in srgb, var(--lg-legend-orange) 14%, transparent);
+  --lg-tone-border: color-mix(in srgb, var(--lg-legend-gold) 46%, transparent);
 }
 
 .lg--secondary {
-  --lg-tone: rgba(246, 211, 101, 0.92);
-  --lg-tone-soft: rgba(246, 211, 101, 0.12);
-  --lg-tone-border: rgba(246, 211, 101, 0.38);
-  --lg-tone: color-mix(in srgb, var(--lg-museum-amber) 92%, transparent);
-  --lg-tone-soft: color-mix(in srgb, var(--lg-museum-amber) 12%, transparent);
-  --lg-tone-border: color-mix(in srgb, var(--lg-museum-amber) 38%, transparent);
+  --lg-tone: rgba(255, 214, 102, 0.92);
+  --lg-tone-soft: rgba(255, 142, 38, 0.12);
+  --lg-tone-border: rgba(255, 198, 74, 0.4);
+  --lg-tone: color-mix(in srgb, var(--lg-museum-amber) 72%, var(--lg-legend-orange) 28%);
+  --lg-tone-soft: color-mix(in srgb, var(--lg-legend-orange) 11%, transparent);
+  --lg-tone-border: color-mix(in srgb, var(--lg-legend-gold) 40%, transparent);
 }
 
 .lg--success {
@@ -359,6 +386,11 @@
   animation: lg-rim-pulse 1.9s ease-in-out infinite;
 }
 
+.lg-status-rim--active::before,
+.lg.is-active::before {
+  animation: lg-liquid-glint 8s ease-in-out infinite;
+}
+
 @keyframes lg-rim-pulse {
   0%,
   100% {
@@ -367,6 +399,17 @@
 
   50% {
     opacity: 0.76;
+  }
+}
+
+@keyframes lg-liquid-glint {
+  0%,
+  100% {
+    background-position: 0 0, -80% 0;
+  }
+
+  50% {
+    background-position: 0 0, 120% 0;
   }
 }
 
@@ -383,6 +426,10 @@
   }
 
   .lg-status-rim--pulse::before {
+    animation: none;
+  }
+
+  .lg::before {
     animation: none;
   }
 }

@@ -9,9 +9,10 @@ Usage:
   scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>
 
 What it does:
-  1) Generate assets via APIs from video_manifest.md
-  2) Build ffmpeg concat lists
-  3) Render final video.mp4 (1280x720, 24fps)
+  1) Generate reusable assets and scene images from video_manifest.md
+  2) Generate narration audio
+  3) Generate video clips
+  4) Build ffmpeg concat lists and render final video.mp4 (1280x720, 24fps)
 USAGE
 }
 
@@ -65,7 +66,7 @@ if gate == "required" and status != "approved":
     )
 PY
 
-stage="assets"
+stage="images"
 on_err() {
   code=$?
   set +e
@@ -80,6 +81,21 @@ trap on_err ERR
 python scripts/toc-state.py append --run-dir "$run_dir" \
   --set "runtime.stage=${stage}" \
   --set "runtime.render.status=started"
+
+python scripts/generate-assets-from-manifest.py \
+  --manifest "$manifest" \
+  --skip-audio \
+  --skip-videos \
+  --apply-asset-guides \
+  --asset-guides-character-refs scene \
+  --require-character-ids \
+  --require-object-ids \
+  --require-object-reference-scenes \
+  --character-reference-views front,side,back \
+  --character-reference-strip
+
+stage="narration"
+python scripts/toc-state.py append --run-dir "$run_dir" --set "runtime.stage=${stage}"
 
 override_tool="${TOC_OVERRIDE_NARRATION_TOOL:-}"
 override_args=()
@@ -110,8 +126,12 @@ if ! python scripts/check-audio-duration-gate.py \
   exit 1
 fi
 
+stage="videos"
+python scripts/toc-state.py append --run-dir "$run_dir" --set "runtime.stage=${stage}"
+
 python scripts/generate-assets-from-manifest.py \
   --manifest "$manifest" \
+  --skip-images \
   --skip-audio \
   --apply-asset-guides \
   --asset-guides-character-refs scene \

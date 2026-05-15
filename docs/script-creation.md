@@ -102,7 +102,7 @@ Script stage のゴールは、承認済みの `story.md` を、物語意図・r
 
 - `global_visual_identity` と `scene_visual_values[]` を、台本の視覚方針と scene/cut skeleton に反映する
 - `anchor_cut_candidates[]` は、後続 manifest / asset stage が判断できるよう selector と意図を残す
-- `asset_bible_candidates` は、p600 の `asset_plan.md` で materialize できるよう使用箇所を保つ
+- `asset_bible_candidates` は、p500 の `asset_plan.md` で materialize できるよう使用箇所を保つ
 - `reference_strategy` と `regeneration_risks[]` は、human change や later prompt authoring で失われないようにする
 - `value_parts[]` がある場合だけ、中盤の silent visual payoff として扱う
 

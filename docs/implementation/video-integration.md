@@ -7,19 +7,19 @@
 `script.md` から素材生成→合成→検証までを一貫した流れとして定義する。
 
 変更内容:
-- production order を audio-first に固定した
+- production order を asset/image-first に固定した
 - `video_manifest.md` は `manifest_phase: skeleton|production` の二段階にした
 
 修正理由:
-- 実 TTS 秒数だけが最終尺の正本であり、asset / scene / video をその後ろに置く方が尺ズレの再設計を減らせるため
+- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため
 
 旧仕様との差分:
-- 旧運用では asset / image / video が audio より前に語られていた
-- 新運用では `script -> skeleton manifest -> narration/TTS -> duration gate -> asset -> scene implementation -> video -> render` を正本にする
+- 旧運用では narration/TTS が asset / image より前に置かれていた
+- 新運用では `script -> skeleton manifest -> asset -> scene implementation / image -> narration/TTS -> duration gate -> video -> render` を正本にする
 
 ## 全体フロー
 
-`script.md → video_manifest.md (manifest_phase: skeleton) → narration/TTS → duration gate → asset → scene implementation (manifest_phase: production) → video → render-video.sh → video.mp4 → QA`
+`script.md → video_manifest.md (manifest_phase: skeleton) → asset → scene implementation / image (manifest_phase: production) → narration/TTS → duration gate → video → render-video.sh → video.mp4 → QA`
 
 ## 正本ルール
 
@@ -149,15 +149,17 @@ generator の既定参照順:
   - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
   - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
    - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
-4) 先に音声だけ生成して秒数を確定する（audio-only）
+4) 先に reusable asset と scene image を生成する（image-only）
+   - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
+5) 次に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
-5) `video_generation.duration_seconds` をナレーション秒数に合わせて更新し、その後に画像/動画生成に進む
+6) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
-6) 実尺が target を満たすかを gate する
+7) 実尺が target を満たすかを gate する
    - `python scripts/check-audio-duration-gate.py --manifest output/<run>/video_manifest.md --run-dir output/<run>`
    - `cinematic_story` は既定で 300 秒以上を target にする
    - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
-   - gate を超えた run だけが次の human review と image/video generation に進む
+   - gate を超えた run だけが video generation / render に進む
 
 render unit の扱い:
 

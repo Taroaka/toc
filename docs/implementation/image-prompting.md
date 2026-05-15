@@ -229,6 +229,12 @@ asset stage での参照原則:
 - ただし no-reference image request は例外的に built-in lane へ回す
 - `reference_count > 0` の cut image は標準 provider lane に残す
 
+<!-- image-gen-setting:scene:start -->
+scene image prompt は、動画を始める最初の1フレームとして書く。
+`[全体 / 不変条件]`, `[登場人物]`, `[小道具 / 舞台装置]`, `[シーン]`, `[連続性]`, `[禁止]` の順を守り、他 cut や前後 prompt の記憶に依存しない。
+参照画像がある場合は、metadata の reference path ではなく、人物参照画像 / 小道具参照画像 / 場所参照画像として何を維持するかを本文に書く。
+<!-- image-gen-setting:scene:end -->
+
 subagent review の必須 criterion:
 
 - `[全体 / 不変条件]`
@@ -449,6 +455,12 @@ aspect ratio / size は `image_generation.aspect_ratio` / `image_generation.imag
 - `三人称 / 肩越し / 自撮り`
 
 ## 3.1 character_bible を scene で選ぶ（混ざり防止）
+
+<!-- image-gen-setting:character:start -->
+人物参照は `assets.character_bible` と `image_generation.character_ids` を正本にする。
+人物が出る still では、顔、髪型、衣装、年齢感、体格、シルエットを固定し、参照画像に写る同一人物として読み取れるように書く。
+B-roll など人物を映さない scene は `character_ids: []` を明示し、人物の混入を避ける。
+<!-- image-gen-setting:character:end -->
 
 複数キャラがいる物語では「全キャラ参照を全sceneに入れる」と混ざって破綻しやすい。
 この repo では `video_manifest.md` の `image_generation.character_ids` で、そのsceneに登場するキャラだけを選び、

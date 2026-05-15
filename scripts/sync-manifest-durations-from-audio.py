@@ -3,11 +3,13 @@
 Sync cut/scene durations and timestamps in a `video_manifest.md` from actual narration audio lengths.
 
 Intended workflow:
-1) Generate audio-only:
+1) Generate assets/images first:
+   python scripts/generate-assets-from-manifest.py --manifest ... --skip-audio --skip-videos
+2) Generate audio-only:
    python scripts/generate-assets-from-manifest.py --manifest ... --skip-images --skip-videos
-2) Sync durations:
+3) Sync durations:
    python scripts/sync-manifest-durations-from-audio.py --manifest ...
-3) Generate images/videos using the updated durations.
+4) Generate videos using the updated durations.
 
 Notes:
 - Uses `ffprobe` to read audio duration.

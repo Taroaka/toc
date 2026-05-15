@@ -50,6 +50,18 @@ def ensure_skeleton_manifest(manifest_text: str) -> str:
     return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
 
 
+def ensure_production_manifest(path: Path) -> None:
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if "manifest_phase:" in text:
+        updated = re.sub(r"(?m)^(\s*manifest_phase:\s*).*$", r"\1production", text, count=1)
+    else:
+        updated = text.replace("```yaml\n", "```yaml\nmanifest_phase: production\n", 1)
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold a standard ToC run dir.")
     parser.add_argument("topic", help="Run topic.")
@@ -118,7 +130,6 @@ def main() -> None:
         manifest = "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n"
     manifest = ensure_skeleton_manifest(manifest)
     write_text(run_dir / "video_manifest.md", manifest, args.force)
-    maybe_run_stage_grounding(run_dir, "narration", flow="toc-run")
 
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "objects").mkdir(parents=True, exist_ok=True)
@@ -127,6 +138,10 @@ def main() -> None:
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
+    maybe_run_stage_grounding(run_dir, "asset", flow="toc-run")
+    maybe_run_stage_grounding(run_dir, "scene_implementation", flow="toc-run")
+    ensure_production_manifest(run_dir / "video_manifest.md")
+    maybe_run_stage_grounding(run_dir, "narration", flow="toc-run")
 
     append_state_snapshot(
         run_dir / "state.txt",

@@ -52,6 +52,7 @@ def main() -> None:
     parser.add_argument("--voice-id", default="JOcmGzB8OFjY8MhjHHEf")
     parser.add_argument("--model-id", default="eleven_v3")
     parser.add_argument("--output-format", default="mp3_44100_128")
+    parser.add_argument("--language-code", default="ja")
     parser.add_argument("--out", default="output/_smoke/elevenlabs_sdk_smoke.mp3")
     args = parser.parse_args()
 
@@ -79,6 +80,7 @@ def main() -> None:
         voice_id=str(args.voice_id),
         model_id=str(args.model_id),
         output_format=str(args.output_format),
+        language_code=str(args.language_code),
     )
 
     out_path = Path(args.out)

@@ -20,7 +20,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.env import load_env_files
 from toc.http import HttpError
-from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_VOICE_ID, ElevenLabsClient, ElevenLabsConfig
+from toc.providers.elevenlabs import (
+    DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+    DEFAULT_ELEVENLABS_VOICE_ID,
+    ElevenLabsClient,
+    ElevenLabsConfig,
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -65,6 +70,7 @@ def main() -> None:
     parser.add_argument("--voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
     parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
+    parser.add_argument("--language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
 
     parser.add_argument("--stability", type=float, default=0.35)
     parser.add_argument("--similarity-boost", type=float, default=0.75)
@@ -81,6 +87,8 @@ def main() -> None:
         raise SystemExit("Missing ELEVENLABS_API_KEY or --api-key.")
     if not args.voice_id:
         args.voice_id = DEFAULT_ELEVENLABS_VOICE_ID
+    if not args.language_code:
+        args.language_code = DEFAULT_ELEVENLABS_LANGUAGE_CODE
 
     base = args.api_base.rstrip("/")
     url = f"{base}/text-to-speech/{urllib.parse.quote(args.voice_id)}"
@@ -90,6 +98,7 @@ def main() -> None:
     payload: dict = {
         "text": args.text,
         "model_id": args.model_id,
+        "language_code": args.language_code,
         "voice_settings": {
             "stability": args.stability,
             "similarity_boost": args.similarity_boost,
@@ -117,6 +126,7 @@ def main() -> None:
             voice_id=args.voice_id,
             model_id=args.model_id,
             output_format=args.output_format,
+            language_code=args.language_code,
         )
     )
 

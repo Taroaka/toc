@@ -158,13 +158,13 @@ class TestTocStateScript(unittest.TestCase):
             self.assertIn("Run status:", r.stdout)
 
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p540_start = index_text.index("#### p540 Duration Fit Gate")
-            p540_end = index_text.index("#### p550 Scene Stretch Review", p540_start)
+            p540_start = index_text.index("#### p540 Asset Eval/Improve Loop")
+            p540_end = index_text.index("#### p550 Asset Requests", p540_start)
             p540_section = index_text[p540_start:p540_end]
             self.assertIn("- status: `skipped`", p540_section)
             self.assertIn("- requirement: `optional`", p540_section)
             self.assertIn("- skip_reason: `asset stage not needed for draft`", p540_section)
-            self.assertIn("#### p640 Asset Eval/Improve Loop", index_text)
+            self.assertIn("#### p740 Duration Fit Gate", index_text)
 
     def test_set_slot_rejects_unknown_slot_and_invalid_enums(self) -> None:
         import tempfile

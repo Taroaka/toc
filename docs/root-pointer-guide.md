@@ -133,11 +133,11 @@ scripts/ai/session-bootstrap.sh
 各エージェントステップは **作業開始前** に対応する設計書を読み、grounding preflight を通す。全 stage 共通で `docs/system-architecture.md` を読み、その上で stage ごとの設計書へ入る。install 可能な stage skill は `skills/toc-<stage>/SKILL.md` を正本とする。
 
 変更内容:
-- production order を audio-first に切り替えた
-- canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
+- production order を asset/image-first に切り替えた
+- canonical stage は `research`, `story`, `script`, `asset`, `scene_implementation`, `narration`, `video_generation`, `render`, `qa`
 
 修正理由:
-- 最終尺を決められる信頼できる runtime 入力が実 TTS 秒数だけだから
+- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため
 
 旧仕様との差分:
 - 旧 canonical stage は `image_prompt` 中心だったが、公開上は `scene_implementation` に寄せた

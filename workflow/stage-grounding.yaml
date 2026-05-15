@@ -78,7 +78,6 @@ stages:
     required_manifest_phase:
       path: video_manifest.md
       allowed_values:
-        - skeleton
         - production
 
   asset:
@@ -90,10 +89,6 @@ stages:
       - video_manifest.md
     optional_playbooks: []
     requires_approved_input: []
-    required_state:
-      - key: review.duration_fit.status
-        allowed_values:
-          - passed
 
   scene_implementation:
     required_docs:
@@ -107,10 +102,6 @@ stages:
     optional_playbooks:
       - workflow/playbooks/image-generation/reference-consistent-batch.md
     requires_approved_input: []
-    required_state:
-      - key: review.duration_fit.status
-        allowed_values:
-          - passed
 
   video_generation:
     required_docs:
@@ -142,3 +133,7 @@ stages:
       path: video_manifest.md
       allowed_values:
         - production
+    required_state:
+      - key: review.duration_fit.status
+        allowed_values:
+          - passed

@@ -58,10 +58,8 @@ class TestAudioDurationGate(unittest.TestCase):
             self.assertEqual(state.get("review.duration_fit.status"), "changes_requested")
             self.assertEqual(state.get("review.duration_fit.actual_seconds"), "133")
             self.assertEqual(state.get("review.duration_fit.minimum_seconds"), "300")
-            self.assertEqual(state.get("slot.p540.status"), "failed")
-            self.assertEqual(state.get("slot.p550.status"), "pending")
-            self.assertEqual(state.get("slot.p560.status"), "pending")
-            self.assertEqual(state.get("slot.p570.status"), "blocked")
+            self.assertEqual(state.get("slot.p740.status"), "failed")
+            self.assertEqual(state.get("slot.p750.status"), "blocked")
 
     def test_gate_passes_when_runtime_meets_threshold(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_audio_duration_gate_") as td:
@@ -101,10 +99,8 @@ class TestAudioDurationGate(unittest.TestCase):
 
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state.get("review.duration_fit.status"), "passed")
-            self.assertEqual(state.get("slot.p540.status"), "done")
-            self.assertEqual(state.get("slot.p550.status"), "skipped")
-            self.assertEqual(state.get("slot.p560.status"), "skipped")
-            self.assertEqual(state.get("slot.p570.status"), "pending")
+            self.assertEqual(state.get("slot.p740.status"), "done")
+            self.assertEqual(state.get("slot.p750.status"), "pending")
 
 
 if __name__ == "__main__":

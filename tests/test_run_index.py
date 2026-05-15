@@ -48,7 +48,7 @@ class TestRunIndex(unittest.TestCase):
             self.assertIn("current_position: `status=SCRIPT`", index_text)
             self.assertIn("next_required_human_review: `script.md`", index_text)
             self.assertIn("pending_gates: `script_review`", index_text)
-            self.assertIn("`p540` | Narration / Audio Runtime Stage | `optional` | Duration Fit Gate", index_text)
+            self.assertIn("`p740` | Narration / Audio Runtime Stage | `optional` | Duration Fit Gate", index_text)
             self.assertIn("#### p110 Research Grounding", index_text)
             self.assertIn("- requirement: `required`", index_text)
             self.assertIn("[transitional] `scene_outline_v3.md`", index_text)
@@ -76,7 +76,7 @@ class TestRunIndex(unittest.TestCase):
 
             self.assertEqual(script_entry.slot, "p420")
             self.assertEqual(manifest_entry.slot, "p450")
-            self.assertEqual(grounding_entry.slot, "p510")
+            self.assertEqual(grounding_entry.slot, "p710")
             self.assertEqual(state_entry.slot, "p930")
             self.assertIn("scene subrun", grounding_entry.note)
 
@@ -103,7 +103,7 @@ class TestRunIndex(unittest.TestCase):
             self.assertIn("pending_gates: `story_review`", index_text)
 
     def test_review_slot_labels_mention_improvement_loop(self) -> None:
-        review_slots = ("p130", "p230", "p320", "p430", "p520", "p640", "p730", "p740", "p820", "p850", "p930")
+        review_slots = ("p130", "p230", "p320", "p430", "p540", "p630", "p640", "p720", "p820", "p850", "p930")
 
         for slot_code in review_slots:
             with self.subTest(slot=slot_code):

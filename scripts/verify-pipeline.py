@@ -536,6 +536,124 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
     return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), updates
 
 
+def _manifest_data_for_outputs(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "video_manifest.md"
+    if not path.exists():
+        return {}
+    _, data = load_structured_document(path)
+    return data
+
+
+def _node_output_paths(run_dir: Path, *, field_path: list[str]) -> list[Path]:
+    outputs: list[Path] = []
+    for node in _iter_manifest_nodes(_manifest_data_for_outputs(run_dir)):
+        value: Any = node
+        for key in field_path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if not non_empty(value):
+            continue
+        output_path = Path(str(value))
+        outputs.append(output_path if output_path.is_absolute() else run_dir / output_path)
+    return outputs
+
+
+def _existing_media_files(path: Path, suffixes: set[str]) -> list[Path]:
+    if not path.exists():
+        return []
+    return [item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in suffixes]
+
+
+def check_asset(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    updates: dict[str, str] = {}
+    asset_plan = run_dir / "asset_plan.md"
+    requests = run_dir / "asset_generation_requests.md"
+    manifests = [
+        run_dir / "asset_generation_manifest.md",
+        run_dir / "location_asset_generation_manifest.md",
+    ]
+
+    add_check(checks, "asset.asset_plan", asset_plan.exists(), f"{asset_plan.name} exists")
+    add_check(checks, "asset.generation_requests", requests.exists(), f"{requests.name} exists")
+    append_grounding_checks(checks, run_dir=run_dir, stage="asset")
+
+    generated_files = _existing_media_files(run_dir / "assets", {".png", ".jpg", ".jpeg", ".webp"})
+    details["generated_asset_file_count"] = len(generated_files)
+    details["generation_manifest_count"] = sum(1 for path in manifests if path.exists())
+    add_check(
+        checks,
+        "asset.generated_or_manifested",
+        bool(generated_files) or any(path.exists() for path in manifests),
+        "asset generation produced reusable image files or generation manifests",
+        kind="rubric",
+    )
+
+    updates["eval.asset.score"] = f"{score_from_checks(checks):.4f}"
+    return make_stage("asset", "asset_plan.md / asset_generation_requests.md", checks, details=details), updates
+
+
+def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    updates: dict[str, str] = {}
+    requests = run_dir / "image_generation_requests.md"
+    expected_outputs = _node_output_paths(run_dir, field_path=["image_generation", "output"])
+    missing_outputs = [path for path in expected_outputs if not path.exists()]
+
+    add_check(checks, "image.generation_requests", requests.exists(), f"{requests.name} exists")
+    append_grounding_checks(checks, run_dir=run_dir, stage="scene_implementation")
+    add_check(checks, "image.expected_outputs", bool(expected_outputs), "manifest declares image_generation.output paths", kind="rubric")
+    add_check(
+        checks,
+        "image.output_files",
+        bool(expected_outputs) and not missing_outputs,
+        f"all declared image outputs exist (missing {len(missing_outputs)} of {len(expected_outputs)})",
+        kind="rubric",
+    )
+    details["declared_image_outputs"] = len(expected_outputs)
+    if missing_outputs:
+        details["missing_image_outputs"] = [str(path.relative_to(run_dir)) if path.is_relative_to(run_dir) else str(path) for path in missing_outputs[:20]]
+
+    updates["eval.image.score"] = f"{score_from_checks(checks):.4f}"
+    return make_stage("image", "image_generation_requests.md / assets/scenes/**", checks, details=details), updates
+
+
+def check_narration(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    state = parse_state_file(run_dir / "state.txt")
+    checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    updates: dict[str, str] = {}
+    review = run_dir / "narration_text_review.md"
+    expected_outputs = _node_output_paths(run_dir, field_path=["audio", "narration", "output"])
+    missing_outputs = [path for path in expected_outputs if not path.exists()]
+    duration_status = state.get("review.duration_fit.status", "").strip().lower()
+
+    add_check(checks, "narration.text_review", review.exists(), f"{review.name} exists")
+    append_grounding_checks(checks, run_dir=run_dir, stage="narration")
+    add_check(checks, "narration.expected_outputs", bool(expected_outputs), "manifest declares audio.narration.output paths", kind="rubric")
+    add_check(
+        checks,
+        "narration.output_files",
+        bool(expected_outputs) and not missing_outputs,
+        f"all declared narration audio outputs exist (missing {len(missing_outputs)} of {len(expected_outputs)})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "narration.duration_fit",
+        duration_status in {"passed", "skipped"},
+        f"duration-fit gate is passed/skipped before video generation (got {duration_status or '(unset)'})",
+        kind="rubric",
+    )
+    details["declared_audio_outputs"] = len(expected_outputs)
+    if missing_outputs:
+        details["missing_audio_outputs"] = [str(path.relative_to(run_dir)) if path.is_relative_to(run_dir) else str(path) for path in missing_outputs[:20]]
+
+    updates["eval.narration.score"] = f"{score_from_checks(checks):.4f}"
+    return make_stage("narration", "narration_text_review.md / assets/audio/**", checks, details=details), updates
+
+
 def _probe_duration(path: Path) -> float | None:
     ffprobe = shutil.which("ffprobe")
     if ffprobe is None or not path.exists():
@@ -617,11 +735,11 @@ STAGE_TARGETS = {
     "p230": ["research", "story"],
     "p330": ["research", "story", "visual_value"],
     "p450": ["research", "story", "visual_value", "script", "manifest"],
-    "p570": ["research", "story", "visual_value", "script", "manifest"],
-    "p680": ["research", "story", "visual_value", "script", "manifest"],
-    "p750": ["research", "story", "visual_value", "script", "manifest"],
-    "p850": ["research", "story", "visual_value", "script", "manifest"],
-    "p930": ["research", "story", "visual_value", "script", "manifest", "video"],
+    "p570": ["research", "story", "visual_value", "script", "manifest", "asset"],
+    "p680": ["research", "story", "visual_value", "script", "manifest", "asset", "image"],
+    "p750": ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration"],
+    "p850": ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration"],
+    "p930": ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"],
 }
 for _slot in range(110, 931, 10):
     _bucket = (_slot // 100) * 100
@@ -631,10 +749,16 @@ for _slot in range(110, 931, 10):
         _stages = ["research", "story"]
     elif _slot < 400:
         _stages = ["research", "story", "visual_value"]
-    elif _slot < 900:
+    elif _slot < 500:
         _stages = ["research", "story", "visual_value", "script", "manifest"]
+    elif _slot < 600:
+        _stages = ["research", "story", "visual_value", "script", "manifest", "asset"]
+    elif _slot < 700:
+        _stages = ["research", "story", "visual_value", "script", "manifest", "asset", "image"]
+    elif _slot < 900:
+        _stages = ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration"]
     else:
-        _stages = ["research", "story", "visual_value", "script", "manifest", "video"]
+        _stages = ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]
     STAGE_TARGETS.setdefault(f"p{_slot}", _stages)
 
 STAGE_TARGET_ALIASES = {
@@ -654,13 +778,15 @@ STAGE_TARGET_ALIASES = {
     "script": "p450",
     "500": "p570",
     "p500": "p570",
-    "narration": "p570",
+    "asset": "p570",
     "600": "p680",
     "p600": "p680",
-    "asset": "p680",
+    "image": "p680",
+    "image_generation": "p680",
+    "scene_implementation": "p680",
     "700": "p750",
     "p700": "p750",
-    "scene_implementation": "p750",
+    "narration": "p750",
     "800": "p850",
     "p800": "p850",
     "video_generation": "p850",
@@ -739,6 +865,21 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
         stages.append(manifest_stage)
         stage_updates.update(updates)
 
+    if "asset" in enabled_stages:
+        asset_stage, updates = check_asset(run_dir)
+        stages.append(asset_stage)
+        stage_updates.update(updates)
+
+    if "image" in enabled_stages:
+        image_stage, updates = check_image(run_dir)
+        stages.append(image_stage)
+        stage_updates.update(updates)
+
+    if "narration" in enabled_stages:
+        narration_stage, updates = check_narration(run_dir)
+        stages.append(narration_stage)
+        stage_updates.update(updates)
+
     if "video" in enabled_stages:
         if flow == "scene-series":
             video_stage, updates = check_video_scene_series(run_dir)
@@ -785,7 +926,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "| --- | --- | --- |",
     ]
 
-    for stage_name in ["research", "story", "visual_value", "script", "manifest", "video"]:
+    for stage_name in ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue
@@ -799,7 +940,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "",
     ]
 
-    for stage_name in ["research", "story", "visual_value", "script", "manifest", "video"]:
+    for stage_name in ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue
