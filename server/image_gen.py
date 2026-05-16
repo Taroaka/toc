@@ -47,7 +47,8 @@ PROMPT_SETTING_TARGETS = {
         "label": "シーン",
         "path": Path("docs/implementation/image-prompting.md"),
         "default": (
-            "scene image prompt は、動画を始める最初の1フレームとして書く。\n"
+            "scene image prompt は、動画を始める最初の1フレームとして設計する。\n"
+            "ただし `最初の1フレーム` / `1フレーム目` / `first frame` という制作メタ情報は prompt 本文に入れず、見えている初期状態だけを書く。\n"
             "[全体 / 不変条件]、[登場人物]、[小道具 / 舞台装置]、[シーン]、[連続性]、[禁止] の順を守る。"
         ),
     },
@@ -487,7 +488,7 @@ def target_matches_item(target: str, item: ImageRequestItem) -> bool:
     raise ValueError("target must be character, item, location, or scene")
 
 
-def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, str]) -> dict[str, list[str]]:
+def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, str], *, allow_inline_prompt: bool = False) -> dict[str, list[str]]:
     filename = REQUEST_FILE_BY_KIND.get(kind)
     if not filename:
         raise ValueError("kind must be asset or scene")
@@ -513,6 +514,9 @@ def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, st
             count=1,
         )
         if not count:
+            if not allow_inline_prompt:
+                missing.append(item_id)
+                break
             first_newline = section.find("\n")
             if first_newline == -1:
                 missing.append(item_id)

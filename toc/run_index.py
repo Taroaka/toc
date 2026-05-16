@@ -178,6 +178,7 @@ STAGES: tuple[StageSpec, ...] = (
                 "10": "script grounding",
                 "20": "script authoring",
                 "30": "script evaluator-improvement loop",
+                "35": "production readiness council",
                 "40": "human change log / structured review edits",
                 "50": "skeleton manifest materialization",
             }
@@ -192,6 +193,7 @@ STAGES: tuple[StageSpec, ...] = (
         planned_artifacts=(
             ("p420", "script.md"),
             ("p430", "script_review.md"),
+            ("p435", "production_readiness_review.md"),
             ("p450", "video_manifest.md"),
         ),
     ),
@@ -393,8 +395,8 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
     "p400": (
         SlotSpec(
             "p410",
-            "Script Grounding",
-            "resolve, audit, readset, and preflight artifacts for script",
+            "Scene Completion",
+            "resolve script grounding, author scene intent cards, and pass scene-set/detail review gates",
             planned_artifacts=(
                 "logs/grounding/script.json",
                 "logs/grounding/script.readset.json",
@@ -402,13 +404,21 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             ),
             state_keys=("stage.script.grounding.status", "stage.script.audit.status"),
         ),
-        SlotSpec("p420", "Script Authoring", "author script.md and narration text source", planned_artifacts=("script.md",), state_keys=("stage.script.status",)),
+        SlotSpec("p420", "Cut Blueprint / Script Authoring", "author cut blueprints only after all scenes pass p410 gates", planned_artifacts=("script.md",), state_keys=("stage.script.status",)),
         SlotSpec(
             "p430",
             "Script Eval/Improve Loop",
             "up to 5 evaluator-improvement rounds after script authoring; each round uses 5 independent critics and 1 aggregator",
             planned_artifacts=("script_review.md",),
             default_requirement="optional",
+        ),
+        SlotSpec(
+            "p435",
+            "Production Readiness Council",
+            "Structure, Duration, Quality, and Orchestrator advisory review before p440; only the Design Owner may edit downstream design artifacts",
+            planned_artifacts=("production_readiness_review.md",),
+            default_requirement="required",
+            state_keys=("review.script.production_readiness.status", "eval.production_readiness.loop.status"),
         ),
         SlotSpec("p440", "Human Changes / Narration Sync", "human change log and narration synchronization", default_requirement="optional"),
         SlotSpec("p450", "Skeleton Manifest Materialization", "materialize or update production skeleton video_manifest.md", planned_artifacts=("video_manifest.md",), default_requirement="required"),
@@ -778,6 +788,14 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
     eval_match = re.match(r"^logs/eval/([^/]+)/", rel)
     if eval_match:
         stage_name = eval_match.group(1)
+        p400_review_slots = {
+            "scene_set": "p410",
+            "scene_detail": "p410",
+            "scene_intent": "p410",
+            "cut_blueprint": "p420",
+        }
+        if stage_name in p400_review_slots:
+            return InventoryEntry(rel, p400_review_slots[stage_name], "log", f"{stage_name} evaluator-improvement loop artifact")
         for spec in REVIEW_LOOP_SLOT_BY_CODE.values():
             if spec.stage == stage_name:
                 return InventoryEntry(rel, spec.slot_codes[0], "log", f"{stage_name} evaluator-improvement loop artifact")
@@ -798,7 +816,12 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         "scene_outline_v3.md": ("p320", "transitional", "visual planning transitional doc"),
         "scene_conte.md": ("p320", "transitional", "visual planning transitional doc"),
         "script.md": ("p420", "canonical", "script / narration text source-of-truth"),
+        "scene_set_review.md": ("p410", "review", "abstract scene-set evaluator report"),
+        "scene_detail_review.md": ("p410", "review", "concrete per-scene evaluator report"),
+        "scene_intent_review.md": ("p410", "review", "scene intent evaluator report"),
+        "cut_blueprint_review.md": ("p420", "review", "cut blueprint evaluator report"),
         "script_review.md": ("p430", "review", "script evaluator report"),
+        "production_readiness_review.md": ("p435", "review", "production readiness council report"),
         "human_change_requests.md": ("p440", "request", "structured human change log"),
         "asset_plan.md": ("p530", "canonical", "asset plan source-of-truth"),
         "asset_generation_manifest.md": ("p550", "request", "asset generation manifest"),

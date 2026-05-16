@@ -36,12 +36,13 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 
 ## Required Repository Rules
 
-1. `bootstrap_builtin` is valid only in `p500`.
-2. Missing new metadata defaults to `standard`, not `bootstrap_builtin`.
-3. Any asset with `reference_inputs[]` must stay on the standard lane.
-4. Any asset with `derived_from_asset_id` must stay on the standard lane.
-5. Bootstrap outputs are not canonical until `review.status=approved`.
-6. After approval, the selected bootstrap output may remain as the canonical asset in the workspace.
+1. `bootstrap_builtin` is the repo's backward-compatible no-reference image lane name.
+2. In `p500`, use this skill only for asset seeds; non-`p500` no-reference image work uses `$toc-no-reference-image-runner`.
+3. Missing new metadata defaults to `standard`, not `bootstrap_builtin`.
+4. Any asset with `reference_inputs[]` must stay on the standard lane.
+5. Any asset with `derived_from_asset_id` must stay on the standard lane.
+6. Bootstrap outputs are not canonical until `review.status=approved`.
+7. After approval, the selected bootstrap output may remain as the canonical asset in the workspace.
 
 ## Execution Workflow
 
@@ -64,7 +65,7 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 
 ## Review Expectations
 
-- `character_reference`: face, hairstyle, costume, age impression
+- `character_reference`: full-body, head-to-toe front / side / back three-view output; face, hairstyle, costume, age impression
 - `object_reference`: silhouette, material, decoration, scale impression
 - `location_anchor`: spatial identity, major structures, lighting environment
 - `reusable_still`: usable as a continuity anchor for later cuts

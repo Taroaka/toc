@@ -9,10 +9,13 @@ asset_plan_metadata:
 review_contract:
   must_cover:
     - "script.md の該当 scene/cut と矛盾しない"
+    - "この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅する"
     - "再利用時の visual identity が固定できる"
+    - "character_reference は全身の front / side / back 3面図として設計する"
   must_avoid:
     - "provider 固有 prompt syntax"
     - "story/script に無い新情報の追加"
+    - "p550 prompt に `物語「<topic>」の sceneXX` や `sceneXX_cutYY` のような制作管理メタを残す"
   done_when:
     - "human review が approved"
     - "asset generation に必要な reference / view plan が揃う"
@@ -30,6 +33,7 @@ assets:
       generation_plan:
         output_dir: "assets/characters"
         required_views: ["front", "side", "back"]
+        view_requirements: "full-body, head-to-toe, front/side/back three-view reference"
         execution_lane: "standard|bootstrap_builtin"
         bootstrap_allowed: false
         bootstrap_reason: "no_reference_seed|other"
@@ -114,6 +118,8 @@ assets:
 # - source_script_selectors は「どこで使うか」
 # - generation_plan.reference_inputs は「何を参照して生成するか」
 # - reference_inputs を使うのは same character / same location / same camera 派生だけ
+# - character_reference は全身の front / side / back 3面図を基本にする
 # - execution_lane は既定で standard。reference_inputs が空で、かつ bootstrap_allowed=true のときだけ bootstrap_builtin を使ってよい
 # - bootstrap_builtin という lane 名は互換のため維持するが、repo 全体では no-reference built-in image lane を意味する
 # - derived_from_asset_id がある asset は常に standard
+# - p550 の prompt 本文では `物語「<topic>」の sceneXX` / `sceneXX_cutYY` ではなく、具体的に見える人物・場所・道具・行為を書く

@@ -60,12 +60,18 @@ idna==3.11
     #   httpx
     #   requests
     #   yarl
+iniconfig==2.3.0
+    # via pytest
 line-bot-sdk==3.21.0
     # via -r requirements.in
 multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
+packaging==26.2
+    # via pytest
+pluggy==1.6.0
+    # via pytest
 propcache==0.4.1
     # via
     #   aiohttp
@@ -85,6 +91,10 @@ pydantic==2.12.5
     #   line-bot-sdk
 pydantic-core==2.41.5
     # via pydantic
+pygments==2.20.0
+    # via pytest
+pytest==9.0.3
+    # via -r requirements.in
 python-dateutil==2.9.0.post0
     # via line-bot-sdk
 pyyaml==6.0.3

@@ -865,6 +865,139 @@ def _script_text_quality_checks(checks: list[dict[str, Any]], text: str, data: d
         add_check(checks, "script.structured_scenes", len(scenes) >= 1, "structured script includes scene list", kind="rubric")
 
 
+def _scene_has_intent(scene: dict[str, Any]) -> bool:
+    intent = scene.get("scene_intent")
+    if not isinstance(intent, dict):
+        return False
+    required_keys = {
+        "story_purpose",
+        "audience_information",
+        "withheld_information",
+        "reveal_constraints",
+        "affect_transition",
+        "visual_value_source",
+        "production_risks",
+        "handoff_notes",
+    }
+    if not required_keys.issubset(set(intent)):
+        return False
+    return non_empty(intent.get("story_purpose")) and non_empty(intent.get("affect_transition")) and isinstance(intent.get("handoff_notes"), dict)
+
+
+def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
+    blueprint = cut.get("cut_blueprint")
+    if not isinstance(blueprint, dict):
+        return False
+    required_keys = {
+        "cut_role",
+        "duration_intent",
+        "target_beat",
+        "must_show",
+        "must_avoid",
+        "done_when",
+        "visual_beat",
+        "narration_role",
+        "asset_dependency_hint",
+    }
+    if not required_keys.issubset(set(blueprint)):
+        return False
+    return (
+        non_empty(blueprint.get("cut_role"))
+        and non_empty(blueprint.get("duration_intent"))
+        and non_empty(blueprint.get("target_beat"))
+        and non_empty(blueprint.get("visual_beat"))
+        and non_empty(blueprint.get("narration_role"))
+        and isinstance(blueprint.get("asset_dependency_hint"), dict)
+    )
+
+
+def _review_status(data: dict[str, Any], key: str) -> str:
+    review = data.get(key)
+    if isinstance(review, dict):
+        return str(review.get("status") or "").strip().lower()
+    nested = nested_get(data, ["script", key], {})
+    if isinstance(nested, dict):
+        return str(nested.get("status") or "").strip().lower()
+    return ""
+
+
+def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, Any], scenes: list[Any]) -> None:
+    if not scenes:
+        return
+
+    scene_set_status = _review_status(data, "scene_set_review")
+    scene_detail_status = _review_status(data, "scene_detail_review")
+    cut_blueprint_status = _review_status(data, "cut_blueprint_review")
+    add_check(
+        checks,
+        "script.scene_set_review_approved",
+        scene_set_status == "approved",
+        f"p410 abstract scene-set review is approved before p420 (got {scene_set_status or 'missing'})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "script.scene_detail_review_approved",
+        scene_detail_status == "approved",
+        f"p410 concrete per-scene review is approved before p420 (got {scene_detail_status or 'missing'})",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "script.cut_blueprint_review_approved",
+        cut_blueprint_status == "approved",
+        f"p420 cut blueprint review is approved before p430 (got {cut_blueprint_status or 'missing'})",
+        kind="rubric",
+    )
+    scene_count = len([scene for scene in scenes if isinstance(scene, dict)])
+    scenes_with_intent = sum(1 for scene in scenes if isinstance(scene, dict) and _scene_has_intent(scene))
+    add_check(
+        checks,
+        "script.scene_intent_cards",
+        scenes_with_intent == scene_count,
+        f"all scenes include p410 scene_intent cards ({scenes_with_intent}/{scene_count})",
+        kind="rubric",
+    )
+    scenes_agent_passed = sum(
+        1
+        for scene in scenes
+        if isinstance(scene, dict)
+        and str(((scene.get("agent_review") or {}) if isinstance(scene.get("agent_review"), dict) else {}).get("status") or "").strip().lower() == "passed"
+    )
+    add_check(
+        checks,
+        "script.scene_agent_review_passed",
+        scenes_agent_passed == scene_count,
+        f"all scenes have agent_review.status=passed ({scenes_agent_passed}/{scene_count})",
+        kind="rubric",
+    )
+
+    renderable_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
+    scenes_with_cuts = [scene for scene in renderable_scenes if as_list(scene.get("cuts"))]
+    add_check(
+        checks,
+        "script.renderable_scenes_have_cuts",
+        len(scenes_with_cuts) == len(renderable_scenes),
+        f"all renderable scenes include cuts ({len(scenes_with_cuts)}/{len(renderable_scenes)})",
+        kind="rubric",
+    )
+
+    cuts: list[dict[str, Any]] = []
+    for scene in renderable_scenes:
+        cuts.extend([cut for cut in as_list(scene.get("cuts")) if isinstance(cut, dict)])
+    if not cuts:
+        add_check(checks, "script.cut_blueprints", False, "renderable cuts include p420 cut_blueprint entries (0/0)", kind="rubric")
+        return
+    cuts_with_blueprint = sum(1 for cut in cuts if _cut_has_blueprint(cut))
+    add_check(
+        checks,
+        "script.cut_blueprints",
+        cuts_with_blueprint == len(cuts),
+        f"all cuts include p420 cut_blueprint entries ({cuts_with_blueprint}/{len(cuts)})",
+        kind="rubric",
+    )
+
+
 def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "script.md"
     checks: list[dict[str, Any]] = []
@@ -881,6 +1014,7 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
     _script_text_quality_checks(checks, body_text, data, profile)
     scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
     flattened = body_text
+    _append_p400_scene_cut_checks(checks, data, scenes)
     if not contract:
         add_check(checks, "script.contract_missing", False, "evaluation_contract is missing for script stage.", kind="rubric")
     else:
@@ -959,6 +1093,25 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
         else:
             items.append((make_scene_cut_selector(scene_id), scene))
     return items
+
+
+def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int = 2) -> list[str]:
+    issues: list[str] = []
+    for index, scene in enumerate(as_list(manifest.get("scenes")), start=1):
+        if not isinstance(scene, dict):
+            issues.append(f"scene[{index}]:invalid")
+            continue
+        if str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id")) or str(index)
+        cuts = [
+            cut
+            for cut in as_list(scene.get("cuts"))
+            if not (isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() == "deleted")
+        ]
+        if len(cuts) < min_cuts_per_scene:
+            issues.append(f"scene{scene_id}:cuts<{min_cuts_per_scene}")
+    return issues
 
 
 def _selector_sort_key(selector: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1238,8 +1391,17 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     if flow == "immersive":
         experience = nested_get(data, ["video_metadata", "experience"])
         prompt_mentions_text_rule = ("画面内テキスト" in body_text) or ("No on-screen text" in body_text)
+        minimum_cut_issues = _minimum_cut_issues(data, min_cuts_per_scene=2)
         add_check(checks, f"{path_label}.experience", non_empty(experience), "immersive manifest records video_metadata.experience", kind="rubric")
         add_check(checks, f"{path_label}.no_onscreen_text_rule", prompt_mentions_text_rule, "immersive manifest includes no on-screen text invariant", kind="rubric")
+        add_check(
+            checks,
+            f"{path_label}.minimum_scene_cuts",
+            not minimum_cut_issues,
+            "immersive manifest gives every production scene at least 2 cuts"
+            + (f" (issues: {', '.join(minimum_cut_issues[:8])})" if minimum_cut_issues else ""),
+            kind="rubric",
+        )
 
 
 def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[str, Any], dict[str, str]]:

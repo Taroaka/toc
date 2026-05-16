@@ -178,10 +178,11 @@ graph TD
   - `p320`: visual planning evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p330`: p400 / p600 / p700 handoff appendix
   - done when: see `docs/data-contracts.md` "Canonical p300 done 条件"
-- `p400`: script / narration text / human changes
-  - `p410`: grounding
-  - `p420`: authoring
+- `p400`: scene/cut design / script / narration text / human changes
+  - `p410`: scene completion gate（grounding + scene-set review + per-scene review）
+  - `p420`: cut blueprint / script authoring
   - `p430`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `p435`: production readiness council（Structure / Duration / Quality / Orchestrator は意見側、Design Owner だけが後段設計書を編集）
   - `p440`: human changes / narration sync
   - `p450`: skeleton manifest materialization
 - `p500`: asset

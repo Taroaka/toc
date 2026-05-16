@@ -49,6 +49,41 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
         final_report="script_review.md",
         source_artifacts=("story.md", "visual_value.md", "script.md"),
     ),
+    "production_readiness": ReviewLoopSpec(
+        stage="production_readiness",
+        slot_codes=("p435",),
+        title="Production Readiness Council",
+        final_report="production_readiness_review.md",
+        source_artifacts=("story.md", "visual_value.md", "script.md"),
+    ),
+    "scene_set": ReviewLoopSpec(
+        stage="scene_set",
+        slot_codes=("p410b",),
+        title="Scene Set Eval/Improve Loop",
+        final_report="scene_set_review.md",
+        source_artifacts=("story.md", "visual_value.md", "script.md"),
+    ),
+    "scene_detail": ReviewLoopSpec(
+        stage="scene_detail",
+        slot_codes=("p410c",),
+        title="Scene Detail Eval/Improve Loop",
+        final_report="scene_detail_review.md",
+        source_artifacts=("story.md", "visual_value.md", "script.md"),
+    ),
+    "scene_intent": ReviewLoopSpec(
+        stage="scene_intent",
+        slot_codes=(),
+        title="Scene Intent Eval/Improve Loop (Transitional)",
+        final_report="scene_intent_review.md",
+        source_artifacts=("story.md", "visual_value.md", "script.md"),
+    ),
+    "cut_blueprint": ReviewLoopSpec(
+        stage="cut_blueprint",
+        slot_codes=(),
+        title="Cut Blueprint Eval/Improve Loop",
+        final_report="cut_blueprint_review.md",
+        source_artifacts=("story.md", "visual_value.md", "script.md"),
+    ),
     "narration": ReviewLoopSpec(
         stage="narration",
         slot_codes=("p720",),
@@ -61,7 +96,7 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
         slot_codes=("p540",),
         title="Asset Eval/Improve Loop",
         final_report="asset_review.md",
-        source_artifacts=("script.md", "asset_plan.md"),
+        source_artifacts=("story.md", "script.md", "video_manifest.md", "asset_plan.md"),
     ),
     "scene_implementation_hard": ReviewLoopSpec(
         stage="scene_implementation_hard",
@@ -156,6 +191,51 @@ def final_review_relpath(stage: str) -> Path:
     return Path(REVIEW_LOOP_SPECS[stage].final_report)
 
 
+def review_guidance_for_stage(stage: str) -> str:
+    if stage == "asset":
+        return dedent(
+            """
+            Stage-specific review criteria:
+            - Treat p520 coverage as the first gate: verify that the story's characters, story-specific items, used locations, setpieces, and reusable stills are represented in asset_plan.md.
+            - Check that principal visual subjects needed by later scenes are not missing: protagonist variants, romantic/decision counterpart, antagonist/authority figures, guide/helper figures, recurring props, setpieces, and recurring locations.
+            - For character_reference assets, require full-body front / side / back three-view planning. For character variants, verify they derive from the main character reference instead of becoming a new unrelated design.
+            - Verify source_script_selectors[] are only usage locations and generation_plan.reference_inputs[] are only actual visual references.
+            - Verify no-reference asset seeds stay on execution_lane=bootstrap_builtin and reference-driven or derived assets stay on execution_lane=standard.
+            - Check p550 readiness: each planned request must have a materializable canonical output path, reference count/input consistency, generation/review status readiness, and enough metadata for a human to know what will be generated, with which references, and where it will be saved.
+            - Check p550 prompt readiness: each planned request must be writable as a concrete visible prompt, not production metadata such as `物語「<topic>」の scene10`, `scene10_cut01`, `この画像は物語「<topic>」の一場面`, or `後続 scene`.
+            - If findings remain, return changes_requested with concrete missing assets or contract fixes so main can patch asset_plan.md and run the next review round.
+            """
+        ).strip()
+    if stage == "scene_detail":
+        return dedent(
+            """
+            Stage-specific review criteria:
+            - Judge whether the proposed cut count can carry this scene in a final 5-10 minute video.
+            - Estimate the scene's needed duration from total scene count, scene importance, reveal weight, and emotional weight.
+            - Treat one cut as roughly 4-15 seconds; explicitly flag that a one-cut scene can only carry about 4-15 seconds.
+            - Check whether every piece of content that must be shown in this scene is represented by planned cuts.
+            - Review the next scene as context. Decide whether the current scene's final cut connects to the next scene.
+            - If the final cut does not connect, recommend either adding one more cut or thickening the final cut.
+            - Return concrete add/thicken/delete recommendations that main can auto-apply.
+            """
+        ).strip()
+    if stage == "production_readiness":
+        return dedent(
+            """
+            Stage-specific review criteria:
+            - This p435 council runs after p430 script review and before p440 human changes / narration sync.
+            - Structure Auditor: inspect story structure, scene order, causality, setup/payoff, scene-to-scene flow, and whether the script skeleton breaks before production.
+            - Duration Auditor: estimate runtime from scene and cut counts for a 5-10 minute video, using one cut as roughly 4-15 seconds; identify undersized scenes or missing cuts.
+            - Quality Auditor: propose quality improvements, new scenes, new cuts, thicker final cuts, clearer visuals, and stronger production handoffs when duration or structure findings reveal weak spots.
+            - Orchestrator: chair the discussion, reconcile Structure/Duration/Quality opinions, and return one prioritized recommendation set.
+            - The Orchestrator and all auditors are advisory only. They must not edit canonical artifacts or downstream design artifacts.
+            - The Design Owner is the only agent allowed to edit downstream design artifacts in this p435 process.
+            - Return every requested change as a patch brief for the Design Owner, including exact target artifact, reason, and acceptance condition.
+            """
+        ).strip()
+    return ""
+
+
 def loop_state_updates(
     *,
     stage: str,
@@ -182,6 +262,8 @@ def loop_state_updates(
 def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic_number: int) -> str:
     spec = REVIEW_LOOP_SPECS[stage]
     readset_stage = stage
+    if stage in {"scene_set", "scene_detail", "scene_intent", "cut_blueprint", "production_readiness"}:
+        readset_stage = "script"
     for prefix in ("scene_implementation", "video_generation"):
         if stage.startswith(prefix):
             readset_stage = prefix
@@ -189,6 +271,8 @@ def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic
     source_paths = "\n".join(f"- `{(run_dir / rel).resolve()}`" for rel in spec.source_artifacts)
     readset_path = run_dir / "logs" / "grounding" / f"{readset_stage}.readset.json"
     own_report = (run_dir / critic_relpath(stage, round_number, critic_number)).resolve()
+    stage_guidance = review_guidance_for_stage(stage)
+    guidance_block = f"\n\n{stage_guidance}" if stage_guidance else ""
     return dedent(
         f"""
         You are critic_{critic_number} in the ToC {spec.title}.
@@ -201,6 +285,7 @@ def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic
         - `{readset_path.resolve()}`
 
         Work independently. Do not read other critic reports and do not edit files.
+        {guidance_block}
         Return markdown for `{own_report}` with:
         - status: passed|changes_requested
         - blocking_findings[]
@@ -220,6 +305,23 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
     )
     aggregate_path = (run_dir / aggregated_review_relpath(stage, round_number)).resolve()
     final_path = (run_dir / final_review_relpath(stage)).resolve()
+    if stage == "production_readiness":
+        handoff = dedent(
+            """
+            suggestions, and pass only one Design Owner-facing brief back. The
+            Orchestrator and auditors are advisory only; do not route edits to
+            Main/Generator, and do not imply that anyone except the Design Owner
+            may edit downstream design artifacts.
+            """
+        ).strip()
+        brief_label = "design_owner_patch_brief"
+    else:
+        handoff = dedent(
+            """
+            suggestions, and pass only one generator-facing brief back to main.
+            """
+        ).strip()
+        brief_label = "generator_patch_brief"
     return dedent(
         f"""
         You are the aggregator in the ToC {spec.title}.
@@ -228,14 +330,14 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
         {critic_paths}
 
         Do not edit source artifacts. Consolidate duplicate findings, resolve contradictory
-        suggestions, and pass only one generator-facing brief back to main.
+        {handoff}
 
         Write markdown suitable for `{aggregate_path}` and final summary `{final_path}` with:
         - status: passed|changes_requested
         - blocking_findings[]
         - recommended_changes[]
         - rejected_suggestions[]
-        - generator_patch_brief
+        - {brief_label}
         - round_summary
         """
     ).strip()
@@ -255,6 +357,12 @@ def render_aggregated_review(
         raise ValueError(f"invalid aggregated review status: {status}")
 
     spec = REVIEW_LOOP_SPECS[stage]
+    patch_brief_heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
+    patch_brief_text = (
+        "Aggregator must provide the single brief the Design Owner is allowed to implement next."
+        if stage == "production_readiness"
+        else "Aggregator must provide the single brief Main/Generator is allowed to implement next."
+    )
     sections: list[str] = [
         f"# {spec.title}",
         "",
@@ -274,9 +382,9 @@ def render_aggregated_review(
         "",
         "Aggregator must list rejected critic suggestions and why they were not adopted.",
         "",
-        "## Generator Patch Brief",
+        f"## {patch_brief_heading}",
         "",
-        "Aggregator must provide the single brief Main/Generator is allowed to implement next.",
+        patch_brief_text,
         "",
         "## Round Summary",
         "",

@@ -167,6 +167,36 @@ PROMPT_SELF_CONTAINED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"rideable", re.I), "prompt uses English term `rideable`; use Japanese such as `騎乗可能` instead."),
 )
 
+PROMPT_NONVISUAL_METADATA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\[物語の文脈\]"),
+        "prompt contains a review-only context heading; replace it with concrete visual subject wording.",
+    ),
+    (
+        re.compile(r"この画像は物語「[^」]+」(?:の一場面(?:を視覚化する)?|に出てくる場所を表す)"),
+        "prompt describes the request as a story artifact instead of naming the concrete visual subject.",
+    ),
+    (
+        re.compile(r"物語「[^」]+」の\s*scene\d+(?:[_\s-]*cut\d+)?", re.I),
+        "prompt uses story title plus internal scene id; use concrete wording such as `シンデレラの灰の台所`.",
+    ),
+    (
+        re.compile(r"(?<![A-Za-z0-9_/.-])scene\d+(?:[_-]cut\d+)?(?![A-Za-z0-9_/.-])", re.I),
+        "prompt uses an internal scene/cut selector; replace it with the visible place, subject, or action.",
+    ),
+)
+
+PROMPT_FIRST_FRAME_METADATA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"最初の\s*1\s*フレーム|1\s*フレーム目|冒頭フレーム|first\s*frame", re.I),
+        "prompt contains first-frame authoring metadata. Keep that in review/authoring context, and describe the visible initial state instead.",
+    ),
+    (
+        re.compile(r"動画(?:の)?(?:開始|冒頭).{0,12}フレーム"),
+        "prompt describes its production role for video instead of the concrete visible image.",
+    ),
+)
+
 IMAGE_REVIEW_RUBRIC_WEIGHTS = {
     "story_alignment": 0.25,
     "subject_specificity": 0.20,
@@ -199,7 +229,6 @@ MID_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 FIRST_FRAME_SAFE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"最初の1フレーム"),
     re.compile(r"動き出す直前"),
     re.compile(r"初期姿勢"),
     re.compile(r"ふと"),
@@ -236,6 +265,8 @@ HARD_FINDING_CODES = {
     "image_contract_must_include_unmet",
     "missing_required_prompt_block",
     "prompt_not_self_contained",
+    "prompt_contains_nonvisual_metadata",
+    "prompt_contains_first_frame_metadata",
     "prompt_mentions_character_but_character_ids_empty",
     "missing_character_id",
     "missing_object_id",
@@ -407,6 +438,22 @@ def missing_required_prompt_blocks(prompt: str) -> list[str]:
 def find_prompt_independence_issues(prompt: str) -> list[str]:
     issues: list[str] = []
     for pattern, message in PROMPT_SELF_CONTAINED_PATTERNS:
+        if pattern.search(prompt or ""):
+            issues.append(message)
+    return issues
+
+
+def find_prompt_nonvisual_metadata_issues(prompt: str) -> list[str]:
+    issues: list[str] = []
+    for pattern, message in PROMPT_NONVISUAL_METADATA_PATTERNS:
+        if pattern.search(prompt or ""):
+            issues.append(message)
+    return issues
+
+
+def find_prompt_first_frame_metadata_issues(prompt: str) -> list[str]:
+    issues: list[str] = []
+    for pattern, message in PROMPT_FIRST_FRAME_METADATA_PATTERNS:
         if pattern.search(prompt or ""):
             issues.append(message)
     return issues
@@ -745,6 +792,8 @@ def _score_production_readiness(findings: list[Finding]) -> float:
     severe_codes = {
         "missing_required_prompt_block",
         "prompt_not_self_contained",
+        "prompt_contains_nonvisual_metadata",
+        "prompt_contains_first_frame_metadata",
         "image_contract_must_avoid_violated",
         "image_contract_missing",
         "image_reveal_constraint_violated",
@@ -966,7 +1015,20 @@ def review_entries(
                     message=f"prompt is missing required block `[{block}]`.",
                 )
             )
-        for issue in find_prompt_independence_issues(entry.prompt):
+        nonvisual_metadata_issues = find_prompt_nonvisual_metadata_issues(entry.prompt)
+        for issue in nonvisual_metadata_issues:
+            findings.append(Finding(code="prompt_contains_nonvisual_metadata", message=issue))
+
+        first_frame_metadata_issues = find_prompt_first_frame_metadata_issues(entry.prompt)
+        for issue in first_frame_metadata_issues:
+            findings.append(Finding(code="prompt_contains_first_frame_metadata", message=issue))
+
+        independence_issues = find_prompt_independence_issues(entry.prompt)
+        if nonvisual_metadata_issues or first_frame_metadata_issues:
+            independence_issues = [
+                issue for issue in independence_issues if issue != "prompt references another scene/cut directly."
+            ]
+        for issue in independence_issues:
             code = "non_japanese_prompt_term" if "rideable" in issue else "prompt_not_self_contained"
             findings.append(Finding(code=code, message=issue))
 
@@ -1100,7 +1162,7 @@ def review_entries(
             prompt_terms=prompt_terms,
             missing_source_terms=missing_source_terms,
             missing_blocks=missing_blocks,
-            independence_issues=find_prompt_independence_issues(entry.prompt),
+            independence_issues=independence_issues + nonvisual_metadata_issues + first_frame_metadata_issues,
             character_alias_hits=character_alias_hits,
             object_alias_hits=object_alias_hits,
             prompt_character_hits=prompt_character_hits,

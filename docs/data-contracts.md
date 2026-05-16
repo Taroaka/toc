@@ -132,6 +132,29 @@ stage.script.audit.report=logs/grounding/script.audit.json
 stage.script.subagent.prompt=logs/grounding/script.subagent_prompt.md
 stage.script.playbooks.report=logs/grounding/script.playbooks.json
 stage.script.playbooks.selected_count=0
+eval.scene_set.loop.status=pending|running|passed|changes_requested|failed
+eval.scene_set.loop.max_rounds=5
+eval.scene_set.loop.current_round=0
+eval.scene_set.loop.final_report=scene_set_review.md
+eval.scene_detail.loop.status=pending|running|passed|changes_requested|failed
+eval.scene_detail.loop.max_rounds=5
+eval.scene_detail.loop.current_round=0
+eval.scene_detail.loop.final_report=scene_detail_review.md
+review.script.scene_set.status=pending|approved|changes_requested|skipped
+review.script.scene_detail.status=pending|approved|changes_requested|skipped
+gate.script_scene_review=required|optional|skipped
+eval.cut_blueprint.loop.status=pending|running|passed|changes_requested|failed
+eval.cut_blueprint.loop.max_rounds=5
+eval.cut_blueprint.loop.current_round=0
+eval.cut_blueprint.loop.final_report=cut_blueprint_review.md
+review.script.cut.status=pending|approved|changes_requested|skipped
+gate.script_cut_review=required|optional|skipped
+eval.production_readiness.loop.status=pending|running|passed|changes_requested|failed
+eval.production_readiness.loop.max_rounds=5
+eval.production_readiness.loop.current_round=0
+eval.production_readiness.loop.final_report=production_readiness_review.md
+review.script.production_readiness.status=pending|approved|changes_requested|skipped
+gate.script_production_readiness_review=required|optional|skipped
 stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.narration.grounding.status=ready|missing_docs|missing_inputs
 stage.narration.grounding.report=logs/grounding/narration.json
@@ -229,6 +252,8 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
 - `p130`: research authoring 後の review
 - `p230`: story authoring 後の review
 - `p320`: visual planning authoring 後の review
+- `p410b`: abstract scene-set review
+- `p410c`: concrete per-scene review
 - `p430`: script authoring 後の review
 - `p540`: asset plan authoring 後の review
 - `p630` / `p640`: scene implementation authoring 後の hard review / judgment review
@@ -365,7 +390,7 @@ slot.pXXX.review_loop.current_round=0-5
 - `p200`: story
 - `p300`: visual planning
   - `visual_value.md` を正本として、cut 作成前に visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / downstream handoff を決める
-- `p400`: script / narration draft / human changes
+- `p400`: scene/cut design / script / narration draft / human changes
 - `p500`: asset
 - `p600`: scene implementation / image
 - `p700`: narration / audio runtime
@@ -407,6 +432,65 @@ Canonical p300 done 条件:
 - `regeneration_risks[]` がある
 - `handoff_to_p400_p500_p600_p700` がある
 - 本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を p300 で作っていない
+
+Canonical p400 scope:
+
+p400 は `story.md` と `visual_value.md` を、後続 stage が実行できる scene/cut 設計へ変換する stage とする。
+ここでの成果物は `script.md` と `video_manifest.md`（`manifest_phase: skeleton`）であり、画像・asset・動画の生成実行はしない。
+
+p400 の内部 slot:
+
+- `p410`: scene completion gate
+  - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
+  - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
+  - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
+  - 具体 reviewer は 5-10 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もり、提案 cut 数だけで足りるかを評価する
+  - 1 cut はおおよそ 4-15 秒であるため、1 cut しかない scene は 4-15 秒程度にしかならないことを finding に明記する
+  - 具体 reviewer は、その scene で見せるべき内容が cut に全て載っているかを確認する
+  - 次 scene 接続 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断し、必要なら cut 追加または最終 cut 増厚を要求する
+  - 抽象 review loop は `eval.scene_set.loop.*` / `scene_set_review.md` に記録する
+  - 具体 review loop は `eval.scene_detail.loop.*` / `scene_detail_review.md` に記録する
+  - human review は `gate.script_scene_review` / `review.script.scene_set.status` / `review.script.scene_detail.status` で required|optional|skipped を切り替える
+  - agent 指摘による scene 追加/削除/統合/分割/順序変更、scene intent 修正、transition 補強は main agent が自動適用する
+- `p420`: cut blueprints
+  - 各 scene を production 用 cut に分解する
+  - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を持つ
+  - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
+  - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
+  - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は main agent / single writer が行う
+  - agent review loop は `eval.cut_blueprint.loop.*` / `cut_blueprint_review.md` に記録する
+  - human review は `gate.script_cut_review` / `review.script.cut.status` で required|optional|skipped を切り替える
+- `p430`: script review handoff
+  - `script.md` を正本として、scene intent / cut blueprint / narration / TTS text / human review criteria を review する
+  - reveal 順序、facts、theme、主人公、承認済み human request を無断で変更していないことを確認する
+- `p435`: production readiness council
+  - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
+  - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
+  - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する
+  - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
+  - Orchestrator は各 auditor の意見を統合して Design Owner 向け patch brief を作る
+  - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この process 内で downstream design artifacts を触れるのは Design Owner だけとする
+- `p450`: skeleton manifest materialization
+  - approved または review-ready な `script.md` から、`video_manifest.md` を `manifest_phase: skeleton` として materialize する
+  - skeleton manifest には scene/cut 構造、`scene_contract`、asset id placeholder、image/audio/video の実行枠を置く
+  - 本番 image prompt、asset 画像、motion prompt の最終文面は p500/p600/p800 に渡し、p400 で確定しない
+
+Canonical p400 done 条件:
+
+- `script.md.scenes[]` が `story.md` の主要 scene を coverage している
+- 各 scene が `scene_intent` 相当の情報を持つ
+  - story purpose
+  - audience information
+  - withheld information / reveal constraint
+  - affect transition
+  - visual value source
+  - source grounding / creative boundary
+- 各 renderable scene が `cuts[]` を持ち、各 cut が `scene_contract` 相当の完了条件を持つ
+- 各 cut が narration の役割を持つ。無音 cut の場合は、p700 へ渡せる `silence_contract` の必要性が明示されている
+- asset が必要そうな character / object / location / reusable still は、p500 用の dependency hint として列挙されている
+- `human_change_requests[]` が selector 付きで正規化され、p400 内で採用/保留/承認待ちが追跡できる
+- `video_manifest.md` が `manifest_phase: skeleton` として存在し、scene/cut selector が `script.md` と対応している
+- 本番 image prompt、asset 画像、TTS 実行、動画生成、最終 render を p400 で実行していない
 
 ### 1.1 `status` と `stage.*.status` の役割分担
 
@@ -659,7 +743,7 @@ generator の読み順:
 画像生成の stage 1 では、`video_manifest.md` の前段として `asset_plan.md` を持てる。
 
 - 目的
-  - reusable asset の設計・review・承認
+  - この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅し、reusable asset として設計・review・承認する
 - 入力
   - `script.md`
   - `story.md`
@@ -669,6 +753,16 @@ generator の読み順:
   - `assets/objects/*`
   - `assets/locations/*`
   - reusable `assets/scenes/*`
+
+p500 slot contract:
+
+- `p510`: asset grounding。`script.md` / `story.md` / `video_manifest.md` / asset stage docs / template の readset と audit を確定する。
+- `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を漏れなく洗い出す。
+- `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
+- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main agent が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
+- `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
+- `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
+- `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
 
 最低限の top-level:
 
@@ -699,6 +793,8 @@ generator の読み順:
 
 asset stage の character variant ルール:
 
+- character reference は、原則として全身が見える front / side / back の 3 面図を作る
+- `generation_plan.required_views[]` には少なくとも `front`, `side`, `back` を入れる
 - 同一人物の variant は、必ず main の `character_reference` を基準参照にする
 - `generation_plan.reference_inputs[]` には main reference の front / side / back などを入れる
 - `generation_plan.derived_from_asset_id` で、どの main asset から派生するかを明示する
@@ -745,7 +841,7 @@ location の例外ルール:
 運用:
 
 - asset stage document は human review を通してから asset 生成へ進む
-- character asset は front / side / back 等の既存 multi-view 運用を維持する
+- character asset は全身が見える front / side / back の 3 面図 multi-view 運用を維持する
 - object / location / setpiece / reusable still は単体 still を基本にする
 - asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内の関連 asset 派生も含めて continuity を守ること
 - したがって asset contract は reuse と continuity を優先し、単発 cut 専用画像を増やすためには使わない
@@ -756,6 +852,12 @@ location の例外ルール:
   - video stage: `artifact.video_generation_requests`
 - request file は selector ごとの final prompt / references / output を記録し、人レビューの対象にできる
   - scene に `render_units[]` がある場合、video request file は cut ではなく render unit selector を出し、review metadata として `source_cuts` を併記してよい
+- asset request file の prompt 本文は image API に渡る凍結文であり、制作管理メタを使わず、具体的に見える人物・場所・道具・行為を書く
+  - NG: `物語「シンデレラ」の scene10 のための背景画像。`
+  - NG: `scene30_cut01 で使う魔法の変身 scene。`
+  - NG: `この画像は物語「シンデレラ」の一場面を視覚化する。`
+  - OK: `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
+  - OK: `若い王子の全身キャラクター参照。深紺と銀の宮廷衣装、落ち着いた目線、同じ人物として再利用できる顔・髪型・立ち姿。`
 - asset request file では、review 用 metadata として少なくとも次を見えるようにする
   - `asset_id`
   - `asset_type`
@@ -784,7 +886,8 @@ location の例外ルール:
 - request 本文では「参照画像の誰/場所/小道具が、この場面でどう見えるか」を明記する
 - `後続する scene` / `前の prompt を引き継ぐ` のような、画像参照を伴わない continuity 指示は request では使わない
 - request 本文では `cut` のような運用メタ語を使わない
-- 物語に実在する人物 / 場所 / 場面を扱う request では、必要に応じて `物語「<topic>」` の文脈を明示する
+- request 本文では `物語「<topic>」の sceneXX` のような制作メタ情報を使わず、人物 / 場所 / 道具 / 行為を具体語で書く
+- 作品文脈が必要な場合も、`物語「<topic>」` だけに頼らず、例: `シンデレラの灰の台所`、`王宮の階段に残された片方のガラスの靴` のように画面化できる名詞句へ落とす
 - cut stage は既存どおり `video_manifest.md` を使う
 - `script.md.human_review_criteria.narration[]`
   - 人間レビュー時の固定観点
@@ -919,6 +1022,8 @@ Canonical reason key:
 - `blocking_drift`
 - `missing_required_prompt_block`
 - `prompt_not_self_contained`
+- `prompt_contains_nonvisual_metadata`
+- `prompt_contains_first_frame_metadata`
 - `non_japanese_prompt_term`
 - `prompt_mentions_character_but_character_ids_empty`
 - `image_contract_missing`
@@ -928,6 +1033,8 @@ Canonical reason key:
 - `image_prompt_story_alignment_weak`
 - `image_prompt_subject_specificity_weak`
 - `image_prompt_continuity_weak`
+- `image_prompt_not_first_frame_ready`
+- `image_prompt_first_frame_readiness_weak`
 - `image_prompt_production_readiness_weak`
 
 Lifecycle:

@@ -33,6 +33,12 @@ class TestBuildSubagentImageReviewPrompt(unittest.TestCase):
             self.assertIn("python scripts/review-image-prompt-story-consistency.py --manifest", prompt)
             self.assertIn(str((run_dir / "video_manifest.md").resolve()), prompt)
             self.assertIn(str((run_dir / "image_prompt_story_review.md").resolve()), prompt)
+            self.assertIn("visible initial state", prompt)
+            self.assertIn("最初の1フレーム", prompt)
+            self.assertIn("nonvisual production metadata", prompt)
+            self.assertIn("物語「<topic>」の scene10", prompt)
+            self.assertIn("at least two concrete cuts", prompt)
+            self.assertIn("fewer than two cuts", prompt)
             self.assertIn("hard_blockers: [...]", prompt)
             self.assertIn("revision_suggestions: [...]", prompt)
 

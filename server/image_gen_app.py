@@ -98,6 +98,7 @@ P650_FIXED_SLOTS = (
     "p640",
     "p650",
 )
+P680_FIXED_SLOTS = (*P650_FIXED_SLOTS, "p660", "p670", "p680")
 SLOT_TERMINAL_STATES = {"done", "skipped", "awaiting_approval"}
 SLOT_AWAITING_APPROVAL_ALLOWED = {
     "p130",
@@ -109,6 +110,7 @@ SLOT_AWAITING_APPROVAL_ALLOWED = {
     "p570",
     "p630",
     "p640",
+    "p680",
 }
 
 
@@ -357,9 +359,10 @@ def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str
         "topic": topic,
         "source": source_text,
         "run_dir": f"output/{run_id}",
-        "stop_target": "p650",
+        "stop_target": "p680",
         "experience": "cinematic_story",
-        "review_policy": "drafts",
+        "review_policy": "frontend",
+        "handoff": "frontend_image_review",
         "required_skill": "toc-immersive-runner",
         "expected_skill_path": str(_toc_immersive_skill_path().relative_to(ROOT)),
     }
@@ -368,10 +371,12 @@ def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str
             "Use $toc-immersive-runner.",
             "",
             "Create a ToC immersive cinematic story run from this request.",
-            "Run the regular p100-p650 workflow in one skill invocation.",
+            "Run the canonical p100-p680 frontend-review workflow in one skill invocation.",
             "Do not execute or depend on Claude slash commands.",
             "Do not create a second run directory.",
             "Do not return success for placeholder scaffold output.",
+            "Do not replace the canonical stage route with a shortcut or postprocess patch.",
+            "Human review must be handed off to the frontend, not skipped.",
             "",
             "Request JSON:",
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -556,6 +561,39 @@ def _validate_created_run(run_id: str) -> None:
         raise RuntimeError(f"ToC run was not scaffolded: missing {', '.join(missing)}")
 
 
+def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 2) -> tuple[list[str], set[str]]:
+    issues: list[str] = []
+    required_outputs: set[str] = set()
+    scenes = data.get("scenes")
+    if not isinstance(scenes, list):
+        return ["video_manifest.md scenes must be a list"], required_outputs
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            issues.append(f"scene[{index}]: invalid scene")
+            continue
+        if str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        scene_id = str(scene.get("scene_id") or index).strip()
+        cuts = scene.get("cuts")
+        if not isinstance(cuts, list) or len(cuts) < min_cuts_per_scene:
+            issues.append(f"scene {scene_id}: requires at least {min_cuts_per_scene} cuts")
+            continue
+        for cut_index, cut in enumerate(cuts, start=1):
+            if not isinstance(cut, dict):
+                issues.append(f"scene {scene_id} cut[{cut_index}]: invalid cut")
+                continue
+            image_generation = cut.get("image_generation")
+            if not isinstance(image_generation, dict):
+                issues.append(f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: missing image_generation")
+                continue
+            output = str(image_generation.get("output") or "").strip()
+            if not output:
+                issues.append(f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: missing image_generation.output")
+                continue
+            required_outputs.add(output)
+    return issues, required_outputs
+
+
 def _validate_p650_run(run_id: str) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     required = [
@@ -591,6 +629,12 @@ def _validate_p650_run(run_id: str) -> None:
     manifest_text = (run_dir / "video_manifest.md").read_text(encoding="utf-8", errors="replace")
     if "scenes:" not in manifest_text or "assets:" not in manifest_text:
         raise RuntimeError("ToC run did not reach p650: video_manifest.md is missing scenes/assets")
+    manifest_data = yaml.safe_load(_extract_manifest_yaml_text(manifest_text)) or {}
+    if not isinstance(manifest_data, dict):
+        raise RuntimeError("ToC run did not reach p650: video_manifest.md YAML root must be a mapping")
+    cut_issues, required_scene_outputs = _manifest_cut_contract(manifest_data, min_cuts_per_scene=2)
+    if cut_issues:
+        raise RuntimeError(f"ToC run did not reach p650: invalid cut contract {', '.join(cut_issues)}")
 
     asset_items = load_request_items(run_dir, "asset")
     scene_items = load_request_items(run_dir, "scene")
@@ -598,6 +642,10 @@ def _validate_p650_run(run_id: str) -> None:
         raise RuntimeError("ToC run did not reach p650: asset_generation_requests.md has no concrete requests")
     if not scene_items:
         raise RuntimeError("ToC run did not reach p650: image_generation_requests.md has no concrete requests")
+    request_outputs = {str(item.output).strip() for item in scene_items if item.output}
+    missing_scene_requests = sorted(required_scene_outputs - request_outputs)
+    if missing_scene_requests:
+        raise RuntimeError(f"ToC run did not reach p650: missing scene cut requests {', '.join(missing_scene_requests)}")
     missing_asset_outputs = [
         str(item.output)
         for item in asset_items
@@ -630,6 +678,43 @@ def _validate_p650_run(run_id: str) -> None:
     ]
     if invalid_approval_slots:
         raise RuntimeError(f"ToC run did not reach p650: invalid awaiting_approval fixed slots {', '.join(invalid_approval_slots)}")
+
+
+def _validate_frontend_create_run(run_id: str) -> None:
+    _validate_p650_run(run_id)
+    run_dir = safe_run_dir(run_id, ROOT)
+    _validate_generated_outputs(run_dir, "asset")
+    _validate_generated_outputs(run_dir, "scene")
+    state = parse_state_file(run_dir / "state.txt")
+    missing_slots = [slot for slot in P680_FIXED_SLOTS if not state.get(f"slot.{slot}.status")]
+    if missing_slots:
+        raise RuntimeError(f"ToC run did not reach p680: missing fixed slot states {', '.join(missing_slots)}")
+    incomplete_slots = [
+        f"{slot}={state.get(f'slot.{slot}.status')}"
+        for slot in P680_FIXED_SLOTS
+        if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
+    ]
+    if incomplete_slots:
+        raise RuntimeError(f"ToC run did not reach p680: incomplete fixed slot states {', '.join(incomplete_slots)}")
+    invalid_approval_slots = [
+        slot
+        for slot in P680_FIXED_SLOTS
+        if (state.get(f"slot.{slot}.status") or "").lower() == "awaiting_approval"
+        and slot not in SLOT_AWAITING_APPROVAL_ALLOWED
+    ]
+    if invalid_approval_slots:
+        raise RuntimeError(f"ToC run did not reach p680: invalid awaiting_approval fixed slots {', '.join(invalid_approval_slots)}")
+    expected = {
+        "slot.p560.status": "done",
+        "slot.p650.status": "done",
+        "slot.p660.status": "done",
+        "slot.p680.status": "awaiting_approval",
+        "review.image.status": "pending",
+        "gate.image_review": "required",
+    }
+    mismatches = [f"{key}={state.get(key)}" for key, value in expected.items() if state.get(key) != value]
+    if mismatches:
+        raise RuntimeError(f"frontend image review handoff incomplete: {', '.join(mismatches)}")
 
 
 def _cleanup_unscaffolded_run(run_id: str) -> None:
@@ -2356,6 +2441,7 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
                         "Return a self-contained Japanese prompt with stable bracketed sections. "
                         "For character assets, include [全体 / 不変条件], [作成するもの], [人物固定], [衣装] when relevant, and [禁止]. "
                         "For scene images, include [全体 / 不変条件], [登場人物], [小道具 / 舞台装置] when relevant, [シーン], [連続性], and [禁止]. "
+                        "For scene images, design the still as the visible initial state of the later video clip, but do not write authoring metadata such as `最初の1フレーム`, `1フレーム目`, or `first frame` in the prompt body. "
                         "Do not shorten or summarize. Make the prompt production-ready for cinematic live-action image generation."
                     ),
                     setting_content=str(setting["content"]),
@@ -2363,7 +2449,7 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
                 )
                 prompts[item.id] = prompt
             async with _serialized_run_write(run_dir, "run_artifacts"):
-                update_result = update_request_prompts(run_dir, kind, prompts)
+                update_result = update_request_prompts(run_dir, kind, prompts, allow_inline_prompt=True)
                 if update_result["missing"]:
                     raise RuntimeError(f"{kind} prompt upgrade failed for {', '.join(update_result['missing'])}")
                 append_state_snapshot(
@@ -2427,13 +2513,22 @@ async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
 
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
-    missing = [
-        str(item.output)
-        for item in load_request_items(run_dir, kind)
-        if item.output and not resolve_run_relative(run_dir, item.output).is_file()
-    ]
-    if missing:
-        raise RuntimeError(f"{kind} image generation incomplete: missing {', '.join(missing)}")
+    issues: list[str] = []
+    for item in load_request_items(run_dir, kind):
+        if not item.output:
+            issues.append(f"{item.id}: missing output")
+            continue
+        try:
+            output = resolve_run_relative(run_dir, item.output)
+            require_image_file(output)
+            if not output.is_file():
+                issues.append(item.output)
+                continue
+            validate_image_bytes(output)
+        except (OSError, ValueError) as exc:
+            issues.append(f"{item.output}: {exc}")
+    if issues:
+        raise RuntimeError(f"{kind} image generation incomplete: {', '.join(issues)}")
 
 
 def _mark_image_generation_review_ready(run_id: str) -> None:
@@ -2483,15 +2578,10 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> None:
 
 async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) -> None:
     try:
-        await _set_create_job(job_id, {"message": "正規ToC工程をp650まで実行中"})
+        await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
         await _run_toc_skill_helper(topic=title, source=source, run_id=run_id)
         _validate_created_run(run_id)
-        await _rebuild_run_index(run_id)
-        _validate_p650_run(run_id)
-        await _upgrade_initial_request_prompts(job_id, run_id=run_id)
-        await _generate_create_images(job_id, run_id=run_id)
-        await _rebuild_run_index(run_id)
-        _validate_image_review_ready(run_id)
+        _validate_frontend_create_run(run_id)
         await _set_create_job(job_id, {"status": "completed"})
     except Exception as exc:
         _cleanup_unscaffolded_run(run_id)

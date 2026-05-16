@@ -1,6 +1,6 @@
 ---
 name: toc-immersive-runner
-description: Use when this repository needs to create a ToC immersive cinematic story run from a topic/source in one Codex skill invocation, progressing the regular p100-p650 workflow and producing real artifacts rather than placeholder scaffolds.
+description: Use when this repository needs to create a ToC immersive cinematic story run from a topic/source in one Codex skill invocation, progressing the regular p100-p680 frontend-review workflow and producing real artifacts rather than placeholder scaffolds.
 ---
 
 # ToC Immersive Runner
@@ -16,7 +16,7 @@ Use it as a single orchestration skill. The caller provides:
 - topic/title
 - source text or story/source material
 - run directory
-- stop target, normally `p650`
+- stop target, normally `p680` for frontend create flows
 - experience, normally `cinematic_story`
 
 ## Canonical References
@@ -30,7 +30,16 @@ Read these before changing stage behavior:
 - `scripts/toc-immersive-ride.py`
 - `.claude/commands/toc/toc-immersive-ride.md` as legacy reference only
 
-## Required Outcome for `p650`
+## Frontend Create Policy
+
+When `review_policy` is `frontend`, do not pause for CLI human review. Generate
+the review artifacts, write gate/state records, and hand approval to the web UI.
+This is not a review skip. It is a frontend handoff.
+
+For app-server Image Gen create flows, the canonical stop target is `p680` with
+`handoff=frontend_image_review`.
+
+## Required Outcome for `p650` / `p680`
 
 When the stop target is `p650`, the run directory must contain real Japanese
 content for:
@@ -48,27 +57,33 @@ content for:
 - `image_generation_requests.md`
 - `p000_index.md`
 
+When the stop target is `p680`, all `p650` artifacts are still required, and the
+run directory must additionally contain generated scene image files referenced by
+`image_generation_requests.md`, with image review state handed off to the
+frontend.
+
 Placeholder scaffolds are failures. Do not mark the task complete if any of the
 required stage artifacts only contain TODO text, `placeholder`, `REPLACE_ME`,
 or generic scaffold prose.
 
-The app-server create flow validates every fixed slot through `p650`. Before
-returning success, `state.txt` must contain a terminal status for each of:
+The app-server create flow validates every fixed slot through its stop target.
+For `p680`, before returning success, `state.txt` must contain a terminal status
+for each of:
 
 - `p110`, `p120`, `p130`
 - `p210`, `p220`, `p230`
 - `p310`, `p320`, `p330`
 - `p410`, `p420`, `p430`, `p440`, `p450`
 - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`
-- `p610`, `p620`, `p630`, `p640`, `p650`
+- `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`, `p680`
 
 Use `done` for completed slots and `skipped` for optional slots that
 intentionally do not run under `review-policy drafts`. Use `awaiting_approval`
 only for review/handoff slots where the artifact is complete and the normal
 handoff is genuinely waiting for human review: `p130`, `p230`, `p320`, `p330`,
-`p430`, `p540`, `p570`, `p630`, or `p640`. Do not use `awaiting_approval` for
+`p430`, `p540`, `p570`, `p630`, `p640`, or `p680`. Do not use `awaiting_approval` for
 work-product slots such as `p120`, `p220`, `p420`, `p450`, `p550`, `p620`, or
-`p650`. Do not leave any p650-or-earlier slot as missing, `pending`,
+`p650`. Do not leave any slot through the stop target as missing, `pending`,
 `in_progress`, `blocked`, or `failed`.
 
 ## Stage Contract
@@ -91,8 +106,29 @@ Run stages in the normal ToC order inside one skill invocation:
 4. `p400` 台本・マニフェスト
    - Use `story.md` and `visual_value.md`.
    - Produce `script.md` and `video_manifest.md`.
+   - Every production scene must be split into at least two cuts from the first
+     create pass. Do not collapse a scene into scene-level `image_generation`.
+     Use `scenes[].cuts[]` with distinct `image_generation.output` paths such as
+     `assets/scenes/scene10_cut1.png` and `assets/scenes/scene10_cut2.png`.
    - Mark the relevant p400/p420/p450 state as done.
-5. `p550` 素材リクエスト作成
+5. `p520` reusable asset inventory
+   - Inventory the story's characters, story-specific items, used locations,
+     setpieces, and reusable stills before authoring requests.
+   - The goal is coverage: every principal visual subject that can cause
+     downstream identity drift must have an asset-plan candidate.
+   - Do not turn one-off cut composition, acting beats, or camera movement into
+     asset entries; leave those for p600.
+6. `p530` / `p540` 素材設計と review/fix loop
+   - Produce or update `asset_plan.md`.
+   - Character references must be designed as full-body front / side / back
+     three-view references. Character variants must derive from the main
+     character reference, not from a new unrelated design.
+   - Run the p540 evaluator-improvement loop when asset coverage is not already
+     approved: review agents check for missing characters, story-specific
+     items, locations, setpieces, reference misuse, lane mistakes, and weak
+     visual specificity. Main applies fixes, then another review round checks
+     again until passed or explicitly overridden.
+7. `p550` 素材リクエスト作成
    - Produce `asset_generation_requests.md` and
      `asset_generation_manifest.md`.
    - Treat `asset_plan.md`, `story.md`, `script.md`, and `video_manifest.md`
@@ -107,20 +143,40 @@ Run stages in the normal ToC order inside one skill invocation:
      summary. Use stable sections such as `[全体 / 不変条件]`,
      `[作成するもの]`, `[人物固定]`, `[衣装]`, `[生成方針]`, and `[禁止]`
      as applicable.
-6. `p560` 素材画像生成
+   - Do not write API-unhelpful production metadata in the prompt body.
+     NG: `物語「シンデレラ」の scene10`, `scene30_cut01`,
+     `この画像は物語「シンデレラ」の一場面`, `後続 scene で使う王子`.
+     OK: `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
+8. `p560` 素材画像生成
    - For no-reference/bootstrap Codex built-in lane requests, generate the
      referenced reusable assets.
    - Prefer `$toc-p500-bootstrap-image-runner` or
      `$toc-no-reference-image-runner` for the image execution details.
-7. `p650` シーン画像リクエスト作成
+9. `p650` シーン画像リクエスト作成
    - Produce `image_generation_requests.md`.
+   - Reject any production scene with fewer than two cuts. Short scenes still need
+     at least an establishing/transition cut and a character/action/result cut.
+   - `image_generation_requests.md` must include every
+     `scenes[].cuts[].image_generation.output`; scene-level request entries are
+     not sufficient.
    - Scene prompts must be at least as detailed as p550 asset prompts. Do not
      emit terse scene summaries. Use stable sections such as
      `[全体 / 不変条件]`, `[登場人物]`, `[小道具 / 舞台装置]`, `[シーン]`,
      `[連続性]`, and `[禁止]` as applicable.
-   - Do not generate scene images unless the caller explicitly asks beyond
-     `p650`.
    - Rebuild `p000_index.md`.
+10. `p660` シーン画像生成
+   - For `stop_target=p680`, generate scene still images from
+     `image_generation_requests.md` using the same image execution lane as the
+     request file declares.
+   - Do not replace this with a server-side postprocess prompt rewrite.
+11. `p670` 画像QA
+   - Create or update review artifacts/state for image QA. Under
+     `review_policy=frontend`, set `slot.p670.status=skipped` when the frontend
+     image review gate is created instead of running CLI QA.
+12. `p680` 画像レビュー引き渡し
+   - Set `slot.p680.status=awaiting_approval`.
+   - Set `review.image.status=pending` and `gate.image_review=required`.
+   - The frontend is responsible for approval/rejection.
 
 ## Execution Rules
 
@@ -128,10 +184,9 @@ Run stages in the normal ToC order inside one skill invocation:
   directory.
 - Keep all user-facing generated artifacts in Japanese.
 - Keep the experience `cinematic_story` unless the caller specifies otherwise.
-- Use `--review-policy drafts` behavior for app-server create flows unless the
-  caller explicitly overrides it.
-- Stop at `p650` for app-server Image Gen create flows. Do not continue into
-  narration, video generation, final render, or scene image generation.
+- Use `review_policy=frontend` for app-server Image Gen create flows.
+- Stop at `p680` for app-server Image Gen create flows. Do not continue into
+  narration, video generation, or final render.
 - Use repo scripts/helpers when they already encode the local contract:
   - `scripts/prepare-stage-context.py` as the standard manual/chat stage entry
   - `scripts/resolve-stage-grounding.py`
@@ -145,9 +200,9 @@ Run stages in the normal ToC order inside one skill invocation:
 - Keep shared planning files single-writer. If using subagents, they may draft
   stage content, but the main skill execution must integrate and write the final
   shared files.
-- Do not call external image/video/TTS providers from this skill. For p560
-  no-reference Codex built-in image work, delegate to the repo image skills
-  named above.
+- Do not call external video/TTS providers from this skill. For p560 and p660
+  image work, use the repo's image execution lanes and delegate to the repo image
+  skills named above when appropriate.
 
 ## Validation Gate
 
@@ -160,11 +215,13 @@ Before reporting completion:
    Confirm that prompts are structured, self-contained, and cinematic. Reject
    one-line prompts or prompts that omit required principal characters from
    reusable assets.
-4. Verify `state.txt` does not leave p100, p200, p300, p400, p550, p560, or
-   p650 as pending when the related artifact is complete.
-5. Verify every fixed slot from `p110` through `p650` has a terminal status.
+4. Verify `state.txt` does not leave p100, p200, p300, p400, p550, p560, p650,
+   p660, p670, or p680 as pending when the related artifact is complete.
+5. Verify every fixed slot from `p110` through the stop target has a terminal status.
    Use `awaiting_approval` only for the review/handoff slots listed above.
-6. Rebuild or update `p000_index.md`.
-7. Summarize the run directory and current p stage.
+6. For `stop_target=p680`, verify generated asset and scene image outputs exist,
+   and verify `review.image.status=pending` plus `gate.image_review=required`.
+7. Rebuild or update `p000_index.md`.
+8. Summarize the run directory and current p stage.
 
 If validation fails, fix the run rather than returning success.

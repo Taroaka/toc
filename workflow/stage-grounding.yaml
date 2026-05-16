@@ -47,6 +47,8 @@ stages:
   script:
     required_docs:
       - docs/script-creation.md
+      - docs/implementation/scene-loop.md
+      - docs/data-contracts.md
     required_templates:
       - workflow/script-template.yaml
       - workflow/video-manifest-template.md
@@ -83,8 +85,11 @@ stages:
   asset:
     required_docs:
       - docs/implementation/asset-bibles.md
-    required_templates: []
+      - docs/data-contracts.md
+    required_templates:
+      - workflow/asset-plan-template.yaml
     required_inputs:
+      - story.md
       - script.md
       - video_manifest.md
     optional_playbooks: []

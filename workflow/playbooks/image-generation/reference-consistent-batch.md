@@ -41,6 +41,7 @@ Review rule:
 - fix 後に subagent が再 review し、解消した entry だけ `agent_review_ok: true` に戻す
 - `human_review_ok: true` は finding を理解して例外許容した記録であり、subagent false reason を消すものではない
 - story still は `still_image_plan.mode: generate_still` だけを既定対象にし、`reuse_anchor` / `no_dedicated_still` は明示的に `--image-plan-modes` を広げない限り生成しない
+- story still は後段動画の first frame 候補として設計する。ただし `最初の1フレーム` / `1フレーム目` / `first frame` は prompt 本文に入れず、見えている初期状態だけを書く
 
 Canonical reason key:
 
@@ -54,6 +55,8 @@ Canonical reason key:
 - `blocking_drift`
 - `missing_required_prompt_block`
 - `prompt_not_self_contained`
+- `prompt_contains_nonvisual_metadata`
+- `prompt_contains_first_frame_metadata`
 - `non_japanese_prompt_term`
 - `prompt_mentions_character_but_character_ids_empty`
 - `image_contract_missing`
@@ -63,6 +66,8 @@ Canonical reason key:
 - `image_prompt_story_alignment_weak`
 - `image_prompt_subject_specificity_weak`
 - `image_prompt_continuity_weak`
+- `image_prompt_not_first_frame_ready`
+- `image_prompt_first_frame_readiness_weak`
 - `image_prompt_production_readiness_weak`
 
 Rubric:
@@ -71,6 +76,7 @@ Rubric:
 - `subject_specificity`
 - `prompt_craft`
 - `continuity_readiness`
+- `first_frame_readiness`
 - `production_readiness`
 
 Prompt contract:

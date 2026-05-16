@@ -145,6 +145,10 @@ output/<topic>_<timestamp>/
   - hard gate は missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題に寄せる
   - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
 - reusable asset が多い run では、cut 画像生成の前に `asset_plan.md` を作って review / approve してから asset を生成する
+  - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅する
+  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main が修正して再 review する cycle を最大 5 round 回す
+  - character reference は、全身が見える front / side / back の 3 面図を基本にする
+  - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
 - image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
 - provider 実行前に request file を materialize できる
   - asset stage: `asset_generation_requests.md`
@@ -171,7 +175,7 @@ output/<topic>_<timestamp>/
   - `p100`: research
   - `p200`: story
   - `p300`: visual planning（`visual_value.md` で visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / p400-p600-p700 handoff を決める）
-  - `p400`: script / narration draft / human changes
+  - `p400`: scene completion gate / cut blueprint / script / production readiness council / narration draft / human changes
   - `p500`: asset
   - `p600`: scene implementation / image
   - `p700`: narration / audio runtime
@@ -200,7 +204,7 @@ output/<topic>_<timestamp>/
   - `p110`, `p120`, `p130`
   - `p210`, `p220`, `p230`
   - `p310`, `p320`, `p330`
-  - `p410`, `p420`, `p430`, `p440`, `p450`
+  - `p410`, `p420`, `p430`, `p435`, `p440`, `p450`
   - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`
   - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`, `p680`
   - `p710`, `p720`, `p730`, `p740`, `p750`
@@ -255,6 +259,7 @@ python scripts/sync-narration-from-script.py \
     - narration review / TTS / duration gate に必要な最小構造
   - `manifest_phase: production`
     - image / video 実装 field を埋めた生成正本
+- production `video_manifest.md` では各 production scene に最低2つの `cuts[]` を持たせる。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest は p620/p650 review で差し戻す。
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
@@ -276,11 +281,17 @@ python scripts/sync-narration-from-script.py \
   - review 実行後に subagent が `agent_review_ok` を更新する
   - `human_review_ok` は初期値 `false`
   - false の cut には reason key を 1 つ以上残す
-  - canonical reason key は `image_contract_missing` / `image_contract_must_include_unmet` / `image_contract_must_avoid_violated` / `image_contract_target_focus_unmet` / `missing_required_prompt_block` / `prompt_not_self_contained` / `non_japanese_prompt_term` / `prompt_mentions_character_but_character_ids_empty` / `source_anchor_missing_from_prompt` / `missing_character_id` / `missing_object_id` / `prompt_only_local_mismatch` / `prompt_missing_expected_character_anchor` / `prompt_missing_expected_object_anchor` / `prompt_subject_drift` / `blocking_drift` / `image_prompt_story_alignment_weak` / `image_prompt_subject_specificity_weak` / `image_prompt_continuity_weak` / `image_prompt_production_readiness_weak`
+  - canonical reason key は `image_contract_missing` / `image_contract_must_include_unmet` / `image_contract_must_avoid_violated` / `image_contract_target_focus_unmet` / `missing_required_prompt_block` / `prompt_not_self_contained` / `prompt_contains_nonvisual_metadata` / `prompt_contains_first_frame_metadata` / `non_japanese_prompt_term` / `prompt_mentions_character_but_character_ids_empty` / `source_anchor_missing_from_prompt` / `missing_character_id` / `missing_object_id` / `prompt_only_local_mismatch` / `prompt_missing_expected_character_anchor` / `prompt_missing_expected_object_anchor` / `prompt_subject_drift` / `blocking_drift` / `image_prompt_not_first_frame_ready` / `image_prompt_story_alignment_weak` / `image_prompt_subject_specificity_weak` / `image_prompt_continuity_weak` / `image_prompt_first_frame_readiness_weak` / `image_prompt_production_readiness_weak`
   - required block `[全体 / 不変条件]` / `[登場人物]` / `[小道具 / 舞台装置]` / `[シーン]` / `[連続性]` / `[禁止]` のいずれかが欠けていれば、subagent は `agent_review_ok: false` にする
   - この場合の canonical reason key は `missing_required_prompt_block`
   - prompt が `scene03_cut01` のような他 cut 参照や `前カット` / `次カット` / `前のprompt` のような参照依存表現を含む場合、subagent は `agent_review_ok: false` にする
   - この場合の canonical reason key は `prompt_not_self_contained`
+  - prompt が `物語「シンデレラ」の scene10` / `この画像は物語「シンデレラ」の一場面` / `[物語の文脈]` のような API に描画対象として伝わらない制作メタ情報を含む場合、subagent は `agent_review_ok: false` にする
+  - この場合の canonical reason key は `prompt_contains_nonvisual_metadata`
+  - scene image prompt は後段動画の first frame 候補として設計する。ただし `最初の1フレーム` / `1フレーム目` / `first frame` は authoring/review 用メタ情報であり、prompt 本文に入れない
+  - この場合の canonical reason key は `prompt_contains_first_frame_metadata`
+  - prompt が action の途中または完了後の絵に見え、動画冒頭の静止画として不自然な場合、subagent は `agent_review_ok: false` にする
+  - この場合の canonical reason key は `image_prompt_not_first_frame_ready`
   - prompt に `rideable` のような英語 shorthand が混ざる場合も false にする
   - この場合の canonical reason key は `non_japanese_prompt_term`
   - prompt に人物が明示されているのに `image_generation.character_ids` が空なら false にする

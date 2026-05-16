@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 from fastapi.testclient import TestClient
@@ -32,7 +32,7 @@ from server.codex_app_server import (
     wait_for_generated_image_after,
     wait_for_unclaimed_generated_image_after,
 )
-from server.image_gen_app import _toc_immersive_command, _toc_run_command, _validate_created_run, _validate_p650_run
+from server.image_gen_app import _toc_immersive_command, _toc_run_command, _validate_created_run, _validate_frontend_create_run, _validate_p650_run
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -144,6 +144,9 @@ scenes:
       - cut_id: 10-1
         image_generation:
           output: assets/scenes/scene10_cut1.png
+      - cut_id: 10-2
+        image_generation:
+          output: assets/scenes/scene10_cut2.png
 ```
 """,
         encoding="utf-8",
@@ -183,11 +186,49 @@ scenes:
 ```text
 実写映画風の横長16:9カット。主人公が物語の転換点に立つ。
 ```
+
+## scene10_cut2
+
+- tool: `google_nanobanana_2`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene10_cut2.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```text
+実写映画風の横長16:9カット。主人公が次の行動へ踏み出す瞬間を具体的に描く。
+```
 """,
         encoding="utf-8",
     )
     (run_dir / "p000_index.md").write_text(
         "# Run Index\n\np650 まで到達した実作業済み run の索引です。現在位置、生成済み成果物、次に必要な確認を十分な本文量で記録します。asset request と scene image request が存在することを確認済みです。\n",
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def write_valid_p680_artifacts(root: Path, run_id: str) -> Path:
+    run_dir = write_valid_p650_artifacts(root, run_id)
+    (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
+    (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(PNG_BYTES)
+    (run_dir / "assets" / "scenes" / "scene10_cut2.png").write_bytes(PNG_BYTES)
+    with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+        state_file.write(
+            "\n".join(
+                [
+                    "slot.p660.status=done",
+                    "slot.p670.status=skipped",
+                    "slot.p680.status=awaiting_approval",
+                    "review.image.status=pending",
+                    "gate.image_review=required",
+                    "",
+                ]
+            )
+        )
+    (run_dir / "p000_index.md").write_text(
+        "# Run Index\n\np680 まで到達した frontend create run の索引です。asset と scene 画像生成が完了し、画像レビューはフロントで承認待ちです。state、request、review gate の状態を確認できます。\n",
         encoding="utf-8",
     )
     return run_dir
@@ -238,7 +279,7 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIn("--review-policy drafts", command)
         self.assertIn("--run-dir \"output/桃太郎_20260509_1200\"", command)
 
-    def test_toc_immersive_command_invokes_skill_with_p650_payload(self) -> None:
+    def test_toc_immersive_command_invokes_skill_with_frontend_p680_payload(self) -> None:
         topic = '桃太郎\n/other-command "quoted"'
         command = _toc_immersive_command(topic=topic, source="鬼ヶ島の資料", run_id="桃太郎_20260509_1200")
 
@@ -247,9 +288,10 @@ class ImageGenParserTests(unittest.TestCase):
         payload = json.loads(command.split("Request JSON:\n", 1)[1])
         self.assertEqual(payload["topic"], topic)
         self.assertEqual(payload["source"], "鬼ヶ島の資料")
-        self.assertEqual(payload["stop_target"], "p650")
+        self.assertEqual(payload["stop_target"], "p680")
         self.assertEqual(payload["experience"], "cinematic_story")
-        self.assertEqual(payload["review_policy"], "drafts")
+        self.assertEqual(payload["review_policy"], "frontend")
+        self.assertEqual(payload["handoff"], "frontend_image_review")
         self.assertEqual(payload["run_dir"], "output/桃太郎_20260509_1200")
         self.assertEqual(payload["required_skill"], "toc-immersive-runner")
         self.assertEqual(payload["expected_skill_path"], ".codex/skills/toc-immersive-runner/SKILL.md")
@@ -275,6 +317,34 @@ class ImageGenParserTests(unittest.TestCase):
 
             with patch("server.image_gen_app.ROOT", root):
                 _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_p650_run_rejects_single_cut_scenes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            text = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                text.replace(
+                    "      - cut_id: 10-2\n        image_generation:\n          output: assets/scenes/scene10_cut2.png\n",
+                    "",
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "requires at least 2 cuts"):
+                    _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_p650_run_requires_request_for_each_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
+            (run_dir / "image_generation_requests.md").write_text(text.split("## scene10_cut2", 1)[0], encoding="utf-8")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "missing scene cut requests"):
+                    _validate_p650_run("桃太郎_20260509_1200")
 
     def test_validate_p650_run_rejects_placeholder_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,6 +429,45 @@ class ImageGenParserTests(unittest.TestCase):
 
             with patch("server.image_gen_app.ROOT", root):
                 _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_frontend_create_run_accepts_p680_review_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+
+            with patch("server.image_gen_app.ROOT", root):
+                _validate_frontend_create_run("桃太郎_20260509_1200")
+
+    def test_validate_frontend_create_run_requires_scene_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+            (run_dir / "assets" / "scenes" / "scene10_cut1.png").unlink()
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "scene image generation incomplete"):
+                    _validate_frontend_create_run("桃太郎_20260509_1200")
+
+    def test_validate_frontend_create_run_rejects_missing_scene_output_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+            text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
+            (run_dir / "image_generation_requests.md").write_text(text.replace("- output: `assets/scenes/scene10_cut1.png`\n", ""), encoding="utf-8")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "missing scene cut requests"):
+                    _validate_frontend_create_run("桃太郎_20260509_1200")
+
+    def test_validate_frontend_create_run_rejects_invalid_scene_image_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+            (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(b"not-png")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "invalid magic bytes"):
+                    _validate_frontend_create_run("桃太郎_20260509_1200")
 
     def test_run_toc_skill_helper_requires_visible_skill_exact_path_when_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1032,31 +1141,22 @@ class ImageGenApiTests(unittest.TestCase):
 
             async def fake_toc_run_helper(*, topic, source=None, run_id):
                 calls.append((topic, run_id, source))
-                write_valid_p650_artifacts(root, run_id)
+                write_valid_p680_artifacts(root, run_id)
 
-            async def noop_async(*_args, **_kwargs):
-                run_id = _kwargs.get("run_id") if "run_id" in _kwargs else (_args[0] if _args else None)
-                if run_id:
-                    (root / "output" / run_id / "p000_index.md").write_text(
-                        "# Run Index\n\np650 まで到達した実作業済み run の索引です。検証用に十分な本文量を持たせています。現在位置、生成済み成果物、次の人間確認、asset request と scene image request の状態を確認済みです。\n",
-                        encoding="utf-8",
-                    )
-                return None
-
-            async def noop_generate_images(*_args, **_kwargs):
-                return None
-
-            def noop_validate_review(*_args, **_kwargs):
-                return None
+            generate_images = AsyncMock()
+            upgrade_prompts = AsyncMock()
+            validate_review = Mock()
+            rebuild_index = AsyncMock()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen.time.strftime", return_value="20260509_1200"),
                     patch("server.image_gen_app._run_toc_skill_helper", fake_toc_run_helper),
-                    patch("server.image_gen_app._generate_create_images", noop_generate_images),
-                    patch("server.image_gen_app._validate_image_review_ready", noop_validate_review),
-                    patch("server.image_gen_app._rebuild_run_index", noop_async),
+                    patch("server.image_gen_app._generate_create_images", generate_images),
+                    patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
+                    patch("server.image_gen_app._validate_image_review_ready", validate_review),
+                    patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
                         create_response = client.post(
@@ -1072,6 +1172,10 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertNotIn("source", create_payload)
         self.assertEqual(final_payload["status"], "completed")
         self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎")])
+        generate_images.assert_not_awaited()
+        upgrade_prompts.assert_not_awaited()
+        validate_review.assert_not_called()
+        rebuild_index.assert_not_awaited()
 
     def test_create_run_endpoint_passes_title_and_nonblank_source_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1080,25 +1184,22 @@ class ImageGenApiTests(unittest.TestCase):
 
             async def fake_toc_run_helper(*, topic, source=None, run_id):
                 calls.append((topic, run_id, source))
-                write_valid_p650_artifacts(root, run_id)
+                write_valid_p680_artifacts(root, run_id)
 
-            async def noop_async(*_args, **_kwargs):
-                return None
-
-            async def noop_generate_images(*_args, **_kwargs):
-                return None
-
-            def noop_validate_review(*_args, **_kwargs):
-                return None
+            generate_images = AsyncMock()
+            upgrade_prompts = AsyncMock()
+            validate_review = Mock()
+            rebuild_index = AsyncMock()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen.time.strftime", return_value="20260509_1200"),
                     patch("server.image_gen_app._run_toc_skill_helper", fake_toc_run_helper),
-                    patch("server.image_gen_app._generate_create_images", noop_generate_images),
-                    patch("server.image_gen_app._validate_image_review_ready", noop_validate_review),
-                    patch("server.image_gen_app._rebuild_run_index", noop_async),
+                    patch("server.image_gen_app._generate_create_images", generate_images),
+                    patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
+                    patch("server.image_gen_app._validate_image_review_ready", validate_review),
+                    patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
                         create_response = client.post(
@@ -1112,6 +1213,10 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["runId"], "桃太郎_20260509_1200")
         self.assertEqual(final_payload["status"], "completed")
         self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料")])
+        generate_images.assert_not_awaited()
+        upgrade_prompts.assert_not_awaited()
+        validate_review.assert_not_called()
+        rebuild_index.assert_not_awaited()
 
     def test_generate_create_images_writes_scene_outputs_and_review_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1151,7 +1256,7 @@ class ImageGenApiTests(unittest.TestCase):
             scene_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
 
         self.assertTrue(scene_exists)
-        self.assertEqual(generated, [("scene10_cut1", ["hero.png"])])
+        self.assertEqual(generated, [("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"])])
         self.assertIn("slot.p660.status=done", state)
         self.assertIn("slot.p680.status=awaiting_approval", state)
         self.assertIn("review.image.status=pending", state)
@@ -1640,11 +1745,11 @@ class ImageGenApiTests(unittest.TestCase):
                         )
 
             manifest = yaml.safe_load(image_gen_app._extract_manifest_yaml_text((run_dir / "video_manifest.md").read_text(encoding="utf-8")))
-            scene_folder_exists = (run_dir / "assets" / "scenes" / "scene10_cut2").is_dir()
-            audio_folder_exists = (run_dir / "assets" / "audio" / "scene10_cut2").is_dir()
+            scene_folder_exists = (run_dir / "assets" / "scenes" / "scene10_cut3").is_dir()
+            audio_folder_exists = (run_dir / "assets" / "audio" / "scene10_cut3").is_dir()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["selector"], "scene10_cut2")
+        self.assertEqual(response.json()["selector"], "scene10_cut3")
         self.assertEqual(manifest["scenes"][0]["cuts"][1]["cut_name"], "新しい接続カット")
         self.assertTrue(scene_folder_exists)
         self.assertTrue(audio_folder_exists)

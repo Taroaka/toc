@@ -245,7 +245,120 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             )
             (run_dir / "research.md").write_text(_good_research_yaml(), encoding="utf-8")
             (run_dir / "script.md").write_text(
-                "```yaml\nevaluation_contract:\n  target_arc: \"opening,development,climax\"\n  must_cover: [\"桃太郎\"]\n  must_avoid: [\"TODO\"]\n  done_when: [\"主要 phase を含む\"]\nscript:\n  scenes:\n    - scene_id: 1\n      phase: \"opening\"\n      summary: \"桃太郎が村で育つ。十分な長さの台本本文です。十分な長さの台本本文です。\"\n      research_refs: [\"research.story_baseline.canonical_synopsis\"]\n    - scene_id: 2\n      phase: \"development\"\n      summary: \"桃太郎が旅支度を整える。十分な長さの台本本文です。十分な長さの台本本文です。\"\n      research_refs: [\"research.story_baseline.canonical_synopsis\"]\n    - scene_id: 3\n      phase: \"climax\"\n      summary: \"桃太郎が決戦へ向かう。十分な長さの台本本文です。十分な長さの台本本文です。\"\n      research_refs: [\"research.story_baseline.canonical_synopsis\"]\n```\n",
+                "\n".join(
+                    [
+                        "```yaml",
+                        "evaluation_contract:",
+                        "  target_arc: \"opening,development,climax\"",
+                        "  must_cover: [\"桃太郎\"]",
+                        "  must_avoid: [\"TODO\"]",
+                        "  done_when: [\"主要 phase を含む\"]",
+                        "scene_set_review:",
+                        "  status: \"approved\"",
+                        "  agent_review:",
+                        "    status: \"passed\"",
+                        "scene_detail_review:",
+                        "  status: \"approved\"",
+                        "cut_blueprint_review:",
+                        "  status: \"approved\"",
+                        "production_readiness_review:",
+                        "  status: \"approved\"",
+                        "  council:",
+                        "    design_owner: {only_editor: true}",
+                        "    advisory_agents: [\"structure_auditor\", \"duration_auditor\", \"quality_auditor\", \"orchestrator\"]",
+                        "script:",
+                        "  scenes:",
+                        "    - scene_id: 1",
+                        "      phase: \"opening\"",
+                        "      summary: \"桃太郎が村で育つ。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"導入\"",
+                        "        audience_information: [\"桃太郎が村にいる\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"hook\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review:",
+                        "        status: \"passed\"",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"桃太郎の導入\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"桃太郎の導入として読める\"]",
+                        "            visual_beat: \"村にいる桃太郎\"",
+                        "            narration_role: \"setup\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "          narration: \"桃太郎は村で育ちました。\"",
+                        "          tts_text: \"桃太郎は村で育ちました。\"",
+                        "    - scene_id: 2",
+                        "      phase: \"development\"",
+                        "      summary: \"桃太郎が旅支度を整える。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"旅立ち\"",
+                        "        audience_information: [\"桃太郎が旅支度をする\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"lift\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review:",
+                        "        status: \"passed\"",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"旅支度\"",
+                        "            must_show: [\"旅支度\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"旅立ち前の変化が読める\"]",
+                        "            visual_beat: \"旅支度を整える桃太郎\"",
+                        "            narration_role: \"fact\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "          narration: \"桃太郎は旅支度を整えました。\"",
+                        "          tts_text: \"桃太郎は旅支度を整えました。\"",
+                        "    - scene_id: 3",
+                        "      phase: \"climax\"",
+                        "      summary: \"桃太郎が決戦へ向かう。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"決戦\"",
+                        "        audience_information: [\"桃太郎が決戦へ向かう\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"spike\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review:",
+                        "        status: \"passed\"",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"決戦へ向かう\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"climax として読める\"]",
+                        "            visual_beat: \"決戦へ向かう桃太郎\"",
+                        "            narration_role: \"emotion\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "          narration: \"桃太郎は決戦へ向かいました。\"",
+                        "          tts_text: \"桃太郎は決戦へ向かいました。\"",
+                        "```",
+                        "",
+                    ]
+                ),
                 encoding="utf-8",
             )
             (run_dir / "video_manifest.md").write_text(
@@ -319,6 +432,354 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertTrue((run_dir / "script_review.md").exists())
             self.assertTrue((run_dir / "manifest_review.md").exists())
             self.assertTrue((run_dir / "video_review.md").exists())
+
+    def test_script_evaluator_fails_without_scene_set_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_set_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0010"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "script.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "evaluation_contract:",
+                        "  target_arc: \"opening\"",
+                        "  must_cover: [\"桃太郎\"]",
+                        "  must_avoid: []",
+                        "scene_set_review:",
+                        "  status: \"pending\"",
+                        "scene_detail_review:",
+                        "  status: \"approved\"",
+                        "cut_blueprint_review:",
+                        "  status: \"approved\"",
+                        "production_readiness_review:",
+                        "  status: \"approved\"",
+                        "script:",
+                        "  scenes:",
+                        "    - scene_id: 1",
+                        "      phase: \"opening\"",
+                        "      summary: \"桃太郎の導入です。十分な長さの本文です。十分な長さの本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"導入\"",
+                        "        audience_information: [\"桃太郎\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"hook\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review: {status: \"passed\"}",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"桃太郎\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"導入として読める\"]",
+                        "            visual_beat: \"桃太郎の導入\"",
+                        "            narration_role: \"setup\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_set_review_approved", stage["reason_keys"])
+
+    def test_script_evaluator_fails_without_scene_detail_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_detail_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0011"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "script.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "evaluation_contract:",
+                        "  target_arc: \"opening\"",
+                        "  must_cover: [\"桃太郎\"]",
+                        "  must_avoid: []",
+                        "scene_set_review:",
+                        "  status: \"approved\"",
+                        "scene_detail_review:",
+                        "  status: \"pending\"",
+                        "cut_blueprint_review:",
+                        "  status: \"approved\"",
+                        "production_readiness_review:",
+                        "  status: \"approved\"",
+                        "script:",
+                        "  scenes:",
+                        "    - scene_id: 1",
+                        "      phase: \"opening\"",
+                        "      summary: \"桃太郎の導入です。十分な長さの本文です。十分な長さの本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"導入\"",
+                        "        audience_information: [\"桃太郎\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"hook\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review: {status: \"passed\"}",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"桃太郎\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"導入として読める\"]",
+                        "            visual_beat: \"桃太郎の導入\"",
+                        "            narration_role: \"setup\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_detail_review_approved", stage["reason_keys"])
+
+    def test_script_evaluator_fails_without_cut_blueprint_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_cut_blueprint_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0012"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "script.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "evaluation_contract:",
+                        "  target_arc: \"opening\"",
+                        "  must_cover: [\"桃太郎\"]",
+                        "  must_avoid: []",
+                        "scene_set_review:",
+                        "  status: \"approved\"",
+                        "scene_detail_review:",
+                        "  status: \"approved\"",
+                        "cut_blueprint_review:",
+                        "  status: \"pending\"",
+                        "production_readiness_review:",
+                        "  status: \"approved\"",
+                        "script:",
+                        "  scenes:",
+                        "    - scene_id: 1",
+                        "      phase: \"opening\"",
+                        "      summary: \"桃太郎の導入です。十分な長さの本文です。十分な長さの本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"導入\"",
+                        "        audience_information: [\"桃太郎\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"hook\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review: {status: \"passed\"}",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"桃太郎\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"導入として読める\"]",
+                        "            visual_beat: \"桃太郎の導入\"",
+                        "            narration_role: \"setup\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.cut_blueprint_review_approved", stage["reason_keys"])
+
+    def test_script_evaluator_does_not_require_future_production_readiness_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_production_readiness_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0013"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "script.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "evaluation_contract:",
+                        "  target_arc: \"opening\"",
+                        "  must_cover: [\"桃太郎\"]",
+                        "  must_avoid: []",
+                        "scene_set_review:",
+                        "  status: \"approved\"",
+                        "scene_detail_review:",
+                        "  status: \"approved\"",
+                        "cut_blueprint_review:",
+                        "  status: \"approved\"",
+                        "production_readiness_review:",
+                        "  status: \"pending\"",
+                        "script:",
+                        "  scenes:",
+                        "    - scene_id: 1",
+                        "      phase: \"opening\"",
+                        "      summary: \"桃太郎の導入です。十分な長さの本文です。十分な長さの本文です。\"",
+                        "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                        "      scene_intent:",
+                        "        story_purpose: \"導入\"",
+                        "        audience_information: [\"桃太郎\"]",
+                        "        withheld_information: []",
+                        "        reveal_constraints: []",
+                        "        affect_transition: \"hook\"",
+                        "        visual_value_source: \"none\"",
+                        "        production_risks: []",
+                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        "      agent_review: {status: \"passed\"}",
+                        "      cuts:",
+                        "        - cut_id: 1",
+                        "          cut_blueprint:",
+                        "            cut_role: \"main\"",
+                        "            duration_intent: \"standard\"",
+                        "            target_beat: \"桃太郎\"",
+                        "            must_show: [\"桃太郎\"]",
+                        "            must_avoid: []",
+                        "            done_when: [\"導入として読める\"]",
+                        "            visual_beat: \"桃太郎の導入\"",
+                        "            narration_role: \"setup\"",
+                        "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+            self.assertNotIn("script.production_readiness_review_approved", stage["reason_keys"])
+
+    def test_manifest_evaluator_rejects_immersive_scene_with_single_cut(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_cuts_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0009"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000009\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\nscript:\n  scenes:\n    - scene_id: 1\n      phase: opening\n      summary: \"桃太郎が出発する。\"\n```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "video_metadata:",
+                        "  topic: \"桃太郎\"",
+                        "  experience: \"cinematic_story\"",
+                        "manifest_phase: production",
+                        "scenes:",
+                        "  - scene_id: 1",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        scene_contract:",
+                        "          target_beat: \"桃太郎\"",
+                        "          must_show: [\"桃太郎\"]",
+                        "          must_avoid: []",
+                        "          done_when: [\"桃太郎が見える\"]",
+                        "        image_generation:",
+                        "          prompt: \"画面内テキストなし。桃太郎が朝の道を進む。桃太郎の姿、村の道、柔らかな朝日、出発の空気が具体的に見える。\"",
+                        "          character_ids: [\"momotaro\"]",
+                        "          object_ids: []",
+                        "          output: \"assets/scenes/scene1_cut1.png\"",
+                        "        video_generation:",
+                        "          duration_seconds: 5",
+                        "          motion_prompt: \"桃太郎が前へ進む。\"",
+                        "        audio:",
+                        "          narration:",
+                        "            text: \"桃太郎が出発する。\"",
+                        "            tool: \"elevenlabs\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--flow", "immersive", "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, msg=result.stderr)
+            report = (run_dir / "manifest_review.md").read_text(encoding="utf-8")
+            self.assertIn("manifest.minimum_scene_cuts", report)
+
+    def test_manifest_evaluator_ignores_deleted_cuts_for_minimum_cut_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_deleted_cuts_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0013"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000013\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\nscript:\n  scenes:\n    - scene_id: 1\n      phase: opening\n      summary: \"桃太郎が出発する。\"\n```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "video_metadata:",
+                        "  topic: \"桃太郎\"",
+                        "  experience: \"cinematic_story\"",
+                        "manifest_phase: production",
+                        "scenes:",
+                        "  - scene_id: 1",
+                        "    cuts:",
+                        "      - cut_id: 1",
+                        "        cut_status: \"active\"",
+                        "        scene_contract: {target_beat: \"桃太郎\", must_show: [\"桃太郎\"], must_avoid: [], done_when: [\"桃太郎が見える\"]}",
+                        "        image_generation: {prompt: \"画面内テキストなし。桃太郎が朝の道を進む。桃太郎の姿、村の道、柔らかな朝日、出発の空気が具体的に見える。\", character_ids: [\"momotaro\"], object_ids: []}",
+                        "        video_generation: {duration_seconds: 5, motion_prompt: \"桃太郎が前へ進む。\"}",
+                        "        audio: {narration: {text: \"桃太郎が出発する。\", tool: \"elevenlabs\"}}",
+                        "      - cut_id: 2",
+                        "        cut_status: \"deleted\"",
+                        "        deletion_reason: \"audit trace only\"",
+                        "```",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            result = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts/review-manifest-stage.py"), "--run-dir", str(run_dir), "--profile", "standard", "--flow", "immersive", "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, msg=result.stderr)
+            report = (run_dir / "manifest_review.md").read_text(encoding="utf-8")
+            self.assertIn("manifest.minimum_scene_cuts", report)
 
     def test_research_evaluator_fails_without_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_fail_") as td:

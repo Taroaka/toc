@@ -89,6 +89,8 @@ for _big_stage, _handoff_slot in BIG_STAGE_HANDOFF_SLOTS.items():
 for _slot_number in range(110, 931, 10):
     STAGE_TARGETS.setdefault(str(_slot_number), f"p{_slot_number}")
     STAGE_TARGETS.setdefault(f"p{_slot_number}", f"p{_slot_number}")
+STAGE_TARGETS.setdefault("435", "p435")
+STAGE_TARGETS.setdefault("p435", "p435")
 
 SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
     "research": {
@@ -112,8 +114,23 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
     "script": {
         "stage.script.status": "pending",
         "artifact.script.status": "scaffold",
+        "review.script.scene_set.status": "pending",
+        "review.script.scene_detail.status": "pending",
+        "review.script.cut.status": "pending",
+        "review.script.production_readiness.status": "pending",
+        "gate.script_scene_review": "optional",
+        "gate.script_cut_review": "optional",
+        "gate.script_production_readiness_review": "optional",
+        "eval.scene_set.loop.status": "pending",
+        "eval.scene_detail.loop.status": "pending",
+        "eval.cut_blueprint.loop.status": "pending",
+        "eval.production_readiness.loop.status": "pending",
+        "slot.p410.status": "pending",
+        "slot.p410.note": "scene completion gate; abstract scene-set review must pass before concrete per-scene review and cut authoring",
         "slot.p420.status": "pending",
-        "slot.p420.note": "scaffold placeholder; author script.md before marking done",
+        "slot.p420.note": "cut blueprint authoring waits until all scenes pass p410 gates",
+        "slot.p435.status": "pending",
+        "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
     },
     "narration": {
         "stage.narration.status": "pending",
@@ -184,9 +201,18 @@ REVIEW_HANDOFF_UPDATES: dict[str, dict[str, str]] = {
     "script": {
         "stage.script.status": "awaiting_approval",
         "review.script.status": "pending",
+        "review.script.scene_set.status": "pending",
+        "review.script.scene_detail.status": "pending",
+        "review.script.cut.status": "pending",
+        "review.script.production_readiness.status": "pending",
         "gate.script_review": "required",
+        "gate.script_scene_review": "optional",
+        "gate.script_cut_review": "optional",
+        "gate.script_production_readiness_review": "optional",
         "slot.p430.status": "pending",
         "slot.p430.note": "human review handoff; run evaluator-improvement loop before approval when required",
+        "slot.p435.status": "pending",
+        "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
     },
     "narration": {
         "stage.narration.status": "awaiting_approval",
@@ -340,6 +366,17 @@ def merge_review_loop_updates(run_dir: Path, *stage_names: str) -> dict[str, str
     for stage_name in stage_names:
         updates.update(materialize_review_loop_prompts(run_dir, stage=stage_name))
     return updates
+
+
+def p400_review_stages_for_stop(stop_slot: str) -> tuple[str, ...]:
+    stages: list[str] = ["scene_set", "scene_detail"]
+    if target_reaches(stop_slot, "p420"):
+        stages.append("cut_blueprint")
+    if target_reaches(stop_slot, "p430"):
+        stages.append("script")
+    if target_reaches(stop_slot, "p435"):
+        stages.append("production_readiness")
+    return tuple(stages)
 
 
 def finish_scaffold(
@@ -529,7 +566,7 @@ def main() -> None:
     write_text(run_dir / "script.md", "# 台本（没入型 / cinematic）\n\nTODO\n", force=args.force)
     maybe_run_stage_grounding(run_dir, "script", flow="immersive")
     if not target_reaches(stop_slot, "p450"):
-        review_updates = materialize_review_loop_prompts(run_dir, stage="script")
+        review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
         finish_scaffold(
             state_path,
             topic_raw,
@@ -583,7 +620,7 @@ def main() -> None:
         write_text(run_dir / "video_manifest.md", "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n", force=args.force)
 
     if not target_reaches(stop_slot, "p510"):
-        review_updates = materialize_review_loop_prompts(run_dir, stage="script")
+        review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
         finish_scaffold(
             state_path,
             topic_raw,
@@ -611,6 +648,7 @@ def main() -> None:
         "artifact.script": str((run_dir / "script.md").resolve()),
         "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
     }
+    p400_review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
 
     maybe_run_stage_grounding(run_dir, "asset", flow="immersive")
     write_text(run_dir / "asset_plan.md", "# Asset Plan\n\nTODO\n", force=args.force)
@@ -630,6 +668,7 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset"),
+                **p400_review_updates,
                 **asset_review_updates,
                 **review_handoff_updates("asset"),
                 **common_artifacts,
@@ -660,6 +699,7 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset", "scene_implementation"),
+                **p400_review_updates,
                 **asset_review_updates,
                 **scene_review_updates,
                 **review_handoff_updates("scene_implementation"),
@@ -680,6 +720,7 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation"),
+                **p400_review_updates,
                 **narration_review_updates,
                 **asset_review_updates,
                 **scene_review_updates,
@@ -704,6 +745,7 @@ def main() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation"),
+                **p400_review_updates,
                 **narration_review_updates,
                 **asset_review_updates,
                 **scene_review_updates,
@@ -727,6 +769,7 @@ def main() -> None:
         stop_slot,
         {
             **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation", "qa"),
+            **p400_review_updates,
             **narration_review_updates,
             **asset_review_updates,
             **scene_review_updates,

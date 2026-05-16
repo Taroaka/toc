@@ -50,6 +50,7 @@ This skill is the planner and adapter.
 3. Treat `video_manifest.md` and `image_generation_requests.md` as the source of truth for what to generate.
 4. Use a single-writer pattern for shared manifest or request-file edits.
 5. Only batch-generate images that are ready for execution.
+6. Treat scene stills as later-video first-frame candidates during planning/review, but do not put `最初の1フレーム`, `1フレーム目`, or `first frame` in the image prompt sent to the image API.
 
 ## Output Mode Rules
 

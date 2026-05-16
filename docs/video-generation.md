@@ -273,7 +273,8 @@ stage 1 の原則:
 - request 本文では `assets/...png` のような path を直接書かない
   - `人物参照画像1`, `場所参照画像1`, `小道具参照画像1` のような役割付きラベルを使う
   - 実 path は metadata の `references` に残す
-- 物語に実在する人物 / 場所 / 場面を扱う request では、必要に応じて `物語「<topic>」` の文脈を添える
+- request 本文では `物語「<topic>」の sceneXX` や `この画像は物語「<topic>」の一場面` のような制作メタ情報を使わない
+- 作品文脈が必要な場合も、人物 / 場所 / 道具 / 行為を具体語で書く。例: `シンデレラの灰の台所`、`王宮の階段に残された片方のガラスの靴`
 - scene image request の本文生成では、`script.md` の `human_review.approved_visual_beat` を最優先し、なければ `visual_beat` を使う
 - `story.md` は背景参照には使えても、scene image request の場面定義では `script.md` に優先されない
 - scene image request を全面改稿する場合は、scene 単位で request authoring subagent を並列起動してよい
@@ -286,6 +287,7 @@ stage 1 の原則:
 - scene image prompt は、カット全体の出来事をそのまま描くのではなく、**その動画を始める最初の1フレーム**として妥当である必要がある
 - `Aが話し、Bがうなずく` のような表現は、動画側で始まるべき動きを still 側で完了させやすいため避ける
 - 推奨は、抽象的に `動き出す直前` と書くのではなく、その場面の動きに応じて `まだ口を開く前`, `まだうなずき始めていない`, `差し出す直前`, `一歩目の体重移動の直前` のように具体化すること
+- `最初の1フレーム` / `1フレーム目` / `first frame` という制作メタ情報そのものは request 本文に入れない。これは p600 authoring / review の前提であり、画像生成 API に渡す意味がない
 - ただしこの具体化は request generator のコードで自動変換しない。`script.md` と人レビューを読んだ自然言語エージェントが request を整え、evaluator がその妥当性を検査する
 
 stage 2 の原則:

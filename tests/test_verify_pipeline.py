@@ -238,12 +238,136 @@ def _resolve_ready_p300_grounding(run_dir: Path, *, flow: str) -> None:
             raise AssertionError(result.stderr or result.stdout)
 
 
+def _write_ready_grounding_artifacts(run_dir: Path, stage: str = "asset") -> None:
+    grounding_dir = run_dir / "logs" / "grounding"
+    grounding_dir.mkdir(parents=True, exist_ok=True)
+    (grounding_dir / f"{stage}.json").write_text(json.dumps({"status": "ready"}), encoding="utf-8")
+    (grounding_dir / f"{stage}.readset.json").write_text(json.dumps({"verified_before_edit": True}), encoding="utf-8")
+    (grounding_dir / f"{stage}.audit.json").write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            f"stage.{stage}.grounding.status": "ready",
+            f"stage.{stage}.grounding.report": f"logs/grounding/{stage}.json",
+            f"stage.{stage}.readset.report": f"logs/grounding/{stage}.readset.json",
+            f"stage.{stage}.audit.status": "passed",
+            f"stage.{stage}.audit.report": f"logs/grounding/{stage}.audit.json",
+        },
+    )
+
+
+def _good_asset_inventory_yaml() -> str:
+    return """```yaml
+asset_inventory:
+  source_artifacts: ["story.md", "script.md", "video_manifest.md"]
+  coverage_scope:
+    characters: ["桃太郎"]
+    story_specific_items: ["きびだんご"]
+    locations: ["村道"]
+    setpieces: ["鬼ヶ島"]
+    reusable_stills: []
+  items:
+    - item_id: "momotaro_seed"
+      category: "character"
+      source_script_selectors: ["scene10_cut1"]
+      reusable_reason: "主人公の visual identity を固定する"
+```
+"""
+
+
+def _good_asset_plan_yaml() -> str:
+    return """```yaml
+asset_plan_metadata:
+  topic: "桃太郎"
+  source_story: "story.md"
+  source_script: "script.md"
+  created_at: "2099-01-01T00:00:00+09:00"
+  purpose: "reusable asset design before cut image generation"
+review_contract:
+  must_cover:
+    - "登場人物、物語固有のアイテム、使われる場所を網羅する"
+  must_avoid:
+    - "production metadata in p550 prompt"
+  done_when:
+    - "human review approved"
+assets:
+  characters:
+    - asset_id: "momotaro_seed"
+      asset_type: "character_reference"
+      source_script_selectors: ["scene10_cut1"]
+      story_purpose: "主人公の基準参照"
+      visual_spec:
+        identity: ["少年、旅装束、赤い鉢巻"]
+        fixed_details: ["全身が見える", "素朴な着物"]
+        must_avoid: ["現代服"]
+      generation_plan:
+        output_dir: "assets/characters"
+        output: "assets/characters/momotaro_seed.png"
+        required_views: ["front", "side", "back"]
+        view_requirements: "full-body front/side/back three-view reference"
+        execution_lane: "bootstrap_builtin"
+        bootstrap_allowed: true
+        bootstrap_reason: "no_reference_seed"
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "created"
+      existing_outputs: ["assets/characters/momotaro_seed.png"]
+      review:
+        status: "approved"
+        notes: "approved for p600 continuity"
+  objects: []
+  locations: []
+  reusable_stills: []
+```
+"""
+
+
 def _write_downstream_generation_artifacts(run_dir: Path) -> None:
-    (run_dir / "asset_plan.md").write_text("# Asset Plan\n\nasset plan body\n", encoding="utf-8")
-    (run_dir / "asset_generation_requests.md").write_text("# Asset Generation Requests\n\nrequest body\n", encoding="utf-8")
+    (run_dir / "asset_inventory.md").write_text(_good_asset_inventory_yaml(), encoding="utf-8")
+    (run_dir / "asset_plan.md").write_text(_good_asset_plan_yaml(), encoding="utf-8")
+    (run_dir / "asset_generation_requests.md").write_text(
+        """# Asset Generation Requests
+
+## momotaro_seed
+
+- tool: `google_nanobanana_2`
+- asset_id: `momotaro_seed`
+- asset_type: `character_reference`
+- execution_lane: `bootstrap_builtin`
+- reference_count: `0`
+- review_status: `approved`
+- creation_status: `created`
+- required_views:
+  - `front`
+  - `side`
+  - `back`
+- output: `assets/characters/momotaro_seed.png`
+- references: `[]`
+
+```text
+桃太郎の全身キャラクター参照。正面、側面、背面の3面図。赤い鉢巻、素朴な旅装束、同じ体格と顔立ちを保つ。
+```
+""",
+        encoding="utf-8",
+    )
     (run_dir / "image_generation_requests.md").write_text("# Image Generation Requests\n\nrequest body\n", encoding="utf-8")
     (run_dir / "narration_text_review.md").write_text("# Narration Text Review\n\napproved\n", encoding="utf-8")
-    (run_dir / "asset_generation_manifest.md").write_text("generated: true\n", encoding="utf-8")
+    (run_dir / "asset_generation_manifest.md").write_text(
+        """```yaml
+asset_generation_manifest:
+  items:
+    - asset_id: "momotaro_seed"
+      asset_type: "character_reference"
+      status: "created"
+      output: "assets/characters/momotaro_seed.png"
+      execution_lane: "bootstrap_builtin"
+      reference_count: 0
+```
+""",
+        encoding="utf-8",
+    )
+    (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
+    (run_dir / "assets" / "characters" / "momotaro_seed.png").write_bytes(b"image")
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
 
@@ -414,6 +538,86 @@ class TestVerifyPipeline(unittest.TestCase):
         self.assertIn("narration", VERIFY_MODULE.STAGE_TARGETS["p750"])
         self.assertNotIn("video", VERIFY_MODULE.STAGE_TARGETS["p750"])
         self.assertIn("video", VERIFY_MODULE.STAGE_TARGETS["p930"])
+
+    def test_check_asset_accepts_complete_asset_contract(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0500"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(stage["passed"])
+            self.assertTrue(checks["asset.asset_inventory"])
+            self.assertTrue(checks["asset.plan_structured"])
+            self.assertTrue(checks["asset.character_three_views"])
+            self.assertTrue(checks["asset.review_approved"])
+            self.assertTrue(checks["asset.request_metadata"])
+            self.assertTrue(checks["asset.request_prompt_no_production_meta"])
+
+    def test_check_asset_rejects_incomplete_asset_contract(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "cinderella_20990101_0501"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=シンデレラ\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            (run_dir / "asset_plan.md").write_text(
+                """```yaml
+assets:
+  characters:
+    - asset_id: "cinderella_work"
+      asset_type: "character_reference"
+      source_script_selectors: ["scene10_cut1"]
+      story_purpose: "灰の台所のシンデレラ"
+      visual_spec:
+        identity: ["灰をかぶった仕事着"]
+      generation_plan:
+        output_dir: "assets/characters"
+        required_views: ["front"]
+        execution_lane: "standard"
+        bootstrap_allowed: false
+        reference_inputs: []
+      creation_status: "planned"
+      existing_outputs: []
+      review:
+        status: "pending"
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## cinderella_work
+
+- asset_id: `cinderella_work`
+- output: `assets/characters/cinderella_work.png`
+
+```text
+物語「シンデレラ」の scene10。scene10_cut1 のための画像。
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_manifest.md").write_text("```yaml\nasset_generation_manifest:\n  items: []\n```\n", encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["asset.asset_inventory"])
+            self.assertFalse(checks["asset.character_three_views"])
+            self.assertFalse(checks["asset.review_approved"])
+            self.assertFalse(checks["asset.output_files"])
+            self.assertFalse(checks["asset.request_metadata"])
+            self.assertFalse(checks["asset.request_prompt_no_production_meta"])
 
     def test_verify_pipeline_p300_accepts_major_scene_visual_value_coverage(self) -> None:
         import tempfile

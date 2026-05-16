@@ -20,7 +20,7 @@ script_metadata:
 
 subagent_trace:
   - subagent_id: "scene-draft-001"
-    role: "scene_draft|narration_draft|script_review"
+    role: "scene_draft|scene_set_review|scene_detail_review|cut_draft|cut_review|cut_merge|narration_draft|script_review|production_readiness"
     input_artifact: "output/<topic>_<timestamp>/story.md"
     output_artifact: "output/<topic>_<timestamp>/scratch/script_scene01.md"
     accepted_by_main: false
@@ -64,6 +64,96 @@ human_review_criteria:
     - "映像より先走っていないか"
     - "説明過多になっていないか"
 
+scene_set_review:
+  status: "pending|approved|changes_requested|skipped"
+  review_policy:
+    agent_review: "required"
+    human_review: "required|optional|skipped"
+  review_loop:
+    status: "pending|running|passed|changes_requested|failed"
+    current_round: 0
+    max_rounds: 5
+    final_report: "scene_set_review.md"
+  agent_review:
+    status: "pending|passed|changes_requested"
+    reason_keys: []
+    reason_messages: []
+  auto_apply_policy:
+    enabled: true
+    allowed_actions: ["add_scene", "delete_scene", "merge_scene", "split_scene", "reorder_scene", "update_scene_intent", "strengthen_transition"]
+
+scene_detail_review:
+  status: "pending|approved|changes_requested|skipped"
+  criteria:
+    target_total_video_duration_minutes: "5-10"
+    cut_duration_assumption_seconds: "4-15"
+    required_checks:
+      - "全体 scene 数と scene 重要度から、この scene に必要な尺を見積もる"
+      - "提案 cut 数だけで必要尺と内容を満たせるか判断する"
+      - "1 cut しかない場合は 4-15 秒程度にしかならないことを明示する"
+      - "この scene で見せるべき内容が cut に全て載っているか確認する"
+      - "次 scene の内容も読み、最終 cut が次 scene につながるか判断する"
+      - "つながらない場合は cut 追加または最終 cut の増厚を要求する"
+  review_policy:
+    agent_review: "required"
+    human_review: "required|optional|skipped"
+  review_loop:
+    status: "pending|running|passed|changes_requested|failed"
+    current_round: 0
+    max_rounds: 5
+    final_report: "scene_detail_review.md"
+  agent_review:
+    status: "pending|passed|changes_requested"
+    reason_keys: []
+    reason_messages: []
+
+cut_blueprint_review:
+  status: "pending|approved|changes_requested|skipped"
+  review_policy:
+    agent_review: "required"
+    human_review: "required|optional|skipped"
+  review_loop:
+    status: "pending|running|passed|changes_requested|failed"
+    current_round: 0
+    max_rounds: 5
+    final_report: "cut_blueprint_review.md"
+  agent_review:
+    status: "pending|passed|changes_requested"
+    reason_keys: []
+    reason_messages: []
+
+production_readiness_review:
+  status: "pending|approved|changes_requested|skipped"
+  review_policy:
+    agent_review: "required"
+    human_review: "required|optional|skipped"
+  review_loop:
+    status: "pending|running|passed|changes_requested|failed"
+    current_round: 0
+    max_rounds: 5
+    final_report: "production_readiness_review.md"
+  council:
+    design_owner:
+      role: "only_editor"
+      may_edit_downstream_design_artifacts: true
+    advisory_agents:
+      - role: "structure_auditor"
+        responsibility: "script の骨格、因果、scene/cut 接続、破綻を評価する"
+        may_edit_downstream_design_artifacts: false
+      - role: "duration_auditor"
+        responsibility: "cut 数と台本から 5-10 分動画の尺を予測し、不足を特定する"
+        may_edit_downstream_design_artifacts: false
+      - role: "quality_auditor"
+        responsibility: "尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する"
+        may_edit_downstream_design_artifacts: false
+      - role: "orchestrator"
+        responsibility: "各 auditor の意見を統合し、Design Owner 向け patch brief にする"
+        may_edit_downstream_design_artifacts: false
+  agent_review:
+    status: "pending|passed|changes_requested"
+    reason_keys: []
+    reason_messages: []
+
 characters:
   - character_id: "protagonist"
     name: "string"
@@ -86,6 +176,19 @@ scenes:
       approved_scene_summary: ""
       approved_story_visual: ""
       change_request_ids: []
+    review_policy:
+      agent_review: "required"
+      human_review: "required|optional|skipped"
+      human_required_reason: ""
+    review_loop:
+      status: "pending|running|passed|changes_requested|failed"
+      current_round: 0
+      max_rounds: 5
+      final_report: "scene_detail_review.md"
+    agent_review:
+      status: "pending|passed|changes_requested"
+      reason_keys: []
+      reason_messages: []
     narrative:
       phase: "ordinary_world"
       purpose: "string"
@@ -105,10 +208,37 @@ scenes:
       source_part_id: ""
       role: "none|visual_payoff"
       narration_policy: "spoken|silent"
+    scene_intent:
+      story_purpose: "string"
+      audience_information: []
+      withheld_information: []
+      reveal_constraints: []
+      affect_transition: "string"
+      visual_value_source: ""
+      production_risks: []
+      handoff_notes:
+        p500_asset: []
+        p600_image: []
+        p700_narration: []
+        p800_video: []
     visual:
       generation_prompt: "string"
     cuts:
       - cut_id: 1  # dotted numeric string も可: 2.1
+        cut_blueprint:
+          cut_role: "main|sub|transition|reaction|visual_payoff"
+          duration_intent: "short|standard|hold"
+          target_beat: "string"
+          must_show: []
+          must_avoid: []
+          done_when: []
+          visual_beat: "string"
+          narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
+          asset_dependency_hint:
+            character_ids: []
+            object_ids: []
+            location_ids: []
+            reusable_still_candidates: []
         narration: "string"
         tts_text: "string"
         elevenlabs_prompt:
@@ -131,6 +261,19 @@ scenes:
           approved_image_notes: []
           approved_video_notes: []
           change_request_ids: []
+        review_policy:
+          agent_review: "required"
+          human_review: "required|optional|skipped"
+          human_required_reason: ""
+        review_loop:
+          status: "pending|running|passed|changes_requested|failed"
+          current_round: 0
+          max_rounds: 5
+          final_report: "cut_blueprint_review.md"
+        agent_review:
+          status: "pending|passed|changes_requested"
+          reason_keys: []
+          reason_messages: []
         image_output: "assets/scenes/scene01_cut01.png"
 
 quality_check:

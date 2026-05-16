@@ -136,6 +136,9 @@ scenes:
     image_generation:
       # 新規の静止画は、場所/物体/人物状態の continuity anchor が必要な scene で優先する。
       # 既存の anchor frame を再利用できる cut は、新規生成を強制しない。
+      # story scene の静止画は後段動画の first frame 候補として設計する。
+      # `最初の1フレーム` / `1フレーム目` / `first frame` は prompt 本文に入れず、
+      # prompt_authoring_context などの非APIメタデータ側にだけ残す。
       # review metadata は image_generation.review 側で持つ:
       # contract:
       #   target_focus: "character"

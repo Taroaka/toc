@@ -357,6 +357,122 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
             self.assertIn("runtime.stage_target=p400", state)
             self.assertIn("runtime.stop_slot=p450", state)
+            self.assertIn("review.script.scene_set.status=pending", state)
+            self.assertIn("review.script.scene_detail.status=pending", state)
+            self.assertIn("review.script.cut.status=pending", state)
+            self.assertIn("review.script.production_readiness.status=pending", state)
+            self.assertIn("eval.scene_set.loop.status=pending", state)
+            self.assertIn("eval.scene_detail.loop.status=pending", state)
+            self.assertIn("eval.cut_blueprint.loop.status=pending", state)
+            self.assertIn("eval.production_readiness.loop.status=pending", state)
+            self.assertIn("slot.p410.status=pending", state)
+            self.assertIn("slot.p435.status=pending", state)
+
+    def test_scaffold_p410_materializes_only_scene_reviews(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "テスト トピック",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "p410",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            run_dir = base / "テスト_トピック_20990101_0000"
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_set" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_detail" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertFalse((run_dir / "logs" / "eval" / "cut_blueprint").exists())
+            self.assertFalse((run_dir / "logs" / "eval" / "script").exists())
+
+    def test_scaffold_p420_materializes_cut_review_but_not_script_review(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "テスト トピック",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "p420",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            run_dir = base / "テスト_トピック_20990101_0000"
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_set" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_detail" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "cut_blueprint" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertFalse((run_dir / "logs" / "eval" / "script").exists())
+            self.assertFalse((run_dir / "logs" / "eval" / "production_readiness").exists())
+
+    def test_scaffold_p435_materializes_production_readiness_after_script_review(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "テスト トピック",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "p435",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            run_dir = base / "テスト_トピック_20990101_0000"
+            self.assertTrue((run_dir / "logs" / "eval" / "script" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "production_readiness" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.stop_slot"], "p435")
+            self.assertEqual(state["review.script.production_readiness.status"], "pending")
+            self.assertEqual(state["eval.production_readiness.loop.status"], "pending")
+            self.assertEqual(state["slot.p435.status"], "pending")
 
     def test_scaffold_script_stage_stops_before_narration(self) -> None:
         import tempfile
@@ -423,6 +539,7 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
 
             run_dir = base / "テスト_トピック_20990101_0000"
             self.assertTrue((run_dir / "logs" / "grounding" / "asset.json").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "production_readiness" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["runtime.stage_target"], "p500")
             self.assertEqual(state["runtime.stop_slot"], "p570")

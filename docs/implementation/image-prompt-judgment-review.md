@@ -16,6 +16,14 @@
 4. subagent は `image_prompt.review_collection.md` を frozen input として読み、prompt quality を judgment する。
 5. subagent の結果は `logs/review/image_prompt.judgment.md` に書き戻す。書き戻せない環境では、同じ内容をそのまま返す。
 
+## 追加レビュー観点
+
+- prompt 本文が画像生成 API に渡す文として成立しているかを見る。
+- `物語「<topic>」の scene10`、`scene10_cut01`、`この画像は物語「<topic>」の一場面`、`[物語の文脈]` のような制作管理メタ情報は blocker とする。
+- scene still は後段動画の first frame 候補として読む。ただし `最初の1フレーム`、`1フレーム目`、`first frame` のような authoring metadata が prompt 本文に残っていれば blocker とする。
+- mid-action / completed-action の prompt は、動画冒頭の静止画として自然に動き出せる初期状態へ書き換える指摘を出す。
+- 修正方向は、内部 id を具体的な画面語へ置き換えること。例: `物語「シンデレラ」の scene10` ではなく `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ`。
+
 ## 読む対象
 
 subagent は、少なくとも次を読む。

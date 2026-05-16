@@ -87,6 +87,10 @@ class TestBuildImagePromptJudgmentReview(unittest.TestCase):
             self.assertIn(str(manifest_path.resolve()), prompt)
             self.assertIn("image_prompt.review_collection.md", prompt)
             self.assertIn("image_prompt.judgment.md", prompt)
+            self.assertIn("first-frame readiness", prompt)
+            self.assertIn("最初の1フレーム", prompt)
+            self.assertIn("nonvisual production metadata", prompt)
+            self.assertIn("物語「<topic>」の scene10", prompt)
             self.assertIn("status: passed|failed", prompt)
 
     def test_cli_writes_review_pack_and_state(self) -> None:

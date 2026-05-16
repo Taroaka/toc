@@ -27,6 +27,74 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 のような指示が入った場合は、まず `asset_plan.md` で受ける。
 
+### 0.1 p500 slot 運用詳細
+
+`p500` の目的は、p600 の cut 画像生成に入る前に、この物語で繰り返し使う視覚要素を漏れなく固定すること。`p500|500|asset` を target にした場合は、`p570` の asset continuity check まで進める。
+
+#### p510 asset grounding
+
+- やること: asset stage で読むべき正本、run local input、stage docs、template を確定する。
+- 主な input: `script.md`、`story.md`、`video_manifest.md`、`docs/implementation/asset-bibles.md`、`docs/data-contracts.md`、`workflow/asset-plan-template.yaml`。
+- 主な output: `logs/grounding/asset.json`、`logs/grounding/asset.readset.json`、`logs/grounding/asset.audit.json`。
+- ゴール: readset が verified、audit が passed で、以後の p520-p570 が親会話だけの暗黙知に依存しない状態にする。
+
+#### p520 reusable asset inventory
+
+- やること: この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、繰り返し参照される still を網羅する。
+- 対象: 主人公の状態差分、相手役、敵役/権力者、案内役/助力者、物語固有の小道具、setpiece、繰り返し使う場所、reusable still。
+- ゴール: 後続 cut で visual identity が揺れる主要 subject が `asset_plan.md` 候補に入っていること。
+- 判断基準: `script.md` / `story.md` / `video_manifest.md` に出る固有名詞・固有の場所・物語上の証拠品・再利用される背景を拾う。単発 cut の一時的な構図や演技は p600 に残す。
+
+#### p530 asset plan authoring
+
+- やること: p520 の inventory を `asset_plan.md` に構造化し、生成前 review に出せる状態にする。
+- ゴール: 各 asset について、何を固定するか、どこで使うか、参照画像が必要か、どの output に保存するかが明確であること。
+- character asset: 原則として全身が見える参照を作り、front / side / back の 3 面図を required views に含める。派生 character variant は main の front / side / back を参照して同一人物性を保つ。
+- object / location / setpiece / reusable still: 単体 still を基本にし、同じ場所や同じ物体の状態差分だけ `derived_from_asset_id` と `reference_inputs[]` を使う。
+
+#### p540 asset review / fix loop
+
+- やること: review agent が `asset_plan.md` を監査し、漏れや矛盾があれば main agent が修正し、再度 review agent が確認する cycle を回す。
+- 標準 loop: 最大 5 round。各 round は複数 critic と aggregator を使い、aggregator が `passed|changes_requested` と unresolved findings を返す。
+- review 観点:
+  - この物語の登場人物・物語固有アイテム・使用場所が漏れていないか
+  - 後続 cut で identity drift が起きやすい subject が asset 化されているか
+  - character の full-body front / side / back 参照方針が入っているか
+  - variant が main reference から派生しており、別人/別物として新規設計されていないか
+  - `source_script_selectors[]` と `generation_plan.reference_inputs[]` を混同していないか
+  - `reference_inputs[]` が空なら no-reference lane、参照あり/derived なら standard lane になっているか
+  - `story.md` / `script.md` に無い新情報を足していないか
+  - p550 request に変換できるだけの visual specificity があるか
+- ゴール: 漏れ・矛盾・lane 誤り・参照関係の誤用が解消され、未解決 finding がある場合は human review / explicit override の理由が残っていること。
+
+#### p550 asset requests
+
+- やること: `asset_plan.md` から `asset_generation_requests.md` と `asset_generation_manifest.md` を materialize する。
+- ゴール: 人間が request file だけを見て、何を、どの参照画像で、どの output に、どの status で生成するか判断できること。
+- prompt 本文は image API に渡る凍結文なので、制作管理メタではなく具体的に見える対象を書く。
+- NG:
+  - `物語「シンデレラ」の scene10 のための背景画像。`
+  - `scene30_cut01 で使う魔法の変身 scene。`
+  - `この画像は物語「シンデレラ」の一場面を視覚化する。`
+  - `後続 scene でも使いやすい王子。`
+- OK:
+  - `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
+  - `月光の庭に停まる、かぼちゃの丸みを残した実写の馬車。蔓の装飾、金属骨組み、重い車輪、扉の形が明確に見える。`
+  - `若い王子の全身キャラクター参照。深紺と銀の宮廷衣装、落ち着いた目線、同じ人物として再利用できる顔・髪型・立ち姿。`
+
+#### p560 asset generation
+
+- やること: p550 request に従い、reusable asset image を output path に保存する。
+- no-reference: `reference_count == 0` の request は、API provider 経由でも Codex GPT Image 1.5 経由でも、互換 lane 名 `execution_lane=bootstrap_builtin` の no-reference image lane に残す。
+- reference-driven: `reference_count > 0`、`reference_inputs[]` あり、または `derived_from_asset_id` ありの request は `execution_lane=standard` に残す。
+- ゴール: request と manifest の status、出力ファイル、失敗/skip/再生成対象が対応していること。
+
+#### p570 asset continuity check
+
+- やること: 生成済み asset が p600 の continuity anchor として使えるか確認する。
+- review 観点: character の顔・髪・年齢感・衣装・3 面図、object の silhouette / material / scale、location の spatial identity / major structure / lighting、variant の同一性、`existing_outputs[]`、`review.status`、manifest status。
+- ゴール: p600 の scene / cut prompt が参照できる approved asset path が揃い、未承認・不足・差し替え対象が明示されていること。
+
 ### 1.0 `asset_plan.md`
 
 - asset 設計と review の正本
@@ -35,6 +103,7 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - 各 asset entry は `creation_status: planned|created|stale|missing` を持ち、すでに作成済みの asset は `existing_outputs[]` に実ファイルを記録する
 - asset を作る本筋目的は、複数 cut で同じ visual identity を再利用し、同一 cut 内でも関連 asset を派生させながら物語の視覚表現をブレさせないこと
 - つまり asset は「先に作ると便利な画像」ではなく、「後続 cut の continuity anchor」として扱う
+- character reference は全身が見える front / side / back の 3 面図を基本にする。顔だけ、上半身だけ、正面だけの参照は p600 の continuity anchor として不足しやすい
 - 同一人物の state/time variant は、main の `character_reference` を基準に派生させる
 - variant entry では `generation_plan.reference_inputs[]` に main reference を入れ、`generation_plan.derived_from_asset_id` で元 asset を明示する
 - 例: `urashima_old` は `urashima` の front / side / back を参照して作り、別人としてゼロから起こさない

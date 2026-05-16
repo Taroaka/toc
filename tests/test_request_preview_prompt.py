@@ -152,9 +152,10 @@ scenes:
             references=[],
             topic="浦島太郎",
         )
-        self.assertIn("物語「浦島太郎」に出てくる浦島太郎のキャラクター基準画像。", rewritten)
+        self.assertIn("浦島太郎のキャラクター基準画像。", rewritten)
         self.assertIn("基準画像のため背景小道具は置かない。", rewritten)
         self.assertIn("顔立ち、髪型、衣装の形、体格比率を読み取れる基準画像にする。", rewritten)
+        self.assertNotIn("物語「浦島太郎」", rewritten)
         self.assertNotIn("後続scene", rewritten)
         self.assertNotIn("以後のscene", rewritten)
         self.assertNotIn("この cut", rewritten)
@@ -172,11 +173,65 @@ scenes:
             references=["assets/characters/urashima.png", "assets/characters/turtle.png"],
             topic="浦島太郎",
         )
-        self.assertIn("この画像は物語「浦島太郎」の一場面を視覚化する。", rewritten)
         self.assertIn("参照画像に写っている顔、髪型、衣装、甲羅パターンをこの場面でも維持する。", rewritten)
         self.assertIn("参照画像に写っている海亀の甲羅の模様、朝の光の方向、波の質感を、この場面の画面内でも維持する。", rewritten)
+        self.assertNotIn("この画像は物語", rewritten)
+        self.assertNotIn("物語「浦島太郎」", rewritten)
         self.assertNotIn("連続性アンカー", rewritten)
         self.assertNotIn("この cut", rewritten)
+
+    def test_removes_nonvisual_story_scene_metadata_from_request_prompt(self) -> None:
+        prompt = """[全体 / 不変条件]
+物語「シンデレラ」の scene10。実写映画風、横長16:9。
+
+[シーン]
+灰の残る古い台所で、シンデレラが暖炉の灰を掃いている。
+
+[連続性]
+scene10 の灰の台所と同じ床。
+"""
+        rewritten = MODULE._rewrite_request_prompt_for_review(
+            prompt=prompt,
+            output="assets/scenes/scene10_ash_kitchen.png",
+            references=[],
+            topic="シンデレラ",
+        )
+        self.assertIn("灰の残る古い台所", rewritten)
+        self.assertIn("シンデレラが暖炉の灰を掃いている", rewritten)
+        self.assertNotIn("物語「シンデレラ」", rewritten)
+        self.assertNotIn("scene10", rewritten)
+        self.assertNotIn("[物語の文脈]", rewritten)
+
+    def test_removes_short_story_context_sentence_from_request_prompt(self) -> None:
+        prompt = """[物語の文脈]
+この画像は物語「シンデレラ」の一場面。
+
+[シーン]
+灰の残る古い台所で、シンデレラが暖炉の灰を掃いている。
+"""
+        rewritten = MODULE._rewrite_request_prompt_for_review(
+            prompt=prompt,
+            output="assets/scenes/scene10_ash_kitchen.png",
+            references=[],
+            topic="シンデレラ",
+        )
+        self.assertIn("灰の残る古い台所", rewritten)
+        self.assertNotIn("この画像は物語", rewritten)
+        self.assertNotIn("[物語の文脈]", rewritten)
+
+    def test_removes_first_frame_authoring_metadata_from_request_prompt(self) -> None:
+        prompt = """[シーン]
+この画像は動画の最初の1フレームとして使う。王宮階段の手前にガラスの靴があり、奥で王子が手を伸ばす直前。
+"""
+        rewritten = MODULE._rewrite_request_prompt_for_review(
+            prompt=prompt,
+            output="assets/scenes/scene50_cut01.png",
+            references=[],
+            topic="シンデレラ",
+        )
+        self.assertIn("王宮階段の手前にガラスの靴", rewritten)
+        self.assertNotIn("最初の1フレーム", rewritten)
+        self.assertNotIn("1フレーム目", rewritten)
 
     def test_removes_stateful_next_cut_language_from_request(self) -> None:
         prompt = """[連続性]
@@ -291,6 +346,8 @@ scenes:
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
             self.assertTrue((tmp_path / "p000_index.md").exists())
             self.assertIn("## scene1_cut2", request_text)
+            self.assertIn("- authoring_role: `video_first_frame_candidate`", request_text)
+            self.assertIn("prompt本文には「最初の1フレーム」等を書かず", request_text)
             self.assertIn("- still_mode: `reuse_anchor`", request_text)
             self.assertIn("- generation_status: `recreate`", request_text)
             self.assertIn("- plan_source: `scene01_cut01`", request_text)
@@ -441,7 +498,11 @@ scenes:
     still_assets:
       - asset_id: "urashima_seed"
         asset_type: "character_reference"
+        source_script_selectors: ["scene1_cut1"]
         output: "assets/characters/urashima_seed.png"
+        creation_status: "planned"
+        generation_plan:
+          required_views: ["front", "side", "back"]
         review:
           status: "pending"
         image_generation:
@@ -477,6 +538,15 @@ scenes:
             self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
             self.assertIn("- reference_count: `0`", request_text)
             self.assertIn("- review_status: `pending`", request_text)
+            self.assertIn("- creation_status: `planned`", request_text)
+            self.assertIn("- bootstrap_allowed: `true`", request_text)
+            self.assertIn("- bootstrap_reason: `no_reference_seed`", request_text)
+            self.assertIn("- source_script_selectors:", request_text)
+            self.assertIn("  - `scene1_cut1`", request_text)
+            self.assertIn("- required_views:", request_text)
+            self.assertIn("  - `front`", request_text)
+            self.assertIn("  - `side`", request_text)
+            self.assertIn("  - `back`", request_text)
             self.assertIn("- output: `assets/characters/urashima_seed.png`", request_text)
 
     def test_image_generation_requests_include_lane_and_reference_count(self) -> None:

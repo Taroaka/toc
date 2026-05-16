@@ -3923,6 +3923,10 @@ def _write_request_preview_md(
             lines.append(f"- reference_count: `{entry['reference_count']}`")
         if entry.get("review_status"):
             lines.append(f"- review_status: `{entry['review_status']}`")
+        if entry.get("authoring_role"):
+            lines.append(f"- authoring_role: `{entry['authoring_role']}`")
+        if entry.get("authoring_note"):
+            lines.append(f"- authoring_note: {entry['authoring_note']}")
         lines.append(f"- output: `{entry['output']}`")
         if entry.get("duration_seconds") is not None:
             lines.append(f"- duration_seconds: `{entry['duration_seconds']}`")
@@ -4026,6 +4030,44 @@ def _write_generation_exclusion_report_md(*, out_path: Path, scenes: list[SceneS
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _strip_nonvisual_story_context(text: str) -> str:
+    stripped = text
+    stripped = re.sub(
+        r"(?ms)\n?\[物語の文脈\]\n(?:この画像は物語「[^」]+」(?:の一場面(?:を視覚化する)?|に出てくる場所を表す)。\n*)+",
+        "\n",
+        stripped,
+    )
+    stripped = re.sub(
+        r"この画像は物語「[^」]+」(?:の一場面(?:を視覚化する)?|に出てくる場所を表す)。\s*",
+        "",
+        stripped,
+    )
+    stripped = re.sub(
+        r"物語「[^」]+」の\s*scene\d+(?:[_\s-]*cut\d+)?[。.\s]*",
+        "",
+        stripped,
+        flags=re.I,
+    )
+    stripped = re.sub(
+        r"(?<![A-Za-z0-9_/.-])scene\d+(?:[_-]cut\d+)?\s*の\s*",
+        "",
+        stripped,
+        flags=re.I,
+    )
+    stripped = re.sub(
+        r"(?<![A-Za-z0-9_/.-])scene\d+(?:[_-]cut\d+)?[、。.\s]*",
+        "",
+        stripped,
+        flags=re.I,
+    )
+    stripped = re.sub(r"物語「[^」]+」に出てくる([^。\n]+)", r"\1", stripped)
+    stripped = stripped.replace("[物語の文脈]\n", "")
+    stripped = re.sub(r"(?:この画像は)?(?:動画(?:の)?(?:開始|冒頭)?)?最初の\s*1\s*フレーム(?:として|。|、)?\s*", "", stripped)
+    stripped = re.sub(r"(?:この画像は)?(?:動画(?:の)?(?:開始|冒頭)?)?1\s*フレーム目(?:として|。|、)?\s*", "", stripped)
+    stripped = re.sub(r"(?:この画像は)?(?:動画(?:の)?(?:開始|冒頭)?)?冒頭フレーム(?:として|。|、)?\s*", "", stripped)
+    return stripped
+
+
 def _rewrite_request_prompt_for_review(*, prompt: str, output: str, references: list[str], topic: str = "") -> str:
     text = (prompt or "").strip()
     if not text:
@@ -4035,12 +4077,10 @@ def _rewrite_request_prompt_for_review(*, prompt: str, output: str, references: 
     output_norm = (output or "").replace("\\", "/")
     is_character_asset = "/assets/characters/" in f"/{output_norm}"
     is_object_asset = "/assets/objects/" in f"/{output_norm}"
-    is_location_asset = "/assets/locations/" in f"/{output_norm}"
-    is_story_scene = "/assets/scenes/" in f"/{output_norm}"
-    topic_norm = (topic or "").strip()
     labeled_refs = _label_reference_paths(list(references))
     path_to_label = {item["path"]: item["label"] for item in labeled_refs}
 
+    text = _strip_nonvisual_story_context(text)
     text = text.replace("（以後のsceneで一貫性を保つため）", "")
     text = text.replace("（連続性アンカー）", "")
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -4101,22 +4141,6 @@ def _rewrite_request_prompt_for_review(*, prompt: str, output: str, references: 
     text = re.sub(r"前の\s*場面\s*の.+?(。|$)", "", text)
     text = re.sub(r"次scene.+?(。|$)", "", text)
     text = re.sub(r"前scene.+?(。|$)", "", text)
-    if topic_norm:
-        if is_character_asset:
-            text = re.sub(
-                r"(?m)^([^\n]+のキャラクター基準画像。)",
-                rf"物語「{topic_norm}」に出てくる\1",
-                text,
-                count=1,
-            )
-        elif is_story_scene:
-            if "[物語の文脈]" not in text:
-                text = "[物語の文脈]\n" + f"この画像は物語「{topic_norm}」の一場面を視覚化する。\n\n" + text
-        elif is_location_asset:
-            basename = Path(output_norm).stem
-            synthetic_location_ids = {"sea_temple_interior", "clock_museum"}
-            if basename not in synthetic_location_ids and "[物語の文脈]" not in text:
-                text = "[物語の文脈]\n" + f"この画像は物語「{topic_norm}」に出てくる場所を表す。\n\n" + text
     text = re.sub(r"この場面\s+でも", "この場面でも", text)
     text = re.sub(r"この場面\s+の", "この場面の", text)
     text = re.sub(r"この場面\s+単体", "この画像だけで", text)
@@ -4941,6 +4965,8 @@ def main() -> None:
                     "execution_lane": _effective_image_execution_lane(scene),
                     "reference_count": len(list(scene.image_references or [])),
                     "review_status": scene.image_review_status or "",
+                    "authoring_role": "video_first_frame_candidate",
+                    "authoring_note": "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。",
                     "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
                     "source_requests": source_requests,
                     "references": list(scene.image_references or []),

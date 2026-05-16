@@ -77,6 +77,9 @@ scenes:
   - scene_id: 10
     timestamp: "00:00-00:08"
     image_generation:
+      # 後段動画の first frame 候補として設計するが、`最初の1フレーム` /
+      # `1フレーム目` / `first frame` は prompt 本文に入れない。
+      # その情報は prompt_authoring_context などの非APIメタデータにだけ残す。
       # review metadata は image_prompt_collection.md 側で持つ。
       # subagent false には reason key を必ず残し、fix 後に再 review する。
       # human_review_ok は例外許容の記録であり、subagent finding を消さない。

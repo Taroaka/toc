@@ -11,6 +11,10 @@
 Script stage のゴールは、承認済みの `story.md` を、物語意図・reveal 順序・research grounding を保ったまま
 制作可能な `script.md` に変換すること。既存手順はこのゴールを満たすための作業分解として扱う。
 
+p400 は、scene を直接画像や動画にする stage ではない。
+`story.md` / `visual_value.md` から、後続の p500 asset、p600 scene implementation、p700 narration、p800 video generation が迷わない
+**scene/cut 設計**を作る stage である。
+
 ### Success criteria
 
 - 各 scene が purpose / intended affect / visual beat / narration boundary / timing / `done_when` を持つ
@@ -18,12 +22,112 @@ Script stage のゴールは、承認済みの `story.md` を、物語意図・r
 - narration と `tts_text` は script 側を正本とし、映像生成 prompt の主要ソースにしない
 - reveal 順序、主人公、theme、承認済み human request を、無断で変更していない
 - provider 固有の prompt syntax と実行管理は `video_manifest.md` 側に渡せる粒度で残っている
+- p400 の時点で、各 scene が `scene intent card` を持ち、各 cut が `cut blueprint` として review できる
+- asset / image / video の実行は p400 では行わず、必要な依存関係だけを p500/p600/p800 へ渡している
 
 ### Scope boundaries
 
 - script で決める: scene 目的、見せる情報、隠す情報、ナレーション、TTS 文字列、視覚 beat、尺の目安
 - manifest へ渡す: provider prompt、asset path、生成結果、採用判定、実行 wiring
 - 編集前に確認する: 事実関係、theme、主人公、reveal 順序、承認済み human request、変更禁止 scope
+
+### p400 scene/cut design slots
+
+p400 は次の順で進める。
+
+1. `p410 scene intent card`
+   - `story.md` の scene を読み、scene ごとの物語責務を固定する
+   - `visual_value.md` がある場合は、その scene の visual value / anchor / regeneration risk を読む
+   - scene ごとに、観客へ渡す情報、まだ隠す情報、感情変化、根拠境界、後続 stage への注意を残す
+   - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する
+   - `p410b` / `p410c` は内部 review-loop label であり、scaffold の停止位置は `p410`、prompt materialize は `build-review-loop-round.py --slot p410b|p410c` で行う
+   - 抽象 review が合格するまで、main agent が scene 構成と transition を自動修正する
+   - 抽象 review 合格後、具体 per-scene review loop を scene 単位で回し、各 scene の必要性、情報量、内部整合、handoff を `scene_detail_review.md` と `eval.scene_detail.loop.*` に記録する
+   - 具体 review が合格するまで、main agent が各 scene intent を自動修正する
+   - human review は `gate.script_scene_review=required|optional|skipped` に従うが、agent 指摘の自動適用を都度止める gate ではない
+2. `p420 cut blueprint`
+   - 全 scene が `review.script.scene_set.status=approved` / `review.script.scene_detail.status=approved` / `agent_review.status=passed` を満たした後だけ cut 化する
+   - scene を 2 個以上の cut に分ける。reference / title / pure transition のような例外は理由を残す
+   - scene 単位で並列 agent に分担してよいが、`script.md` は main agent が single writer として統合する
+   - 1 cut は 1 意図に限定する。1 cut の中で場所移動、reveal、感情反転、説明を同時に背負わせない
+   - cut ごとに `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を書く
+   - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
+   - human review は `gate.script_cut_review=required|optional|skipped` に従う
+3. `p430 script review`
+   - `script.md` を正本として、scene/cut loop 後の最終集約 review を行う
+   - facts / theme / protagonist / reveal order / approved human requests を無断変更していないか確認する
+   - cut 数、尺、visual/narration の距離、説明過多、asset 依存の抜けを確認する
+4. `p435 production readiness council`
+   - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
+   - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
+   - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する
+   - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
+   - Orchestrator は各 auditor の意見を統合し、Design Owner 向け patch brief にする
+   - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この p435 process 内で downstream design artifacts を触れるのは Design Owner だけとする
+5. `p450 skeleton manifest`
+   - `script.md` から `video_manifest.md` を `manifest_phase: skeleton` として materialize する
+   - skeleton manifest は scene/cut selector、`scene_contract`、asset id placeholder、image/audio/video の実行枠を持つ
+   - final image prompt、asset 生成、TTS 実行、motion prompt の確定は後続 stage に渡す
+
+### p410 Scene Intent Card
+
+各 scene は、少なくとも次を持つ。
+
+```yaml
+scene_intent:
+  story_purpose: "この scene が物語全体で担う役割"
+  audience_information: ["この scene で観客に渡す情報"]
+  withheld_information: ["この scene ではまだ見せない情報"]
+  reveal_constraints: ["初出や早出しを避ける対象"]
+  affect_transition: "前 scene からの感情変化"
+  visual_value_source: "visual_value.md の対応 part / none"
+  production_risks: ["後続 stage で崩れやすい点"]
+  handoff_notes:
+    p500_asset: ["asset 化すべき候補"]
+    p600_image: ["first frame / visual prompt で守ること"]
+    p700_narration: ["ナレーションで補うこと / 補わないこと"]
+    p800_video: ["motion で守ること"]
+```
+
+### p420 Cut Blueprint
+
+各 cut は、少なくとも次を持つ。
+
+```yaml
+cut_blueprint:
+  cut_role: "main|sub|transition|reaction|visual_payoff"
+  duration_intent: "short|standard|hold"
+  target_beat: "この cut で伝える 1 つのこと"
+  must_show: ["画・音・動きのどこかで必ず見せるもの"]
+  must_avoid: ["drift / reveal 破り / 説明過多など"]
+  done_when: ["reviewer が完了判断できる条件"]
+  visual_beat: "画として何が見えるか"
+  narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
+  asset_dependency_hint:
+    character_ids: []
+    object_ids: []
+    location_ids: []
+    reusable_still_candidates: []
+```
+
+`cut_blueprint` は生成 prompt ではない。
+API にそのまま渡す文面は p600 / p800 で作る。
+
+### p410 Review Order
+
+p410 の review は抽象から具体へ進む。
+
+1. `scene_set_review`
+   - 全 scene の概要を見て、不足 scene、不要 scene、統合/分割すべき scene、順序、scene 間の話の接続を評価する
+   - この review が `approved` になるまで、per-scene review や cut blueprint へ進まない
+2. `scene_detail_review`
+   - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する
+   - 目標動画は最低でも 5-10 分程度を想定し、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる
+   - 1 cut はおおよそ 4-15 秒であり、cut が 1 つしかない scene は 4-15 秒程度の尺しか持てないことを明示して評価する
+   - この scene で見せるべき内容が、予定 cut ですべて表現されているか確認する
+   - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する
+   - つながらない場合は、もう 1 cut 追加するか、最終 cut を厚くする修正案を出す
+   - 全 scene の `agent_review.status=passed` が揃うまで cut blueprint へ進まない
 
 ### Subagent use
 

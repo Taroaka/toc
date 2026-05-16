@@ -90,14 +90,28 @@ human_change_requests: []
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
     timestamp: "00:00-00:10"
+    scene_intent:
+      story_purpose: "string"
+      audience_information: []
+      withheld_information: []
+      reveal_constraints: []
+      affect_transition: "string"
+      visual_value_source: ""
+      production_risks: []
+      handoff_notes:
+        p500_asset: []
+        p600_image: []
+        p700_narration: []
+        p800_video: []
     implementation_trace:
       source_request_ids: []
       status: "implemented|verified|waived"
       notes: ""
     # カット設計ルール（推奨）:
     # - 1カット = 1ナレーション
+    # - 各 production scene は最低2カット。scene直下の image_generation だけで済ませない。
     # - メインカット（最低1つ）: 5–15秒（ナレーションの実秒ベース）
-    # - サブカット（任意）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
+    # - サブカット（最低1つ）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
     cuts:
       - cut_id: 1  # dotted numeric string も可: 2.1
         cut_role: "main"  # main|sub
@@ -115,6 +129,13 @@ scenes:
         image_generation:
           # 新規の静止画は、連続性アンカーが必要なときだけ優先して作る。
           # 既存の参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
+          # prompt_authoring_context は prompt 生成/レビュー用の非APIメタデータ。
+          # prompt 本文には `最初の1フレーム` / `1フレーム目` / `first frame` と書かず、
+          # この動画が動き出す直前に見えている初期状態だけを具体化する。
+          # prompt_authoring_context:
+          #   image_role: "video_first_frame_candidate"
+          #   first_frame_question: "この動画がこの静止画から動き出すなら、冒頭で何が見えているべきか"
+          #   api_prompt_policy: "do_not_include_authoring_context"
           # review metadata は image_generation.review 側で持つ:
           # contract:
           #   target_focus: "character"

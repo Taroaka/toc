@@ -38,14 +38,18 @@ scenes:
     timestamp: "00:00-00:30"
     # カット設計ルール（推奨）:
     # - 1カット = 1ナレーション
+    # - 各 production scene は最低2カット。scene直下の image_generation だけで済ませない。
     # - メインカット（最低1つ）: 5–15秒（ナレーションの実秒ベース）
-    # - サブカット（任意）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
+    # - サブカット（最低1つ）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
     cuts:
       - cut_id: 1
         cut_role: "main"  # main|sub
         image_generation:
           # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
           # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
+          # 後段動画の first frame 候補として設計するが、`最初の1フレーム` /
+          # `1フレーム目` / `first frame` は prompt 本文に入れない。
+          # その情報は prompt_authoring_context などの非APIメタデータにだけ残す。
           # review metadata は image_generation.review 側で管理する:
           # contract:
           #   target_focus: "character"

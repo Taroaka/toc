@@ -107,6 +107,147 @@ class TestImagePromptStoryReview(unittest.TestCase):
         self.assertIn("prompt is missing required block `[全体 / 不変条件]`.", findings)
         self.assertIn("prompt is missing required block `[禁止]`.", findings)
 
+    def test_review_flags_nonvisual_story_scene_metadata(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt_collection = """# Image Prompt Collection
+
+件数: `1`
+
+## scene10_cut01
+
+- output: `assets/scenes/scene10_ash_kitchen.png`
+- narration: `シンデレラが灰の台所で暖炉の灰を掃く。`
+- rationale: `anchor`
+
+```text
+[全体 / 不変条件]
+物語「シンデレラ」の scene10。実写映画調、画像内テキストなし。
+
+[登場人物]
+シンデレラ。
+
+[小道具 / 舞台装置]
+灰の台所、暖炉、古い箒。
+
+[シーン]
+灰の残る古い台所で、シンデレラが暖炉の灰を掃いている。
+
+[連続性]
+灰色の床と朝の青い光を保つ。
+
+[禁止]
+ロゴ、字幕、ウォーターマーク。
+```
+"""
+        manifest = {
+            "assets": {
+                "character_bible": [{"character_id": "cinderella_work", "review_aliases": ["シンデレラ"]}],
+                "object_bible": [{"object_id": "ash_kitchen", "review_aliases": ["灰の台所"]}],
+            },
+            "scenes": [
+                {
+                    "scene_id": 10,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "image_generation": {
+                                "character_ids": ["cinderella_work"],
+                                "object_ids": ["ash_kitchen"],
+                            },
+                            "audio": {"narration": {"text": "シンデレラが灰の台所で暖炉の灰を掃く。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        results = mod.review_entries(
+            mod.parse_prompt_collection(prompt_collection),
+            manifest=manifest,
+            story_scene_map={10: "シンデレラが灰の台所で暖炉の灰を掃く。"},
+            script_scene_map={},
+            story_text="シンデレラが灰の台所で暖炉の灰を掃く。",
+            script_text="",
+        )
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertIn("prompt_contains_nonvisual_metadata", findings)
+        self.assertNotIn("prompt_not_self_contained", findings)
+
+    def test_review_flags_short_story_scene_metadata_phrase(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt = "この画像は物語「シンデレラ」の一場面。灰の残る古い台所。"
+        issues = mod.find_prompt_nonvisual_metadata_issues(prompt)
+        self.assertTrue(issues)
+
+    def test_review_flags_first_frame_authoring_metadata_in_prompt_body(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt_collection = """# Image Prompt Collection
+
+件数: `1`
+
+## scene50_cut01
+
+- output: `assets/scenes/scene50_midnight_stair.png`
+- narration: `真夜中、階段にはガラスの靴だけが残る。`
+- rationale: `anchor`
+
+```text
+[全体 / 不変条件]
+実写映画調、画面内テキストなし。
+
+[登場人物]
+シンデレラ、王子。
+
+[小道具 / 舞台装置]
+ガラスの靴、王宮階段。
+
+[シーン]
+この画像は動画の最初の1フレームとして使う。階段の手前にガラスの靴が残り、奥で王子が手を伸ばす直前。
+
+[連続性]
+王宮の金色の光を保つ。
+
+[禁止]
+ロゴ、字幕、ウォーターマーク。
+```
+"""
+        manifest = {
+            "assets": {
+                "character_bible": [{"character_id": "cinderella_ball", "review_aliases": ["シンデレラ"]}],
+                "object_bible": [{"object_id": "glass_slipper", "review_aliases": ["ガラスの靴"]}],
+            },
+            "scenes": [
+                {
+                    "scene_id": 50,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "image_generation": {
+                                "character_ids": ["cinderella_ball"],
+                                "object_ids": ["glass_slipper"],
+                            },
+                            "audio": {"narration": {"text": "真夜中、階段にはガラスの靴だけが残る。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        results = mod.review_entries(
+            mod.parse_prompt_collection(prompt_collection),
+            manifest=manifest,
+            story_scene_map={50: "真夜中、階段にはガラスの靴だけが残る。"},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertIn("prompt_contains_first_frame_metadata", findings)
+
     def test_review_flags_missing_source_anchor_and_missing_object_id(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)

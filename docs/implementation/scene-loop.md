@@ -6,7 +6,50 @@
 
 シーン単位で生成→レビュー→再提出を反復し、整合性のある `script.md` を構築する。
 
-## Scene Plan（最小）
+## p400 Scene/Cut Design（正本）
+
+p400 では scene を直接生成しない。
+`story.md` / `visual_value.md` を読み、後続の p500 / p600 / p700 / p800 が使う scene/cut 設計へ落とす。
+
+### p410 Scene Completion Gate
+
+p410 は cut 作成前の scene 完成 gate である。
+まず全 scene を俯瞰する抽象 review を通し、その後に scene ごとの具体 review を通す。
+全 scene が合格するまで p420 へ進まない。
+
+scene ごとに次を固定する。
+
+- `story_purpose`
+- `audience_information`
+- `withheld_information`
+- `reveal_constraints`
+- `affect_transition`
+- `visual_value_source`
+- `production_risks`
+- `handoff_notes`
+  - `p500_asset`
+  - `p600_image`
+  - `p700_narration`
+  - `p800_video`
+
+### p420 Cut Blueprint
+
+cut ごとに次を固定する。
+
+- `cut_role`
+- `duration_intent`
+- `target_beat`
+- `must_show`
+- `must_avoid`
+- `done_when`
+- `visual_beat`
+- `narration_role`
+- `asset_dependency_hint`
+
+`cut_blueprint` は生成 prompt ではない。
+p600 image prompt / p800 motion prompt は、この設計を元に後続 stage で作る。
+
+## Legacy Scene Plan（最小）
 
 - `scene_id`
 - `purpose`
@@ -17,7 +60,28 @@
 
 ## フロー
 
-`ScenePlan → DraftScene → ReviewScene → (ReviseScene)* → Accept → Append`
+`SceneIntent → AbstractSceneSetReviewLoop → ConcretePerSceneReviewLoop → OptionalHumanSceneReview → CutBlueprint → CutReviewLoop → OptionalHumanCutReview → ScriptDraft → ReviewScript → ProductionReadinessCouncil → SkeletonManifest`
+
+旧表現でいう `ScenePlan → DraftScene → ReviewScene → (ReviseScene)* → Accept → Append` は、
+現在の p400 では上記フローへ読み替える。
+
+scene review と cut review は分ける。
+抽象 scene-set review が合格するまで concrete per-scene review は走らせない。
+全 scene が concrete review を通らず、かつ必要な human policy を満たしていない状態では cut を作らない。
+cut authoring は scene 単位で parallel agent に分担してよいが、`script.md` と `video_manifest.md` を更新する writer は main agent だけにする。
+
+concrete per-scene review は、scene 単体の必要性だけでなく尺と接続も見る。
+目標動画は最低 5-10 分程度とし、全体 scene 数と scene 重要度から scene ごとの必要尺を見積もる。
+1 cut はおおよそ 4-15 秒なので、1 cut しかない scene は 4-15 秒程度にしかならない。
+reviewer はこの制約を明示し、見せるべき内容が cut に全て載っているか、最終 cut が次 scene へつながるかを確認する。
+つながらない場合は、cut 追加または最終 cut の増厚を要求する。
+
+### p435 Production Readiness Council
+
+p435 は p430 script review の後、p440 human changes / narration sync の前に走る。
+Structure Auditor は骨格と因果、Duration Auditor は 5-10 分動画としての尺、Quality Auditor は映像品質と追加 scene/cut の必要性を見る。
+Orchestrator は意見を統合するが、Orchestrator と auditor は設計書を編集しない。
+この process 内で後段に渡る design artifacts を触れるのは Design Owner だけで、他 agent は Design Owner 向け patch brief を返す。
 
 ### 反復上限
 
@@ -28,6 +92,9 @@
 
 - accept 済みシーンのみ `script.md` に統合
 - `scene_id` の順序で並べる
+- p400 の single writer が `script.md` を統合する
+- `video_manifest.md` は `manifest_phase: skeleton` として p450 で materialize する
+- p400 では asset / image / TTS / video の実行をしない
 
 ## 状態記録
 

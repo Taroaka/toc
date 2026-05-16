@@ -10,6 +10,9 @@ google-genai
 # YAML parsing (used by scripts and E2E runner)
 pyyaml
 
+# Test runner used by CI and local verification
+pytest
+
 # Local /line + /image_gen web app
 fastapi
 uvicorn
