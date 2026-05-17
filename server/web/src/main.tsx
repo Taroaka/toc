@@ -350,6 +350,44 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+const IMAGE_GENERATION_RECOVERY_POLL_MS = 2000;
+const IMAGE_GENERATION_POST_ERROR_RECOVERY_ATTEMPTS = 3600;
+
+type CandidateRecoveryOptions = {
+  shouldStop?: () => boolean;
+  maxAttempts?: number;
+};
+
+class CandidateRecoveryCancelled extends Error {
+  constructor() {
+    super('candidate recovery cancelled');
+    this.name = 'CandidateRecoveryCancelled';
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function isRecoverableGenerationError(error: unknown): boolean {
+  const text = errorText(error).toLowerCase();
+  return (
+    text.includes('timed out') ||
+    text.includes('timeout') ||
+    text.includes('failed to fetch') ||
+    text.includes('networkerror') ||
+    text.includes('load failed') ||
+    text.includes('internal server error') ||
+    text.includes('bad gateway') ||
+    text.includes('gateway timeout') ||
+    text.includes('service unavailable')
+  );
+}
+
 function defaultVideoPrompt(item: ImageRequestItem): string {
   return [
     '静止画の人物・構図・光を保ったまま、自然なカメラ移動と小さな環境変化だけで動かす。',
@@ -1927,18 +1965,31 @@ function App() {
   );
 
   const waitForRecoveredCandidates = useCallback(
-    async (itemId: string, expectedCount: number, sinceMs: number, shouldStop?: () => boolean): Promise<CandidatesResponse> => {
-      for (let attempt = 0; attempt < 180; attempt += 1) {
-        await sleep(2000);
-        if (shouldStop?.()) throw new Error('candidate recovery cancelled');
-        const data = await fetchCandidates(itemId);
-        if (shouldStop?.()) throw new Error('candidate recovery cancelled');
-        const completed = data.candidates.filter((candidate) => candidate.path && (candidate.mtimeMs ?? 0) >= sinceMs);
-        if (completed.length >= expectedCount) {
-          return { ...data, candidates: completed };
+    async (
+      itemId: string,
+      expectedCount: number,
+      sinceMs: number,
+      options: CandidateRecoveryOptions = {},
+    ): Promise<CandidatesResponse> => {
+      let attempt = 0;
+      let lastError: unknown = null;
+      while (options.maxAttempts === undefined || attempt < options.maxAttempts) {
+        attempt += 1;
+        await sleep(IMAGE_GENERATION_RECOVERY_POLL_MS);
+        if (options.shouldStop?.()) throw new CandidateRecoveryCancelled();
+        try {
+          const data = await fetchCandidates(itemId);
+          if (options.shouldStop?.()) throw new CandidateRecoveryCancelled();
+          const completed = data.candidates.filter((candidate) => candidate.path && (candidate.mtimeMs ?? 0) >= sinceMs);
+          if (completed.length >= expectedCount) {
+            return { ...data, candidates: completed };
+          }
+        } catch (error) {
+          if (error instanceof CandidateRecoveryCancelled) throw error;
+          lastError = error;
         }
       }
-      throw new Error('candidate recovery timed out');
+      throw new Error(`candidate recovery timed out${lastError ? `: ${errorText(lastError)}` : ''}`);
     },
     [fetchCandidates],
   );
@@ -1955,6 +2006,7 @@ function App() {
           run_id: runId,
           kind: viewKind,
           item_id: item.id,
+          output: item.output,
           prompt: item.draftPrompt,
           references: item.selectedReferences.map((ref) => ref.path),
           candidate_count: candidateCount,
@@ -1964,11 +2016,32 @@ function App() {
       const trackedGeneration = generation.finally(() => {
         generationSettled = true;
       });
-      const recovery = waitForRecoveredCandidates(item.id, candidateCount, startedAtMs, () => generationSettled).then((data) => {
-        controller.abort();
-        return data;
-      });
-      return Promise.race([trackedGeneration, recovery]);
+      const recovery = waitForRecoveredCandidates(item.id, candidateCount, startedAtMs, {
+        shouldStop: () => generationSettled,
+      })
+        .then((data) => {
+          controller.abort();
+          return data;
+        })
+        .catch((error) => {
+          if (error instanceof CandidateRecoveryCancelled) {
+            return new Promise<CandidatesResponse>(() => {});
+          }
+          throw error;
+        });
+      try {
+        return await Promise.race([trackedGeneration, recovery]);
+      } catch (error) {
+        generationSettled = true;
+        if (isAbortError(error) || !isRecoverableGenerationError(error)) throw error;
+        try {
+          return await waitForRecoveredCandidates(item.id, candidateCount, startedAtMs, {
+            maxAttempts: IMAGE_GENERATION_POST_ERROR_RECOVERY_ATTEMPTS,
+          });
+        } catch {
+          throw error;
+        }
+      }
     },
     [candidateCount, runId, viewKind, waitForRecoveredCandidates],
   );

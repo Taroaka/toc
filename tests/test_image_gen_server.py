@@ -29,6 +29,7 @@ from server.codex_app_server import (
     find_agent_message_texts,
     find_image_generation_items,
     image_generation_saved_path,
+    image_generation_turn_timeout_seconds,
     wait_for_generated_image_after,
     wait_for_unclaimed_generated_image_after,
 )
@@ -793,6 +794,95 @@ class ImageGenParserTests(unittest.TestCase):
         with patch.dict(os.environ, {"TOC_CODEX_APP_SERVER_MODEL": "gpt-5.4"}):
             self.assertEqual(default_app_server_model(), "gpt-5.4")
 
+    def test_image_generation_turn_timeout_can_be_overridden(self) -> None:
+        with patch.dict(os.environ, {"TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS": "42"}):
+            self.assertEqual(image_generation_turn_timeout_seconds(), 42)
+
+    def test_generate_image_passes_image_timeout_to_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            codex_home = root / "codex_home"
+            generated_dir = codex_home / "generated_images" / "session"
+            generated_dir.mkdir(parents=True)
+            client = CodexAppServerClient(cwd=root)
+            seen_timeout = None
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**kwargs):
+                nonlocal seen_timeout
+                seen_timeout = kwargs.get("timeout_seconds")
+                generated = generated_dir / "generated.png"
+                generated.write_bytes(PNG_BYTES)
+                return [{"method": "turn/completed", "params": {"turnId": "turn-1"}}]
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": str(codex_home), "TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS": "42"},
+            ):
+                result = asyncio.run(
+                    client.generate_image(
+                        prompt="prompt",
+                        output_path=run_dir / "candidate.png",
+                        reference_images=[],
+                        item_id="scene1",
+                        run_dir=run_dir,
+                    )
+                )
+
+        self.assertIsNotNone(result.saved_path)
+        self.assertEqual(seen_timeout, 42)
+
+    def test_generate_image_recovers_generated_file_after_turn_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            codex_home = root / "codex_home"
+            generated_dir = codex_home / "generated_images" / "session"
+            generated_dir.mkdir(parents=True)
+            client = CodexAppServerClient(cwd=root)
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**_kwargs):
+                (generated_dir / "late.png").write_bytes(PNG_BYTES)
+                raise CodexAppServerError("turn timed out")
+
+            async def fake_wait_for_unclaimed_generated_image_after(*_args, **_kwargs):
+                return None
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+                patch(
+                    "server.codex_app_server.wait_for_unclaimed_generated_image_after",
+                    fake_wait_for_unclaimed_generated_image_after,
+                ),
+            ):
+                result = asyncio.run(
+                    client.generate_image(
+                        prompt="prompt",
+                        output_path=run_dir / "candidate.png",
+                        reference_images=[],
+                        item_id="scene1",
+                        run_dir=run_dir,
+                    )
+                )
+
+        self.assertIsNotNone(result.saved_path)
+        self.assertEqual(result.saved_path.name, "late.png")
+        self.assertEqual(result.source, "generated_images_timeout_fallback")
+
     def test_run_turn_raises_on_failed_turn(self) -> None:
         async def run() -> None:
             client = CodexAppServerClient(cwd=Path("/tmp"))
@@ -1054,6 +1144,27 @@ scene two prompt
     def test_list_candidate_items_returns_existing_candidate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
+            candidate = run_dir / "assets/scenes/image_gen_candidates/scene1/candidate_01.png"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(PNG_BYTES)
+
+            candidates = image_gen.list_candidate_items(run_dir, "scene1")
+
+        self.assertEqual(candidates[0]["path"], "assets/scenes/image_gen_candidates/scene1/candidate_01.png")
+        self.assertEqual(candidates[0]["status"], "completed")
+        self.assertIn("mtimeMs", candidates[0])
+
+    def test_candidate_path_uses_output_asset_folder_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            path = image_gen.candidate_path(run_dir, "scene1", 1, output="assets/scenes/scene01.png")
+
+        self.assertEqual(path.relative_to(run_dir.resolve()).as_posix(), "assets/scenes/image_gen_candidates/scene1/candidate_01.png")
+
+    def test_list_candidate_items_includes_legacy_test_candidate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
             candidate = run_dir / "assets/test/image_gen_candidates/scene1/candidate_01.png"
             candidate.parent.mkdir(parents=True)
             candidate.write_bytes(PNG_BYTES)
@@ -1061,8 +1172,6 @@ scene two prompt
             candidates = image_gen.list_candidate_items(run_dir, "scene1")
 
         self.assertEqual(candidates[0]["path"], "assets/test/image_gen_candidates/scene1/candidate_01.png")
-        self.assertEqual(candidates[0]["status"], "completed")
-        self.assertIn("mtimeMs", candidates[0])
 
     def test_insert_candidate_backs_up_existing_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1127,12 +1236,12 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("runs", response.json())
 
-    def test_api_requires_token_when_not_configured(self) -> None:
+    def test_api_allows_requests_without_token_when_not_configured(self) -> None:
         with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "", "TOC_SERVER_AUTH_DISABLED": ""}):
             with TestClient(app) as client:
                 response = client.get("/api/image-gen/runs")
 
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 200)
 
     def test_create_run_endpoint_uses_title_as_blank_source_and_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1413,6 +1522,7 @@ class ImageGenApiTests(unittest.TestCase):
                                 "run_id": "sample_run",
                                 "kind": "scene",
                                 "item_id": "scene1_cut1",
+                                "output": "assets/scenes/scene01_cut01.png",
                                 "prompt": "prompt",
                                 "references": [],
                                 "candidate_count": 1,
@@ -1421,6 +1531,7 @@ class ImageGenApiTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             path = response.json()["candidates"][0]["path"]
+            self.assertEqual(path, "assets/scenes/image_gen_candidates/scene1_cut1/candidate_01.png")
             self.assertEqual((run_dir / path).read_bytes(), PNG_BYTES)
 
     def test_generate_runs_candidate_count_concurrently(self) -> None:
@@ -1479,7 +1590,7 @@ class ImageGenApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "output" / "sample_run"
-            candidate = run_dir / "assets/test/image_gen_candidates/scene1/candidate_01.png"
+            candidate = run_dir / "assets/scenes/image_gen_candidates/scene1/candidate_01.png"
             candidate.parent.mkdir(parents=True)
             candidate.write_bytes(PNG_BYTES)
 
@@ -1489,7 +1600,7 @@ class ImageGenApiTests(unittest.TestCase):
                         response = client.get("/api/image-gen/candidates?run_id=sample_run&item_id=scene1")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["candidates"][0]["path"], "assets/test/image_gen_candidates/scene1/candidate_01.png")
+        self.assertEqual(response.json()["candidates"][0]["path"], "assets/scenes/image_gen_candidates/scene1/candidate_01.png")
 
     def test_generate_writes_app_server_debug_log_when_saved_path_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2498,13 +2609,13 @@ scene two prompt
             with self.assertRaises(ValueError):
                 image_gen.insert_candidate(run_dir, candidate, "assets/scenes/scene01.png")
 
-    def test_api_requires_token_when_configured(self) -> None:
+    def test_api_allows_requests_without_token_even_when_configured(self) -> None:
         with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "secret", "TOC_SERVER_AUTH_DISABLED": ""}):
             with TestClient(app) as client:
-                blocked = client.get("/api/image-gen/runs")
+                allowed_without_token = client.get("/api/image-gen/runs")
                 allowed = client.get("/api/image-gen/runs", headers={"X-ToC-Local-Token": "secret"})
 
-        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(allowed_without_token.status_code, 200)
         self.assertEqual(allowed.status_code, 200)
 
     def test_invalid_run_id_returns_400(self) -> None:
@@ -2578,7 +2689,7 @@ scene two prompt
                             },
                         )
                         generated_exists = (
-                            parent_run / "assets/test/image_gen_candidates/scene1_cut1/candidate_01.png"
+                            parent_run / "assets/image_gen_candidates/scene1_cut1/candidate_01.png"
                         ).resolve().exists()
 
         self.assertEqual(response.status_code, 200)

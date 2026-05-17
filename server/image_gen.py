@@ -546,37 +546,72 @@ def list_reference_options(run_dir: Path) -> list[ReferenceOption]:
     return options
 
 
-def candidate_dir(run_dir: Path, item_id: str) -> Path:
+def _safe_candidate_item_id(item_id: str) -> str:
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
-    return run_dir / "assets" / "test" / "image_gen_candidates" / safe_id
+    return safe_id
 
 
-def candidate_path(run_dir: Path, item_id: str, index: int) -> Path:
-    return candidate_dir(run_dir, item_id) / f"candidate_{index:02d}.png"
+def candidate_dir(run_dir: Path, item_id: str, output: str | None = None) -> Path:
+    safe_id = _safe_candidate_item_id(item_id)
+    output_value = (output or "").strip()
+    if output_value:
+        try:
+            require_assets_output(run_dir, output_value)
+            output_path = resolve_run_relative(run_dir, output_value)
+            if output_path.parent.name != "image_gen_candidates":
+                return output_path.parent / "image_gen_candidates" / safe_id
+        except ValueError:
+            pass
+    return run_dir / "assets" / "image_gen_candidates" / safe_id
+
+
+def candidate_path(run_dir: Path, item_id: str, index: int, output: str | None = None) -> Path:
+    return candidate_dir(run_dir, item_id, output=output) / f"candidate_{index:02d}.png"
+
+
+def _candidate_dirs(run_dir: Path, item_id: str) -> list[Path]:
+    safe_id = _safe_candidate_item_id(item_id)
+    assets = run_dir / "assets"
+    directories: list[Path] = []
+    primary = assets / "image_gen_candidates" / safe_id
+    if primary.exists():
+        directories.append(primary)
+    if assets.exists():
+        for parent in sorted(assets.rglob("image_gen_candidates")):
+            directory = parent / safe_id
+            if directory.exists() and directory not in directories:
+                directories.append(directory)
+    legacy = assets / "test" / "image_gen_candidates" / safe_id
+    if legacy.exists() and legacy not in directories:
+        directories.append(legacy)
+    return directories
 
 
 def list_candidate_items(run_dir: Path, item_id: str) -> list[dict[str, Any]]:
-    directory = candidate_dir(run_dir, item_id)
-    if not directory.exists():
-        return []
     candidates: list[dict[str, Any]] = []
-    for path in sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES):
-        match = re.search(r"candidate_(\d+)", path.stem)
-        index = int(match.group(1)) if match else len(candidates) + 1
-        try:
-            validate_image_bytes(path)
-        except ValueError:
-            continue
-        candidates.append(
-            {
-                "index": index,
-                "status": "completed",
-                "path": path.relative_to(run_dir).as_posix(),
-                "revisedPrompt": None,
-                "mtimeMs": int(path.stat().st_mtime * 1000),
-            }
-        )
-    return candidates
+    seen: set[Path] = set()
+    for directory in _candidate_dirs(run_dir, item_id):
+        for path in sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            match = re.search(r"candidate_(\d+)", path.stem)
+            index = int(match.group(1)) if match else len(candidates) + 1
+            try:
+                validate_image_bytes(path)
+            except ValueError:
+                continue
+            candidates.append(
+                {
+                    "index": index,
+                    "status": "completed",
+                    "path": path.relative_to(run_dir).as_posix(),
+                    "revisedPrompt": None,
+                    "mtimeMs": int(path.stat().st_mtime * 1000),
+                }
+            )
+    return sorted(candidates, key=lambda item: (int(item["index"]), str(item["path"])))
 
 
 def _run_relative_or_string(run_dir: Path, path: Path) -> str:
@@ -668,10 +703,12 @@ def require_assets_output(run_dir: Path, output: str) -> None:
 
 
 def require_candidate_path(run_dir: Path, candidate: Path) -> None:
-    base = (run_dir / "assets" / "test" / "image_gen_candidates").resolve()
     resolved = candidate.resolve()
-    if base not in resolved.parents:
-        raise ValueError("candidate must be under assets/test/image_gen_candidates/")
+    assets = (run_dir / "assets").resolve()
+    if assets not in resolved.parents:
+        raise ValueError("candidate must be under assets/")
+    if "image_gen_candidates" not in resolved.parts:
+        raise ValueError("candidate must be under an image_gen_candidates directory")
     require_image_file(resolved)
 
 

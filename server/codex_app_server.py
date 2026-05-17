@@ -268,15 +268,19 @@ Rules:
 - Do not edit repository files. The host app will import the saved generated image.
 - After generating, briefly state whether generation completed.
 """
+        timeout_seconds = image_generation_turn_timeout_seconds()
         turn_task = asyncio.create_task(
             self.run_turn(
                 thread_id=thread_id,
                 text=text,
                 cwd=run_dir,
                 local_images=reference_images,
+                timeout_seconds=timeout_seconds,
             )
         )
-        fallback_task = asyncio.create_task(wait_for_unclaimed_generated_image_after(cutoff_ns))
+        fallback_task = asyncio.create_task(
+            wait_for_unclaimed_generated_image_after(cutoff_ns, timeout_seconds=timeout_seconds)
+        )
         done, _pending = await asyncio.wait({turn_task, fallback_task}, return_when=asyncio.FIRST_COMPLETED)
         if fallback_task in done:
             fallback = fallback_task.result()
@@ -295,7 +299,19 @@ Rules:
             fallback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await fallback_task
-        transcript = await turn_task
+        try:
+            transcript = await turn_task
+        except Exception:
+            fallback = await claim_latest_generated_image_after(cutoff_ns)
+            if fallback:
+                return ImageGenerationResult(
+                    saved_path=fallback,
+                    revised_prompt=None,
+                    status="completed",
+                    transcript=[],
+                    source="generated_images_timeout_fallback",
+                )
+            raise
         image_items: list[dict[str, Any]] = []
         for message in transcript:
             image_items.extend(find_image_generation_items(message))
@@ -359,6 +375,28 @@ def app_server_disabled() -> bool:
 
 def default_app_server_model() -> str:
     return os.environ.get("TOC_CODEX_APP_SERVER_MODEL", "").strip()
+
+
+def _positive_int_env(*names: str, default: int) -> int:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return default
+
+
+def image_generation_turn_timeout_seconds() -> int:
+    return _positive_int_env(
+        "TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS",
+        "TOC_IMAGE_GEN_TIMEOUT_SECONDS",
+        default=7200,
+    )
 
 
 def _extract_prompt_from_agent_text(text: str) -> str:

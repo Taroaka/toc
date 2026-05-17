@@ -118,6 +118,7 @@ class GenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(asset|scene)$")
     item_id: str = Field(min_length=1, max_length=200)
+    output: str | None = Field(default=None, max_length=500)
     prompt: str = Field(min_length=1, max_length=20000)
     references: list[str] = Field(default_factory=list, max_length=16)
     candidate_count: int = Field(default=1, ge=1, le=16)
@@ -3079,7 +3080,7 @@ async def api_final_render(req: FinalRenderRequest) -> dict[str, Any]:
 
 
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
-    destination = candidate_path(run_dir, req.item_id, index)
+    destination = candidate_path(run_dir, req.item_id, index, output=req.output)
     references = []
     for ref in req.references:
         try:
