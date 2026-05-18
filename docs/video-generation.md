@@ -674,14 +674,14 @@ scenes:
     timestamp: "00:00-00:10"
 
     image_generation:
-      tool: "midjourney | dalle3 | stable_diffusion"
+      tool: "codex_builtin_image"
       prompt: "string"
       output: "assets/scenes/scene1_base.png"
       iterations: 5
       selected: 3
 
     video_generation:
-      tool: "runway | pika | kling"
+      tool: "kling_3_0 | kling_3_0_omni | seedance"
       input_image: "assets/scenes/scene1_base.png"
       motion_prompt: "camera slowly zooms in"
       output: "assets/scenes/scene1_video.mp4"

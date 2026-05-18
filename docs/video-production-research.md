@@ -25,7 +25,7 @@
 
 - 画像: Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
 - 画像（外部provider）: 標準ワークフローでは使用しない
-- 動画: Google Veo 3.1（`veo-3.1-generate-preview`）
+- 動画: Kling 3.0（default）/ Kling 3.0 Omni / Seedance
 - 音声（TTS）: ElevenLabs
 
 ### ざっくりの工程
@@ -137,7 +137,7 @@
   - 入出力仕様（解像度、アスペクト比、参照画像、ネガティブ）
   - 生成結果の安定性（同一プロンプト/seedでの再現性）
   - 料金体系とレート制限（バッチ可否、同時実行）
-- 動画（Veo 3.1）:
+- 動画（Kling / Seedance）:
   - image-to-video（first frame / reference images）の使い方と制約
   - `durationSeconds`/`aspectRatio`/`resolution` の制約と scene 分割戦略
   - 失敗時のリトライ設計（LRO、ポーリング、タイムアウト）

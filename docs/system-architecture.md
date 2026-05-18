@@ -278,7 +278,7 @@ Authoring-after review loop の標準分担:
 - Video (alt): Seedance（BytePlus ModelArk。`video_generation.tool: seedance`）
 - Note: Google Veo は安全のためこのリポジトリでは無効化している。
 - TTS: ElevenLabs
-- Swap providers via configuration without changing orchestration logic.
+- Image provider is fixed to Codex built-in image generation for p500 / p600. Video, TTS, and LLM providers can still be swapped through configuration without changing orchestration logic.
 
 ## API boundaries / module ownership
 

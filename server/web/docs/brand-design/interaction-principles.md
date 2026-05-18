@@ -31,7 +31,7 @@ multi-select の期待:
 - label は拡張子なし filename
 - selected state が分かる
 
-`reference_count == 0` の item は no-reference work として扱い、API provider に戻さず Codex built-in image lane のまま生成する。
+p500 / p600 の image item は、frontend からの単体生成・一括生成・Codex app-server 経由の生成のいずれでも `codex_builtin_image` 固定で扱う。外部 API provider へ切り替えない。`reference_count == 0` の item だけ no-reference work として `execution_lane=bootstrap_builtin` に残し、参照あり item は `execution_lane=standard` のまま Codex built-in image generation に渡す。
 
 ## Generation
 

@@ -1,4 +1,4 @@
-# Image Prompting（Gemini Image / cross-model）: 正本
+# Image Prompting（Codex built-in image / cross-model）: 正本
 
 このドキュメントは **画像生成プロンプト品質**をシステムの根幹として扱い、
 `video_manifest.md` の `scenes[].image_generation.prompt` を「全体 → 個別」の順で安定して組み立てるための正本。
@@ -12,7 +12,8 @@
   - `asset_plan.md` を作る
   - `script.md` の該当箇所を見て reusable asset を設計する
   - human review を通してから asset を生成する
-  - `reference_inputs[]` が無い asset だけは Codex built-in image generation を bootstrap lane として使ってよい
+  - provider は参照あり/なしを問わず `tool: codex_builtin_image` に固定する
+  - `reference_inputs[]` が無い asset だけは `execution_lane=bootstrap_builtin` の no-reference lane として扱う
 - cut stage
   - 既存どおり `video_manifest.md` を直接 review し、`image_generation.review` に結果を書き戻す
   - review は単なる missing character 検出ではなく、prompt が環境寄りに流れすぎていないか、story 上の関係性/行為が抜けていないかも確認し、足りない `character_ids` は先に補完する
@@ -24,7 +25,7 @@
   - 人物参照は自然言語だけに頼らず、manifest の `character_ids` で明示する
 
 対象:
-- `/toc-immersive-ride` の `video_manifest.md`（特に Gemini Image）
+- `/toc-immersive-ride` の `video_manifest.md`
 - scene-series / 通常 run の `video_manifest.md`（静止画生成）
 
 除外:
@@ -37,7 +38,7 @@
 
 **prompt は 1本の自由文にせず、毎回同じ見出し順で書く。**
 
-prompt 本文は画像生成 API がそのまま描ける語だけで構成する。`物語「シンデレラ」の scene10`、`この画像は物語「シンデレラ」の一場面`、`scene10_cut01` のような制作管理メタ情報は書かない。必要なのは `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ` のような、画面に現れる具体語である。
+prompt 本文は画像生成 provider がそのまま描ける語だけで構成する。`物語「シンデレラ」の scene10`、`この画像は物語「シンデレラ」の一場面`、`scene10_cut01` のような制作管理メタ情報は書かない。必要なのは `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ` のような、画面に現れる具体語である。provider 固定の判断は request metadata / 設計書に置き、prompt 本文には書かない。
 
 さらに、正しい順番は「うまい一文を書く」ではなく、
 **構造化する → anchor を決める → reference を固定する → manifest をレビューする → story/script 整合を確認する → 画像生成する** である。
@@ -231,9 +232,9 @@ asset stage での参照原則:
 - same-location の昼夜差分 / 現在未来差分は base location を参照してよい
 - それ以外の独立 location anchor は、使用 cut があっても `reference_inputs[]` を空にする
 - 別エリアから他エリアを見せる場合は、asset stage ではなく cut stage の `reference_usage.background_glimpse` で扱う
-- Codex built-in image generation は標準画像基盤ではない
-- ただし no-reference image request は例外的に built-in lane へ回す
-- `reference_count > 0` の cut image は標準 provider lane に残す
+- p500 / p600 の image request は `tool: codex_builtin_image` で固定する
+- `reference_count == 0` の request は `execution_lane=bootstrap_builtin` の no-reference lane にする
+- `reference_count > 0` の cut image は `execution_lane=standard` に残すが、実行 provider は `codex_builtin_image` のまま変えない
 
 <!-- image-gen-setting:scene:start -->
 scene image prompt は、動画を始める最初の1フレームとして書く。

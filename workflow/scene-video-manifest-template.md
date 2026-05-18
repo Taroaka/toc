@@ -68,8 +68,8 @@ scenes:
           # required block:
           # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
           # 1 つでも欠けていれば subagent review は false にする。
-          # no-reference の entry は実行時に `execution_lane=bootstrap_builtin` として
-          # Codex built-in image generation に回す。
+          # p500/p600 image provider は codex_builtin_image 固定。
+          # no-reference の entry だけ実行時に `execution_lane=bootstrap_builtin` として扱う。
           # tool: "codex_builtin_image"  # standard repo image provider (gpt-image-2 via Codex app-server)
           tool: "codex_builtin_image"
           character_ids: ["character_id_here"]  # Use [] for B-roll scenes with no characters visible

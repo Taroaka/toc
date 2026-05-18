@@ -85,8 +85,9 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 #### p560 asset generation
 
 - やること: p550 request に従い、reusable asset image を output path に保存する。
+- provider: p500 asset generation は参照あり/なしを問わず `codex_builtin_image` 固定。外部 API provider へ切り替えない。
 - no-reference: `reference_count == 0` の request は、Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）で生成し、互換 lane 名 `execution_lane=bootstrap_builtin` の no-reference image lane に残す。
-- reference-driven: `reference_count > 0`、`reference_inputs[]` あり、または `derived_from_asset_id` ありの request は `execution_lane=standard` に残す。
+- reference-driven: `reference_count > 0`、`reference_inputs[]` あり、または `derived_from_asset_id` ありの request は `execution_lane=standard` に残し、同じ `codex_builtin_image` provider に参照画像を渡す。
 - ゴール: request と manifest の status、出力ファイル、失敗/skip/再生成対象が対応していること。
 
 #### p570 asset continuity check

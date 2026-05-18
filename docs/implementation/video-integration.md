@@ -259,10 +259,10 @@ ffmpeg -i sceneXX_compiled.mp4 \
 
 ## プレースホルダ（MVP）
 
-プロバイダは当面、manifestで選べる（例: Google Gemini Image / Seedance / Kling 3.0）。ただしMVPでは:
+動画/TTS provider は当面 manifest で選べる（例: Seedance / Kling 3.0 / ElevenLabs）。p500 / p600 の画像 provider は `codex_builtin_image` 固定。ただしMVPでは:
 
 - placeholder でE2Eを通す（`scripts/generate-placeholder-assets.py`）
-- 生成APIで素材化する（`scripts/generate-assets-from-manifest.py`）
+- 画像は Codex built-in image generation、動画/TTS は各 provider で素材化する（`scripts/generate-assets-from-manifest.py`）
 
 注: Google Veo はこのリポジトリでは安全のため無効化している。
 

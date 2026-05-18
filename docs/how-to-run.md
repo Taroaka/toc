@@ -128,6 +128,7 @@ output/<topic>_<timestamp>/
 - 画像: Codex built-in image generation（`tool: "codex_builtin_image"` / 現行想定モデル `gpt-image-2`）
 - 外部課金系の画像 provider（Nano Banana / Gemini image / SeaDream）は標準経路では使わない
 - 互換のため、旧 `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` 表記を読んだ場合も実行時は `codex_builtin_image` に正規化する
+- provider 固定は request metadata / 設計書の責務であり、生成 prompt 本文には書かない
 - `reference_count == 0` の image request は互換 lane 名 `execution_lane=bootstrap_builtin` のまま扱う
 - `reference_count > 0` の image request は `execution_lane=standard` のまま扱うが、実行 provider は `codex_builtin_image` で固定する
 - 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
