@@ -128,7 +128,7 @@ scenes:
           done_when: ["string"]     # evaluator と共有する完了条件
         image_generation:
           # 新規の静止画は、連続性アンカーが必要なときだけ優先して作る。
-          # 既存の参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
+          # 同一 run 内の既存参照画像や前cutの anchor frame を再利用できる場合は、新規生成を強制しない。
           # prompt_authoring_context は prompt 生成/レビュー用の非APIメタデータ。
           # prompt 本文には `最初の1フレーム` / `1フレーム目` / `first frame` と書かず、
           # この動画が動き出す直前に見えている初期状態だけを具体化する。

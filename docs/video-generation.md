@@ -67,8 +67,8 @@
 
 #### 生成静止画は「毎回」ではなく「必要なとき」に作る
 
-- 新規の静止画生成は、同じ場所/物体/人物状態の continuity anchor を作るときに優先する
-- すでに anchor frame や参照画像がある scene/cut は、それを再利用してよい
+- 新規の静止画生成は、同一 run 内で同じ場所/物体/人物状態の continuity anchor を作るときに優先する
+- 同一 run 内にすでに anchor frame や参照画像がある scene/cut は、それを再利用してよい
 - 目的は「全scene/cutに1枚ずつ新規画像を作ること」ではなく、後続の cut で迷わない共通参照を確保すること
 
 #### 段階的精緻化（Progressive Refinement）

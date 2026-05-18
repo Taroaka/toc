@@ -88,8 +88,8 @@ generator の既定参照順:
 
 補足:
 - ここでの参照画像は、毎sceneの必須成果物ではない
-- 新規の静止画生成は、連続性アンカーを作るとき、または同じ場所/物体/人物状態を複数scene/cutで再利用するときに優先する
-- それ以外の scene/cut は、既存の anchor frame を再利用してよい
+- 新規の静止画生成は、連続性アンカーを作るとき、または同一 run 内で同じ場所/物体/人物状態を複数scene/cutで再利用するときに優先する
+- それ以外の scene/cut は、同一 run 内の既存 anchor frame を再利用してよい
 
 出力（scene単位）:
 - `assets/scenes/scene{n}_base.png`

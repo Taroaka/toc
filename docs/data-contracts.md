@@ -677,8 +677,8 @@ output/<topic>_<timestamp>/
 - `character_variant_ids: []` は optional。複数 state/time variant がある場合だけ、scene/cut ごとに使う variant を明示する
 - `object_ids: []` は常に明示（setpiece/アイテムが無い scene でも `[]`）
 - `object_variant_ids: []` は optional。複数 variant がある object/setpiece を scene/cut ごとに切り替えるときに使う
-- 新規の静止画生成は必須ではない。連続性アンカーを作る scene/cut、または同じ場所/物体/人物状態を複数scene/cutで再利用したい場合に優先する
-- 既存の参照画像や直前の anchor frame を再利用できる場合は、同じ構図の再生成を避けてよい
+- 新規の静止画生成は必須ではない。連続性アンカーを作る scene/cut、または同一 run 内で同じ場所/物体/人物状態を複数scene/cutで再利用したい場合に優先する
+- 同一 run 内の既存参照画像や直前の anchor frame を再利用できる場合は、同じ構図の再生成を避けてよい
 
 ### 4.3 `scenes[].cuts[]`（optional, recommended）
 

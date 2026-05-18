@@ -50,7 +50,8 @@ YouTube サムネイル用の prompt だけ作る場合:
 /toc-youtube-thumbnail "桃太郎"
 ```
 
-既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合:
+既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合
+（サムネ用の読み取り専用用途に限る。production run の生成成果物・fallback・成功根拠として他の `output/*` を参照しない）:
 
 ```text
 /toc-youtube-thumbnail "浦島太郎" --run-dir output/浦島太郎_<timestamp>

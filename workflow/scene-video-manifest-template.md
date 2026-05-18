@@ -46,7 +46,7 @@ scenes:
         cut_role: "main"  # main|sub
         image_generation:
           # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
-          # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
+          # それ以外は、同一 run 内の既存参照画像や直前 cut の anchor frame を再利用してよい。
           # 後段動画の first frame 候補として設計するが、`最初の1フレーム` /
           # `1フレーム目` / `first frame` は prompt 本文に入れない。
           # その情報は prompt_authoring_context などの非APIメタデータにだけ残す。

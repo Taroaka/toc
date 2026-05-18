@@ -135,7 +135,7 @@ scenes:
     timestamp: "00:00-00:08"
     image_generation:
       # 新規の静止画は、場所/物体/人物状態の continuity anchor が必要な scene で優先する。
-      # 既存の anchor frame を再利用できる cut は、新規生成を強制しない。
+      # 同一 run 内に既存の anchor frame がある cut は、新規生成を強制しない。
       # story scene の静止画は後段動画の first frame 候補として設計する。
       # `最初の1フレーム` / `1フレーム目` / `first frame` は prompt 本文に入れず、
       # prompt_authoring_context などの非APIメタデータ側にだけ残す。
@@ -314,7 +314,7 @@ scenes:
   - scene_id: 40
     timestamp: "00:24-00:32"
     image_generation:
-      # B-roll でも新規静止画は必須ではない。連続性が保てるなら anchor を再利用する。
+      # B-roll でも新規静止画は必須ではない。連続性が保てるなら同一 run 内の anchor を再利用する。
       tool: "google_nanobanana_2"
       character_ids: []
       character_variant_ids: []
