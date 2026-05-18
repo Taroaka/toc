@@ -131,6 +131,7 @@ output/<topic>_<timestamp>/
 - Codex built-in image generation（現行想定モデル: `gpt-image-2`）は標準画像基盤としては使わない
 - ただし `reference_count == 0` の image request は、互換 lane 名 `execution_lane=bootstrap_builtin` で Codex built-in image generation に回す
 - `reference_count > 0` の image request は `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` の標準 lane に残す
+- API key 未設定時に、簡易図形・ベクター風・placeholder PNG を生成済み画像として扱ってはならない。未設定が通常運用である場合は、対象 request を Codex built-in image generation の実画像生成 workflow に回すか、生成不能として止める。
 - `scripts/generate-assets-from-manifest.py` を no-reference のまま標準 provider で実行すると、deterministic error を返して `$toc-no-reference-image-runner` へ誘導する
 - repo-local Codex hooks を有効にすると、その deterministic error を `PostToolUse` hook が拾って同じ指示へ寄せる
 - 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
@@ -234,6 +235,7 @@ python scripts/toc-state.py set-slot \
 - 修正理由を残したい場合は `script.md.human_change_requests[]` を正本にし、materialized request file の `source_requests` を review に使う
 - 同時に `generation_exclusion_report.md` も更新され、`cut_status: deleted` の cut が request / generation / concat から外れることを確認できる
 - 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
+- `p670` は agent image QA / fix loop として扱う。frontend review gate は p670 の代替ではなく、agent QA 合格後の human approval に限る。
 - `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
 - ナレーション文面の human review 正本は `script.md`
   - `script.md` の `narration` / `elevenlabs_prompt` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する

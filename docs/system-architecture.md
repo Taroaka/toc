@@ -66,6 +66,13 @@ graph TD
 - Object storage (artifacts): filesystem at `output/`.
 - Metadata DB: PostgreSQL (local or managed).
 - Paths are configured in `config/system.yaml`.
+- Run isolation is mandatory: a run may only treat files inside its own
+  `output/<topic>_<timestamp>/` directory as generated artifacts for that run.
+  Other `output/*` run directories must not be used as source material,
+  fallback assets, generated-image substitutes, validation evidence, or success
+  proof. If a reusable asset is intentionally imported from another run, it must
+  be copied through an explicit import step, recorded in the run-local artifact
+  and state/review notes, and re-reviewed as part of the current run.
 
 ## Job queue / executor
 
@@ -200,8 +207,8 @@ graph TD
   - `p640`: judgment evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
   - `p650`: generation ready
   - `p660`: image generation
-  - `p670`: image QA / fix loop
-  - `p680`: image human review handoff
+  - `p670`: agent image QA / fix loop（実写品質、参照一貫性、placeholder / ベクター風 fallback 不使用を検査）
+  - `p680`: image human review handoff（p670 合格後に限る）
 - `p700`: narration / audio runtime
   - `p710`: narration grounding
   - `p720`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)

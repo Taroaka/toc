@@ -188,6 +188,7 @@ multi-agent が使える環境では、コンテキストを fork しない audi
 ## Hard Rules
 
 - `state.txt` を置き換えない。append-only を維持する。
+- 現在の run の成果物として、他の `output/*` run directory のファイルを参照・流用・成功根拠化しない。意図的に再利用する場合は、明示 import と current run 内での再 review / state 記録を必須にする。
 - hybridization は人間承認必須。自動承認しない。
 - `run_report.md` は手書きしない。`eval_report.json` から生成する。
 - marketing 関連の参照先は `marketing/SNS/` に限定する。通常の story / script / image / video generation と混ぜない。

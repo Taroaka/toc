@@ -32,12 +32,14 @@ Read these before changing stage behavior:
 
 ## Frontend Create Policy
 
-When `review_policy` is `frontend`, do not pause for CLI human review. Generate
-the review artifacts, write gate/state records, and hand approval to the web UI.
-This is not a review skip. It is a frontend handoff.
+When `review_policy` is `frontend`, do not pause for CLI human approval. Still
+run agent image QA/fix checks and generate the review artifacts before any human
+approval state is written. Frontend review may collect human approval only after
+agent QA has passed; it must not replace p670 image QA.
 
-For app-server Image Gen create flows, the canonical stop target is `p680` with
-`handoff=frontend_image_review`.
+For app-server Image Gen create flows, the canonical stop target is `p680`.
+`handoff=frontend_image_review` is not a substitute for agent QA and must not be
+used to skip p670.
 
 ## Required Outcome for `p650` / `p680`
 
@@ -152,6 +154,10 @@ Run stages in the normal ToC order inside one skill invocation:
      referenced reusable assets.
    - Prefer `$toc-p500-bootstrap-image-runner` or
      `$toc-no-reference-image-runner` for the image execution details.
+   - Missing third-party provider API keys are not a license to degrade output
+     quality. When a request is eligible for the Codex built-in lane, use that
+     lane to generate real raster images. Do not create placeholder, vector-like,
+     or diagrammatic stand-ins and mark them as generated assets.
 9. `p650` シーン画像リクエスト作成
    - Produce `image_generation_requests.md`.
    - Reject any production scene with fewer than two cuts. Short scenes still need
@@ -169,19 +175,37 @@ Run stages in the normal ToC order inside one skill invocation:
      `image_generation_requests.md` using the same image execution lane as the
      request file declares.
    - Do not replace this with a server-side postprocess prompt rewrite.
+   - If the standard provider key is unavailable and the request must be handled
+     in the Codex built-in lane, run the built-in image generation workflow and
+     import the generated raster result. Never synthesize flat/vector placeholder
+     PNGs as a fallback.
 11. `p670` 画像QA
-   - Create or update review artifacts/state for image QA. Under
-     `review_policy=frontend`, set `slot.p670.status=skipped` when the frontend
-     image review gate is created instead of running CLI QA.
+   - p670 is agent image QA / fix loop, not human review.
+   - Inspect generated images for production quality, including photorealism,
+     prompt adherence, reference continuity, non-vector appearance, non-placeholder
+     content, subject completeness, and visible artifacts.
+   - Under `review_policy=frontend`, do not set `slot.p670.status=skipped` merely
+     because a frontend review gate exists. Frontend human review happens only
+     after p670 agent QA passes.
+   - If generated files are flat/vector-like placeholders or otherwise fail
+     cinematic quality, set the image review to changes requested, fix/regenerate
+     the images, and do not report p680 success.
 12. `p680` 画像レビュー引き渡し
-   - Set `slot.p680.status=awaiting_approval`.
-   - Set `review.image.status=pending` and `gate.image_review=required`.
-   - The frontend is responsible for approval/rejection.
+   - Enter p680 only after p670 agent QA has passed.
+   - Set `slot.p680.status=awaiting_approval` only when the generated images are
+     real production-quality images and the remaining approval is genuinely human
+     approval.
+   - Set `review.image.status=pending` and `gate.image_review=required` only for
+     that human approval gate. Do not use p680 to hide failed agent QA.
 
 ## Execution Rules
 
 - Use the exact run directory supplied by the caller. Do not create a second run
   directory.
+- Do not use files from other `output/*` run directories as generated artifacts,
+  fallback assets, validation evidence, or success proof for the current run.
+  Any intentional cross-run reuse must be an explicit import into the supplied
+  run directory, with state/review notes and current-run QA.
 - Keep all user-facing generated artifacts in Japanese.
 - Keep the experience `cinematic_story` unless the caller specifies otherwise.
 - Use `review_policy=frontend` for app-server Image Gen create flows.
