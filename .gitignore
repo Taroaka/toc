@@ -5,6 +5,7 @@
 
 # Claude settings (local only)
 .claude/settings.local.json
+.codex/run/
 server/.env
 server/data/
 
