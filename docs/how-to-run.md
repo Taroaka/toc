@@ -125,14 +125,11 @@ output/<topic>_<timestamp>/
 
 ## 生成（画像/動画/TTS）について
 
-- 画像: Google Nano Banana 2（`tool: "google_nanobanana_2"`）
-- 画像（代替）: Gemini 3.1 Flash Image（`tool: "gemini_3_1_flash_image"` / `gemini-3.1-flash-image-preview`）
-- 画像（代替）: SeaDream / Seedream 4.5（`tool: "seadream"` + `SEADREAM_*`）
-- Codex built-in image generation（現行想定モデル: `gpt-image-2`）は標準画像基盤としては使わない
-- ただし `reference_count == 0` の image request は、互換 lane 名 `execution_lane=bootstrap_builtin` で Codex built-in image generation に回す
-- `reference_count > 0` の image request は `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` の標準 lane に残す
-- `scripts/generate-assets-from-manifest.py` を no-reference のまま標準 provider で実行すると、deterministic error を返して `$toc-no-reference-image-runner` へ誘導する
-- repo-local Codex hooks を有効にすると、その deterministic error を `PostToolUse` hook が拾って同じ指示へ寄せる
+- 画像: Codex built-in image generation（`tool: "codex_builtin_image"` / 現行想定モデル `gpt-image-2`）
+- 外部課金系の画像 provider（Nano Banana / Gemini image / SeaDream）は標準経路では使わない
+- 互換のため、旧 `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` 表記を読んだ場合も実行時は `codex_builtin_image` に正規化する
+- `reference_count == 0` の image request は互換 lane 名 `execution_lane=bootstrap_builtin` のまま扱う
+- `reference_count > 0` の image request は `execution_lane=standard` のまま扱うが、実行 provider は `codex_builtin_image` で固定する
 - 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
 - 動画（Omni）: Kling 3.0 Omni（`video_generation.tool: "kling_3_0_omni"` + `KLING_OMNI_*`）
 - 動画（代替）: Seedance（BytePlus ModelArk。`video_generation.tool: "seedance"` + `ARK_API_KEY`）
@@ -144,8 +141,8 @@ output/<topic>_<timestamp>/
 - `review-image-prompt-story-consistency.py` は manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む
   - hard gate は missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題に寄せる
   - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
-- reusable asset が多い run では、cut 画像生成の前に `asset_plan.md` を作って review / approve してから asset を生成する
-  - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅する
+- reusable asset が多い run では、cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する
+  - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を `asset_inventory.md` に網羅する
   - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main が修正して再 review する cycle を最大 5 round 回す
   - character reference は、全身が見える front / side / back の 3 面図を基本にする
   - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
@@ -268,6 +265,7 @@ python scripts/sync-narration-from-script.py \
   - 1 round は 5 critic agents が独立評価し、1 aggregator が統合判定する
   - `eval.*` summary は最新 aggregator result を反映する
   - round 途中の critic prompt は `logs/eval/<stage>/round_01/prompts/critic_1.prompt.md` 形式、critic report は `logs/eval/<stage>/round_01/critic_1.md` 形式、aggregator report は `logs/eval/<stage>/round_01/aggregated_review.md` に残す
+  - critic / aggregator は、単に failed check や不足項目を列挙せず、根本原因、後段への影響、修正方針、次回 review の通過条件を artifact に残す。修正方針が明確でない場合は、推測で patch を作らず、次に集めるべき証拠を書く
   - research は `research.md.evaluation_contract`
   - script は `script.md.evaluation_contract`
   - scene/cut は `video_manifest.md.scenes[].cuts[].scene_contract`
@@ -320,6 +318,7 @@ python scripts/sync-narration-from-script.py \
   - `generation_status` は `missing|created|recreate`
   - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
   - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
+  - p600 の画像gateは生成済み scene still と参照画像を実画像として検査する。scene still がベクター風で参照画像が正常なら p600 を再生成し、参照画像もベクター風なら p500/p560 の参照asset再生成へ戻す
   - 画像生成は依存のない cut から並列化され、`--image-max-concurrency` で同時実行数を制御できる（上限 10）
   - `recreate` を実際に回すときは `--force` を使う
   - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする

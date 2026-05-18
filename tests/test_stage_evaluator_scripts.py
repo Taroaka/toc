@@ -170,12 +170,176 @@ def _resolve_ready_grounding(run_dir: Path, *stages: str, flow: str = "toc-run")
         _ensure_script_ready(run_dir)
     if any(stage in {"image_prompt", "scene_implementation", "video_generation"} for stage in stages):
         append_state_snapshot(run_dir / "state.txt", {"review.duration_fit.status": "passed"})
+    if any(stage in {"image_prompt", "scene_implementation", "video_generation"} for stage in stages):
+        append_state_snapshot(run_dir / "state.txt", {"eval.p400_readiness.status": "approved"})
     if "video_generation" in stages:
         _ensure_video_generation_ready(run_dir)
-    for stage in stages:
+    expanded_stages = list(stages)
+    if "image_prompt" in expanded_stages and "manifest" not in expanded_stages:
+        expanded_stages.insert(expanded_stages.index("image_prompt"), "manifest")
+    for stage in expanded_stages:
         result = _run_grounding(run_dir, stage, flow=flow)
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
+
+
+def _write_p400_review_artifacts(run_dir: Path) -> None:
+    reports = {
+        "scene_set_review.md": "status: passed\n\n全 scene set は承認済み。\n",
+        "scene_detail_review.md": "status: passed\n\n全 scene detail は承認済み。\n",
+        "cut_blueprint_review.md": "status: passed\n\n全 cut blueprint は承認済み。\n",
+        "script_review.md": "status: passed\n\nscript review は承認済み。\n",
+        "production_readiness_review.md": "\n".join(
+            [
+                "status: passed",
+                "",
+                "Structure: scene/cut 構造は連続している。",
+                "Duration: target duration を cut duration 合計で満たしている。",
+                "Quality: 追加 cut は不要。",
+                "## Design Owner Patch Brief",
+                "",
+                "No blocking changes.",
+            ]
+        )
+        + "\n",
+    }
+    for filename, text in reports.items():
+        (run_dir / filename).write_text(text, encoding="utf-8")
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
+        round_dir = run_dir / "logs" / "eval" / stage / "round_01"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(1, 6):
+            (round_dir / f"critic_{idx}.md").write_text("- status: passed\n", encoding="utf-8")
+        patch_heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
+        (round_dir / "aggregated_review.md").write_text(
+            "\n".join(
+                [
+                    "- status: passed",
+                    "",
+                    "## Blocking Findings",
+                    "",
+                    "[]",
+                    "",
+                    "## Recommended Changes",
+                    "",
+                    "[]",
+                    "",
+                    "## Rejected Suggestions",
+                    "",
+                    "[]",
+                    "",
+                    f"## {patch_heading}",
+                    "",
+                    "No changes.",
+                    "",
+                    "## Round Summary",
+                    "",
+                    "passed",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def _write_valid_immersive_p400_pair(
+    run_dir: Path,
+    *,
+    target_duration: int = 300,
+    cut_duration: int = 15,
+    scene_count: int = 10,
+    manifest_phase: str = "production",
+) -> None:
+    script_lines = [
+        "```yaml",
+        "evaluation_contract:",
+        "  target_arc: \"opening\"",
+        "  must_cover: [\"桃太郎\"]",
+        "  must_avoid: []",
+        "scene_set_review: {status: \"approved\"}",
+        "scene_detail_review: {status: \"approved\"}",
+        "cut_blueprint_review: {status: \"approved\"}",
+        "script:",
+        "  scenes:",
+    ]
+    manifest_lines = [
+        "```yaml",
+        f"manifest_phase: {manifest_phase}",
+        "video_metadata:",
+        "  topic: \"桃太郎\"",
+        "  experience: \"cinematic_story\"",
+        f"  target_duration_seconds: {target_duration}",
+        "scenes:",
+    ]
+    for scene_idx in range(1, scene_count + 1):
+        terminal = scene_idx == scene_count
+        script_lines.extend(
+            [
+                f"    - scene_id: {scene_idx}",
+                "      phase: \"opening\"",
+                "      importance: \"medium\"",
+                "      summary: \"桃太郎が進む。十分な長さの本文です。十分な長さの本文です。\"",
+                f"      target_duration_seconds: {cut_duration * 2}",
+                f"      estimated_duration_seconds: {cut_duration * 2}",
+                ("      terminal_resolution: \"物語が締まる\"" if terminal else "      handoff_to_next_scene: \"次の場面へつながる\""),
+                "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                "      scene_intent:",
+                "        story_purpose: \"進行\"",
+                "        audience_information: [\"桃太郎\"]",
+                "        withheld_information: []",
+                "        reveal_constraints: []",
+                "        affect_transition: \"前進\"",
+                "        visual_value_source: \"none\"",
+                "        production_risks: []",
+                "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                "      agent_review: {status: \"passed\"}",
+                "      cuts:",
+            ]
+        )
+        manifest_lines.extend([f"  - scene_id: {scene_idx}", "    cuts:"])
+        for cut_idx in range(1, 3):
+            selector = f"scene{scene_idx}_cut{cut_idx}"
+            script_lines.extend(
+                [
+                    f"        - cut_id: {cut_idx}",
+                    f"          selector: \"{selector}\"",
+                    "          cut_blueprint:",
+                    "            cut_role: \"main\"",
+                    "            duration_intent: \"standard\"",
+                    "            target_beat: \"桃太郎\"",
+                    "            must_show: [\"桃太郎\"]",
+                    "            must_avoid: []",
+                    "            done_when: [\"桃太郎が見える\"]",
+                    "            visual_beat: \"桃太郎が進む\"",
+                    "            narration_role: \"setup\"",
+                    "            asset_dependency_hint: {character_ids: [\"momotaro\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                ]
+            )
+            manifest_lines.extend(
+                [
+                    f"      - cut_id: {cut_idx}",
+                    f"        selector: \"{selector}\"",
+                    "        scene_contract: {target_beat: \"桃太郎\", must_show: [\"桃太郎\"], must_avoid: [], done_when: [\"桃太郎が見える\"]}",
+                    "        image_generation:",
+                    "          prompt: \"画面内テキストなし。実写映画風の村道。前景に湿った土と小石、中央に桃太郎の顔と衣装、腰のきびだんご袋、背景に朝霧の村と山並み、横から柔らかな朝日、布の質感、足元の影、次へ進む緊張まで具体的に見える。\"",
+                    "          character_ids: [\"momotaro\"]",
+                    "          object_ids: []",
+                    f"          output: \"assets/scenes/{selector}.png\"",
+                    "        video_generation:",
+                    f"          duration_seconds: {cut_duration}",
+                    "          motion_prompt: \"桃太郎が前へ進む。\"",
+                    "        audio:",
+                    "          narration:",
+                    "            text: \"桃太郎が進む。\"",
+                    "            tool: \"elevenlabs\"",
+                ]
+            )
+    script_lines.extend(["```", ""])
+    manifest_lines.extend(["```", ""])
+    (run_dir / "script.md").write_text("\n".join(script_lines), encoding="utf-8")
+    (run_dir / "video_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+    _write_p400_review_artifacts(run_dir)
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
@@ -271,6 +435,11 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "    - scene_id: 1",
                         "      phase: \"opening\"",
                         "      summary: \"桃太郎が村で育つ。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      importance: \"medium\"",
+                        "      target_duration_seconds: 100",
+                        "      estimated_duration_seconds: 100",
+                        "      handoff_to_next_scene: \"旅支度へ進む\"",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                         "      scene_intent:",
                         "        story_purpose: \"導入\"",
@@ -300,6 +469,11 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "    - scene_id: 2",
                         "      phase: \"development\"",
                         "      summary: \"桃太郎が旅支度を整える。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      importance: \"medium\"",
+                        "      target_duration_seconds: 100",
+                        "      estimated_duration_seconds: 100",
+                        "      handoff_to_next_scene: \"決戦へ進む\"",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                         "      scene_intent:",
                         "        story_purpose: \"旅立ち\"",
@@ -329,6 +503,11 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "    - scene_id: 3",
                         "      phase: \"climax\"",
                         "      summary: \"桃太郎が決戦へ向かう。十分な長さの台本本文です。十分な長さの台本本文です。\"",
+                        "      importance: \"medium\"",
+                        "      target_duration_seconds: 130",
+                        "      estimated_duration_seconds: 130",
+                        "      terminal_resolution: \"決戦への余韻で終わる\"",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                         "      scene_intent:",
                         "        story_purpose: \"決戦\"",
@@ -668,6 +847,137 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
             self.assertNotIn("script.production_readiness_review_approved", stage["reason_keys"])
 
+    def test_script_evaluator_fails_without_scene_readiness_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_readiness_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            text = (run_dir / "script.md").read_text(encoding="utf-8")
+            text = text.replace("      handoff_to_next_scene: \"次の場面へつながる\"\n", "", 1)
+            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}\n", "", 1)
+            (run_dir / "script.md").write_text(text, encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "script", flow="immersive")
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_readiness_contract", stage["reason_keys"])
+
+    def test_manifest_evaluator_gates_p400_duration_and_review_integrity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_duration_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0015"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000015\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=7, scene_count=10)
+            (run_dir / "production_readiness_review.md").write_text(
+                "status: passed\n\nStructure: ok\nDuration: p700 で後続確認する。\nQuality: ok\n",
+                encoding="utf-8",
+            )
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.duration_coverage", stage["reason_keys"])
+            self.assertIn("p400.review_report_integrity", stage["reason_keys"])
+
+    def test_manifest_p400_readiness_includes_script_scene_readiness(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_script_ready_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0018"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000018\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            text = (run_dir / "script.md").read_text(encoding="utf-8")
+            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}\n", "", 1)
+            (run_dir / "script.md").write_text(text, encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.script_readiness_contract", stage["reason_keys"])
+
+    def test_manifest_evaluator_approves_complete_p400_readiness(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_ready_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0016"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000016\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertTrue(stage["passed"], stage["reason_keys"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "approved")
+
+    def test_manifest_evaluator_approves_p400_readiness_for_skeleton_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_skeleton_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0016b"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000016b\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10, manifest_phase="skeleton")
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("manifest.phase", stage["reason_keys"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "approved")
+            self.assertEqual(updates["eval.p400_readiness.reason_keys"], "")
+
+    def test_manifest_p400_readiness_requires_explicit_manifest_phase(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_phase_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0016c"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000016c\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10, manifest_phase="skeleton")
+            manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(manifest.replace("manifest_phase: skeleton\n", "", 1), encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            _stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.skeleton_manifest_phase", updates["eval.p400_readiness.reason_keys"])
+
+    def test_downstream_grounding_requires_p400_readiness_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p500_gate_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0017"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000017\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            _ensure_story_ready(run_dir)
+
+            for stage_name in ("asset", "scene_implementation", "narration", "video_generation"):
+                result = _run_grounding(run_dir, stage_name, flow="immersive")
+                self.assertNotEqual(result.returncode, 0, stage_name)
+
+            append_state_snapshot(run_dir / "state.txt", {"eval.p400_readiness.status": "approved"})
+            append_state_snapshot(run_dir / "state.txt", {"review.duration_fit.status": "passed", "review.image.status": "approved", "review.narration.status": "approved"})
+            for stage_name in ("asset", "scene_implementation", "narration", "video_generation"):
+                result = _run_grounding(run_dir, stage_name, flow="immersive")
+                self.assertEqual(result.returncode, 0, msg=stage_name + (result.stderr or result.stdout))
+
     def test_manifest_evaluator_rejects_immersive_scene_with_single_cut(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_cuts_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0009"
@@ -728,6 +1038,9 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertEqual(result.returncode, 1, msg=result.stderr)
             report = (run_dir / "manifest_review.md").read_text(encoding="utf-8")
             self.assertIn("manifest.minimum_scene_cuts", report)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("manifest.minimum_scene_cuts", state["eval.p400_readiness.reason_keys"])
 
     def test_manifest_evaluator_ignores_deleted_cuts_for_minimum_cut_count(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_deleted_cuts_") as td:

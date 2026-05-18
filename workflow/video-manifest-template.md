@@ -172,9 +172,8 @@ scenes:
           # 1 つでも欠けていれば subagent review は false にする。
           # no-reference の entry は実行時に `execution_lane=bootstrap_builtin` として
           # Codex built-in image generation に回す。
-          # tool: "google_nanobanana_2"
-          # tool: "seadream"        # Seedream 4.5 (OpenAI Images compatible; see SEADREAM_* env)
-          tool: "google_nanobanana_2"
+          # tool: "codex_builtin_image"  # standard repo image provider (gpt-image-2 via Codex app-server)
+          tool: "codex_builtin_image"
           character_ids: ["protagonist"]  # Use [] when no character is visible
           character_variant_ids: []         # Optional: ["protagonist_battle_damaged"] when a specific state/time variant is needed
           object_ids: []                    # Use [] when no setpiece / prop anchor is required
@@ -213,7 +212,7 @@ scenes:
               status: "implemented|verified|waived"
               notes: ""
             image_generation:
-              tool: "google_nanobanana_2"
+              tool: "codex_builtin_image"
               character_ids: ["protagonist"]
               object_ids: []
               location_ids: []

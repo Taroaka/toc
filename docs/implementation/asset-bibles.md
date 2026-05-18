@@ -40,9 +40,9 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 #### p520 reusable asset inventory
 
-- やること: この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、繰り返し参照される still を網羅する。
+- やること: この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、繰り返し参照される still を `asset_inventory.md` に網羅する。
 - 対象: 主人公の状態差分、相手役、敵役/権力者、案内役/助力者、物語固有の小道具、setpiece、繰り返し使う場所、reusable still。
-- ゴール: 後続 cut で visual identity が揺れる主要 subject が `asset_plan.md` 候補に入っていること。
+- ゴール: 後続 cut で visual identity が揺れる主要 subject が `asset_inventory.md` に洗い出され、`asset_plan.md` 候補に入っていること。
 - 判断基準: `script.md` / `story.md` / `video_manifest.md` に出る固有名詞・固有の場所・物語上の証拠品・再利用される背景を拾う。単発 cut の一時的な構図や演技は p600 に残す。
 
 #### p530 asset plan authoring
@@ -85,7 +85,7 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 #### p560 asset generation
 
 - やること: p550 request に従い、reusable asset image を output path に保存する。
-- no-reference: `reference_count == 0` の request は、API provider 経由でも Codex GPT Image 1.5 経由でも、互換 lane 名 `execution_lane=bootstrap_builtin` の no-reference image lane に残す。
+- no-reference: `reference_count == 0` の request は、Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）で生成し、互換 lane 名 `execution_lane=bootstrap_builtin` の no-reference image lane に残す。
 - reference-driven: `reference_count > 0`、`reference_inputs[]` あり、または `derived_from_asset_id` ありの request は `execution_lane=standard` に残す。
 - ゴール: request と manifest の status、出力ファイル、失敗/skip/再生成対象が対応していること。
 
@@ -93,7 +93,15 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 - やること: 生成済み asset が p600 の continuity anchor として使えるか確認する。
 - review 観点: character の顔・髪・年齢感・衣装・3 面図、object の silhouette / material / scale、location の spatial identity / major structure / lighting、variant の同一性、`existing_outputs[]`、`review.status`、manifest status。
+- gate: 生成画像そのものを確認し、ベクター風・フラットな塗り・低情報量の PNG/JPEG は p600 に渡さず p560 へ戻す。`verify-pipeline.py` の `asset.visual_not_vector_like` が失敗した場合も同じ扱い。
 - ゴール: p600 の scene / cut prompt が参照できる approved asset path が揃い、未承認・不足・差し替え対象が明示されていること。
+
+#### p660 scene image generation gate
+
+- p600 の scene still も、出力ファイルの拡張子だけでなく実画像を開いて検査する。
+- `verify-pipeline.py` の `image.visual_not_vector_like` が失敗し、`image.references_not_vector_like` が通っている場合は、参照画像は使えるため p600 scene image を再生成する。
+- `image.references_not_vector_like` が失敗した場合は、p600 の再生成だけでは直らない。`image_regeneration_plan` に従い、該当する p500/p560 reference asset を先に再生成し、ベクター風でなくなったことを確認してから p600 をやり直す。
+- この gate は PNG/JPEG/WebP の拡張子判定ではなく、Pillow で読める raster の画素情報量、thumbnail color diversity、bytes per megapixel を使う。
 
 ### 1.0 `asset_plan.md`
 
@@ -114,7 +122,7 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - `reference_inputs[]` は同一人物 variant / 同一場所 variant / same-camera 派生のときだけ使う
 - `reference_inputs[]` が空の asset では、bootstrap 用に `execution_lane=bootstrap_builtin` を選んでよい
 - 既存 reference を持つ派生 asset では使わない
-- `bootstrap_builtin` という lane 名は asset 専用語ではなく、repo 全体では no-reference built-in image lane の互換名として扱う
+- `bootstrap_builtin` という lane 名は asset 専用語ではなく、repo 全体では no-reference built-in image lane の互換名として扱う。provider は標準で `codex_builtin_image` に固定する
 - asset 段階で参照を持つのは、複数 cut で再利用される同一 entity の identity / state / structure / relation continuity を固定したい場合に限る
 - shot 内の移動、演技、立ち位置、カメラ差分のような表現差分は cut stage で扱い、asset 段階の参照理由にしない
 - 独立した location anchor は原則 `reference_inputs: []`

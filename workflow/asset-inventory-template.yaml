@@ -1,0 +1,26 @@
+# Asset inventory template
+asset_inventory:
+  source_artifacts:
+    - "story.md"
+    - "script.md"
+    - "video_manifest.md"
+  coverage_scope:
+    characters: []
+    story_specific_items: []
+    locations: []
+    setpieces: []
+    reusable_stills: []
+  items:
+    - item_id: "protagonist_workwear"
+      category: "character|object|location|setpiece|reusable_still"
+      source_script_selectors: ["scene10_cut1"]
+      story_purpose: "REPLACE_ME: why this subject needs reusable visual identity"
+      reusable_reason: "REPLACE_ME: repeated use, identity risk, or continuity anchor"
+      recommended_asset_type: "character_reference|object_reference|location_anchor|reusable_still"
+      notes: ""
+
+# rule:
+# - p520 is coverage only: identify what must become a reusable asset candidate.
+# - Do not write provider prompts here.
+# - Do not write production metadata such as `物語「<topic>」の sceneXX` as future prompt text.
+# - Leave one-off camera moves, acting beats, and per-cut composition to p600.

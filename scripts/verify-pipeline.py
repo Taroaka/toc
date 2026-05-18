@@ -5,11 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+try:
+    from PIL import Image, ImageFilter  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover
+    Image = None
+    ImageFilter = None
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +34,7 @@ from toc.harness import (  # noqa: E402
     sync_run_status,
     write_json,
 )
+from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
 from toc.stage_evaluator import check_visual_value  # noqa: E402
 
 
@@ -563,10 +571,471 @@ def _existing_media_files(path: Path, suffixes: set[str]) -> list[Path]:
     return [item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in suffixes]
 
 
-def check_asset(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+def _slot_number(value: str | None, *, default: int) -> int:
+    match = re.search(r"(\d+)", str(value or ""))
+    if not match:
+        return default
+    try:
+        return int(match.group(1))
+    except Exception:
+        return default
+
+
+def _asset_entries(asset_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    assets = asset_plan.get("assets")
+    if isinstance(assets, list):
+        return [item for item in assets if isinstance(item, dict)]
+    if not isinstance(assets, dict):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for category in ("characters", "objects", "locations", "setpieces", "reusable_stills"):
+        for item in as_list(assets.get(category)):
+            if isinstance(item, dict):
+                copied = dict(item)
+                copied.setdefault("_category", category)
+                entries.append(copied)
+    return entries
+
+
+def _entry_generation_plan(entry: dict[str, Any]) -> dict[str, Any]:
+    plan = entry.get("generation_plan")
+    return plan if isinstance(plan, dict) else {}
+
+
+def _entry_review(entry: dict[str, Any]) -> dict[str, Any]:
+    review = entry.get("review")
+    return review if isinstance(review, dict) else {}
+
+
+def _entry_asset_id(entry: dict[str, Any]) -> str:
+    return str(entry.get("asset_id") or "").strip()
+
+
+def _entry_asset_type(entry: dict[str, Any]) -> str:
+    return str(entry.get("asset_type") or "").strip()
+
+
+def _entry_required_views(entry: dict[str, Any]) -> list[str]:
+    views = _entry_generation_plan(entry).get("required_views")
+    return [str(item).strip().lower() for item in as_list(views) if str(item).strip()]
+
+
+def _entry_reference_inputs(entry: dict[str, Any]) -> list[str]:
+    references = _entry_generation_plan(entry).get("reference_inputs")
+    return [str(item).strip() for item in as_list(references) if str(item).strip()]
+
+
+def _entry_outputs(entry: dict[str, Any]) -> list[str]:
+    outputs: list[str] = []
+    for raw in as_list(entry.get("existing_outputs")):
+        text = str(raw).strip()
+        if text:
+            outputs.append(text)
+    plan = _entry_generation_plan(entry)
+    for key in ("output", "output_path"):
+        text = str(plan.get(key) or "").strip()
+        if text and text not in outputs:
+            outputs.append(text)
+    return outputs
+
+
+def _resolve_run_relpath(run_dir: Path, rel: str) -> Path:
+    return (run_dir / rel).resolve()
+
+
+def _output_exists(run_dir: Path, rel: str) -> bool:
+    path = _resolve_run_relpath(run_dir, rel)
+    try:
+        path.relative_to(run_dir.resolve())
+    except ValueError:
+        return False
+    return path.exists() and path.is_file()
+
+
+def _asset_manifest_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(data.get("asset_generation_manifest"), dict):
+        items = data["asset_generation_manifest"].get("items")
+        return [item for item in as_list(items) if isinstance(item, dict)]
+    if isinstance(data.get("assets"), list):
+        return [item for item in data.get("assets", []) if isinstance(item, dict)]
+    if isinstance(data.get("items"), list):
+        return [item for item in data.get("items", []) if isinstance(item, dict)]
+    return []
+
+
+def _asset_manifest_item_id(item: dict[str, Any]) -> str:
+    return str(item.get("asset_id") or item.get("selector") or "").strip()
+
+
+def _has_template_placeholder(text: str) -> bool:
+    upper = text.upper()
+    return any(marker in upper for marker in ("TODO", "TBD", "REPLACE_ME", "EXAMPLE_ONLY", "TEMPLATE_ONLY"))
+
+
+def _asset_inventory_schema_issues(inventory_root: Any) -> list[str]:
+    if not isinstance(inventory_root, dict):
+        return ["asset_inventory root missing"]
+    issues: list[str] = []
+    source_artifacts = inventory_root.get("source_artifacts")
+    if not isinstance(source_artifacts, list) or not source_artifacts:
+        issues.append("source_artifacts[] missing")
+    coverage_scope = inventory_root.get("coverage_scope")
+    if not isinstance(coverage_scope, dict):
+        issues.append("coverage_scope missing")
+    else:
+        for key in ("characters", "story_specific_items", "locations", "setpieces", "reusable_stills"):
+            if key not in coverage_scope or not isinstance(coverage_scope.get(key), list):
+                issues.append(f"coverage_scope.{key}[] missing")
+    items = inventory_root.get("items")
+    if not isinstance(items, list) or not items:
+        issues.append("items[] missing")
+    else:
+        for idx, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                issues.append(f"items[{idx}] is not mapping")
+                continue
+            for key in ("item_id", "category", "source_script_selectors", "story_purpose", "reusable_reason", "recommended_asset_type"):
+                value = item.get(key)
+                if key == "source_script_selectors":
+                    if not isinstance(value, list) or not value:
+                        issues.append(f"items[{idx}].{key}[] missing")
+                elif not str(value or "").strip():
+                    issues.append(f"items[{idx}].{key} missing")
+    return issues
+
+
+def _request_sections_by_asset_id(text: str) -> dict[str, dict[str, str]]:
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_heading or current_lines:
+                sections.append((current_heading, current_lines))
+            current_heading = line.removeprefix("## ").strip()
+            current_lines = []
+            continue
+        current_lines.append(line)
+    if current_heading or current_lines:
+        sections.append((current_heading, current_lines))
+
+    out: dict[str, dict[str, str]] = {}
+    field_pattern = re.compile(r"^\s*-\s+([A-Za-z0-9_.]+):\s*(.*?)\s*$")
+    for heading, lines in sections:
+        fields: dict[str, str] = {}
+        for line in lines:
+            match = field_pattern.match(line)
+            if not match:
+                continue
+            value = match.group(2).strip()
+            if value.startswith("`") and value.endswith("`") and len(value) >= 2:
+                value = value[1:-1]
+            fields[match.group(1)] = value
+        asset_id = fields.get("asset_id") or heading
+        asset_id = str(asset_id).strip("` ")
+        if asset_id:
+            out[asset_id] = fields
+    return out
+
+
+def _request_sections_with_references(text: str) -> list[dict[str, Any]]:
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_heading or current_lines:
+                sections.append((current_heading, current_lines))
+            current_heading = line.removeprefix("## ").strip()
+            current_lines = []
+            continue
+        current_lines.append(line)
+    if current_heading or current_lines:
+        sections.append((current_heading, current_lines))
+
+    field_pattern = re.compile(r"^\s*-\s+([A-Za-z0-9_.]+):\s*(.*?)\s*$")
+    backtick_pattern = re.compile(r"`([^`]+)`")
+    out: list[dict[str, Any]] = []
+    for heading, lines in sections:
+        fields: dict[str, str] = {}
+        references: list[str] = []
+        in_references = False
+        for line in lines:
+            field_match = field_pattern.match(line)
+            if field_match:
+                key = field_match.group(1)
+                raw_value = field_match.group(2).strip()
+                value = raw_value
+                if value.startswith("`") and value.endswith("`") and len(value) >= 2:
+                    value = value[1:-1]
+                fields[key] = value
+                in_references = key == "references"
+                if in_references and raw_value and raw_value != "[]":
+                    references.extend(
+                        candidate
+                        for candidate in backtick_pattern.findall(raw_value)
+                        if Path(candidate).suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES
+                    )
+                continue
+
+            if in_references:
+                if not line.startswith((" ", "\t")) or line.lstrip().startswith("- ") is False:
+                    in_references = False
+                    continue
+                candidates = backtick_pattern.findall(line)
+                for candidate in reversed(candidates):
+                    if Path(candidate).suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES:
+                        references.append(candidate)
+                        break
+
+        selector = (fields.get("selector") or fields.get("asset_id") or heading).strip("` ")
+        if selector or fields or references:
+            out.append({"selector": selector, "fields": fields, "references": references})
+    return out
+
+
+def _request_field_value(fields: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = str(fields.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _parse_int_field(value: str) -> int | None:
+    try:
+        return int(str(value or "").strip("` "))
+    except Exception:
+        return None
+
+
+PRODUCTION_META_PATTERNS = (
+    re.compile(r"物語「[^」]+」の\s*scene\d+", flags=re.IGNORECASE),
+    re.compile(r"\bscene\d+[_-]cut\d+\b", flags=re.IGNORECASE),
+    re.compile(r"この画像は物語「[^」]+」の一場面"),
+    re.compile(r"後続\s*scene", flags=re.IGNORECASE),
+)
+
+VECTOR_LIKE_MIN_BYTES_PER_MEGAPIXEL = 60_000
+VECTOR_LIKE_MIN_THUMBNAIL_COLORS = 1_800
+VECTOR_LIKE_MIN_DENOISED_EDGE_MEAN = 1.2
+VECTOR_LIKE_MIN_DENOISED_EDGE_DENSITY = 0.025
+VECTOR_LIKE_MAX_QUANTIZED_TOP5_RATIO = 0.62
+VECTOR_LIKE_MAX_FLAT_EDGE_MEAN = 1.4
+VECTOR_GATE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _request_prompt_contains_production_meta(text: str) -> bool:
+    prompt_blocks = re.findall(r"```text\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
+    targets = prompt_blocks or [text]
+    return any(pattern.search(block) for block in targets for pattern in PRODUCTION_META_PATTERNS)
+
+
+def _image_complexity_stats(path: Path, *, run_dir: Path) -> dict[str, Any]:
+    resolved_path = path.resolve()
+    try:
+        rel_path = str(resolved_path.relative_to(run_dir.resolve()))
+    except ValueError:
+        rel_path = str(resolved_path)
+    stats: dict[str, Any] = {"path": rel_path}
+    if Image is None:
+        stats["issue"] = "Pillow is unavailable"
+        return stats
+
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0:
+                stats["issue"] = "invalid image dimensions"
+                return stats
+            rgb = image.convert("RGB")
+            resampling = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+            thumb = rgb.resize((160, 90), resampling)
+            colors = thumb.getcolors(maxcolors=160 * 90 + 1)
+            unique_colors = (160 * 90 + 1) if colors is None else len(colors)
+            quantized_top5_ratio = 0.0
+            quantized = thumb.quantize(colors=16).convert("RGB")
+            quantized_colors = quantized.getcolors(maxcolors=160 * 90 + 1) or []
+            if quantized_colors:
+                quantized_top5_ratio = sum(count for count, _color in sorted(quantized_colors, reverse=True)[:5]) / (160 * 90)
+            denoised_edge_mean = 0.0
+            denoised_edge_density = 0.0
+            if ImageFilter is not None:
+                denoised = thumb.filter(ImageFilter.MedianFilter(5)).filter(ImageFilter.GaussianBlur(1.5)).convert("L")
+                pixels = list(denoised.getdata())
+                edge_diffs: list[int] = []
+                thumb_width, thumb_height = denoised.size
+                for y in range(thumb_height):
+                    row = y * thumb_width
+                    for x in range(thumb_width - 1):
+                        edge_diffs.append(abs(pixels[row + x] - pixels[row + x + 1]))
+                for y in range(thumb_height - 1):
+                    row = y * thumb_width
+                    next_row = (y + 1) * thumb_width
+                    for x in range(thumb_width):
+                        edge_diffs.append(abs(pixels[row + x] - pixels[next_row + x]))
+                if edge_diffs:
+                    denoised_edge_mean = sum(edge_diffs) / len(edge_diffs)
+                    denoised_edge_density = sum(diff > 8 for diff in edge_diffs) / len(edge_diffs)
+    except Exception as exc:
+        stats["issue"] = f"cannot inspect image: {exc}"
+        return stats
+
+    megapixels = max((width * height) / 1_000_000, 0.000001)
+    bytes_per_megapixel = path.stat().st_size / megapixels
+    stats.update(
+        {
+            "width": width,
+            "height": height,
+            "bytes_per_megapixel": round(bytes_per_megapixel, 1),
+            "thumbnail_unique_colors": unique_colors,
+            "quantized_top5_ratio": round(quantized_top5_ratio, 4),
+            "denoised_edge_mean": round(denoised_edge_mean, 4),
+            "denoised_edge_density": round(denoised_edge_density, 4),
+        }
+    )
+    if (
+        bytes_per_megapixel < VECTOR_LIKE_MIN_BYTES_PER_MEGAPIXEL
+        and unique_colors < VECTOR_LIKE_MIN_THUMBNAIL_COLORS
+    ):
+        stats["issue"] = "vector-like or low-detail raster image"
+    elif (
+        unique_colors >= VECTOR_LIKE_MIN_THUMBNAIL_COLORS
+        and denoised_edge_mean < VECTOR_LIKE_MIN_DENOISED_EDGE_MEAN
+        and denoised_edge_density < VECTOR_LIKE_MIN_DENOISED_EDGE_DENSITY
+    ):
+        stats["issue"] = "noise-masked vector-like or low-structure raster image"
+    elif (
+        quantized_top5_ratio > VECTOR_LIKE_MAX_QUANTIZED_TOP5_RATIO
+        and denoised_edge_mean < VECTOR_LIKE_MAX_FLAT_EDGE_MEAN
+    ):
+        stats["issue"] = "flat-region vector-like or cel-shaded raster image"
+    return stats
+
+
+def _asset_visual_quality_stats(run_dir: Path, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stats: list[dict[str, Any]] = []
+    for entry in entries:
+        asset_id = _entry_asset_id(entry) or "<missing_asset_id>"
+        for rel in _entry_outputs(entry):
+            path = _resolve_run_relpath(run_dir, rel)
+            if path.suffix.lower() not in VECTOR_GATE_IMAGE_SUFFIXES:
+                continue
+            if not path.exists() or not path.is_file():
+                continue
+            item_stats = _image_complexity_stats(path, run_dir=run_dir)
+            item_stats["asset_id"] = asset_id
+            stats.append(item_stats)
+    return stats
+
+
+def _scene_image_visual_quality_stats(
+    run_dir: Path,
+    request_items: list[dict[str, Any]],
+    expected_outputs: list[Path],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    output_stats: list[dict[str, Any]] = []
+    reference_stats: list[dict[str, Any]] = []
+    regeneration_plan: list[dict[str, Any]] = []
+    seen_references: set[tuple[str, str]] = set()
+    request_by_output: dict[Path, dict[str, Any]] = {}
+
+    for item in request_items:
+        fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+        output_rel = _request_field_value(fields, "output")
+        if output_rel:
+            request_by_output[_resolve_run_relpath(run_dir, output_rel)] = item
+
+    uninspected_outputs: list[str] = []
+    for output_path in expected_outputs:
+        if output_path.suffix.lower() not in VECTOR_GATE_IMAGE_SUFFIXES or not output_path.exists() or not output_path.is_file():
+            continue
+        item = request_by_output.get(output_path.resolve())
+        fields = item.get("fields") if isinstance(item, dict) and isinstance(item.get("fields"), dict) else {}
+        try:
+            fallback_selector = output_path.relative_to(run_dir).as_posix()
+        except ValueError:
+            fallback_selector = str(output_path)
+        selector = str((item or {}).get("selector") or fields.get("selector") or fallback_selector).strip() or fallback_selector
+        output_rel = _request_field_value(fields, "output") or fallback_selector
+        if item is None:
+            uninspected_outputs.append(fallback_selector)
+        scene_issue = False
+        item_stats = _image_complexity_stats(output_path, run_dir=run_dir)
+        item_stats["selector"] = selector
+        output_stats.append(item_stats)
+        scene_issue = bool(item_stats.get("issue"))
+
+        item_reference_issues: list[dict[str, Any]] = []
+        for reference_rel in as_list((item or {}).get("references")):
+            reference_text = str(reference_rel).strip()
+            if not reference_text:
+                continue
+            reference_path = _resolve_run_relpath(run_dir, reference_text)
+            if reference_path.suffix.lower() not in VECTOR_GATE_IMAGE_SUFFIXES:
+                continue
+            if not reference_path.exists() or not reference_path.is_file():
+                continue
+            seen_key = (selector, str(reference_path.resolve()))
+            if seen_key in seen_references:
+                continue
+            seen_references.add(seen_key)
+            item_stats = _image_complexity_stats(reference_path, run_dir=run_dir)
+            item_stats["selector"] = selector
+            item_stats["reference"] = str(reference_text)
+            reference_stats.append(item_stats)
+            if item_stats.get("issue"):
+                item_reference_issues.append(item_stats)
+
+        if scene_issue:
+            if item_reference_issues:
+                regeneration_plan.append(
+                    {
+                        "selector": selector,
+                        "output": output_rel,
+                        "action": "regenerate_p500_reference_first",
+                        "reason": "scene output is vector-like and one or more p500 reference images are also vector-like",
+                        "vector_like_references": [stat.get("reference") or stat.get("path") for stat in item_reference_issues],
+                    }
+                )
+            else:
+                regeneration_plan.append(
+                    {
+                        "selector": selector,
+                        "output": output_rel,
+                        "action": "regenerate_p600_scene",
+                        "reason": "scene output is vector-like but referenced p500 images are inspectable raster images",
+                        "vector_like_references": [],
+                    }
+                )
+
+    for stat in reference_stats:
+        if stat.get("issue") and not any(
+            plan.get("action") == "regenerate_p500_reference_first"
+            and stat.get("selector") == plan.get("selector")
+            and (stat.get("reference") or stat.get("path")) in as_list(plan.get("vector_like_references"))
+            for plan in regeneration_plan
+        ):
+            regeneration_plan.append(
+                {
+                    "selector": stat.get("selector"),
+                    "output": "",
+                    "action": "regenerate_p500_reference_first",
+                    "reason": "p600 request references a vector-like p500 image",
+                    "vector_like_references": [stat.get("reference") or stat.get("path")],
+                }
+            )
+
+    return output_stats, reference_stats, regeneration_plan, uninspected_outputs
+
+
+def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
     details: dict[str, Any] = {}
     updates: dict[str, str] = {}
+    target_number = _slot_number(target_slot, default=570)
+    asset_inventory = run_dir / "asset_inventory.md"
     asset_plan = run_dir / "asset_plan.md"
     requests = run_dir / "asset_generation_requests.md"
     manifests = [
@@ -574,9 +1043,242 @@ def check_asset(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
         run_dir / "location_asset_generation_manifest.md",
     ]
 
-    add_check(checks, "asset.asset_plan", asset_plan.exists(), f"{asset_plan.name} exists")
-    add_check(checks, "asset.generation_requests", requests.exists(), f"{requests.name} exists")
     append_grounding_checks(checks, run_dir=run_dir, stage="asset")
+    add_check(checks, "asset.asset_inventory", target_number < 520 or asset_inventory.exists(), f"{asset_inventory.name} exists")
+    add_check(checks, "asset.asset_plan", target_number < 530 or asset_plan.exists(), f"{asset_plan.name} exists")
+    add_check(checks, "asset.generation_requests", target_number < 550 or requests.exists(), f"{requests.name} exists")
+
+    inventory_text = ""
+    inventory_data: dict[str, Any] = {}
+    if asset_inventory.exists():
+        inventory_text, inventory_data = load_structured_document(asset_inventory)
+    inventory_root = inventory_data.get("asset_inventory") if isinstance(inventory_data.get("asset_inventory"), dict) else inventory_data
+    inventory_items = as_list(inventory_root.get("items")) if isinstance(inventory_root, dict) else []
+    inventory_schema_issues = _asset_inventory_schema_issues(inventory_root)
+    if inventory_schema_issues:
+        details["asset_inventory_schema_issues"] = inventory_schema_issues[:20]
+    details["asset_inventory_item_count"] = len(inventory_items)
+    add_check(
+        checks,
+        "asset.inventory_structured",
+        target_number < 520 or bool(inventory_items),
+        "asset_inventory.md contains reusable asset inventory data",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "asset.inventory_schema",
+        target_number < 520 or not inventory_schema_issues,
+        "asset_inventory.md includes source_artifacts, coverage_scope categories, and item metadata",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "asset.inventory_no_todo",
+        target_number < 520 or not _has_template_placeholder(inventory_text),
+        "asset_inventory.md does not contain TODO/TBD/template placeholder markers",
+        kind="rubric",
+    )
+
+    plan_text = ""
+    plan_data: dict[str, Any] = {}
+    if asset_plan.exists():
+        plan_text, plan_data = load_structured_document(asset_plan)
+    entries = _asset_entries(plan_data)
+    details["asset_plan_entry_count"] = len(entries)
+    add_check(
+        checks,
+        "asset.plan_structured",
+        target_number < 530 or (bool(plan_data.get("assets")) and bool(entries)),
+        "asset_plan.md has structured assets entries",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "asset.no_todo",
+        target_number < 530 or not has_todo(plan_text),
+        "asset_plan.md does not contain TODO/TBD markers",
+        kind="rubric",
+    )
+
+    missing_core_fields = [
+        _entry_asset_id(entry) or "<missing_asset_id>"
+        for entry in entries
+        if not (
+            _entry_asset_id(entry)
+            and _entry_asset_type(entry)
+            and as_list(entry.get("source_script_selectors"))
+            and non_empty(entry.get("story_purpose"))
+            and isinstance(entry.get("visual_spec"), dict)
+            and isinstance(entry.get("generation_plan"), dict)
+        )
+    ]
+    if missing_core_fields:
+        details["asset_missing_core_fields"] = missing_core_fields[:20]
+    add_check(
+        checks,
+        "asset.required_fields",
+        target_number < 530 or (bool(entries) and not missing_core_fields),
+        "all asset plan entries include id/type/source selectors/story purpose/visual spec/generation plan",
+        kind="rubric",
+    )
+
+    character_three_view_failures = [
+        _entry_asset_id(entry) or "<missing_asset_id>"
+        for entry in entries
+        if "character" in _entry_asset_type(entry)
+        and not {"front", "side", "back"}.issubset(set(_entry_required_views(entry)))
+    ]
+    if character_three_view_failures:
+        details["character_three_view_failures"] = character_three_view_failures[:20]
+    add_check(
+        checks,
+        "asset.character_three_views",
+        target_number < 530 or not character_three_view_failures,
+        "character_reference entries require full-body front/side/back views",
+        kind="rubric",
+    )
+
+    lane_failures: list[str] = []
+    for entry in entries:
+        asset_id = _entry_asset_id(entry) or "<missing_asset_id>"
+        plan = _entry_generation_plan(entry)
+        lane = str(plan.get("execution_lane") or entry.get("execution_lane") or "").strip()
+        reference_inputs = _entry_reference_inputs(entry)
+        derived_from = str(plan.get("derived_from_asset_id") or "").strip()
+        bootstrap_allowed = bool(plan.get("bootstrap_allowed") or entry.get("bootstrap_allowed"))
+        if reference_inputs or derived_from:
+            if lane != "standard":
+                lane_failures.append(f"{asset_id}: expected standard with references/derived_from")
+        else:
+            if lane != "bootstrap_builtin":
+                lane_failures.append(f"{asset_id}: expected bootstrap_builtin for no-reference bootstrap seed")
+            if not bootstrap_allowed:
+                lane_failures.append(f"{asset_id}: bootstrap_allowed must be true for no-reference seed")
+    if lane_failures:
+        details["asset_lane_failures"] = lane_failures[:20]
+    add_check(
+        checks,
+        "asset.lane_consistency",
+        target_number < 530 or not lane_failures,
+        "execution_lane matches reference_inputs / bootstrap contract",
+        kind="rubric",
+    )
+
+    review_failures = [
+        _entry_asset_id(entry) or "<missing_asset_id>"
+        for entry in entries
+        if str(_entry_review(entry).get("status") or "").strip().lower() != "approved"
+    ]
+    if review_failures:
+        details["asset_review_failures"] = review_failures[:20]
+    add_check(
+        checks,
+        "asset.review_approved",
+        target_number < 540 or (bool(entries) and not review_failures),
+        "all planned asset entries are review approved before generation",
+        kind="rubric",
+    )
+
+    output_failures: list[str] = []
+    for entry in entries:
+        asset_id = _entry_asset_id(entry) or "<missing_asset_id>"
+        outputs = _entry_outputs(entry)
+        if not outputs:
+            output_failures.append(f"{asset_id}: no output path")
+            continue
+        missing = [rel for rel in outputs if not _output_exists(run_dir, rel)]
+        if missing:
+            output_failures.append(f"{asset_id}: missing {', '.join(missing[:3])}")
+    if output_failures:
+        details["asset_output_failures"] = output_failures[:20]
+    add_check(
+        checks,
+        "asset.output_files",
+        target_number < 560 or (bool(entries) and not output_failures),
+        "all approved/generated asset output files exist under the run directory",
+        kind="rubric",
+    )
+
+    visual_quality_stats = _asset_visual_quality_stats(run_dir, entries) if target_number >= 560 and entries else []
+    visual_quality_issues = [
+        f"{stat.get('asset_id', '<missing_asset_id>')}: {stat.get('path', '(unknown)')} - {stat.get('issue')}"
+        for stat in visual_quality_stats
+        if stat.get("issue")
+    ]
+    if visual_quality_stats:
+        details["asset_visual_quality_samples"] = visual_quality_stats[:20]
+    if visual_quality_issues:
+        details["asset_visual_quality_issues"] = visual_quality_issues[:20]
+    add_check(
+        checks,
+        "asset.visual_not_vector_like",
+        target_number < 560 or (bool(entries) and not visual_quality_issues),
+        "generated p500 asset images are inspectable raster images and not vector-like/low-detail",
+        kind="rubric",
+    )
+
+    request_text = requests.read_text(encoding="utf-8") if requests.exists() else ""
+    request_sections = _request_sections_by_asset_id(request_text) if request_text else {}
+    metadata_failures: list[str] = []
+    for entry in entries:
+        asset_id = _entry_asset_id(entry)
+        if not asset_id:
+            continue
+        fields = request_sections.get(asset_id)
+        if not fields:
+            metadata_failures.append(f"{asset_id}: missing request section")
+            continue
+        for key in ("tool", "asset_type", "execution_lane", "reference_count", "output"):
+            if not _request_field_value(fields, key):
+                metadata_failures.append(f"{asset_id}: missing {key}")
+        request_tool = _request_field_value(fields, "tool")
+        if request_tool and request_tool != "codex_builtin_image":
+            metadata_failures.append(f"{asset_id}: tool {request_tool} must be codex_builtin_image")
+        if not _request_field_value(fields, "review_status", "review.status"):
+            metadata_failures.append(f"{asset_id}: missing review_status/review.status")
+        request_lane = _request_field_value(fields, "execution_lane")
+        request_reference_count = _parse_int_field(_request_field_value(fields, "reference_count"))
+        if request_reference_count is not None:
+            expected_request_lane = "standard" if request_reference_count > 0 else "bootstrap_builtin"
+            if request_lane != expected_request_lane:
+                metadata_failures.append(f"{asset_id}: execution_lane {request_lane or '(missing)'} mismatches reference_count {request_reference_count}")
+    if metadata_failures:
+        details["asset_request_metadata_failures"] = metadata_failures[:20]
+    add_check(
+        checks,
+        "asset.request_metadata",
+        target_number < 550 or (bool(entries) and not metadata_failures),
+        "asset_generation_requests.md includes asset id/type/lane/reference count/review status/output metadata",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "asset.request_prompt_no_production_meta",
+        target_number < 550 or (bool(request_text.strip()) and not _request_prompt_contains_production_meta(request_text)),
+        "asset_generation_requests.md prompt bodies omit production-only metadata such as story title + scene ids",
+        kind="rubric",
+    )
+
+    manifest_items: list[dict[str, Any]] = []
+    for manifest_path in manifests:
+        if not manifest_path.exists():
+            continue
+        _, manifest_data = load_structured_document(manifest_path)
+        manifest_items.extend(_asset_manifest_items(manifest_data))
+    details["generation_manifest_item_count"] = len(manifest_items)
+    manifest_ids = {_asset_manifest_item_id(item) for item in manifest_items if _asset_manifest_item_id(item)}
+    expected_ids = {_entry_asset_id(entry) for entry in entries if _entry_asset_id(entry)}
+    missing_manifest_ids = sorted(expected_ids - manifest_ids)
+    if missing_manifest_ids:
+        details["missing_asset_manifest_ids"] = missing_manifest_ids[:20]
+    add_check(
+        checks,
+        "asset.manifest_items",
+        target_number < 550 or (bool(manifest_items) and not missing_manifest_ids),
+        "asset generation manifests include each planned asset id",
+        kind="rubric",
+    )
 
     generated_files = _existing_media_files(run_dir / "assets", {".png", ".jpg", ".jpeg", ".webp"})
     details["generated_asset_file_count"] = len(generated_files)
@@ -584,13 +1286,13 @@ def check_asset(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     add_check(
         checks,
         "asset.generated_or_manifested",
-        bool(generated_files) or any(path.exists() for path in manifests),
+        target_number < 550 or bool(generated_files) or any(path.exists() for path in manifests),
         "asset generation produced reusable image files or generation manifests",
         kind="rubric",
     )
 
     updates["eval.asset.score"] = f"{score_from_checks(checks):.4f}"
-    return make_stage("asset", "asset_plan.md / asset_generation_requests.md", checks, details=details), updates
+    return make_stage("asset", "asset_inventory.md / asset_plan.md / asset_generation_requests.md", checks, details=details), updates
 
 
 def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
@@ -602,6 +1304,58 @@ def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     missing_outputs = [path for path in expected_outputs if not path.exists()]
 
     add_check(checks, "image.generation_requests", requests.exists(), f"{requests.name} exists")
+    request_text = requests.read_text(encoding="utf-8") if requests.exists() else ""
+    request_sections = _request_sections_by_asset_id(request_text) if request_text else {}
+    request_items = _request_sections_with_references(request_text) if request_text else []
+    image_tool_failures: list[str] = []
+    for selector, fields in request_sections.items():
+        request_tool = _request_field_value(fields, "tool")
+        if not request_tool:
+            image_tool_failures.append(f"{selector}: missing tool")
+        elif request_tool != "codex_builtin_image":
+            image_tool_failures.append(f"{selector}: tool {request_tool} must be codex_builtin_image")
+    if image_tool_failures:
+        details["image_request_tool_failures"] = image_tool_failures[:20]
+    add_check(
+        checks,
+        "image.request_tool_codex_builtin",
+        not request_sections or not image_tool_failures,
+        "image_generation_requests.md uses codex_builtin_image for every scene image request",
+        kind="rubric",
+    )
+    request_references_by_selector = {
+        str(item.get("selector") or "").strip(): list(item.get("references") or [])
+        for item in request_items
+        if str(item.get("selector") or "").strip()
+    }
+    request_lane_failures: list[str] = []
+    for selector, fields in request_sections.items():
+        request_lane = _request_field_value(fields, "execution_lane")
+        reference_count = _parse_int_field(_request_field_value(fields, "reference_count"))
+        if not request_lane:
+            request_lane_failures.append(f"{selector}: missing execution_lane")
+        if reference_count is None:
+            request_lane_failures.append(f"{selector}: missing reference_count")
+            continue
+        expected_lane = "standard" if reference_count > 0 else "bootstrap_builtin"
+        if request_lane != expected_lane:
+            request_lane_failures.append(
+                f"{selector}: execution_lane {request_lane or '(missing)'} mismatches reference_count {reference_count}"
+            )
+        parsed_references = request_references_by_selector.get(selector)
+        if parsed_references is not None and reference_count != len(parsed_references):
+            request_lane_failures.append(
+                f"{selector}: reference_count {reference_count} mismatches references[] count {len(parsed_references)}"
+            )
+    if request_lane_failures:
+        details["image_request_lane_failures"] = request_lane_failures[:20]
+    add_check(
+        checks,
+        "image.request_lane_consistency",
+        not request_sections or not request_lane_failures,
+        "image_generation_requests.md keeps reference_count=0 on bootstrap_builtin and reference_count>0 on standard",
+        kind="rubric",
+    )
     append_grounding_checks(checks, run_dir=run_dir, stage="scene_implementation")
     add_check(checks, "image.expected_outputs", bool(expected_outputs), "manifest declares image_generation.output paths", kind="rubric")
     add_check(
@@ -614,6 +1368,55 @@ def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     details["declared_image_outputs"] = len(expected_outputs)
     if missing_outputs:
         details["missing_image_outputs"] = [str(path.relative_to(run_dir)) if path.is_relative_to(run_dir) else str(path) for path in missing_outputs[:20]]
+
+    visual_quality_stats, reference_quality_stats, regeneration_plan, uninspected_outputs = _scene_image_visual_quality_stats(
+        run_dir,
+        request_items,
+        expected_outputs,
+    )
+    visual_quality_issues = [
+        f"{stat.get('selector', '<missing_selector>')}: {stat.get('path', '(unknown)')} - {stat.get('issue')}"
+        for stat in visual_quality_stats
+        if stat.get("issue")
+    ]
+    reference_quality_issues = [
+        f"{stat.get('selector', '<missing_selector>')}: {stat.get('reference') or stat.get('path', '(unknown)')} - {stat.get('issue')}"
+        for stat in reference_quality_stats
+        if stat.get("issue")
+    ]
+    if visual_quality_stats:
+        details["image_visual_quality_samples"] = visual_quality_stats[:20]
+    if reference_quality_stats:
+        details["image_reference_quality_samples"] = reference_quality_stats[:20]
+    if visual_quality_issues:
+        details["image_visual_quality_issues"] = visual_quality_issues[:20]
+    if reference_quality_issues:
+        details["image_reference_quality_issues"] = reference_quality_issues[:20]
+    if regeneration_plan:
+        details["image_regeneration_plan"] = regeneration_plan[:20]
+    if uninspected_outputs:
+        details["uninspected_image_outputs"] = uninspected_outputs[:20]
+    add_check(
+        checks,
+        "image.visual_outputs_inspected",
+        not uninspected_outputs and len(visual_quality_stats) == len([path for path in expected_outputs if path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES and path.exists()]),
+        "every manifest-declared scene image output is inspected by the visual quality gate",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "image.visual_not_vector_like",
+        bool(expected_outputs) and not uninspected_outputs and not visual_quality_issues,
+        "generated p600 scene images are inspectable raster images and not vector-like/low-detail",
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "image.references_not_vector_like",
+        not reference_quality_issues,
+        "p600 reference images are inspectable raster images; vector-like references route regeneration back to p500",
+        kind="rubric",
+    )
 
     updates["eval.image.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("image", "image_generation_requests.md / assets/scenes/**", checks, details=details), updates
@@ -861,12 +1664,12 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
         if flow == "scene-series":
             manifest_stage, updates = check_manifest_scene_series(run_dir, profile)
         else:
-            manifest_stage, updates = check_manifest_single(run_dir, profile, flow)
+            manifest_stage, updates = shared_check_manifest_single(run_dir, profile, flow)
         stages.append(manifest_stage)
         stage_updates.update(updates)
 
     if "asset" in enabled_stages:
-        asset_stage, updates = check_asset(run_dir)
+        asset_stage, updates = check_asset(run_dir, target_slot=target)
         stages.append(asset_stage)
         stage_updates.update(updates)
 

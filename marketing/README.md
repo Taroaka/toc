@@ -27,6 +27,7 @@
 marketing/
 ├── README.md
 ├── browser-use.md
+├── LP/
 └── SNS/
 ```
 
@@ -35,6 +36,9 @@ marketing/
 - `browser-use.md`
   - `marketing/` 配下で共通利用する browser 操作ガイド。
   - YouTube Studio や各 SNS 管理画面を `Codex + browser MCP` で扱うときは最初に読む。
+- `LP/`
+  - YouTube 概要欄から遷移させる中間導線の原稿とフォーム設計を置く。
+  - セールス本文ではなく、制作ノート・改善提案・相談の入口として扱う。
 - `SNS/`
   - SNS 関連の正本を置く。
   - 現時点の marketing 実務領域は SNS のみとする。

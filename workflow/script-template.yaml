@@ -167,6 +167,15 @@ timeline:
 
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
+    importance: "low|medium|high|critical"
+    target_duration_seconds: 0
+    estimated_duration_seconds: 0
+    handoff_to_next_scene: "次 scene へ接続する最終状態。最終 scene では terminal_resolution を使ってよい"
+    terminal_resolution: ""
+    coverage_review:
+      audience_information_covered: false
+      visualizable_action_covered: false
+      next_scene_connection_checked: false
     timing:
       duration_seconds: 6
       timestamp: "00:00-00:06"

@@ -39,6 +39,7 @@ p400 は次の順で進める。
    - `story.md` の scene を読み、scene ごとの物語責務を固定する
    - `visual_value.md` がある場合は、その scene の visual value / anchor / regeneration risk を読む
    - scene ごとに、観客へ渡す情報、まだ隠す情報、感情変化、根拠境界、後続 stage への注意を残す
+   - scene ごとに `importance`, `target_duration_seconds`, `estimated_duration_seconds`, `handoff_to_next_scene`（最終 scene は `terminal_resolution`）, `coverage_review` を必須で残す
    - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する
    - `p410b` / `p410c` は内部 review-loop label であり、scaffold の停止位置は `p410`、prompt materialize は `build-review-loop-round.py --slot p410b|p410c` で行う
    - 抽象 review が合格するまで、main agent が scene 構成と transition を自動修正する
@@ -61,9 +62,11 @@ p400 は次の順で進める。
    - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
    - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
    - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する
+   - Duration Auditor は `video_manifest.md.video_metadata.target_duration_seconds` と production cut duration 合計を比較し、90% 未満なら passed にしてはいけない。p700 へ defer してはいけない
    - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
    - Orchestrator は各 auditor の意見を統合し、Design Owner 向け patch brief にする
    - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この p435 process 内で downstream design artifacts を触れるのは Design Owner だけとする
+   - p500 へ進むには `eval.p400_readiness.status=approved` が必要で、scene/cut/review/duration/selector 対応の deterministic gate が 1 つでも落ちたら p500 grounding は開始しない
 5. `p450 skeleton manifest`
    - `script.md` から `video_manifest.md` を `manifest_phase: skeleton` として materialize する
    - skeleton manifest は scene/cut selector、`scene_contract`、asset id placeholder、image/audio/video の実行枠を持つ

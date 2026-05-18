@@ -261,8 +261,8 @@ stage 1 の原則:
 - 人間レビューで通るまで asset 生成に進まない
 - asset stage 完了時は、次が human review 待ちであることを明示してユーザーへ確認を促す
 - 浦島 run のように scene still を後から asset に昇格する例外はあるが、それは設計移行中の互換運用であり、今後の標準フローでは asset stage を先に置く
-- Codex built-in image generation（現行想定モデル: `gpt-image-2`）は repo の標準画像基盤ではない
-- ただし `reference_count == 0` の no-reference image request は例外として許可する
+- Codex built-in image generation（現行想定モデル: `gpt-image-2`）を repo の標準画像基盤にする
+- 外部課金系の画像 provider は標準ワークフローでは使わない
 - request file は「最終的にこの prompt / reference / output で投げる」を確認するための凍結成果物として扱う
 - `plan` は設計用、`request` は人レビュー用と割り切る
 - 人が review する既定の対象は request file

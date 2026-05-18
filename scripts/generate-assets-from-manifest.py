@@ -2,7 +2,7 @@
 """
 Generate assets (image/video/audio) from a `video_manifest.md`.
 
-- Image: Google Gemini Image (default: gemini-3.1-flash-image-preview)
+- Image: Codex built-in image generation (gpt-image-2 via the Codex app-server)
 - Video: Kling (kling_3_0 / kling_3_0_omni) or BytePlus ModelArk Seedance. Any Veo tool names are treated as Kling for safety.
 
 Audio (TTS):
@@ -12,6 +12,7 @@ Audio (TTS):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -35,7 +36,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.env import load_env_files
-from toc.harness import load_structured_document, parse_state_file
+from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.http import HttpError, request_bytes
 from toc.immersive_manifest import (
     dotted_id_slug,
@@ -57,12 +58,24 @@ from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
 from toc.run_index import write_run_index
+from toc.stage_evaluator import check_manifest_single
+from server.codex_app_server import CodexAppServerClient, app_server_disabled, latest_generated_image_mtime_ns
+from server.image_gen import copy_saved_image, write_app_server_image_debug_log
 
 
 ALLOWED_VEO_DURATIONS = (4, 6, 8)
+CODEX_BUILTIN_IMAGE_TOOL = "codex_builtin_image"
+CODEX_BUILTIN_IMAGE_TOOL_ALIASES = {
+    CODEX_BUILTIN_IMAGE_TOOL,
+    "codex_app_server",
+    "gpt_image_2",
+    "gpt-image-2",
+    "openai_gpt_image_2",
+    "openai_gpt-image-2",
+}
 NO_REFERENCE_IMAGE_EXECUTION_LANE = "bootstrap_builtin"
 NO_REFERENCE_IMAGE_EXECUTION_LANE_ALIASES = {"bootstrap_builtin", "no_reference_builtin"}
-REFERENCE_DRIVEN_IMAGE_TOOLS = {
+DEPRECATED_EXTERNAL_IMAGE_TOOLS = {
     "google_nanobanana_2",
     "nanobanana_2",
     "gemini_3_1_flash_image",
@@ -74,6 +87,7 @@ REFERENCE_DRIVEN_IMAGE_TOOLS = {
     "seedream_4_5",
     "byteplus_seedream_4_5",
 }
+REFERENCE_DRIVEN_IMAGE_TOOLS = CODEX_BUILTIN_IMAGE_TOOL_ALIASES | DEPRECATED_EXTERNAL_IMAGE_TOOLS
 
 
 @dataclass
@@ -1691,12 +1705,12 @@ def _generate_single_image_scene(
     )
     execution_lane = _effective_image_execution_lane(scene)
 
-    if tool in REFERENCE_DRIVEN_IMAGE_TOOLS and execution_lane == NO_REFERENCE_IMAGE_EXECUTION_LANE:
+    if tool in DEPRECATED_EXTERNAL_IMAGE_TOOLS and execution_lane == NO_REFERENCE_IMAGE_EXECUTION_LANE:
         raise SystemExit(_no_reference_image_lane_error(scene=scene, tool=tool))
 
     is_char_ref = bool(out_path and _is_character_ref_path(out_path))
 
-    if tool in {"google_nanobanana_2", "nanobanana_2", "gemini_3_1_flash_image", "gemini3_1_flash_image"}:
+    if tool == CODEX_BUILTIN_IMAGE_TOOL:
         prefix = (args.image_prompt_prefix or "").strip()
         suffix = (args.image_prompt_suffix or "").strip()
         prompt = scene.image_prompt.strip()
@@ -1719,17 +1733,17 @@ def _generate_single_image_scene(
             if args.log_prompts:
                 log_dir.mkdir(parents=True, exist_ok=True)
                 (log_dir / f"scene{scene.scene_id}_image_prompt.txt").write_text(front_prompt + "\n", encoding="utf-8")
-            generate_gemini_image(
-                client=gemini_client,
-                model=args.gemini_image_model,
+            generate_codex_builtin_image(
                 prompt=front_prompt,
-                aspect_ratio=scene_aspect_ratio,
-                image_size=scene_image_size,
                 reference_images=refs,
                 out_path=view_paths["front"],
                 force=args.force,
                 log_path=log_dir / f"scene{scene.scene_id}_image.json",
                 dry_run=args.dry_run,
+                run_dir=base_dir,
+                item_id=_scene_selector(scene),
+                aspect_ratio=scene_aspect_ratio,
+                image_size=scene_image_size,
             )
 
             conditioned_refs = list(refs)
@@ -1743,17 +1757,17 @@ def _generate_single_image_scene(
                 if args.log_prompts:
                     log_dir.mkdir(parents=True, exist_ok=True)
                     (log_dir / f"scene{scene.scene_id}_image_prompt_{v}.txt").write_text(vprompt + "\n", encoding="utf-8")
-                generate_gemini_image(
-                    client=gemini_client,
-                    model=args.gemini_image_model,
+                generate_codex_builtin_image(
                     prompt=vprompt,
-                    aspect_ratio=scene_aspect_ratio,
-                    image_size=scene_image_size,
                     reference_images=conditioned_refs,
                     out_path=view_paths[v],
                     force=args.force,
                     log_path=log_dir / f"scene{scene.scene_id}_image_{v}.json",
                     dry_run=args.dry_run,
+                    run_dir=base_dir,
+                    item_id=f"{_scene_selector(scene)}_{v}",
+                    aspect_ratio=scene_aspect_ratio,
+                    image_size=scene_image_size,
                 )
 
             if args.character_reference_strip and all(k in view_paths for k in ("front", "side", "back")):
@@ -1771,17 +1785,17 @@ def _generate_single_image_scene(
         if args.log_prompts:
             log_dir.mkdir(parents=True, exist_ok=True)
             (log_dir / f"scene{scene.scene_id}_image_prompt.txt").write_text(prompt + "\n", encoding="utf-8")
-        generate_gemini_image(
-            client=gemini_client,
-            model=args.gemini_image_model,
+        generate_codex_builtin_image(
             prompt=prompt,
-            aspect_ratio=scene_aspect_ratio,
-            image_size=scene_image_size,
             reference_images=refs,
             out_path=out_path,
             force=args.force,
             log_path=log_dir / f"scene{scene.scene_id}_image.json",
             dry_run=args.dry_run,
+            run_dir=base_dir,
+            item_id=_scene_selector(scene),
+            aspect_ratio=scene_aspect_ratio,
+            image_size=scene_image_size,
         )
         if args.test_image_variants > 0:
             for variant_index in range(1, args.test_image_variants + 1):
@@ -1799,98 +1813,17 @@ def _generate_single_image_scene(
                         prompt + "\n",
                         encoding="utf-8",
                     )
-                generate_gemini_image(
-                    client=gemini_client,
-                    model=args.gemini_image_model,
+                generate_codex_builtin_image(
                     prompt=prompt,
-                    aspect_ratio=scene_aspect_ratio,
-                    image_size=scene_image_size,
                     reference_images=refs,
                     out_path=variant_out,
                     force=args.force,
                     log_path=log_dir / f"scene{scene.scene_id}_image_test_v{variant_index:02d}.json",
                     dry_run=args.dry_run,
-                )
-        return
-
-    if tool in {"seadream", "seedream", "seedream_4_5", "byteplus_seedream_4_5"}:
-        base_prompt = scene.image_prompt.strip()
-        if is_char_ref and (char_views or args.character_reference_strip):
-            views_to_generate = [v for v in ("front", "side", "back") if (v == "front" or v in char_views)]
-            if "front" not in views_to_generate:
-                views_to_generate.insert(0, "front")
-            view_paths: dict[str, Path] = {"front": out_path}
-            for v in ("side", "back"):
-                if v in views_to_generate:
-                    view_paths[v] = _derive_character_view_path(out_path, v)
-
-            for v in views_to_generate:
-                vprompt = _character_view_prompt(base_prompt, v)
-                if args.log_prompts:
-                    log_dir.mkdir(parents=True, exist_ok=True)
-                    suffix_name = "" if v == "front" else f"_{v}"
-                    (log_dir / f"scene{scene.scene_id}_image_prompt{suffix_name}.txt").write_text(vprompt + "\n", encoding="utf-8")
-                generate_seadream_image(
-                    client=seadream_client,
-                    model=args.seadream_model,
-                    prompt=vprompt,
-                    size=args.seadream_size,
-                    out_path=view_paths[v],
-                    force=args.force,
-                    log_path=log_dir / f"scene{scene.scene_id}_image{'' if v == 'front' else '_' + v}.json",
-                    dry_run=args.dry_run,
-                )
-
-            if args.character_reference_strip and all(k in view_paths for k in ("front", "side", "back")):
-                strip_path = _derive_character_refstrip_path(out_path, args.character_reference_strip_suffix)
-                if not args.dry_run:
-                    _ffmpeg_hstack_images(
-                        [view_paths["front"], view_paths["side"], view_paths["back"]],
-                        strip_path,
-                        force=args.force,
-                    )
-                else:
-                    print(f"[dry-run] IMAGE {strip_path} <- hstack(front,side,back)")
-            return
-
-        if args.log_prompts:
-            log_dir.mkdir(parents=True, exist_ok=True)
-            (log_dir / f"scene{scene.scene_id}_image_prompt.txt").write_text(base_prompt + "\n", encoding="utf-8")
-        generate_seadream_image(
-            client=seadream_client,
-            model=args.seadream_model,
-            prompt=base_prompt,
-            size=args.seadream_size,
-            out_path=out_path,
-            force=args.force,
-            log_path=log_dir / f"scene{scene.scene_id}_image.json",
-            dry_run=args.dry_run,
-        )
-        if args.test_image_variants > 0:
-            for variant_index in range(1, args.test_image_variants + 1):
-                variant_out = _derive_test_variant_output_path(
-                    base_dir,
-                    scene.image_output,
-                    variant_index,
-                    args.test_image_dir,
-                )
-                if variant_out is None:
-                    continue
-                if args.log_prompts:
-                    log_dir.mkdir(parents=True, exist_ok=True)
-                    (log_dir / f"scene{scene.scene_id}_image_prompt_test_v{variant_index:02d}.txt").write_text(
-                        base_prompt + "\n",
-                        encoding="utf-8",
-                    )
-                generate_seadream_image(
-                    client=seadream_client,
-                    model=args.seadream_model,
-                    prompt=base_prompt,
-                    size=args.seadream_size,
-                    out_path=variant_out,
-                    force=args.force,
-                    log_path=log_dir / f"scene{scene.scene_id}_image_test_v{variant_index:02d}.json",
-                    dry_run=args.dry_run,
+                    run_dir=base_dir,
+                    item_id=f"{_scene_selector(scene)}_test_v{variant_index:02d}",
+                    aspect_ratio=scene_aspect_ratio,
+                    image_size=scene_image_size,
                 )
         return
 
@@ -2388,6 +2321,7 @@ def apply_asset_guides_to_scene(*, scene: SceneSpec, guides: AssetGuides, charac
 
     # Inject object/setpiece prompts only when that object is active for the scene.
     prop_lines: list[str] = []
+    chosen_object_ids = set(scene.image_object_ids or [])
     for entry in guides.object_bible or []:
         selected_variants = _selected_reference_variants(entry.reference_variants, selected_object_variant_ids)
         is_active = entry.object_id in chosen_object_ids
@@ -3163,11 +3097,13 @@ def generate_gemini_image(
         return
 
     if dry_run:
-        print(f"[dry-run] IMAGE {out_path} <- {model} ({aspect_ratio}, {image_size})")
+        print(f"[dry-run] IMAGE {out_path} skipped: external Gemini/Nano Banana image generation is disabled")
         return
 
-    if client is None:
-        raise SystemExit("Gemini client not configured (missing GEMINI_API_KEY).")
+    raise SystemExit(
+        "Deprecated: external Gemini/Nano Banana image generation is disabled for this repo. "
+        "Use codex_builtin_image / gpt-image-2 through the Codex app-server instead."
+    )
 
     try:
         image_bytes, mime_type, resp = client.generate_image(
@@ -3223,6 +3159,80 @@ def generate_gemini_image(
             pass
 
 
+def generate_codex_builtin_image(
+    *,
+    prompt: str,
+    reference_images: list[Path] | None,
+    out_path: Path,
+    force: bool,
+    log_path: Path | None,
+    dry_run: bool,
+    run_dir: Path,
+    item_id: str,
+    aspect_ratio: str,
+    image_size: str,
+) -> None:
+    if out_path.exists() and not force:
+        return
+
+    if dry_run:
+        ref_count = len(reference_images or [])
+        print(f"[dry-run] IMAGE {out_path} <- {CODEX_BUILTIN_IMAGE_TOOL} (gpt-image-2, {aspect_ratio}, {image_size}, refs={ref_count})")
+        return
+
+    if app_server_disabled():
+        raise SystemExit("Codex app-server is disabled; enable it to use codex_builtin_image / gpt-image-2 image generation.")
+
+    async def _run_generation() -> None:
+        client = CodexAppServerClient(cwd=REPO_ROOT)
+        result = None
+        try:
+            await client.start()
+            fallback_cutoff_ns = latest_generated_image_mtime_ns()
+            result = await client.generate_image(
+                prompt=prompt,
+                output_path=out_path,
+                reference_images=list(reference_images or []),
+                item_id=item_id,
+                run_dir=run_dir,
+                fallback_cutoff_ns=fallback_cutoff_ns,
+            )
+            debug_path = write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id=item_id,
+                index=1,
+                destination=out_path,
+                references=list(reference_images or []),
+                prompt=prompt,
+                kind="manifest",
+                result=result,
+            )
+            if log_path:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    json.dumps(
+                        {
+                            "tool": CODEX_BUILTIN_IMAGE_TOOL,
+                            "model": "gpt-image-2",
+                            "debug_log": str(debug_path.relative_to(run_dir)),
+                            "status": result.status,
+                            "source": result.source,
+                            "saved_path": str(result.saved_path or ""),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            if result.saved_path is None:
+                raise SystemExit(f"Codex app-server did not return an image for {item_id}; see {debug_path}")
+            copy_saved_image(result.saved_path, out_path)
+        finally:
+            await client.stop()
+
+    asyncio.run(_run_generation())
+
+
 def generate_seadream_image(
     *,
     client: SeaDreamClient | None,
@@ -3238,11 +3248,13 @@ def generate_seadream_image(
         return
 
     if dry_run:
-        print(f"[dry-run] IMAGE {out_path} <- {model} (size={size})")
+        print(f"[dry-run] IMAGE {out_path} skipped: external SeaDream image generation is disabled")
         return
 
-    if client is None:
-        raise SystemExit("SeaDream client not configured (missing SEADREAM_API_KEY).")
+    raise SystemExit(
+        "Deprecated: external SeaDream image generation is disabled for this repo. "
+        "Use codex_builtin_image / gpt-image-2 through the Codex app-server instead."
+    )
 
     try:
         image_bytes, mime_type, resp = client.generate_image(prompt=prompt, size=size, model=model)
@@ -3652,15 +3664,8 @@ def normalize_tool_name(tool: str | None) -> str:
     # Safety: treat Veo tool names as Kling to avoid accidental paid Google video calls.
     if normalized in {"google_veo_3_1", "veo", "veo_3_1", "veo3", "veo_3"}:
         return "kling_3_0_omni"
-    if normalized in {
-        "google_nanobanana_2",
-        "nanobanana_2",
-        "gemini_3_1_flash_image",
-        "gemini3_1_flash_image",
-        "gemini_3.1_flash_image",
-        "gemini-3.1-flash-image",
-    }:
-        return "google_nanobanana_2"
+    if normalized in CODEX_BUILTIN_IMAGE_TOOL_ALIASES or normalized in DEPRECATED_EXTERNAL_IMAGE_TOOLS:
+        return CODEX_BUILTIN_IMAGE_TOOL
     return normalized
 
 
@@ -3923,6 +3928,12 @@ def _write_request_preview_md(
             lines.append(f"- reference_count: `{entry['reference_count']}`")
         if entry.get("review_status"):
             lines.append(f"- review_status: `{entry['review_status']}`")
+        if entry.get("creation_status"):
+            lines.append(f"- creation_status: `{entry['creation_status']}`")
+        if "bootstrap_allowed" in entry:
+            lines.append(f"- bootstrap_allowed: `{str(bool(entry['bootstrap_allowed'])).lower()}`")
+        if entry.get("bootstrap_reason"):
+            lines.append(f"- bootstrap_reason: `{entry['bootstrap_reason']}`")
         if entry.get("authoring_role"):
             lines.append(f"- authoring_role: `{entry['authoring_role']}`")
         if entry.get("authoring_note"):
@@ -3943,6 +3954,16 @@ def _write_request_preview_md(
             lines.append("- source_cuts:")
             for source_cut in source_cuts:
                 lines.append(f"  - `{source_cut}`")
+        source_script_selectors = entry.get("source_script_selectors") or []
+        if source_script_selectors:
+            lines.append("- source_script_selectors:")
+            for selector in source_script_selectors:
+                lines.append(f"  - `{selector}`")
+        required_views = entry.get("required_views") or []
+        if required_views:
+            lines.append("- required_views:")
+            for view in required_views:
+                lines.append(f"  - `{view}`")
         source_requests = entry.get("source_requests") or []
         if source_requests:
             lines.append("- source_requests:")
@@ -4199,6 +4220,11 @@ def main() -> None:
         "--ignore-duration-fit-gate",
         action="store_true",
         help="Allow video generation even if review.duration_fit.status=changes_requested.",
+    )
+    parser.add_argument(
+        "--ignore-p400-readiness-gate",
+        action="store_true",
+        help="Allow read-only dry-run diagnostics even if eval.p400_readiness.status is not approved.",
     )
     parser.add_argument(
         "--skip-image-prompt-review",
@@ -4480,6 +4506,48 @@ def main() -> None:
 
     base_dir = Path(args.base_dir) if args.base_dir else manifest_path.parent
     state_path = base_dir / "state.txt"
+    md = manifest_path.read_text(encoding="utf-8")
+    yaml_text = extract_yaml_block(md)
+    manifest_data = yaml.safe_load(yaml_text) if yaml is not None else {}
+    if not isinstance(manifest_data, dict):
+        manifest_data = {}
+    manifest_phase = str(manifest_data.get("manifest_phase") or "production").strip().lower() or "production"
+    if manifest_phase not in {"skeleton", "production"}:
+        raise SystemExit(f"Unsupported manifest_phase: {manifest_phase!r} (expected skeleton|production)")
+    early_metadata = manifest_data.get("video_metadata") if isinstance(manifest_data.get("video_metadata"), dict) else {}
+    early_experience = str(early_metadata.get("experience") or "").strip().lower()
+    is_asset_stage_manifest = early_experience.startswith("asset_stage")
+    canonical_manifest_path = (base_dir / "video_manifest.md").resolve()
+    if manifest_path.resolve() != canonical_manifest_path:
+        raise SystemExit(
+            "p400 readiness gate must evaluate the same manifest passed to generation.\n"
+            f"  expected: {canonical_manifest_path}\n"
+            f"  got: {manifest_path.resolve()}"
+        )
+    p400_override_is_read_only_diagnostic = bool(
+        args.ignore_p400_readiness_gate
+        and args.dry_run
+        and args.skip_images
+        and args.skip_videos
+        and args.skip_audio
+        and not args.materialize_request_files_only
+    )
+    if args.ignore_p400_readiness_gate and not p400_override_is_read_only_diagnostic:
+        raise SystemExit(
+            "--ignore-p400-readiness-gate is limited to read-only diagnostics: "
+            "use it only with --dry-run --skip-images --skip-videos --skip-audio and without --materialize-request-files-only."
+        )
+    if not p400_override_is_read_only_diagnostic and not is_asset_stage_manifest:
+        _stage_result, p400_updates = check_manifest_single(base_dir, "standard", "immersive")
+        append_state_snapshot(state_path, p400_updates)
+    if not p400_override_is_read_only_diagnostic:
+        state = parse_state_file(state_path) if state_path.exists() else {}
+        if state.get("eval.p400_readiness.status", "").strip().lower() != "approved":
+            raise SystemExit(
+                "p400 readiness gate is not approved.\n"
+                "  Run the p400 deterministic readiness review and resolve scene/cut/duration/review findings before p500+ generation,\n"
+                "  or pass --ignore-p400-readiness-gate only with read-only dry-run diagnostic flags."
+            )
     if args.skip_audio and not args.skip_videos and not args.ignore_duration_fit_gate and state_path.exists():
         state = parse_state_file(state_path)
         if state.get("review.duration_fit.status", "").strip().lower() == "changes_requested":
@@ -4491,15 +4559,6 @@ def main() -> None:
                 "  Resolve the duration-fit review before generating videos, or pass --ignore-duration-fit-gate."
             )
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
-
-    md = manifest_path.read_text(encoding="utf-8")
-    yaml_text = extract_yaml_block(md)
-    manifest_data = yaml.safe_load(yaml_text) if yaml is not None else {}
-    if not isinstance(manifest_data, dict):
-        manifest_data = {}
-    manifest_phase = str(manifest_data.get("manifest_phase") or "production").strip().lower() or "production"
-    if manifest_phase not in {"skeleton", "production"}:
-        raise SystemExit(f"Unsupported manifest_phase: {manifest_phase!r} (expected skeleton|production)")
 
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
     aspect_ratio = (
@@ -4519,6 +4578,9 @@ def main() -> None:
             "Manifest is still in skeleton phase.\n"
             "  Promote video_manifest.md to manifest_phase=production before generating scene images or videos."
         )
+    if p400_override_is_read_only_diagnostic:
+        print("[dry-run] p400 readiness override diagnostic only; no request files or assets were materialized.")
+        return
 
     if not args.skip_images and not args.skip_image_prompt_review and manifest_phase == "production" and not is_asset_stage_request:
         review_cmd = [
@@ -4703,26 +4765,19 @@ def main() -> None:
     def _scene_uses_tool(scene: Scene, tools: set[str]) -> bool:
         return normalize_tool_name(scene.image_tool) in tools
 
-    needs_gemini_image = (
+    needs_codex_image = (
         not args.skip_images
         and any(
-            _scene_uses_tool(scene, {"google_nanobanana_2", "nanobanana_2"})
+            _scene_uses_tool(scene, {CODEX_BUILTIN_IMAGE_TOOL})
             and scene.image_output
             and scene.image_prompt
             and _scene_matches_filter(scene, scene_filter)
             for scene in scenes
         )
     )
-    needs_seadream_image = (
-        not args.skip_images
-        and any(
-            _scene_uses_tool(scene, {"seadream", "seedream", "seedream_4_5", "byteplus_seedream_4_5"})
-            and scene.image_output
-            and scene.image_prompt
-            and _scene_matches_filter(scene, scene_filter)
-            for scene in scenes
-        )
-    )
+    # External image providers are disabled; legacy tool aliases normalize to codex_builtin_image.
+    needs_gemini_image = False
+    needs_seadream_image = False
     needs_gemini_video = (
         not args.skip_videos
         and any(
@@ -4953,6 +5008,29 @@ def main() -> None:
                     selector=selector,
                     section_name="image_generation.applied_request_ids",
                 )
+            asset_stage_preview_metadata: dict[str, Any] = {}
+            if is_asset_stage_request:
+                primary_asset = _select_primary_still_asset(scene.still_assets)
+                generation_plan = (
+                    primary_asset.get("generation_plan")
+                    if isinstance(primary_asset, dict) and isinstance(primary_asset.get("generation_plan"), dict)
+                    else {}
+                )
+                if isinstance(primary_asset, dict):
+                    asset_stage_preview_metadata = {
+                        "creation_status": _as_opt_str(primary_asset.get("creation_status")) or "",
+                        "bootstrap_allowed": bool(scene.image_bootstrap_allowed),
+                        "bootstrap_reason": scene.image_bootstrap_reason or "",
+                        "source_script_selectors": _ensure_str_list(primary_asset.get("source_script_selectors")),
+                        "required_views": _ensure_str_list(generation_plan.get("required_views"))
+                        or _ensure_str_list(primary_asset.get("required_views")),
+                    }
+            authoring_role = "reusable_asset_candidate" if is_asset_stage_request else "video_first_frame_candidate"
+            authoring_note = (
+                "このメタ情報はp550 reusable asset生成/レビュー用。prompt本文には物語タイトルやscene idを書かず、見える人物・場所・道具・行為だけを具体化する。"
+                if is_asset_stage_request
+                else "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
+            )
             image_preview_entries.append(
                 {
                     "selector": selector,
@@ -4965,8 +5043,8 @@ def main() -> None:
                     "execution_lane": _effective_image_execution_lane(scene),
                     "reference_count": len(list(scene.image_references or [])),
                     "review_status": scene.image_review_status or "",
-                    "authoring_role": "video_first_frame_candidate",
-                    "authoring_note": "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。",
+                    "authoring_role": authoring_role,
+                    "authoring_note": authoring_note,
                     "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
                     "source_requests": source_requests,
                     "references": list(scene.image_references or []),
@@ -4976,6 +5054,7 @@ def main() -> None:
                         suffix=image_suffix,
                         request_visual_beat=request_visual_beat,
                     ),
+                    **asset_stage_preview_metadata,
                 }
             )
         _write_request_preview_md(
@@ -5055,6 +5134,8 @@ def main() -> None:
         return
 
     image_max_concurrency = max(1, min(int(args.image_max_concurrency or 1), 10))
+    if needs_codex_image:
+        image_max_concurrency = 1
     _generate_image_scenes_with_dependencies(
         image_scenes=image_scenes,
         image_max_concurrency=image_max_concurrency,

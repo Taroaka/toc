@@ -87,6 +87,9 @@ class TestReviewLoop(unittest.TestCase):
         self.assertIn("# Script Eval/Improve Loop", review)
         self.assertIn("- round: 2/5", review)
         self.assertIn("## Generator Patch Brief", review)
+        self.assertIn("root cause", review)
+        self.assertIn("fix plan", review)
+        self.assertIn("acceptance condition", review)
         self.assertIn("## Critic 5 Input", review)
 
         with self.assertRaises(ValueError):
@@ -105,10 +108,16 @@ class TestReviewLoop(unittest.TestCase):
                 prompt_path = run_dir / critic_prompt_relpath("story", 1, idx)
                 self.assertFalse(report_path.exists(), report_path)
                 self.assertTrue(prompt_path.exists(), prompt_path)
-                self.assertIn(f"critic_{idx}", prompt_path.read_text(encoding="utf-8"))
+                prompt_text = prompt_path.read_text(encoding="utf-8")
+                self.assertIn(f"critic_{idx}", prompt_text)
+                self.assertIn("root_cause", prompt_text)
+                self.assertIn("fix_direction", prompt_text)
             aggregate_prompt = run_dir / aggregator_prompt_relpath("story", 1)
             self.assertTrue(aggregate_prompt.exists())
-            self.assertIn("Wait until all 5 critic reports exist", aggregate_prompt.read_text(encoding="utf-8"))
+            aggregate_text = aggregate_prompt.read_text(encoding="utf-8")
+            self.assertIn("Wait until all 5 critic reports exist", aggregate_text)
+            self.assertIn("essential cause", aggregate_text)
+            self.assertIn("adopted_fix_plan", aggregate_text)
 
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["eval.story.loop.status"], "running")
@@ -178,6 +187,7 @@ class TestReviewLoop(unittest.TestCase):
             prompt = render_critic_prompt(run_dir=run_dir, stage="asset", round_number=1, critic_number=1)
 
             self.assertIn("Treat p520 coverage as the first gate", prompt)
+            self.assertIn("asset_inventory.md", prompt)
             self.assertIn("characters, story-specific items, used locations, setpieces", prompt)
             self.assertIn("full-body front / side / back", prompt)
             self.assertIn("source_script_selectors[]", prompt)

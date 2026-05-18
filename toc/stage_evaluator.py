@@ -10,6 +10,7 @@ from typing import Any
 from toc.grounding import grounding_validation
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
+from toc.review_loop import REVIEW_LOOP_CRITIC_COUNT
 
 
 STAGE_RUBRIC_WEIGHTS = {
@@ -907,8 +908,43 @@ def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
         and non_empty(blueprint.get("target_beat"))
         and non_empty(blueprint.get("visual_beat"))
         and non_empty(blueprint.get("narration_role"))
+        and as_list(blueprint.get("must_show"))
+        and as_list(blueprint.get("done_when"))
         and isinstance(blueprint.get("asset_dependency_hint"), dict)
     )
+
+
+def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
+    issues: list[str] = []
+    concrete_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
+    for index, scene in enumerate(concrete_scenes):
+        scene_id = as_dotted_str(scene.get("scene_id")) or str(index + 1)
+        importance = str(scene.get("importance") or "").strip().lower()
+        if importance not in {"low", "medium", "high", "critical"}:
+            issues.append(f"scene{scene_id}:importance")
+        for key in ("target_duration_seconds", "estimated_duration_seconds"):
+            value = scene.get(key)
+            if not isinstance(value, (int, float)) or value <= 0:
+                issues.append(f"scene{scene_id}:{key}")
+        if index < len(concrete_scenes) - 1:
+            if not non_empty(scene.get("handoff_to_next_scene")):
+                issues.append(f"scene{scene_id}:handoff_to_next_scene")
+        elif not (non_empty(scene.get("terminal_resolution")) or non_empty(scene.get("handoff_to_next_scene"))):
+            issues.append(f"scene{scene_id}:terminal_resolution")
+
+        cuts = [cut for cut in as_list(scene.get("cuts")) if isinstance(cut, dict)]
+        min_cuts = 3 if importance in {"high", "critical"} else 1
+        if len(cuts) < min_cuts:
+            issues.append(f"scene{scene_id}:cuts<{min_cuts}")
+
+        coverage = scene.get("coverage_review")
+        if not isinstance(coverage, dict):
+            issues.append(f"scene{scene_id}:coverage_review")
+        else:
+            for key in ("audience_information_covered", "visualizable_action_covered", "next_scene_connection_checked"):
+                if coverage.get(key) is not True:
+                    issues.append(f"scene{scene_id}:{key}")
+    return issues
 
 
 def _review_status(data: dict[str, Any], key: str) -> str:
@@ -996,6 +1032,15 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         f"all cuts include p420 cut_blueprint entries ({cuts_with_blueprint}/{len(cuts)})",
         kind="rubric",
     )
+    readiness_issues = _scene_readiness_issues(scenes)
+    add_check(
+        checks,
+        "script.scene_readiness_contract",
+        not readiness_issues,
+        "all scenes declare importance, target/estimated duration, handoff, coverage review, and importance-based cut count"
+        + (f" (issues: {', '.join(readiness_issues[:8])})" if readiness_issues else ""),
+        kind="rubric",
+    )
 
 
 def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
@@ -1065,7 +1110,7 @@ def _iter_manifest_nodes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         cuts = as_list(scene.get("cuts")) if isinstance(scene, dict) else []
         if cuts:
-            nodes.extend([cut for cut in cuts if isinstance(cut, dict)])
+            nodes.extend([cut for cut in cuts if isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() != "deleted"])
         elif isinstance(scene, dict):
             nodes.append(scene)
     return nodes
@@ -1085,6 +1130,8 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
         if cuts:
             for cut in cuts:
                 if not isinstance(cut, dict):
+                    continue
+                if str(cut.get("cut_status") or "").strip().lower() == "deleted":
                     continue
                 cut_id = as_dotted_str(cut.get("cut_id"))
                 if cut_id is None:
@@ -1111,6 +1158,184 @@ def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int = 2
         ]
         if len(cuts) < min_cuts_per_scene:
             issues.append(f"scene{scene_id}:cuts<{min_cuts_per_scene}")
+    return issues
+
+
+P400_READINESS_CHECK_IDS = {
+    "p400.skeleton_manifest_phase",
+    "p400.target_duration_range",
+    "p400.duration_coverage",
+    "p400.script_readiness_contract",
+    "p400.script_manifest_selector_match",
+    "p400.review_report_integrity",
+    "p400.review_loop_integrity",
+    "manifest.scenes",
+    "manifest.nodes",
+    "manifest.minimum_scene_cuts",
+    "manifest.cut_duration",
+    "manifest.asset_ids",
+    "manifest.experience",
+    "manifest.no_onscreen_text_rule",
+    "manifest.contract_missing",
+    "manifest.contract_must_show_unmet",
+    "manifest.contract_must_avoid_violated",
+    "manifest.contract_target_beat_unmet",
+    "manifest.reveal_constraints_violated",
+}
+
+
+def _manifest_duration_summary(manifest: dict[str, Any]) -> tuple[float, float, int]:
+    target = nested_get(manifest, ["video_metadata", "target_duration_seconds"])
+    target_seconds = float(target) if isinstance(target, (int, float)) else 0.0
+    actual_seconds = 0.0
+    cut_count = 0
+    for node in _iter_manifest_nodes(manifest):
+        if str(node.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        duration = node.get("duration_seconds")
+        video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
+        if not isinstance(duration, (int, float)):
+            duration = video_generation.get("duration_seconds")
+        if isinstance(duration, (int, float)):
+            actual_seconds += float(duration)
+        cut_count += 1
+    return target_seconds, actual_seconds, cut_count
+
+
+def _script_selectors_from_run(run_dir: Path) -> set[str]:
+    path = run_dir / "script.md"
+    if not path.exists():
+        return set()
+    _text, data = load_structured_document(path)
+    scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+    selectors: set[str] = set()
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        if str(scene.get("kind") or "").strip() == "reference":
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id"))
+        if scene_id is None:
+            continue
+        for cut in as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            explicit = str(cut.get("selector") or "").strip()
+            if explicit:
+                selectors.add(explicit)
+                continue
+            cut_id = as_dotted_str(cut.get("cut_id"))
+            if cut_id is not None:
+                selectors.add(make_scene_cut_selector(scene_id, cut_id))
+    return selectors
+
+
+def _script_readiness_issues_from_run(run_dir: Path) -> list[str]:
+    path = run_dir / "script.md"
+    if not path.exists():
+        return ["script.md:missing"]
+    _text, data = load_structured_document(path)
+    scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+    issues: list[str] = []
+    if not scenes:
+        issues.append("script.scenes:missing")
+    readiness_issues = _scene_readiness_issues(scenes)
+    issues.extend(readiness_issues)
+    if _review_status(data, "cut_blueprint_review") not in {"approved", "passed"}:
+        issues.append("script.cut_blueprint_review_approved")
+    renderable_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
+    missing_cuts = [
+        as_dotted_str(scene.get("scene_id")) or str(index + 1)
+        for index, scene in enumerate(renderable_scenes)
+        if not as_list(scene.get("cuts"))
+    ]
+    if missing_cuts:
+        issues.append("script.renderable_scenes_have_cuts")
+    missing_blueprints: list[str] = []
+    for scene in renderable_scenes:
+        scene_id = as_dotted_str(scene.get("scene_id")) or "unknown"
+        for cut in as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            if not _cut_has_blueprint(cut):
+                cut_id = as_dotted_str(cut.get("cut_id")) or "unknown"
+                missing_blueprints.append(f"scene{scene_id}_cut{cut_id}")
+    if missing_blueprints:
+        issues.append("script.cut_blueprints")
+    return issues
+
+
+def _manifest_selectors(manifest: dict[str, Any]) -> set[str]:
+    selectors: set[str] = set()
+    for selector, node in _iter_manifest_nodes_with_selectors(manifest):
+        if str(node.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        explicit = str(node.get("selector") or "").strip()
+        selectors.add(explicit or selector)
+    return selectors
+
+
+def _review_report_status(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("status:"):
+            return stripped.split(":", 1)[1].strip().strip("`\"'").lower()
+        if stripped.lower().startswith("- status:"):
+            return stripped.split(":", 1)[1].strip().strip("`\"'").lower()
+    return ""
+
+
+def _review_report_issues(run_dir: Path) -> list[str]:
+    required_reports = {
+        "scene_set_review.md": ("status",),
+        "scene_detail_review.md": ("status",),
+        "cut_blueprint_review.md": ("status",),
+        "script_review.md": ("status",),
+        "production_readiness_review.md": ("Structure", "Duration", "Quality", "Design Owner Patch Brief"),
+    }
+    issues: list[str] = []
+    for filename, markers in required_reports.items():
+        path = run_dir / filename
+        if not path.exists():
+            issues.append(f"{filename}:missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if _review_report_status(text) not in {"passed", "approved"}:
+            issues.append(f"{filename}:status")
+        for marker in markers:
+            if marker not in text:
+                issues.append(f"{filename}:missing:{marker}")
+    readiness_path = run_dir / "production_readiness_review.md"
+    if readiness_path.exists():
+        text = readiness_path.read_text(encoding="utf-8").lower()
+        forbidden = ("p700", "後続", "defer", "later", "実尺 gate")
+        if any(token in text for token in forbidden):
+            issues.append("production_readiness_review.md:duration_deferred")
+    return issues
+
+
+def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness")) -> list[str]:
+    issues: list[str] = []
+    for stage in stages:
+        round_dir = run_dir / "logs" / "eval" / stage / "round_01"
+        if not round_dir.exists():
+            issues.append(f"{stage}:round_01_missing")
+            continue
+        critic_reports = sorted(round_dir.glob("critic_*.md"))
+        if len(critic_reports) != REVIEW_LOOP_CRITIC_COUNT:
+            issues.append(f"{stage}:critics<{REVIEW_LOOP_CRITIC_COUNT}")
+        aggregate = round_dir / "aggregated_review.md"
+        if not aggregate.exists():
+            issues.append(f"{stage}:aggregated_review_missing")
+            continue
+        aggregate_text = aggregate.read_text(encoding="utf-8")
+        required_sections = ("## Blocking Findings", "## Recommended Changes", "## Rejected Suggestions", "## Round Summary")
+        for section in required_sections:
+            if section not in aggregate_text:
+                issues.append(f"{stage}:missing:{section}")
+        patch_heading = "## Design Owner Patch Brief" if stage == "production_readiness" else "## Generator Patch Brief"
+        if patch_heading not in aggregate_text:
+            issues.append(f"{stage}:missing:{patch_heading}")
     return issues
 
 
@@ -1415,9 +1640,71 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     text, data = load_structured_document(path)
     body_text = flatten_without_keys(data, excluded={"scene_contract", "review_contract", "evaluation_contract"}) or text
     _append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
-    manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
+    raw_manifest_phase = data.get("manifest_phase")
+    manifest_phase = str(raw_manifest_phase or "production").strip().lower()
     add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
     _manifest_checks(checks, body_text, data, profile=profile, flow=flow, path_label="manifest")
+    if flow == "immersive":
+        add_check(
+            checks,
+            "p400.skeleton_manifest_phase",
+            non_empty(raw_manifest_phase) and manifest_phase in {"skeleton", "production"},
+            f"p400 manifest explicitly declares skeleton or promoted production phase (got {str(raw_manifest_phase or '').strip() or '(unset)'})",
+            kind="rubric",
+        )
+        target_seconds, actual_seconds, cut_count = _manifest_duration_summary(data)
+        add_check(
+            checks,
+            "p400.target_duration_range",
+            300 <= target_seconds <= 600,
+            f"p400 target duration is 5-10 minutes (got {target_seconds:.0f}s)",
+            kind="rubric",
+        )
+        add_check(
+            checks,
+            "p400.duration_coverage",
+            bool(target_seconds) and actual_seconds >= target_seconds * 0.9,
+            f"p400 cut durations cover at least 90% of target ({actual_seconds:.0f}/{target_seconds:.0f}s across {cut_count} cuts)",
+            kind="rubric",
+        )
+        script_selectors = _script_selectors_from_run(run_dir)
+        manifest_selectors = _manifest_selectors(data)
+        selector_mismatch = sorted((script_selectors - manifest_selectors) | (manifest_selectors - script_selectors))
+        script_readiness_issues = _script_readiness_issues_from_run(run_dir)
+        add_check(
+            checks,
+            "p400.script_readiness_contract",
+            not script_readiness_issues,
+            "p400 script scene readiness contract is satisfied before downstream stages"
+            + (f" (issues: {', '.join(script_readiness_issues[:8])})" if script_readiness_issues else ""),
+            kind="rubric",
+        )
+        add_check(
+            checks,
+            "p400.script_manifest_selector_match",
+            bool(script_selectors) and not selector_mismatch,
+            "p450 manifest selectors correspond exactly to script.md scene/cut selectors"
+            + (f" (mismatch: {', '.join(selector_mismatch[:8])})" if selector_mismatch else ""),
+            kind="rubric",
+        )
+        review_issues = _review_report_issues(run_dir)
+        add_check(
+            checks,
+            "p400.review_report_integrity",
+            not review_issues,
+            "p400 review reports have required passed status, p435 council sections, and no duration deferral"
+            + (f" (issues: {', '.join(review_issues[:8])})" if review_issues else ""),
+            kind="rubric",
+        )
+        loop_issues = _review_loop_integrity_issues(run_dir)
+        add_check(
+            checks,
+            "p400.review_loop_integrity",
+            not loop_issues,
+            "p400 review loops include five critic reports, aggregate report, and required patch brief sections"
+            + (f" (issues: {', '.join(loop_issues[:8])})" if loop_issues else ""),
+            kind="rubric",
+        )
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
     reveal_constraints = _load_script_reveal_constraints(run_dir)
@@ -1483,6 +1770,11 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     rubric_scores = _manifest_rubric(nodes, body_text)
     _append_rubric_findings(checks=checks, stage="manifest", rubric_scores=rubric_scores)
     updates["eval.manifest.score"] = f"{score_from_checks(checks):.4f}"
+    if flow == "immersive":
+        p400_gate_checks = [check for check in checks if check["id"] in P400_READINESS_CHECK_IDS or check["id"].startswith("p400.")]
+        p400_ready = bool(p400_gate_checks) and all(check["passed"] for check in p400_gate_checks)
+        updates["eval.p400_readiness.status"] = "approved" if p400_ready else "changes_requested"
+        updates["eval.p400_readiness.reason_keys"] = ",".join(check["id"] for check in p400_gate_checks if not check["passed"])
     return make_stage("manifest", path.name, checks, rubric_scores=rubric_scores), updates
 
 

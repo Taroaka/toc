@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import re
 import subprocess
 import sys
 import unittest
@@ -16,6 +17,98 @@ SPEC = importlib.util.spec_from_file_location("verify_pipeline", VERIFY_SCRIPT_P
 assert SPEC is not None and SPEC.loader is not None
 VERIFY_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY_MODULE)
+
+
+def _write_photo_like_test_png(path: Path, *, width: int = 320, height: int = 180) -> None:
+    import math
+
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (width, height))
+    pixels = [
+        (
+            max(0, min(255, int(80 + 50 * math.sin(x / 13) + 30 * math.sin((x + y) / 21) + y * 0.4) + ((x * 17 + y * 31) % 23) - 11)),
+            max(0, min(255, int(90 + 40 * math.sin(y / 9) + 20 * math.cos(x / 17) + x * 0.1) + ((x * 17 + y * 31) % 23) - 11)),
+            max(0, min(255, int(100 + 50 * math.cos((x - y) / 19) + 30 * (1 - y / height)) + ((x * 17 + y * 31) % 23) - 11)),
+        )
+        for y in range(height)
+        for x in range(width)
+    ]
+    image.putdata(pixels)
+    draw = ImageDraw.Draw(image, "RGBA")
+    for index in range(20):
+        x = (index * 37) % width
+        y = (index * 23) % height
+        draw.rectangle(
+            (x, y, min(width, x + 30 + (index % 5) * 8), min(height, y + 20 + (index % 7) * 5)),
+            fill=(80 + index * 5, 60 + index * 3, 50 + index * 2, 90),
+        )
+    for index in range(8):
+        x = (index * 53) % width
+        y = (index * 31) % height
+        draw.ellipse((x, y, min(width, x + 25), min(height, y + 40)), fill=(180, 160, 130, 120))
+    image.save(path)
+
+
+def _write_vector_like_test_png(path: Path, *, width: int = 768, height: int = 384) -> None:
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (width, height), (236, 231, 222))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, height * 2 // 3, width, height), fill=(96, 80, 68))
+    draw.ellipse((width // 3, height // 8, width * 2 // 3, height * 5 // 6), fill=(64, 88, 104))
+    draw.rectangle((width * 7 // 16, height // 2, width * 9 // 16, height * 5 // 6), fill=(220, 220, 214))
+    image.save(path)
+
+
+def _write_noise_masked_vector_like_test_png(path: Path, *, width: int = 1280, height: int = 720) -> None:
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (width, height), (54, 48, 42))
+    pixels = []
+    for y in range(height):
+        for x in range(width):
+            noise = ((x * 37 + y * 53) % 85) - 42
+            pixels.append(
+                (
+                    max(0, min(255, 54 + noise)),
+                    max(0, min(255, 48 + noise)),
+                    max(0, min(255, 42 + noise)),
+                )
+            )
+    image.putdata(pixels)
+    draw = ImageDraw.Draw(image, "RGBA")
+    for x in range(-200, width + 200, 320):
+        draw.line((x, height, x + 480, 0), fill=(190, 186, 170, 95), width=8)
+    for y in range(80, height, 95):
+        draw.line((0, y, width, y), fill=(160, 150, 132, 70), width=2)
+    draw.ellipse((width // 3, height // 4, width // 3 + 70, height // 4 + 70), fill=(190, 187, 172, 230))
+    draw.rectangle((width // 3 - 30, height // 4 + 65, width // 3 + 100, height // 2 + 140), fill=(170, 168, 150, 220))
+    draw.line((width // 3 - 25, height // 2, width // 3 - 90, height // 2 + 90), fill=(210, 205, 190, 240), width=10)
+    draw.line((width // 3 + 95, height // 2, width // 3 + 160, height // 2 + 90), fill=(210, 205, 190, 240), width=10)
+    draw.line((width // 3 + 5, height // 2 + 140, width // 3 - 25, height // 2 + 230), fill=(28, 26, 24, 230), width=10)
+    draw.line((width // 3 + 70, height // 2 + 140, width // 3 + 110, height // 2 + 230), fill=(28, 26, 24, 230), width=10)
+    image.save(path)
+
+
+def _write_detailed_cel_vector_like_test_png(path: Path, *, width: int = 1280, height: int = 720) -> None:
+    from PIL import Image, ImageDraw
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (width, height), (96, 125, 150))
+    draw = ImageDraw.Draw(image)
+    for y in range(height):
+        draw.line((0, y, width, y), fill=(80 + y // 12, 110 + y // 18, 145 + y // 20))
+    draw.rectangle((0, height * 2 // 3, width, height), fill=(70, 95, 80))
+    draw.polygon([(420, 170), (550, 120), (690, 190), (650, 430), (455, 430)], fill=(210, 195, 160), outline=(25, 25, 25))
+    draw.ellipse((490, 80, 610, 205), fill=(235, 190, 160), outline=(20, 20, 20), width=5)
+    draw.rectangle((450, 420, 510, 610), fill=(70, 55, 45), outline=(20, 20, 20), width=5)
+    draw.rectangle((600, 420, 665, 610), fill=(70, 55, 45), outline=(20, 20, 20), width=5)
+    draw.polygon([(210, 310), (330, 230), (430, 330), (350, 390)], fill=(180, 170, 120), outline=(30, 30, 30))
+    image.save(path)
 
 
 def _good_story_yaml(topic: str = "桃太郎", scene_count: int = 20) -> str:
@@ -223,9 +316,10 @@ def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
             "review.image.status": "approved",
             "review.narration.status": "approved",
             "review.duration_fit.status": "passed",
+            "eval.p400_readiness.status": "approved",
         },
     )
-    for stage in ["research", "story", "script", "asset", "scene_implementation", "narration", "video_generation"]:
+    for stage in ["research", "story", "script", "manifest", "asset", "scene_implementation", "narration", "video_generation"]:
         result = _run_grounding(run_dir, stage, flow=flow)
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
@@ -270,7 +364,9 @@ asset_inventory:
     - item_id: "momotaro_seed"
       category: "character"
       source_script_selectors: ["scene10_cut1"]
+      story_purpose: "主人公の基準参照"
       reusable_reason: "主人公の visual identity を固定する"
+      recommended_asset_type: "character_reference"
 ```
 """
 
@@ -330,13 +426,15 @@ def _write_downstream_generation_artifacts(run_dir: Path) -> None:
 
 ## momotaro_seed
 
-- tool: `google_nanobanana_2`
+- tool: `codex_builtin_image`
 - asset_id: `momotaro_seed`
 - asset_type: `character_reference`
 - execution_lane: `bootstrap_builtin`
 - reference_count: `0`
 - review_status: `approved`
 - creation_status: `created`
+- source_script_selectors:
+  - `scene10_cut1`
 - required_views:
   - `front`
   - `side`
@@ -367,9 +465,246 @@ asset_generation_manifest:
         encoding="utf-8",
     )
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
-    (run_dir / "assets" / "characters" / "momotaro_seed.png").write_bytes(b"image")
+    _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
+
+
+def _write_image_request(run_dir: Path, *, selector: str, output: str, reference: str = "assets/characters/momotaro_seed.png") -> None:
+    (run_dir / "image_generation_requests.md").write_text(
+        f"""# Image Generation Requests
+
+## {selector}
+
+- tool: `codex_builtin_image`
+- selector: `{selector}`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `{output}`
+- references:
+  - `momotaro_seed`: `{reference}`
+
+```text
+実写映画風。人物、場所、光、衣装、背景を具体的に見せる。画面内テキストなし。
+```
+""",
+        encoding="utf-8",
+    )
+
+
+def _write_image_requests_from_manifest(run_dir: Path, *, reference: str = "assets/characters/momotaro_seed.png") -> None:
+    manifest_text = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+    outputs = re.findall(r'output:\s*"?(assets/scenes/[^"\n]+?\.png)"?\s*$', manifest_text, flags=re.MULTILINE)
+    sections = ["# Image Generation Requests", ""]
+    for index, output in enumerate(outputs, start=1):
+        selector = Path(output).stem
+        sections.extend(
+            [
+                f"## {selector}",
+                "",
+                "- tool: `codex_builtin_image`",
+                f"- selector: `{selector}`",
+                "- execution_lane: `standard`",
+                "- reference_count: `1`",
+                f"- output: `{output}`",
+                "- references:",
+                f"  - `momotaro_seed`: `{reference}`",
+                "",
+                "```text",
+                f"実写映画風。{selector} の人物、場所、光、衣装、背景を具体的に見せる。画面内テキストなし。",
+                "```",
+                "",
+            ]
+        )
+    (run_dir / "image_generation_requests.md").write_text("\n".join(sections), encoding="utf-8")
+
+
+def _write_p400_review_artifacts(run_dir: Path) -> None:
+    reports = {
+        "scene_set_review.md": "status: passed\n\nscene set approved.\n",
+        "scene_detail_review.md": "status: passed\n\nscene detail approved.\n",
+        "cut_blueprint_review.md": "status: passed\n\ncut blueprint approved.\n",
+        "script_review.md": "status: passed\n\nscript approved.\n",
+        "production_readiness_review.md": "\n".join(
+            [
+                "status: passed",
+                "",
+                "Structure: approved.",
+                "Duration: target duration is covered by production cut durations.",
+                "Quality: approved.",
+                "## Design Owner Patch Brief",
+                "",
+                "No changes.",
+            ]
+        )
+        + "\n",
+    }
+    for name, text in reports.items():
+        (run_dir / name).write_text(text, encoding="utf-8")
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
+        round_dir = run_dir / "logs" / "eval" / stage / "round_01"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(1, 6):
+            (round_dir / f"critic_{idx}.md").write_text("- status: passed\n", encoding="utf-8")
+        heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
+        (round_dir / "aggregated_review.md").write_text(
+            f"- status: passed\n\n## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n## Rejected Suggestions\n\n[]\n\n## {heading}\n\nNo changes.\n\n## Round Summary\n\npassed\n",
+            encoding="utf-8",
+        )
+
+
+def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", silent: bool = False) -> None:
+    scene_count = 10
+    cut_duration = 15
+    script_lines = [
+        "```yaml",
+        "evaluation_contract:",
+        "  target_arc: \"opening\"",
+        f"  must_cover: [\"{topic}\"]",
+        "  must_avoid: []",
+        "scene_set_review: {status: \"approved\"}",
+        "scene_detail_review: {status: \"approved\"}",
+        "cut_blueprint_review: {status: \"approved\"}",
+        "script:",
+        "  scenes:",
+    ]
+    manifest_lines = [
+        "```yaml",
+        "manifest_phase: production",
+        "video_metadata:",
+        f"  topic: \"{topic}\"",
+        "  experience: \"cinematic_story\"",
+        "  target_duration_seconds: 300",
+        "scenes:",
+    ]
+    for scene_idx in range(1, scene_count + 1):
+        terminal = scene_idx == scene_count
+        script_lines.extend(
+            [
+                f"    - scene_id: {scene_idx}",
+                "      phase: \"opening\"",
+                "      importance: \"medium\"",
+                f"      summary: \"{topic}が進む。十分な長さの本文です。十分な長さの本文です。\"",
+                "      target_duration_seconds: 30",
+                "      estimated_duration_seconds: 30",
+                ("      terminal_resolution: \"物語が締まる\"" if terminal else "      handoff_to_next_scene: \"次の場面へつながる\""),
+                "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
+                "      scene_intent:",
+                "        story_purpose: \"進行\"",
+                f"        audience_information: [\"{topic}\"]",
+                "        withheld_information: []",
+                "        reveal_constraints: []",
+                "        affect_transition: \"前進\"",
+                "        visual_value_source: \"none\"",
+                "        production_risks: []",
+                "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                "      agent_review: {status: \"passed\"}",
+                "      cuts:",
+            ]
+        )
+        manifest_lines.extend([f"  - scene_id: {scene_idx}", "    cuts:"])
+        for cut_idx in range(1, 3):
+            selector = f"scene{scene_idx}_cut{cut_idx}"
+            image_output = f"assets/scenes/{selector}.png"
+            audio_output = f"assets/audio/{selector}.mp3"
+            script_lines.extend(
+                [
+                    f"        - cut_id: {cut_idx}",
+                    f"          selector: \"{selector}\"",
+                    "          cut_blueprint:",
+                    "            cut_role: \"main\"",
+                    "            duration_intent: \"standard\"",
+                    f"            target_beat: \"{topic}\"",
+                    f"            must_show: [\"{topic}\"]",
+                    "            must_avoid: []",
+                    f"            done_when: [\"{topic}が見える\"]",
+                    f"            visual_beat: \"{topic}が進む\"",
+                    "            narration_role: \"setup\"",
+                    "            asset_dependency_hint: {character_ids: [\"momotaro_seed\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                ]
+            )
+            narration = "tool: \"silent\"\n            text: \"\"\n            tts_text: \"\"\n            silence_contract: {intentional: true, kind: \"visual_value_hold\", confirmed_by_human: true, reason: \"映像で見せる\"}" if silent and scene_idx == 1 and cut_idx == 1 else f"tool: \"elevenlabs\"\n            text: \"{topic}が進む。\""
+            manifest_lines.extend(
+                [
+                    f"      - cut_id: {cut_idx}",
+                    f"        selector: \"{selector}\"",
+                    f"        scene_contract: {{target_beat: \"{topic}\", must_show: [\"{topic}\"], must_avoid: [], done_when: [\"{topic}が見える\"]}}",
+                    "        image_generation:",
+                    f"          prompt: \"画面内テキストなし。{topic}が朝の石畳の道を進む。手前に草の露、横に古い木柵、奥に低い山並み、斜めから入る柔らかな朝日、衣服の布目、足元の影、旅立ち前の緊張した表情が実写映画風に具体的に見える。\"",
+                    "          character_ids: [\"momotaro_seed\"]",
+                    "          object_ids: []",
+                    f"          output: \"{image_output}\"",
+                    "        video_generation:",
+                    f"          duration_seconds: {cut_duration}",
+                    "          motion_prompt: \"前へ進む。\"",
+                    "        audio:",
+                    "          narration:",
+                    *[f"            {line.strip()}" for line in narration.splitlines()],
+                    f"            output: \"{audio_output}\"",
+                ]
+            )
+            _write_photo_like_test_png(run_dir / image_output)
+            (run_dir / audio_output).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / audio_output).write_bytes(b"audio")
+    script_lines.extend(["```", ""])
+    manifest_lines.extend(["```", ""])
+    (run_dir / "script.md").write_text("\n".join(script_lines), encoding="utf-8")
+    (run_dir / "video_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+    _write_p400_review_artifacts(run_dir)
+
+
+def _write_basic_image_stage_artifacts(run_dir: Path, *, output: str = "assets/scenes/scene10.png", reference: str = "assets/characters/momotaro_seed.png") -> None:
+    (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=IMAGE\n---\n", encoding="utf-8")
+    _write_ready_grounding_artifacts(run_dir, "scene_implementation")
+    (run_dir / "video_manifest.md").write_text(
+        f"""```yaml
+video_metadata:
+  topic: "桃太郎"
+  experience: "cinematic_story"
+scenes:
+  - scene_id: 10
+    cuts:
+      - cut_id: 1
+        cut_role: "main"
+        image_generation:
+          tool: "codex_builtin_image"
+          character_ids: ["momotaro_seed"]
+          object_ids: []
+          prompt: |
+            実写映画風の森の道。画面内テキストなし。
+          output: "{output}"
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 8
+          output: "assets/scenes/scene10.mp4"
+        audio:
+          narration:
+            text: "桃太郎が歩く。"
+            tool: "elevenlabs"
+            output: "assets/audio/scene10.mp3"
+```""",
+        encoding="utf-8",
+    )
+    (run_dir / "image_generation_requests.md").write_text(
+        f"""# Image Generation Requests
+
+## scene10_cut1
+
+- tool: `codex_builtin_image`
+- selector: `scene10_cut1`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `{output}`
+- references:
+  - `momotaro_seed`: `{reference}`
+
+```text
+実写映画風。桃太郎が森の道を歩く一枚目のフレーム。画面内テキストなし。
+```
+""",
+        encoding="utf-8",
+    )
 
 
 class TestVerifyPipeline(unittest.TestCase):
@@ -554,11 +889,180 @@ class TestVerifyPipeline(unittest.TestCase):
 
             self.assertTrue(stage["passed"])
             self.assertTrue(checks["asset.asset_inventory"])
+            self.assertTrue(checks["asset.inventory_schema"])
+            self.assertTrue(checks["asset.inventory_no_todo"])
             self.assertTrue(checks["asset.plan_structured"])
             self.assertTrue(checks["asset.character_three_views"])
             self.assertTrue(checks["asset.review_approved"])
             self.assertTrue(checks["asset.request_metadata"])
             self.assertTrue(checks["asset.request_prompt_no_production_meta"])
+            self.assertTrue(checks["asset.visual_not_vector_like"])
+
+    def test_check_asset_rejects_vector_like_generated_asset_output(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0507"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            _write_vector_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.visual_not_vector_like"])
+            self.assertIn("asset_visual_quality_issues", stage["details"])
+            self.assertIn("vector-like", "\n".join(stage["details"]["asset_visual_quality_issues"]))
+
+    def test_check_image_accepts_photo_like_scene_and_reference(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0600"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["image.visual_not_vector_like"])
+            self.assertTrue(checks["image.references_not_vector_like"])
+            self.assertTrue(checks["image.request_lane_consistency"])
+            self.assertNotIn("image_regeneration_plan", stage["details"])
+
+    def test_check_image_rejects_no_reference_standard_lane(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0603"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            request_path = run_dir / "image_generation_requests.md"
+            request_text = request_path.read_text(encoding="utf-8")
+            request_text = request_text.replace("- reference_count: `1`", "- reference_count: `0`")
+            request_text = request_text.replace("- references:\n  - `momotaro_seed`: `assets/characters/momotaro_seed.png`", "- references: `[]`")
+            request_path.write_text(request_text, encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.request_lane_consistency"])
+            self.assertIn("execution_lane standard mismatches reference_count 0", "\n".join(stage["details"]["image_request_lane_failures"]))
+
+    def test_check_image_rejects_vector_like_scene_and_routes_to_p600_when_references_are_raster(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0601"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_vector_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.visual_not_vector_like"])
+            self.assertTrue(checks["image.references_not_vector_like"])
+            self.assertEqual(stage["details"]["image_regeneration_plan"][0]["action"], "regenerate_p600_scene")
+
+    def test_check_image_rejects_noise_masked_vector_like_scene(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0604"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_noise_masked_vector_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.visual_not_vector_like"])
+            self.assertTrue(checks["image.references_not_vector_like"])
+            self.assertIn("vector-like", "\n".join(stage["details"]["image_visual_quality_issues"]))
+            self.assertEqual(stage["details"]["image_regeneration_plan"][0]["action"], "regenerate_p600_scene")
+
+    def test_check_image_rejects_detailed_cel_vector_like_scene(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0605"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_detailed_cel_vector_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.visual_not_vector_like"])
+            self.assertTrue(checks["image.references_not_vector_like"])
+            self.assertIn("vector-like", "\n".join(stage["details"]["image_visual_quality_issues"]))
+
+    def test_check_image_rejects_uninspected_manifest_output(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0606"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir, output="assets/scenes/manifest_only.png")
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8").replace("assets/scenes/manifest_only.png", "assets/scenes/request_only.png"),
+                encoding="utf-8",
+            )
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "manifest_only.png")
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "request_only.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.visual_outputs_inspected"])
+            self.assertFalse(checks["image.visual_not_vector_like"])
+            self.assertIn("assets/scenes/manifest_only.png", stage["details"]["uninspected_image_outputs"])
+
+    def test_check_asset_rejects_noise_masked_vector_like_asset(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0508"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            _write_noise_masked_vector_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.visual_not_vector_like"])
+            self.assertIn("vector-like", "\n".join(stage["details"]["asset_visual_quality_issues"]))
+
+    def test_check_image_rejects_vector_like_reference_and_routes_to_p500(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0602"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_vector_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_vector_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.visual_not_vector_like"])
+            self.assertFalse(checks["image.references_not_vector_like"])
+            self.assertEqual(stage["details"]["image_regeneration_plan"][0]["action"], "regenerate_p500_reference_first")
+            self.assertIn("assets/characters/momotaro_seed.png", stage["details"]["image_regeneration_plan"][0]["vector_like_references"])
 
     def test_check_asset_rejects_incomplete_asset_contract(self) -> None:
         import tempfile
@@ -613,11 +1117,104 @@ assets:
 
             self.assertFalse(stage["passed"])
             self.assertFalse(checks["asset.asset_inventory"])
+            self.assertFalse(checks["asset.inventory_schema"])
             self.assertFalse(checks["asset.character_three_views"])
             self.assertFalse(checks["asset.review_approved"])
             self.assertFalse(checks["asset.output_files"])
             self.assertFalse(checks["asset.request_metadata"])
             self.assertFalse(checks["asset.request_prompt_no_production_meta"])
+
+    def test_check_asset_accepts_review_status_dotted_request_metadata(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0502"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            request_path = run_dir / "asset_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8").replace("- review_status: `approved`", "- review.status: `approved`"),
+                encoding="utf-8",
+            )
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["asset.request_metadata"], msg=stage["details"])
+
+    def test_check_asset_accepts_selector_based_manifest_item(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0506"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            manifest_path = run_dir / "asset_generation_manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace('asset_id: "momotaro_seed"', 'selector: "momotaro_seed"'),
+                encoding="utf-8",
+            )
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["asset.manifest_items"], msg=stage["details"])
+
+    def test_check_asset_rejects_inventory_template_placeholders(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0503"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            (run_dir / "asset_inventory.md").write_text(_good_asset_inventory_yaml().replace("主人公の基準参照", "REPLACE_ME: purpose"), encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.inventory_no_todo"])
+
+    def test_check_asset_rejects_inventory_missing_story_purpose(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0504"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            (run_dir / "asset_inventory.md").write_text(_good_asset_inventory_yaml().replace('      story_purpose: "主人公の基準参照"\n', ""), encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.inventory_schema"])
+
+    def test_check_asset_rejects_no_reference_standard_lane(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0505"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            plan_path = run_dir / "asset_plan.md"
+            plan_path.write_text(plan_path.read_text(encoding="utf-8").replace('execution_lane: "bootstrap_builtin"', 'execution_lane: "standard"'), encoding="utf-8")
+            request_path = run_dir / "asset_generation_requests.md"
+            request_path.write_text(request_path.read_text(encoding="utf-8").replace("- execution_lane: `bootstrap_builtin`", "- execution_lane: `standard`"), encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.lane_consistency"])
+            self.assertFalse(checks["asset.request_metadata"])
 
     def test_verify_pipeline_p300_accepts_major_scene_visual_value_coverage(self) -> None:
         import tempfile
@@ -888,7 +1485,7 @@ assets:
                         "      - cut_id: 1",
                         "        cut_role: \"main\"",
                         "        image_generation:",
-                        "          tool: \"google_nanobanana_2\"",
+                        "          tool: \"codex_builtin_image\"",
                         "          character_ids: []",
                         "          object_ids: []",
                         "          prompt: |",
@@ -909,8 +1506,10 @@ assets:
                 ),
                 encoding="utf-8",
             )
+            _write_verify_ready_p400_pair(run_dir, topic="桃太郎")
             _write_downstream_generation_artifacts(run_dir)
-            (run_dir / "assets" / "scenes" / "scene10.png").write_bytes(b"image")
+            _write_image_requests_from_manifest(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
             (run_dir / "assets" / "audio" / "scene10.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_p300_grounding(run_dir, flow="immersive")
@@ -1060,7 +1659,7 @@ assets:
                         "      - cut_id: 1",
                         "        cut_role: \"sub\"",
                         "        image_generation:",
-                        "          tool: \"google_nanobanana_2\"",
+                        "          tool: \"codex_builtin_image\"",
                         "          character_ids: []",
                         "          object_ids: [\"ryugu_palace\"]",
                         "          prompt: |",
@@ -1087,8 +1686,10 @@ assets:
                 ),
                 encoding="utf-8",
             )
+            _write_verify_ready_p400_pair(run_dir, topic="浦島太郎", silent=True)
             _write_downstream_generation_artifacts(run_dir)
-            (run_dir / "assets" / "scenes" / "scene40_1.png").write_bytes(b"image")
+            _write_image_requests_from_manifest(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene40_1.png")
             (run_dir / "assets" / "audio" / "scene40_1.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_p300_grounding(run_dir, flow="immersive")
@@ -1154,7 +1755,7 @@ assets:
                         "      - cut_id: 1",
                         "        cut_role: \"sub\"",
                         "        image_generation:",
-                        "          tool: \"google_nanobanana_2\"",
+                        "          tool: \"codex_builtin_image\"",
                         "          character_ids: []",
                         "          object_ids: [\"ryugu_palace\"]",
                         "          prompt: |",
@@ -1222,9 +1823,10 @@ assets:
             (run_dir / "research.md").write_text("```yaml\ntopic: \"桃太郎\"\nstory_baseline:\n  canonical_synopsis:\n    one_liner: \"桃太郎\"\n    short_summary: \"summary\"\n    beat_sheet:\n      - beat: \"b1\"\n        scene_ids: [1]\n        confidence: 0.9\n        sources: [\"S1\"]\nscene_plan:\n  min_scene_count: 1\n  scenes:\n    - scene_id: 1\n      role: \"opening\"\n      beat_summary: \"b\"\n      desired_emotion: \"c\"\n      key_visuals: [\"v\"]\n      key_dialogue_or_voiceover: \"k\"\n      continuity_requirements:\n        from_prev: \"\"\n        to_next: \"\"\nsources:\n  - source_id: \"S1\"\n    title: \"s\"\n    url: \"https://example.com\"\n    type: \"primary\"\n    reliability: \"high\"\n    accessed_at: \"2099-01-01T00:00:00+09:00\"\n    notes: \"\"\nconflicts: []\nmetadata:\n  confidence_score: 0.9\n```\n", encoding="utf-8")
             (run_dir / "story.md").write_text(_good_story_yaml("桃太郎"), encoding="utf-8")
             (run_dir / "script.md").write_text("# Script\n\n十分な長さの script 本文です。十分な長さの script 本文です。\n", encoding="utf-8")
-            (run_dir / "video_manifest.md").write_text("```yaml\nvideo_metadata:\n  topic: \"桃太郎\"\n  experience: \"cinematic_story\"\nscenes:\n  - scene_id: 1\n    cuts:\n      - cut_id: 1\n        cut_role: \"main\"\n        image_generation:\n          tool: \"google_nanobanana_2\"\n          character_ids: []\n          object_ids: []\n          prompt: |\n            画面内テキストなし。\n          output: \"assets/scenes/scene01.png\"\n        video_generation:\n          tool: \"kling_3_0\"\n          duration_seconds: 5\n          output: \"assets/scenes/scene01.mp4\"\n        audio:\n          narration:\n            text: \"桃太郎が歩く。\"\n            tool: \"elevenlabs\"\n            output: \"assets/audio/scene01.mp3\"\n```\n", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text("```yaml\nvideo_metadata:\n  topic: \"桃太郎\"\n  experience: \"cinematic_story\"\nscenes:\n  - scene_id: 1\n    cuts:\n      - cut_id: 1\n        cut_role: \"main\"\n        image_generation:\n          tool: \"codex_builtin_image\"\n          character_ids: []\n          object_ids: []\n          prompt: |\n            画面内テキストなし。\n          output: \"assets/scenes/scene01.png\"\n        video_generation:\n          tool: \"kling_3_0\"\n          duration_seconds: 5\n          output: \"assets/scenes/scene01.mp4\"\n        audio:\n          narration:\n            text: \"桃太郎が歩く。\"\n            tool: \"elevenlabs\"\n            output: \"assets/audio/scene01.mp3\"\n```\n", encoding="utf-8")
             _write_downstream_generation_artifacts(run_dir)
-            (run_dir / "assets" / "scenes" / "scene01.png").write_bytes(b"image")
+            _write_image_request(run_dir, selector="scene01_cut1", output="assets/scenes/scene01.png")
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene01.png")
             (run_dir / "assets" / "audio" / "scene01.mp3").write_bytes(b"audio")
             (run_dir / "video.mp4").write_bytes(b"placeholder")
             _resolve_ready_grounding(run_dir, flow="immersive")

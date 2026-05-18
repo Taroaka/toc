@@ -11,6 +11,24 @@ MAX_REVIEW_LOOP_ROUNDS = 5
 REVIEW_LOOP_CRITIC_COUNT = 5
 
 
+REVIEW_CAUSAL_ANALYSIS_GUIDANCE = dedent(
+    """
+    Review artifact quality rule:
+    - Do not stop at surface symptoms such as "missing", "weak", "unclear", or
+      "not enough detail". Explain the essential failure cause.
+    - Every blocking finding must identify root_cause: the artifact design,
+      dependency, state mismatch, missing contract, or prompt/manifest structure
+      that caused the failure.
+    - When the fix is clear, include fix_direction with the target file/section,
+      the concrete change, and the acceptance condition for the next review.
+    - If the fix is not yet clear, say what evidence must be gathered next
+      instead of inventing a patch.
+    - Prefer causal chains over restating failed checks: "because X is absent,
+      Y cannot be generated/reviewed safely, causing Z downstream".
+    """
+).strip()
+
+
 @dataclass(frozen=True)
 class ReviewLoopSpec:
     stage: str
@@ -96,7 +114,7 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
         slot_codes=("p540",),
         title="Asset Eval/Improve Loop",
         final_report="asset_review.md",
-        source_artifacts=("story.md", "script.md", "video_manifest.md", "asset_plan.md"),
+        source_artifacts=("story.md", "script.md", "video_manifest.md", "asset_inventory.md", "asset_plan.md"),
     ),
     "scene_implementation_hard": ReviewLoopSpec(
         stage="scene_implementation_hard",
@@ -196,13 +214,13 @@ def review_guidance_for_stage(stage: str) -> str:
         return dedent(
             """
             Stage-specific review criteria:
-            - Treat p520 coverage as the first gate: verify that the story's characters, story-specific items, used locations, setpieces, and reusable stills are represented in asset_plan.md.
+            - Treat p520 coverage as the first gate: verify that the story's characters, story-specific items, used locations, setpieces, and reusable stills are represented in asset_inventory.md, then carried into p530 asset_plan.md.
             - Check that principal visual subjects needed by later scenes are not missing: protagonist variants, romantic/decision counterpart, antagonist/authority figures, guide/helper figures, recurring props, setpieces, and recurring locations.
             - For character_reference assets, require full-body front / side / back three-view planning. For character variants, verify they derive from the main character reference instead of becoming a new unrelated design.
-            - Verify source_script_selectors[] are only usage locations and generation_plan.reference_inputs[] are only actual visual references.
-            - Verify no-reference asset seeds stay on execution_lane=bootstrap_builtin and reference-driven or derived assets stay on execution_lane=standard.
-            - Check p550 readiness: each planned request must have a materializable canonical output path, reference count/input consistency, generation/review status readiness, and enough metadata for a human to know what will be generated, with which references, and where it will be saved.
-            - Check p550 prompt readiness: each planned request must be writable as a concrete visible prompt, not production metadata such as `物語「<topic>」の scene10`, `scene10_cut01`, `この画像は物語「<topic>」の一場面`, or `後続 scene`.
+            - Hard review: verify source_script_selectors[] are only usage locations, generation_plan.reference_inputs[] are only actual visual references, output paths are canonical, review/status fields are present, all image requests use tool=codex_builtin_image, and no-reference asset seeds stay on execution_lane=bootstrap_builtin while reference-driven or derived assets stay on execution_lane=standard.
+            - Hard review: check p550 readiness for each planned request: materializable canonical output path, reference count/input consistency, generation/review status readiness, and enough metadata for a human to know what will be generated, with which references, and where it will be saved.
+            - Judgment review: check whether the planned visual identities are concrete enough to preserve continuity across later scenes, whether variants remain recognizably derived from their base asset, and whether fixed details / must_avoid constraints are useful for p600 prompt authors.
+            - Judgment review: check p550 prompt readiness: each planned request must be writable as a concrete visible prompt, not production metadata such as `物語「<topic>」の scene10`, `scene10_cut01`, `この画像は物語「<topic>」の一場面`, or `後続 scene`.
             - If findings remain, return changes_requested with concrete missing assets or contract fixes so main can patch asset_plan.md and run the next review round.
             """
         ).strip()
@@ -226,6 +244,7 @@ def review_guidance_for_stage(stage: str) -> str:
             - This p435 council runs after p430 script review and before p440 human changes / narration sync.
             - Structure Auditor: inspect story structure, scene order, causality, setup/payoff, scene-to-scene flow, and whether the script skeleton breaks before production.
             - Duration Auditor: estimate runtime from scene and cut counts for a 5-10 minute video, using one cut as roughly 4-15 seconds; identify undersized scenes or missing cuts.
+            - Duration Auditor must compare `video_manifest.md.video_metadata.target_duration_seconds` with the sum of production cut durations. Do not defer this judgment to p700.
             - Quality Auditor: propose quality improvements, new scenes, new cuts, thicker final cuts, clearer visuals, and stronger production handoffs when duration or structure findings reveal weak spots.
             - Orchestrator: chair the discussion, reconcile Structure/Duration/Quality opinions, and return one prioritized recommendation set.
             - The Orchestrator and all auditors are advisory only. They must not edit canonical artifacts or downstream design artifacts.
@@ -285,13 +304,14 @@ def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic
         - `{readset_path.resolve()}`
 
         Work independently. Do not read other critic reports and do not edit files.
+        {REVIEW_CAUSAL_ANALYSIS_GUIDANCE}
         {guidance_block}
         Return markdown for `{own_report}` with:
         - status: passed|changes_requested
-        - blocking_findings[]
-        - recommended_changes[]
+        - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, fix_direction, acceptance_condition
+        - recommended_changes[]: each item must include cause, fix_direction, acceptance_condition
         - rejected_suggestions[]
-        - generator_patch_brief
+        - generator_patch_brief: target files/sections, concrete edits, reason, acceptance condition
         - round_summary
         """
     ).strip()
@@ -331,13 +351,16 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
 
         Do not edit source artifacts. Consolidate duplicate findings, resolve contradictory
         {handoff}
+        Apply the same causal-analysis rule as the critics: every adopted blocker
+        must name the essential cause, not only the failed check, and every clear
+        fix must include a concrete fix plan and acceptance condition.
 
         Write markdown suitable for `{aggregate_path}` and final summary `{final_path}` with:
         - status: passed|changes_requested
-        - blocking_findings[]
-        - recommended_changes[]
+        - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
+        - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
         - rejected_suggestions[]
-        - {brief_label}
+        - {brief_label}: target files/sections, concrete edits, reason/root cause, acceptance condition
         - round_summary
         """
     ).strip()
@@ -372,11 +395,11 @@ def render_aggregated_review(
         "",
         "## Blocking Findings",
         "",
-        "Aggregator must consolidate critic blockers here. Use an empty list only when status is passed.",
+        "Aggregator must consolidate critic blockers here. Each adopted blocker must include evidence, root cause, downstream impact, fix plan, and acceptance condition. Use an empty list only when status is passed.",
         "",
         "## Recommended Changes",
         "",
-        "Aggregator must list non-blocking quality improvements here.",
+        "Aggregator must list non-blocking quality improvements here, including cause, fix direction, and acceptance condition when the fix is clear.",
         "",
         "## Rejected Suggestions",
         "",
@@ -384,11 +407,11 @@ def render_aggregated_review(
         "",
         f"## {patch_brief_heading}",
         "",
-        patch_brief_text,
+        f"{patch_brief_text} Include target files/sections, concrete edits, root cause being fixed, and acceptance condition.",
         "",
         "## Round Summary",
         "",
-        "Aggregator must summarize what changed or why the loop can stop.",
+        "Aggregator must summarize the essential causes found in this round, which fixes are clear, and why the loop can stop or must continue.",
     ]
     for idx, report in enumerate(critic_reports, start=1):
         sections.extend(["", f"## Critic {idx} Input", "", report.strip()])

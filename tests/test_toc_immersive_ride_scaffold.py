@@ -85,6 +85,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "20990101_0000",
                     "--base",
                     str(base),
+                    "--stage",
+                    "p400",
                     "--experience",
                     "cinematic_story",
                     "--force",
@@ -112,22 +114,20 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "asset.json").exists())
+            self.assertFalse((run_dir / "logs" / "grounding" / "asset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.readset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "script.audit.json").exists())
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
-            self.assertIn("status=DONE", state)
-            self.assertIn("runtime.stage=immersive_ride_scaffolded", state)
+            self.assertIn("status=P400", state)
+            self.assertIn("runtime.stage=immersive_ride_scaffolded_p450", state)
             parsed_state = parse_state(run_dir / "state.txt")
-            self.assertEqual(parsed_state["stage.asset.status"], "awaiting_approval")
-            self.assertEqual(parsed_state["review.asset.status"], "pending")
-            self.assertEqual(parsed_state["slot.p510.status"], "pending")
-            self.assertEqual(parsed_state["slot.p530.status"], "pending")
+            self.assertEqual(parsed_state["stage.script.status"], "awaiting_approval")
+            self.assertEqual(parsed_state["slot.p450.status"], "pending")
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p500_section = markdown_section(index_text, "### p500 Asset Stage")
-            p510_section = markdown_subsection(index_text, "#### p510 Asset Grounding")
-            self.assertIn("- current_state: `awaiting_approval (asset)`", p500_section)
-            self.assertIn("- status: `pending`", p510_section)
+            p400_section = markdown_section(index_text, "### p400 Script / Narration Text / Human Changes")
+            p450_section = markdown_subsection(index_text, "#### p450 Skeleton Manifest Materialization")
+            self.assertIn("- current_state: `awaiting_approval (script)`", p400_section)
+            self.assertIn("- status: `pending`", p450_section)
             manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             self.assertIn("manifest_phase: skeleton", manifest)
             self.assertIn('reference_id: "protagonist_front_ref"', manifest)
@@ -151,6 +151,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "20990101_0000",
                     "--base",
                     str(base),
+                    "--stage",
+                    "p400",
                     "--experience",
                     "cloud_island_walk",
                     "--force",
@@ -509,14 +511,14 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertIn("runtime.stage_target=p400", state)
             self.assertIn("runtime.stop_slot=p450", state)
 
-    def test_scaffold_p500_records_pending_asset_state(self) -> None:
+    def test_scaffold_p500_requires_p400_readiness_gate(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
             base = Path(td) / "out"
             base.mkdir(parents=True, exist_ok=True)
 
-            subprocess.run(
+            result = subprocess.run(
                 [
                     sys.executable,
                     "scripts/toc-immersive-ride.py",
@@ -532,28 +534,17 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                     "--review-policy",
                     "drafts",
                 ],
-                check=True,
                 capture_output=True,
                 text=True,
             )
 
             run_dir = base / "テスト_トピック_20990101_0000"
-            self.assertTrue((run_dir / "logs" / "grounding" / "asset.json").exists())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((run_dir / "logs" / "grounding" / "asset.json").exists())
             self.assertTrue((run_dir / "logs" / "eval" / "production_readiness" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
+            self.assertFalse((run_dir / "asset_plan.md").exists())
             state = parse_state(run_dir / "state.txt")
-            self.assertEqual(state["runtime.stage_target"], "p500")
-            self.assertEqual(state["runtime.stop_slot"], "p570")
-            self.assertEqual(state["stage.asset.status"], "awaiting_approval")
-            self.assertEqual(state["review.asset.status"], "pending")
-            self.assertEqual(state["slot.p510.status"], "pending")
-            self.assertEqual(state["slot.p530.status"], "pending")
-            index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p500_section = markdown_section(index_text, "### p500 Asset Stage")
-            p510_section = markdown_subsection(index_text, "#### p510 Asset Grounding")
-            p530_section = markdown_subsection(index_text, "#### p530 Asset Plan Authoring")
-            self.assertIn("- current_state: `awaiting_approval (asset)`", p500_section)
-            self.assertIn("- status: `pending`", p510_section)
-            self.assertIn("- status: `pending`", p530_section)
+            self.assertEqual(state["eval.p400_readiness.status"], "changes_requested")
 
     def test_later_coarse_targets_record_matching_handoff_state(self) -> None:
         import tempfile
@@ -618,18 +609,19 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                         "--review-policy",
                         "drafts",
                     ],
-                    check=True,
+                    check=False,
                     capture_output=True,
                     text=True,
                 )
 
                 run_dir = base / "テスト_トピック_20990101_0000"
+                if stage == "p700":
+                    self.assertTrue((run_dir / "video_manifest.md").exists())
+                else:
+                    self.assertFalse((run_dir / expected["artifact"]).exists())
+                self.assertFalse((run_dir / "asset_plan.md").exists())
                 state = parse_state(run_dir / "state.txt")
-                for key, value in expected.items():
-                    if key == "artifact":
-                        continue
-                    self.assertEqual(state[key], value)
-                self.assertTrue((run_dir / expected["artifact"]).exists())
+                self.assertEqual(state["eval.p400_readiness.status"], "changes_requested")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: toc-p500-bootstrap-image-runner
-description: Use when this repository needs to create initial p500 assets with no existing reference images, routing only bootstrap-eligible assets through the shared built-in image generation skill.
+description: Use when this repository needs to create initial p500 assets with no existing reference images through the shared Codex built-in image generation lane.
 ---
 
 # ToC P500 Bootstrap Image Runner
@@ -39,8 +39,8 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 1. `bootstrap_builtin` is the repo's backward-compatible no-reference image lane name.
 2. In `p500`, use this skill only for asset seeds; non-`p500` no-reference image work uses `$toc-no-reference-image-runner`.
 3. Missing new metadata defaults to `standard`, not `bootstrap_builtin`.
-4. Any asset with `reference_inputs[]` must stay on the standard lane.
-5. Any asset with `derived_from_asset_id` must stay on the standard lane.
+4. Any asset with `reference_inputs[]` must stay on the standard lane, still using `tool: codex_builtin_image`.
+5. Any asset with `derived_from_asset_id` must stay on the standard lane, still using `tool: codex_builtin_image`.
 6. Bootstrap outputs are not canonical until `review.status=approved`.
 7. After approval, the selected bootstrap output may remain as the canonical asset in the workspace.
 
@@ -72,9 +72,9 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 
 ## Guardrails
 
-- Do not use this lane for `p600`.
-- Do not use this lane when a stronger reference-driven standard lane is available.
-- Do not treat built-in generation as the repo-wide default image provider.
+- Do not use this bootstrap lane for `p600`; p600 uses the normal `codex_builtin_image` reference-aware path.
+- Do not use external paid image providers for p500 assets.
+- Treat built-in generation as the repo-wide default image provider; this skill only narrows the no-reference p500 bootstrap case.
 - Do not mix bootstrap and standard assets in a single ambiguous summary; label them clearly.
 
 ## Example Uses

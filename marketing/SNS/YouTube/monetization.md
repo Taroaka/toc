@@ -77,6 +77,11 @@ Notion（無料）でOK。以下だけあれば機能する:
 - 料金表
 - 申込みフォーム（Googleフォーム）
 
+初期LP原稿:
+
+- `marketing/LP/niwakanoai-lp.md`
+- `marketing/LP/lead-form-schema.md`
+
 ---
 
 ## 4. 料金プラン（初期版）

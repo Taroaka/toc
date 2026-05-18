@@ -19,7 +19,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | Storage | Filesystem object store + PostgreSQL metadata DB | Durable metadata |
 | Job queue | In-process async queue | Simple and sufficient for MVP |
 | State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
-| Providers | LLM via LangChain; image=Google Nano Banana 2 / Gemini 3.1 Flash Image; video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
+| Providers | LLM via LangChain; image=Codex built-in image generation (`codex_builtin_image` / gpt-image-2); video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
 | Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible while preserving one canonical writer |
@@ -271,8 +271,8 @@ Authoring-after review loop の標準分担:
 
 - Provider interfaces for image, video, TTS, and LLM.
 - LLM integration uses LangChain.
-- Image: Google Nano Banana 2（`google_nanobanana_2`）
-- Image (alt): Gemini 3.1 Flash Image（`gemini_3_1_flash_image` / `gemini-3.1-flash-image-preview`）
+- Image: Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
+- External image providers are disabled for standard repo workflows
 - Video: Kling 3.0（default。`video_generation.tool: kling_3_0`）
 - Video (omni): Kling 3.0 Omni（`video_generation.tool: kling_3_0_omni`）
 - Video (alt): Seedance（BytePlus ModelArk。`video_generation.tool: seedance`）

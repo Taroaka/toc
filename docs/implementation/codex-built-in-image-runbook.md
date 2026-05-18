@@ -1,13 +1,13 @@
 # Codex Built-in Image Runbook
 
-この文書は Codex built-in image generation（現行想定モデル: `gpt-image-2`）の検証メモであり、repo の標準画像パイプラインではない。
-ただし repo では、`reference_count == 0` の image request を互換 lane 名 `execution_lane=bootstrap_builtin` でこの経路へ回してよい。
+この文書は Codex built-in image generation（現行想定モデル: `gpt-image-2`）の運用メモであり、repo の標準画像パイプラインである。
+repo では、参照あり/なしを問わず image request を `tool: codex_builtin_image` でこの経路へ回す。
 
 目的: OpenAI API を使わずに、Codex built-in image generation を会話内で使い、採用画像を workspace に取り込む運用を固定する。
 
 対象:
 
-- 標準パイプライン外の built-in image generation 検証
+- 標準パイプラインの built-in image generation
 - no-reference asset seed / scene still
 - 参照画像を使う scene still
 - test 用の `assets/test/` 保存

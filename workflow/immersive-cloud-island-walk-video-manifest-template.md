@@ -86,7 +86,7 @@ scenes:
       # required block:
       # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
       # 1 つでも欠けていれば subagent review は false にする。
-      tool: "google_nanobanana_2"
+      tool: "codex_builtin_image"
       character_ids: []
       character_variant_ids: []
       object_ids: []
@@ -144,7 +144,7 @@ scenes:
   - scene_id: 20
     timestamp: "00:08-00:16"
     image_generation:
-      tool: "google_nanobanana_2"
+      tool: "codex_builtin_image"
       character_ids: []
       character_variant_ids: []
       object_ids: []
@@ -189,7 +189,7 @@ scenes:
   - scene_id: 30
     timestamp: "00:16-00:24"
     image_generation:
-      tool: "google_nanobanana_2"
+      tool: "codex_builtin_image"
       character_ids: []
       character_variant_ids: []
       object_ids: []

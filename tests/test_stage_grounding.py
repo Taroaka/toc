@@ -181,7 +181,7 @@ class TestStageGrounding(unittest.TestCase):
             self.assertFalse(report["approved_input_checks"][0]["approval_required"])
             self.assertEqual(report["review_policy"]["story"], "optional")
 
-    def test_manifest_alias_reads_image_prompt_grounding(self) -> None:
+    def test_manifest_grounding_is_separate_from_downstream_image_prompt_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0003"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ class TestStageGrounding(unittest.TestCase):
             (run_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
             append_state_snapshot(run_dir / "state.txt", {"review.story.status": "approved"})
 
-            result = _run_grounding(run_dir, "image_prompt")
+            result = _run_grounding(run_dir, "manifest")
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             validation = grounding_validation(run_dir, "manifest")
@@ -200,6 +200,11 @@ class TestStageGrounding(unittest.TestCase):
             self.assertTrue(validation["audit_exists"])
             self.assertTrue(validation["audit_passed"])
             self.assertEqual(validation["state_status"], "ready")
+
+            image_prompt = _run_grounding(run_dir, "image_prompt")
+            self.assertEqual(image_prompt.returncode, 1)
+            report = json.loads((run_dir / "logs" / "grounding" / "scene_implementation.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "missing_inputs")
 
     def test_audit_cli_rewrites_passed_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
@@ -238,13 +243,20 @@ class TestStageGrounding(unittest.TestCase):
             (scene_dir / "script.md").write_text("# scene script\n", encoding="utf-8")
             (root_run_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
             (scene_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
-            append_state_snapshot(root_run_dir / "state.txt", {"review.story.status": "approved"})
+            append_state_snapshot(
+                root_run_dir / "state.txt",
+                {
+                    "review.story.status": "approved",
+                    "eval.p400_readiness.status": "approved",
+                },
+            )
 
             report = run_stage_grounding(scene_dir, "image_prompt", flow="scene-series", retries=0, mark_stage_failure=False)
 
             self.assertEqual(report["status"], "ready")
             self.assertEqual(report["parent_run_dir"], str(root_run_dir.resolve()))
-            self.assertFalse(report["required_state_checks"])
+            self.assertEqual(report["required_state_checks"][0]["key"], "eval.p400_readiness.status")
+            self.assertTrue(report["required_state_checks"][0]["passed"])
             scene_state = parse_state_file(scene_dir / "state.txt")
             self.assertEqual(scene_state["stage.scene_implementation.grounding.status"], "ready")
             self.assertEqual(scene_state["stage.scene_implementation.audit.status"], "passed")

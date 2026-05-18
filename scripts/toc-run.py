@@ -138,11 +138,6 @@ def main() -> None:
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
-    maybe_run_stage_grounding(run_dir, "asset", flow="toc-run")
-    maybe_run_stage_grounding(run_dir, "scene_implementation", flow="toc-run")
-    ensure_production_manifest(run_dir / "video_manifest.md")
-    maybe_run_stage_grounding(run_dir, "narration", flow="toc-run")
-
     append_state_snapshot(
         run_dir / "state.txt",
         {

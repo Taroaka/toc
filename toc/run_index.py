@@ -220,6 +220,7 @@ STAGES: tuple[StageSpec, ...] = (
         outputs="assets/characters/**, assets/objects/**, assets/locations/**, assets/test/**",
         default_owner="generator",
         planned_artifacts=(
+            ("p520", "asset_inventory.md"),
             ("p530", "asset_plan.md"),
             ("p550", "asset_generation_requests.md"),
         ),
@@ -435,7 +436,13 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             ),
             state_keys=("stage.asset.grounding.status", "stage.asset.audit.status"),
         ),
-        SlotSpec("p520", "Reusable Asset Inventory", "inventory recurring characters, objects, and locations", default_requirement="optional"),
+        SlotSpec(
+            "p520",
+            "Reusable Asset Inventory",
+            "inventory recurring characters, story-specific objects, used locations, setpieces, and reusable stills",
+            planned_artifacts=("asset_inventory.md",),
+            default_requirement="optional",
+        ),
         SlotSpec("p530", "Asset Plan Authoring", "author asset_plan.md", planned_artifacts=("asset_plan.md",), default_requirement="optional"),
         SlotSpec(
             "p540",
@@ -823,6 +830,7 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         "script_review.md": ("p430", "review", "script evaluator report"),
         "production_readiness_review.md": ("p435", "review", "production readiness council report"),
         "human_change_requests.md": ("p440", "request", "structured human change log"),
+        "asset_inventory.md": ("p520", "canonical", "reusable asset inventory source"),
         "asset_plan.md": ("p530", "canonical", "asset plan source-of-truth"),
         "asset_generation_manifest.md": ("p550", "request", "asset generation manifest"),
         "location_asset_generation_manifest.md": ("p550", "request", "location asset generation manifest"),

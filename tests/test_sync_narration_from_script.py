@@ -248,7 +248,7 @@ human_change_requests:
           role: "primary"
           output: "assets/scenes/temple_day.png"
           image_generation:
-            tool: "google_nanobanana_2"
+            tool: "codex_builtin_image"
             prompt: "temple day"
             output: "assets/scenes/temple_day.png"
             references: []
@@ -296,7 +296,7 @@ scenes:
       - cut_id: 2
         output: "assets/scenes/scene35_cut02.png"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "old"
           output: "assets/scenes/scene35_cut02.png"
           character_ids: []
@@ -381,7 +381,7 @@ scenes:
     cuts:
       - cut_id: 2
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "beach path"
           output: "assets/scenes/scene01_cut02.png"
           character_ids: []
@@ -464,14 +464,14 @@ scenes:
     cuts:
       - cut_id: 1
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "keep"
           output: "assets/scenes/scene01_cut01.png"
           character_ids: []
           object_ids: []
       - cut_id: 2
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "delete"
           output: "assets/scenes/scene01_cut02.png"
           character_ids: []

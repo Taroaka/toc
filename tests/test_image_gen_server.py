@@ -43,7 +43,7 @@ SAMPLE_REQUESTS = """# Image Generation Requests
 
 ## scene1_cut1
 
-- tool: `google_nanobanana_2`
+- tool: `codex_builtin_image`
 - generation_status: `created`
 - asset_type: `reusable_still`
 - execution_lane: `standard`
@@ -60,7 +60,7 @@ line two
 
 ## scene2_cut1
 
-- tool: `google_nanobanana_2`
+- tool: `codex_builtin_image`
 - reference_count: `0`
 - output: `assets/scenes/scene02_cut01.png`
 - references: `[]`
@@ -156,7 +156,7 @@ scenes:
 
 ## hero
 
-- tool: `codex_app_server`
+- tool: `codex_builtin_image`
 - execution_lane: `bootstrap_builtin`
 - reference_count: `0`
 - output: `assets/characters/hero.png`
@@ -176,7 +176,7 @@ scenes:
 
 ## scene10_cut1
 
-- tool: `google_nanobanana_2`
+- tool: `codex_builtin_image`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene10_cut1.png`
@@ -189,7 +189,7 @@ scenes:
 
 ## scene10_cut2
 
-- tool: `google_nanobanana_2`
+- tool: `codex_builtin_image`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene10_cut2.png`
@@ -295,6 +295,13 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(payload["run_dir"], "output/桃太郎_20260509_1200")
         self.assertEqual(payload["required_skill"], "toc-immersive-runner")
         self.assertEqual(payload["expected_skill_path"], ".codex/skills/toc-immersive-runner/SKILL.md")
+
+    def test_toc_immersive_command_can_request_frontend_p650_handoff(self) -> None:
+        command = _toc_immersive_command(topic="桃太郎", source="鬼ヶ島の資料", run_id="桃太郎_20260509_1200", stop_target="p650")
+
+        payload = json.loads(command.split("Request JSON:\n", 1)[1])
+        self.assertEqual(payload["stop_target"], "p650")
+        self.assertIn("Run the canonical p100-p650 frontend-review workflow in one skill invocation.", command)
 
     def test_validate_created_run_requires_scaffold_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -435,7 +442,10 @@ class ImageGenParserTests(unittest.TestCase):
             root = Path(tmp)
             write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
 
-            with patch("server.image_gen_app.ROOT", root):
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+            ):
                 _validate_frontend_create_run("桃太郎_20260509_1200")
 
     def test_validate_frontend_create_run_requires_scene_outputs(self) -> None:
@@ -940,6 +950,52 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(items[1].prompt, "|\n月明かりの庭。\n魔法の変化。")
         self.assertEqual(items[1].execution_lane, "bootstrap_builtin")
 
+    def test_parse_asset_request_keeps_output_after_empty_references(self) -> None:
+        request_text = """# Asset Generation Requests
+
+## cinderella_common
+
+- asset_id: `cinderella_common`
+- asset_type: `character_reference`
+- tool: `codex_builtin_image`
+- execution_lane: `bootstrap_builtin`
+- reference_count: `0`
+- references: `[]`
+- review_status: `approved`
+- output: `assets/characters/cinderella_common.png`
+
+```text
+実写映画風のキャラクター参照画像。
+```
+
+## cinderella_ball_gown
+
+- asset_id: `cinderella_ball_gown`
+- asset_type: `character_reference`
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- references:
+  - `assets/characters/cinderella_common.png`
+- review_status: `approved`
+- output: `assets/characters/cinderella_ball_gown.png`
+
+```text
+同じ人物の舞踏会衣装。
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "assets/characters").mkdir(parents=True)
+            (run_dir / "assets/characters/cinderella_common.png").write_bytes(PNG_BYTES)
+            items = image_gen.parse_request_markdown(request_text, kind="asset", run_dir=run_dir)
+
+        self.assertEqual(items[0].output, "assets/characters/cinderella_common.png")
+        self.assertEqual(items[0].references, [])
+        self.assertEqual(items[0].existing_image, "assets/characters/cinderella_common.png")
+        self.assertEqual(items[1].output, "assets/characters/cinderella_ball_gown.png")
+        self.assertEqual(items[1].references, ["assets/characters/cinderella_common.png"])
+
     def test_prompt_setting_markers_read_and_replace_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1134,17 +1190,60 @@ class ImageGenApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_toc_skill_helper_returns_when_p650_contract_is_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            cancelled: list[bool] = []
+
+            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680"):
+                write_valid_p650_artifacts(root, run_id)
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(True)
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.CREATE_SKILL_STOP_POLL_SECONDS", 0.01),
+                patch("server.image_gen_app.CREATE_SKILL_CANCEL_TIMEOUT_SECONDS", 0.01),
+                patch("server.image_gen_app._run_toc_skill_helper", fake_toc_skill_helper),
+            ):
+                asyncio.run(
+                    image_gen_app._run_toc_skill_helper_until_stop_target(
+                        topic="桃太郎",
+                        source="桃太郎",
+                        run_id=run_id,
+                        stop_target="p650",
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(root / "output" / run_id / "state.txt")
+
+        self.assertEqual(state["runtime.app_server_skill.stop_target"], "p650")
+        self.assertEqual(state["runtime.app_server_skill.stop_detected"], "true")
+        self.assertEqual(cancelled, [True])
+
     def test_create_run_endpoint_uses_title_as_blank_source_and_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            calls: list[tuple[str, str, str | None]] = []
+            calls: list[tuple[str, str, str | None, str]] = []
+            events: list[tuple[str, str | None]] = []
 
-            async def fake_toc_run_helper(*, topic, source=None, run_id):
-                calls.append((topic, run_id, source))
+            async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
+                calls.append((topic, run_id, source, stop_target))
+                events.append(("skill", stop_target))
+                write_valid_p650_artifacts(root, run_id)
+
+            async def fake_upgrade_prompts(_job_id, *, run_id):
+                events.append(("upgrade", run_id))
+
+            async def fake_generate_images(_job_id, *, run_id):
+                events.append(("generate", run_id))
                 write_valid_p680_artifacts(root, run_id)
 
-            generate_images = AsyncMock()
-            upgrade_prompts = AsyncMock()
+            generate_images = AsyncMock(side_effect=fake_generate_images)
+            upgrade_prompts = AsyncMock(side_effect=fake_upgrade_prompts)
             validate_review = Mock()
             rebuild_index = AsyncMock()
 
@@ -1156,6 +1255,7 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
                     patch("server.image_gen_app._validate_image_review_ready", validate_review),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                     patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
@@ -1171,23 +1271,33 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["path"], "output/桃太郎_20260509_1200")
         self.assertNotIn("source", create_payload)
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎")])
-        generate_images.assert_not_awaited()
-        upgrade_prompts.assert_not_awaited()
+        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎", "p650")])
+        self.assertEqual(events, [("skill", "p650"), ("upgrade", "桃太郎_20260509_1200"), ("generate", "桃太郎_20260509_1200")])
+        generate_images.assert_awaited_once()
+        upgrade_prompts.assert_awaited_once()
         validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
     def test_create_run_endpoint_passes_title_and_nonblank_source_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            calls: list[tuple[str, str, str | None]] = []
+            calls: list[tuple[str, str, str | None, str]] = []
+            events: list[tuple[str, str | None]] = []
 
-            async def fake_toc_run_helper(*, topic, source=None, run_id):
-                calls.append((topic, run_id, source))
+            async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
+                calls.append((topic, run_id, source, stop_target))
+                events.append(("skill", stop_target))
+                write_valid_p650_artifacts(root, run_id)
+
+            async def fake_upgrade_prompts(_job_id, *, run_id):
+                events.append(("upgrade", run_id))
+
+            async def fake_generate_images(_job_id, *, run_id):
+                events.append(("generate", run_id))
                 write_valid_p680_artifacts(root, run_id)
 
-            generate_images = AsyncMock()
-            upgrade_prompts = AsyncMock()
+            generate_images = AsyncMock(side_effect=fake_generate_images)
+            upgrade_prompts = AsyncMock(side_effect=fake_upgrade_prompts)
             validate_review = Mock()
             rebuild_index = AsyncMock()
 
@@ -1199,6 +1309,7 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
                     patch("server.image_gen_app._validate_image_review_ready", validate_review),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                     patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
@@ -1212,9 +1323,10 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_response.status_code, 200)
         self.assertEqual(create_payload["runId"], "桃太郎_20260509_1200")
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料")])
-        generate_images.assert_not_awaited()
-        upgrade_prompts.assert_not_awaited()
+        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料", "p650")])
+        self.assertEqual(events, [("skill", "p650"), ("upgrade", "桃太郎_20260509_1200"), ("generate", "桃太郎_20260509_1200")])
+        generate_images.assert_awaited_once()
+        upgrade_prompts.assert_awaited_once()
         validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
@@ -1248,8 +1360,13 @@ class ImageGenApiTests(unittest.TestCase):
                     generated.append((kwargs["item_id"], [path.name for path in kwargs["reference_images"]]))
                     return FakeResult()
 
+            validate_asset_gate = Mock()
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", validate_asset_gate),
+                ):
                     asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
@@ -1257,9 +1374,225 @@ class ImageGenApiTests(unittest.TestCase):
 
         self.assertTrue(scene_exists)
         self.assertEqual(generated, [("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"])])
+        validate_asset_gate.assert_called_once()
+        self.assertEqual(validate_asset_gate.call_args.args[0].resolve(), run_dir.resolve())
         self.assertIn("slot.p660.status=done", state)
         self.assertIn("slot.p680.status=awaiting_approval", state)
         self.assertIn("review.image.status=pending", state)
+
+    def test_build_generation_groups_layers_reference_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request_file = run_dir / "asset_generation_requests.md"
+            request_file.write_text(
+                """# Asset Generation Requests
+
+## base_a
+
+- output: `assets/characters/base_a.png`
+- references: `[]`
+
+```text
+base a prompt
+```
+
+## base_b
+
+- output: `assets/characters/base_b.png`
+- references: `[]`
+
+```text
+base b prompt
+```
+
+## variant
+
+- output: `assets/characters/variant.png`
+- references:
+  - `base`: `assets/characters/base_a.png`
+
+```text
+variant prompt
+```
+
+## final
+
+- output: `assets/characters/final.png`
+- references:
+  - `variant`: `assets/characters/variant.png`
+  - `base b`: `assets/characters/base_b.png`
+
+```text
+final prompt
+```
+""",
+                encoding="utf-8",
+            )
+            items = image_gen.load_request_items(run_dir, "asset")
+
+            groups = image_gen_app._build_generation_groups(items, run_dir=run_dir, kind="asset")
+
+        self.assertEqual([[item.id for item in group] for group in groups], [["base_a", "base_b"], ["variant"], ["final"]])
+
+    def test_build_generation_groups_rejects_missing_reference_before_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## orphan
+
+- output: `assets/characters/orphan.png`
+- references:
+  - `missing`: `assets/characters/missing.png`
+
+```text
+orphan prompt
+```
+""",
+                encoding="utf-8",
+            )
+            items = image_gen.load_request_items(run_dir, "asset")
+
+            with self.assertRaisesRegex(RuntimeError, "asset reference not found"):
+                image_gen_app._build_generation_groups(items, run_dir=run_dir, kind="asset")
+
+    def test_build_generation_groups_rejects_reference_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## a
+
+- output: `assets/characters/a.png`
+- references:
+  - `b`: `assets/characters/b.png`
+
+```text
+a prompt
+```
+
+## b
+
+- output: `assets/characters/b.png`
+- references:
+  - `a`: `assets/characters/a.png`
+
+```text
+b prompt
+```
+""",
+                encoding="utf-8",
+            )
+            items = image_gen.load_request_items(run_dir, "asset")
+
+            with self.assertRaisesRegex(RuntimeError, "cyclic reference dependencies"):
+                image_gen_app._build_generation_groups(items, run_dir=run_dir, kind="asset")
+
+    def test_generate_request_outputs_runs_same_group_items_in_parallel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## base_a
+
+- output: `assets/characters/base_a.png`
+- references: `[]`
+
+```text
+base a prompt
+```
+
+## base_b
+
+- output: `assets/characters/base_b.png`
+- references: `[]`
+
+```text
+base b prompt
+```
+""",
+                encoding="utf-8",
+            )
+            active = 0
+            peak = 0
+            generated: list[str] = []
+
+            async def fake_generate_item(*, run_dir, kind, item):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                output = run_dir / item.output
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(PNG_BYTES)
+                generated.append(item.id)
+                active -= 1
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app._generate_request_item_output", fake_generate_item):
+                    asyncio.run(image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset"))
+
+        self.assertEqual(set(generated), {"base_a", "base_b"})
+        self.assertEqual(peak, 2)
+
+    def test_generate_create_images_retries_bootstrap_assets_until_gate_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            write_valid_p650_artifacts(root, run_id)
+            generated_kinds: list[str] = []
+            repair_prompts = AsyncMock()
+            gate = Mock(side_effect=[RuntimeError("bootstrap asset visual gate failed"), RuntimeError("bootstrap asset visual gate failed"), None])
+
+            async def fake_generate_request_outputs(*, run_dir, kind):
+                generated_kinds.append(kind)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._validate_p560_asset_quality", gate),
+                    patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
+                    patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
+                ):
+                    result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+        self.assertTrue(result)
+        self.assertEqual(generated_kinds, ["asset", "asset", "asset", "scene"])
+        self.assertEqual(gate.call_count, 3)
+        self.assertEqual(repair_prompts.await_count, 2)
+
+    def test_generate_create_images_sends_to_frontend_after_ten_failed_asset_repairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            generated_kinds: list[str] = []
+            repair_prompts = AsyncMock()
+
+            async def fake_generate_request_outputs(*, run_dir, kind):
+                generated_kinds.append(kind)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock(side_effect=RuntimeError("bootstrap asset visual gate failed"))),
+                    patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
+                    patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
+                ):
+                    result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = (run_dir / "state.txt").read_text(encoding="utf-8")
+
+        self.assertFalse(result)
+        self.assertEqual(generated_kinds, ["asset"] * 10 + ["scene"])
+        self.assertEqual(repair_prompts.await_count, 9)
+        self.assertIn("review.asset_visual_gate.status=needs_frontend_review", state)
+        self.assertIn("review.asset_visual_gate.attempts=10", state)
 
     def test_generate_create_images_fails_when_scene_generation_has_no_saved_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1288,7 +1621,11 @@ class ImageGenApiTests(unittest.TestCase):
                     return FakeResult()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                ):
                     with self.assertRaisesRegex(RuntimeError, "did not return an image"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
@@ -1534,12 +1871,19 @@ class ImageGenApiTests(unittest.TestCase):
             log_path = run_dir / candidate["debugLog"]
             log_exists = log_path.exists()
             log_payload = log_path.read_text(encoding="utf-8")
+            prompt_log = run_dir / "logs" / "image_generation_prompts.jsonl"
+            prompt_log_exists = prompt_log.exists()
+            prompt_log_payload = prompt_log.read_text(encoding="utf-8") if prompt_log_exists else ""
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(candidate["status"], "failed")
         self.assertTrue(log_exists)
         self.assertIn('"itemId": "scene1_cut1"', log_payload)
+        self.assertIn('"prompt": "prompt"', log_payload)
+        self.assertIn('"promptSha256"', log_payload)
         self.assertIn('"transcript"', log_payload)
+        self.assertTrue(prompt_log_exists)
+        self.assertIn('"prompt": "prompt"', prompt_log_payload)
 
     def test_prompt_settings_api_reads_and_writes_existing_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

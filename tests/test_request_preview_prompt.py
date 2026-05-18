@@ -17,7 +17,439 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
+def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
+    manifest_path = run_dir / "video_manifest.md"
+    data = MODULE.yaml.safe_load(MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))) if MODULE.yaml is not None else {}
+    if not isinstance(data, dict):
+        data = {}
+    initial_metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
+    if str(initial_metadata.get("experience") or "").strip().lower().startswith("asset_stage"):
+        with (run_dir / "state.txt").open("a", encoding="utf-8") as f:
+            f.write("eval.p400_readiness.status=approved\n---\n")
+        return
+    existing_script = {}
+    existing_script_path = run_dir / "script.md"
+    if existing_script_path.exists():
+        existing_script = MODULE.yaml.safe_load(MODULE.extract_yaml_block(existing_script_path.read_text(encoding="utf-8"))) if MODULE.yaml is not None else {}
+        if not isinstance(existing_script, dict):
+            existing_script = {}
+    existing_cut_lookup = {}
+    existing_scenes = existing_script.get("scenes")
+    if not existing_scenes and isinstance(existing_script.get("script"), dict):
+        existing_scenes = existing_script["script"].get("scenes")
+    for existing_scene in existing_scenes if isinstance(existing_scenes, list) else []:
+        if not isinstance(existing_scene, dict):
+            continue
+        for existing_cut in existing_scene.get("cuts", []) if isinstance(existing_scene.get("cuts"), list) else []:
+            if isinstance(existing_cut, dict):
+                existing_cut_lookup[(str(existing_scene.get("scene_id")), str(existing_cut.get("cut_id")))] = existing_cut
+    data["manifest_phase"] = "production"
+    metadata = data.setdefault("video_metadata", {})
+    if isinstance(metadata, dict):
+        metadata.setdefault("topic", "request preview")
+        metadata.setdefault("experience", "cinematic_story")
+        metadata["target_duration_seconds"] = 300
+    scenes = data.setdefault("scenes", [])
+    if not isinstance(scenes, list):
+        scenes = []
+        data["scenes"] = scenes
+    if not scenes:
+        scenes.append({"scene_id": 1, "cuts": []})
+
+    total_duration = 0
+    script_scenes: list[dict] = []
+    for scene_index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        scene_id = scene.get("scene_id", scene_index)
+        if str(scene.get("kind") or "").strip().lower() in {"reference", "character_reference"}:
+            continue
+        cuts = scene.setdefault("cuts", [])
+        if not isinstance(cuts, list):
+            cuts = []
+            scene["cuts"] = cuts
+        while len([cut for cut in cuts if isinstance(cut, dict) and str(cut.get("cut_status") or "").lower() != "deleted"]) < 2:
+            cuts.append(
+                {
+                    "cut_id": len(cuts) + 1,
+                    "scene_contract": {
+                        "target_beat": "request preview filler",
+                        "must_show": ["request preview"],
+                        "must_avoid": [],
+                        "done_when": ["request preview cut is present"],
+                    },
+                    "image_generation": {
+                        "tool": "codex_builtin_image",
+                        "prompt": "画面内テキストなし。実写映画風の村道、人物、道具、背景、光、足元、空気感が具体的に見える。",
+                        "character_ids": [],
+                        "object_ids": [],
+                        "output": f"assets/scenes/scene{scene_id}_p400_filler_{len(cuts) + 1}.png",
+                    },
+                    "video_generation": {
+                        "tool": "kling_3_0",
+                        "duration_seconds": 15,
+                        "motion_prompt": "人物がゆっくり前へ進む。",
+                        "output": f"assets/videos/scene{scene_id}_p400_filler_{len(cuts) + 1}.mp4",
+                    },
+                    "audio": {"narration": {"tool": "elevenlabs", "text": "場面が続く。", "output": f"assets/audio/scene{scene_id}_p400_filler_{len(cuts) + 1}.mp3"}},
+                }
+            )
+        script_cuts = []
+        for cut_index, cut in enumerate(cuts, start=1):
+            if not isinstance(cut, dict) or str(cut.get("cut_status") or "").lower() == "deleted":
+                continue
+            cut_id = cut.get("cut_id", cut_index)
+            video_generation = cut.setdefault("video_generation", {})
+            if isinstance(video_generation, dict):
+                video_generation["duration_seconds"] = 15
+                video_generation.setdefault("motion_prompt", "人物がゆっくり前へ進む。")
+                total_duration += 15
+            image_generation = cut.setdefault("image_generation", {})
+            if isinstance(image_generation, dict):
+                image_generation.setdefault("prompt", "画面内テキストなし。実写映画風の具体的な人物、場所、道具、光が見える。")
+                image_generation.setdefault("character_ids", [])
+                image_generation.setdefault("object_ids", [])
+            cut.setdefault(
+                "scene_contract",
+                {
+                    "target_beat": "request preview",
+                    "must_show": ["request preview"],
+                    "must_avoid": [],
+                    "done_when": ["request preview cut is present"],
+                },
+            )
+            contract = cut.get("scene_contract") if isinstance(cut.get("scene_contract"), dict) else {}
+            prompt_terms = [str(contract.get("target_beat") or "request preview")]
+            prompt_terms.extend(str(item) for item in contract.get("must_show", []) if str(item).strip())
+            if isinstance(image_generation, dict):
+                current_prompt = str(image_generation.get("prompt") or "")
+                image_generation["prompt"] = (
+                    current_prompt
+                    + " 画面内テキストなし。"
+                    + "、".join(prompt_terms)
+                    + "、人物、場所、道具、背景、光、足元、空気感が具体的に見える。"
+                )
+            cut.setdefault("audio", {"narration": {"tool": "elevenlabs", "text": "場面が続く。"}})
+            narration = cut.get("audio", {}).get("narration") if isinstance(cut.get("audio"), dict) else None
+            request_ids = []
+            if isinstance(image_generation, dict):
+                request_ids.extend(str(item) for item in image_generation.get("applied_request_ids", []) if str(item).strip())
+            if isinstance(video_generation, dict):
+                request_ids.extend(str(item) for item in video_generation.get("applied_request_ids", []) if str(item).strip())
+            trace = cut.get("implementation_trace") if isinstance(cut.get("implementation_trace"), dict) else {}
+            request_ids.extend(str(item) for item in trace.get("source_request_ids", []) if str(item).strip())
+            request_ids = list(dict.fromkeys(request_ids))
+            if isinstance(narration, dict) and request_ids:
+                narration.setdefault("applied_request_ids", request_ids)
+            existing_cut = existing_cut_lookup.get((str(scene_id), str(cut_id)), {})
+            script_cut = {
+                key: value
+                for key, value in existing_cut.items()
+                if key not in {"cut_blueprint"}
+            } if isinstance(existing_cut, dict) else {}
+            script_cut.update(
+                {
+                    "cut_id": cut_id,
+                    "selector": cut.get("selector") or f"scene{scene_id}_cut{cut_id}",
+                    "cut_blueprint": {
+                        "cut_role": "main",
+                        "duration_intent": "standard",
+                        "target_beat": "request preview",
+                        "must_show": ["request preview"],
+                        "must_avoid": [],
+                        "done_when": ["request preview cut is present"],
+                        "visual_beat": "request preview",
+                        "narration_role": "setup",
+                        "asset_dependency_hint": {"character_ids": [], "object_ids": [], "location_ids": [], "reusable_still_candidates": []},
+                    },
+                }
+            )
+            script_cuts.append(
+                script_cut
+            )
+        script_scenes.append(
+            {
+                "scene_id": scene_id,
+                "phase": "development",
+                "importance": "medium",
+                "summary": "request preview 用の p400 readiness scene。",
+                "target_duration_seconds": max(30, len(script_cuts) * 15),
+                "estimated_duration_seconds": max(30, len(script_cuts) * 15),
+                "handoff_to_next_scene": "次へつながる",
+                "terminal_resolution": "preview 完了",
+                "coverage_review": {
+                    "audience_information_covered": True,
+                    "visualizable_action_covered": True,
+                    "next_scene_connection_checked": True,
+                },
+                "agent_review": {"status": "passed"},
+                "cuts": script_cuts,
+            }
+        )
+
+    filler_scene_id = 900
+    while total_duration < 300:
+        filler_cuts = []
+        manifest_cuts = []
+        for cut_id in (1, 2):
+            total_duration += 15
+            manifest_cuts.append(
+                {
+                    "cut_id": cut_id,
+                    "scene_contract": {"target_beat": "filler", "must_show": ["filler"], "must_avoid": [], "done_when": ["filler is visible"]},
+                    "image_generation": {
+                        "tool": "codex_builtin_image",
+                        "prompt": "画面内テキストなし。filler が見える。実写映画風の道、人物、背景、光、空気感、足元の動きが具体的に見える。",
+                        "character_ids": [],
+                        "object_ids": [],
+                        "output": f"assets/scenes/scene{filler_scene_id}_cut{cut_id}.png",
+                    },
+                    "video_generation": {"tool": "kling_3_0", "duration_seconds": 15, "motion_prompt": "人物が進む。", "output": f"assets/videos/scene{filler_scene_id}_cut{cut_id}.mp4"},
+                    "audio": {"narration": {"tool": "elevenlabs", "text": "場面が続く。", "output": f"assets/audio/scene{filler_scene_id}_cut{cut_id}.mp3"}},
+                }
+            )
+            filler_cuts.append(
+                {
+                    "cut_id": cut_id,
+                    "selector": f"scene{filler_scene_id}_cut{cut_id}",
+                    "cut_blueprint": {
+                        "cut_role": "main",
+                        "duration_intent": "standard",
+                        "target_beat": "filler",
+                        "must_show": ["filler"],
+                        "must_avoid": [],
+                        "done_when": ["filler is visible"],
+                        "visual_beat": "filler",
+                        "narration_role": "setup",
+                        "asset_dependency_hint": {"character_ids": [], "object_ids": [], "location_ids": [], "reusable_still_candidates": []},
+                    },
+                }
+            )
+        scenes.append({"scene_id": filler_scene_id, "cuts": manifest_cuts})
+        script_scenes.append(
+            {
+                "scene_id": filler_scene_id,
+                "phase": "development",
+                "importance": "medium",
+                "summary": "尺を満たす filler scene。",
+                "target_duration_seconds": 30,
+                "estimated_duration_seconds": 30,
+                "handoff_to_next_scene": "次へつながる",
+                "terminal_resolution": "preview 完了",
+                "coverage_review": {
+                    "audience_information_covered": True,
+                    "visualizable_action_covered": True,
+                    "next_scene_connection_checked": True,
+                },
+                "agent_review": {"status": "passed"},
+                "cuts": filler_cuts,
+            }
+        )
+        filler_scene_id += 1
+
+    manifest_path.write_text("```yaml\n" + MODULE.yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
+    (run_dir / "script.md").write_text(
+        "```yaml\n"
+        + MODULE.yaml.safe_dump(
+            {
+                "scene_set_review": {"status": "approved"},
+                "scene_detail_review": {"status": "approved"},
+                "cut_blueprint_review": {"status": "approved"},
+                "scenes": script_scenes,
+                "script": {"scenes": script_scenes},
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        + "```\n",
+        encoding="utf-8",
+    )
+    for name in ("scene_set_review.md", "scene_detail_review.md", "cut_blueprint_review.md", "script_review.md"):
+        (run_dir / name).write_text("status: passed\n\nreview passed\n", encoding="utf-8")
+    (run_dir / "production_readiness_review.md").write_text("status: passed\n\nStructure: ok\nDuration: ok\nQuality: ok\nDesign Owner Patch Brief: ok\n", encoding="utf-8")
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
+        round_dir = run_dir / "logs" / "eval" / stage / "round_01"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1, 6):
+            (round_dir / f"critic_{index}.md").write_text("status: passed\n\ncritic passed\n", encoding="utf-8")
+        patch = "## Design Owner Patch Brief" if stage == "production_readiness" else "## Generator Patch Brief"
+        (round_dir / "aggregated_review.md").write_text(
+            "status: passed\n\n## Blocking Findings\nnone\n## Recommended Changes\nnone\n## Rejected Suggestions\nnone\n"
+            + patch
+            + "\nnone\n## Round Summary\npassed\n",
+            encoding="utf-8",
+        )
+    with (run_dir / "state.txt").open("a", encoding="utf-8") as f:
+        f.write("eval.p400_readiness.status=approved\n---\n")
+
+
 class TestRequestPreviewPrompt(unittest.TestCase):
+    def test_image_tool_aliases_normalize_to_codex_builtin_image(self) -> None:
+        for tool in [
+            "google_nanobanana_2",
+            "nanobanana_2",
+            "gemini_3_1_flash_image",
+            "seadream",
+            "seedream_4_5",
+            "codex_app_server",
+            "gpt-image-2",
+        ]:
+            with self.subTest(tool=tool):
+                self.assertEqual(MODULE.normalize_tool_name(tool), "codex_builtin_image")
+
+    def test_generation_requires_p400_readiness_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+manifest_phase: production
+video_metadata:
+  topic: "かぐや姫"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          tool: "codex_builtin_image"
+          prompt: "画面内テキストなし。竹林の朝、光る竹、人物、足元の霧が見える。"
+          output: "assets/scenes/scene01_1.png"
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 4
+          output: "assets/videos/scene01_1.mp4"
+        audio:
+          narration:
+            tool: "silent"
+            text: ""
+            tts_text: ""
+            silence_contract:
+              intentional: true
+              kind: "visual_value_hold"
+              confirmed_by_human: true
+              reason: "draft"
+            output: "assets/audio/scene01_1.mp3"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-image-prompt-review",
+                    "--skip-narration-review",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("p400 readiness gate is not approved", result.stderr)
+            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
+
+    def test_p400_readiness_override_is_read_only_diagnostic_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+manifest_phase: production
+video_metadata:
+  topic: "かぐや姫"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          tool: "codex_builtin_image"
+          prompt: "画面内テキストなし。竹林の朝、光る竹、人物、足元の霧が見える。"
+          output: "assets/scenes/scene01_1.png"
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: 4
+          output: "assets/videos/scene01_1.mp4"
+        audio:
+          narration:
+            tool: "silent"
+            text: ""
+            tts_text: ""
+            silence_contract:
+              intentional: true
+              kind: "visual_value_hold"
+              confirmed_by_human: true
+              reason: "draft"
+            output: "assets/audio/scene01_1.mp3"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--ignore-p400-readiness-gate",
+                    "--dry-run",
+                    "--skip-images",
+                    "--skip-videos",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                    "--skip-narration-review",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("readiness override diagnostic only", result.stdout)
+            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "asset_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
+
+            materialize_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--ignore-p400-readiness-gate",
+                    "--dry-run",
+                    "--skip-images",
+                    "--skip-videos",
+                    "--skip-audio",
+                    "--materialize-request-files-only",
+                    "--skip-image-prompt-review",
+                    "--skip-narration-review",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(materialize_result.returncode, 0)
+            self.assertIn("read-only diagnostics", materialize_result.stderr)
+            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
+            self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
+
     def test_skeleton_manifest_does_not_materialize_scene_or_video_request_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -37,7 +469,7 @@ scenes:
           mode: generate_still
           generation_status: planned
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene01_1.png"
         video_generation:
@@ -60,7 +492,7 @@ scenes:
                 encoding="utf-8",
             )
 
-            subprocess.run(
+            result = subprocess.run(
                 [
                     sys.executable,
                     str(SCRIPT_PATH),
@@ -72,10 +504,14 @@ scenes:
                     "--skip-image-prompt-review",
                     "--skip-narration-review",
                 ],
-                check=True,
+                check=False,
                 cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
             )
 
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("p400 readiness gate is not approved", result.stderr)
             self.assertFalse((tmp_path / "image_generation_requests.md").exists())
             self.assertFalse((tmp_path / "video_generation_requests.md").exists())
             self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
@@ -93,7 +529,7 @@ video_metadata:
 scenes:
   - scene_id: 1
     image_generation:
-      tool: "google_nanobanana_2"
+      tool: "codex_builtin_image"
       prompt: "かぐや姫"
       output: "assets/scenes/scene01.png"
     video_generation:
@@ -133,7 +569,7 @@ scenes:
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("skeleton phase", result.stderr + result.stdout)
+            self.assertIn("p400 readiness gate is not approved", result.stderr + result.stdout)
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
 
     def test_rewrites_stateful_character_asset_wording(self) -> None:
@@ -304,7 +740,7 @@ scenes:
           mode: generate_still
           generation_status: created
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene01_1.png"
       - cut_id: 2
@@ -313,7 +749,7 @@ scenes:
           generation_status: recreate
           source: "scene01_cut01"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p2"
           output: "assets/scenes/scene01_2.png"
       - cut_id: 3
@@ -321,13 +757,15 @@ scenes:
           mode: no_dedicated_still
           source: "motion chain: scene01_cut01 -> scene02_cut01"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p3"
           output: "assets/scenes/scene01_3.png"
 ```
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -451,7 +889,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           character_ids: ["urashima"]
           object_ids: ["tamatebako"]
           location_ids: ["banquet_hall_main"]
@@ -461,6 +899,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -506,7 +946,7 @@ scenes:
         review:
           status: "pending"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           execution_lane: "bootstrap_builtin"
           bootstrap_allowed: true
           bootstrap_reason: "no_reference_seed"
@@ -517,6 +957,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -533,12 +975,18 @@ scenes:
             )
 
             request_text = (tmp_path / "asset_generation_requests.md").read_text(encoding="utf-8")
+            self.assertIn("- tool: `codex_builtin_image`", request_text)
+            self.assertNotIn("google_nanobanana_2", request_text)
             self.assertIn("- asset_id: `urashima_seed`", request_text)
             self.assertIn("- asset_type: `character_reference`", request_text)
             self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
             self.assertIn("- reference_count: `0`", request_text)
             self.assertIn("- review_status: `pending`", request_text)
             self.assertIn("- creation_status: `planned`", request_text)
+            self.assertIn("- authoring_role: `reusable_asset_candidate`", request_text)
+            self.assertIn("prompt本文には物語タイトルやscene idを書かず", request_text)
+            self.assertNotIn("video_first_frame_candidate", request_text)
+            self.assertNotIn("最初の1フレーム", request_text)
             self.assertIn("- bootstrap_allowed: `true`", request_text)
             self.assertIn("- bootstrap_reason: `no_reference_seed`", request_text)
             self.assertIn("- source_script_selectors:", request_text)
@@ -568,13 +1016,13 @@ scenes:
         still_image_plan:
           mode: "generate_still"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "浜辺の establishing shot"
           references: []
           output: "assets/scenes/scene1_cut1.png"
       - cut_id: 2
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "浦島太郎の中景"
           references:
             - "assets/characters/urashima.png"
@@ -583,6 +1031,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -601,12 +1051,14 @@ scenes:
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
             self.assertIn("## scene1_cut1", request_text)
             self.assertIn("## scene1_cut2", request_text)
+            self.assertIn("- tool: `codex_builtin_image`", request_text)
+            self.assertNotIn("google_nanobanana_2", request_text)
             self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
             self.assertIn("- reference_count: `0`", request_text)
             self.assertIn("- execution_lane: `standard`", request_text)
             self.assertIn("- reference_count: `1`", request_text)
 
-    def test_generation_fails_with_no_reference_lane_guidance(self) -> None:
+    def test_generation_keeps_no_reference_requests_on_bootstrap_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manifest_path = tmp_path / "video_manifest.md"
@@ -623,7 +1075,7 @@ scenes:
         still_image_plan:
           mode: "generate_still"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "浜辺の establishing shot"
           references: []
           output: "assets/scenes/scene1_cut1.png"
@@ -631,6 +1083,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             completed = subprocess.run(
                 [
@@ -648,9 +1102,9 @@ scenes:
                 text=True,
             )
 
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("NO_REFERENCE_IMAGE_LANE_REQUIRED", completed.stderr)
-            self.assertIn("$toc-no-reference-image-runner", completed.stderr)
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertIn("codex_builtin_image", completed.stdout)
+            self.assertIn("refs=0", completed.stdout)
 
     def test_materialized_requests_preserve_explicit_scene_self_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -681,7 +1135,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           object_ids: ["tamatebako"]
           references: ["assets/scenes/scene01_cut01.png"]
           prompt: "参照画像1の構図を維持し、玉手箱だけを直す。"
@@ -690,6 +1144,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -726,7 +1182,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           references: ["assets/scenes/scene01_cut01.png"]
           prompt: "p1"
           output: "assets/scenes/scene01_cut01.png"
@@ -734,7 +1190,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           references: ["assets/scenes/scene01_cut01.png"]
           prompt: "p2"
           output: "assets/scenes/scene01_cut02.png"
@@ -742,7 +1198,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           references: []
           prompt: "p3"
           output: "assets/scenes/scene01_cut03.png"
@@ -787,7 +1243,7 @@ scenes:
           source_request_ids: ["hr-001", "hr-002"]
           status: implemented
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene01_cut01.png"
           applied_request_ids: ["hr-002", "hr-001"]
@@ -800,6 +1256,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -856,7 +1314,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene01_cut01.png"
         video_generation:
@@ -867,6 +1325,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -903,7 +1363,7 @@ scenes:
     cuts:
       - cut_id: 1
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene03_cut01.png"
         video_generation:
@@ -918,7 +1378,7 @@ scenes:
             output: "assets/audio/scene03_cut01_narration.mp3"
       - cut_id: 2
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p2"
           output: "assets/scenes/scene03_cut02.png"
         video_generation:
@@ -933,7 +1393,7 @@ scenes:
             output: "assets/audio/scene03_cut02_narration.mp3"
       - cut_id: 3
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p3"
           output: "assets/scenes/scene03_cut03.png"
         video_generation:
@@ -967,6 +1427,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -1011,7 +1473,7 @@ scenes:
                                 "status": "implemented",
                             },
                             "image_generation": {
-                                "tool": "google_nanobanana_2",
+                                "tool": "codex_builtin_image",
                                 "prompt": "p1",
                                 "output": "assets/scenes/scene01_cut01.png",
                                 "applied_request_ids": ["hr-999"],
@@ -1082,7 +1544,7 @@ scenes:
         still_image_plan:
           mode: generate_still
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "既存の prompt"
           output: "assets/scenes/scene07_cut01.png"
 ```
@@ -1104,6 +1566,8 @@ scenes:
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [
@@ -1141,7 +1605,7 @@ scenes:
         cut_status: deleted
         deletion_reason: "story removal"
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p1"
           output: "assets/scenes/scene06_cut01.png"
         audio:
@@ -1158,13 +1622,15 @@ scenes:
           mode: generate_still
           generation_status: created
         image_generation:
-          tool: "google_nanobanana_2"
+          tool: "codex_builtin_image"
           prompt: "p2"
           output: "assets/scenes/scene06_cut02.png"
 ```
 """,
                 encoding="utf-8",
             )
+
+            _make_p400_ready_for_request_preview(tmp_path)
 
             subprocess.run(
                 [

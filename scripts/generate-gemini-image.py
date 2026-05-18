@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate a single image via Google Gemini API (Image generation).
-
-Defaults are tuned for Nano Banana 2 / Gemini 3.1 Flash Image (= gemini-3.1-flash-image-preview) but can be overridden.
-"""
+"""Disabled legacy Gemini/Nano Banana image generation entrypoint."""
 
 from __future__ import annotations
 
@@ -63,6 +59,10 @@ def _run_ffmpeg_convert_image(src: Path, dst: Path) -> None:
 
 def main() -> None:
     load_env_files(repo_root=REPO_ROOT)
+    raise SystemExit(
+        "Deprecated: external Gemini/Nano Banana image generation is disabled for this repo. "
+        "Use codex_builtin_image / gpt-image-2 through the Codex app-server instead."
+    )
 
     parser = argparse.ArgumentParser(description="Generate an image via Gemini API.")
     parser.add_argument("--prompt", required=True, help="Text prompt.")

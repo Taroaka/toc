@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
+from toc.grounding import StageGroundingError, resolve_review_policy, review_policy_state_entries, run_stage_grounding
 from toc.harness import append_state_snapshot
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
@@ -30,6 +30,7 @@ from toc.review_loop import (
     render_aggregator_prompt,
     render_critic_prompt,
 )
+from toc.stage_evaluator import check_manifest_single
 
 EXPERIENCE_TEMPLATES: dict[str, Path] = {
     "cinematic_story": Path("workflow/immersive-ride-video-manifest-template.md"),
@@ -131,6 +132,8 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
         "slot.p420.note": "cut blueprint authoring waits until all scenes pass p410 gates",
         "slot.p435.status": "pending",
         "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
+        "slot.p450.status": "pending",
+        "slot.p450.note": "skeleton manifest materialization waits for p400 readiness approval before p500",
     },
     "narration": {
         "stage.narration.status": "pending",
@@ -143,9 +146,12 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
     },
     "asset": {
         "stage.asset.status": "pending",
+        "artifact.asset_inventory.status": "scaffold",
         "artifact.asset_plan.status": "scaffold",
         "slot.p510.status": "pending",
         "slot.p510.note": "scaffold grounding only; resolve asset stage context before marking done",
+        "slot.p520.status": "pending",
+        "slot.p520.note": "scaffold placeholder; inventory reusable characters, objects, locations, setpieces, and stills before asset planning",
         "slot.p530.status": "pending",
         "slot.p530.note": "scaffold placeholder; author asset_plan.md before marking done",
         "slot.p550.status": "pending",
@@ -213,6 +219,8 @@ REVIEW_HANDOFF_UPDATES: dict[str, dict[str, str]] = {
         "slot.p430.note": "human review handoff; run evaluator-improvement loop before approval when required",
         "slot.p435.status": "pending",
         "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
+        "slot.p450.status": "pending",
+        "slot.p450.note": "skeleton manifest materialization waits for p400 readiness approval before p500",
     },
     "narration": {
         "stage.narration.status": "awaiting_approval",
@@ -289,8 +297,20 @@ def write_text(path: Path, content: str, force: bool) -> bool:
     return True
 
 
-def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:
-    run_stage_grounding(run_dir, stage, flow=flow, retries=1)
+def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str, fatal: bool = True) -> None:
+    try:
+        run_stage_grounding(run_dir, stage, flow=flow, retries=1)
+    except StageGroundingError:
+        if fatal:
+            raise
+
+
+def require_fresh_p400_readiness(run_dir: Path) -> None:
+    _stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
+    append_state_snapshot(run_dir / "state.txt", updates)
+    if updates.get("eval.p400_readiness.status") != "approved":
+        reasons = updates.get("eval.p400_readiness.reason_keys") or "unknown"
+        raise SystemExit(f"p400 readiness gate is not approved: {reasons}")
 
 
 def ensure_skeleton_manifest(manifest_text: str) -> str:
@@ -650,12 +670,15 @@ def main() -> None:
     }
     p400_review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
 
+    require_fresh_p400_readiness(run_dir)
     maybe_run_stage_grounding(run_dir, "asset", flow="immersive")
+    write_text(run_dir / "asset_inventory.md", "# Asset Inventory\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_plan.md", "# Asset Plan\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_requests.md", "# Asset Generation Requests\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_manifest.md", "```yaml\nassets: []\n```\n", force=args.force)
     asset_review_updates = merge_review_loop_updates(run_dir, "asset")
     asset_artifacts = {
+        "artifact.asset_inventory": str((run_dir / "asset_inventory.md").resolve()),
         "artifact.asset_plan": str((run_dir / "asset_plan.md").resolve()),
         "artifact.asset_generation_requests": str((run_dir / "asset_generation_requests.md").resolve()),
         "artifact.asset_generation_manifest": str((run_dir / "asset_generation_manifest.md").resolve()),

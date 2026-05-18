@@ -3,8 +3,8 @@
 本書は、未確定事項（TBD）を集約する。
 
 ## Providers
-- image: Google Nano Banana 2（`google_nanobanana_2`）
-- image (alt): Gemini 3.1 Flash Image（`gemini_3_1_flash_image` / `gemini-3.1-flash-image-preview`）
+- image: Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
+- image (external): disabled for standard repo workflows
 - video: Kling 3.0（default。`video_generation.tool: kling_3_0`）
 - video (omni): Kling 3.0 Omni（`video_generation.tool: kling_3_0_omni`）
 - video (alt): Seedance（BytePlus ModelArk。`video_generation.tool: seedance`）

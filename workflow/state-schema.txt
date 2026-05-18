@@ -225,6 +225,7 @@
 #   artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 #   artifact.script=output/<topic>_<timestamp>/script.md
 #   artifact.script_review=output/<topic>_<timestamp>/script_review.md
+#   artifact.asset_inventory=output/<topic>_<timestamp>/asset_inventory.md
 #   artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
 #   artifact.asset_generation_requests=output/<topic>_<timestamp>/asset_generation_requests.md
 #   artifact.human_change_log=output/<topic>_<timestamp>/human_change_requests.md

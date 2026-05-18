@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import fcntl
 import json
 import math
@@ -58,6 +58,7 @@ from .image_gen import (
 
 
 ROOT = repo_root()
+APP_ROOT = Path(__file__).resolve().parents[1]
 WEB_DIR = ROOT / "server" / "web"
 DIST_DIR = WEB_DIR / "dist"
 
@@ -99,6 +100,10 @@ P650_FIXED_SLOTS = (
     "p650",
 )
 P680_FIXED_SLOTS = (*P650_FIXED_SLOTS, "p660", "p670", "p680")
+BOOTSTRAP_ASSET_MAX_ATTEMPTS = 10
+IMAGE_GENERATION_PARALLELISM = max(1, int(os.environ.get("TOC_IMAGE_GEN_PARALLELISM", "4") or "4"))
+CREATE_SKILL_STOP_POLL_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_STOP_POLL_SECONDS", "10") or "10"))
+CREATE_SKILL_CANCEL_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_CANCEL_TIMEOUT_SECONDS", "10") or "10"))
 SLOT_TERMINAL_STATES = {"done", "skipped", "awaiting_approval"}
 SLOT_AWAITING_APPROVAL_ALLOWED = {
     "p130",
@@ -353,13 +358,15 @@ def _toc_run_command(*, topic: str, run_id: str) -> str:
     return f"/toc-run {topic_arg} --dry-run --review-policy drafts --run-dir {run_dir_arg}"
 
 
-def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str) -> str:
+def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str, stop_target: str = "p680") -> str:
     source_text = (source or "").strip() or topic
+    if stop_target not in {"p650", "p680"}:
+        raise ValueError("stop_target must be p650 or p680")
     payload = {
         "topic": topic,
         "source": source_text,
         "run_dir": f"output/{run_id}",
-        "stop_target": "p680",
+        "stop_target": stop_target,
         "experience": "cinematic_story",
         "review_policy": "frontend",
         "handoff": "frontend_image_review",
@@ -371,7 +378,7 @@ def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str
             "Use $toc-immersive-runner.",
             "",
             "Create a ToC immersive cinematic story run from this request.",
-            "Run the canonical p100-p680 frontend-review workflow in one skill invocation.",
+            f"Run the canonical p100-{stop_target} frontend-review workflow in one skill invocation.",
             "Do not execute or depend on Claude slash commands.",
             "Do not create a second run directory.",
             "Do not return success for placeholder scaffold output.",
@@ -471,7 +478,7 @@ def _asset_entries_from_manifest(run_dir: Path) -> list[dict[str, Any]]:
                 entries.append(
                     {
                         "selector": selector,
-                        "tool": "codex_app_server",
+                        "tool": "codex_builtin_image",
                         "asset_type": f"{kind}_reference" if kind != "location" else "location_anchor",
                         "execution_lane": "bootstrap_builtin",
                         "reference_count": 0,
@@ -494,7 +501,7 @@ def _asset_entries_from_manifest(run_dir: Path) -> list[dict[str, Any]]:
         entries.append(
             {
                 "selector": selector,
-                "tool": "codex_app_server",
+                "tool": "codex_builtin_image",
                 "asset_type": "style_reference",
                 "execution_lane": "bootstrap_builtin",
                 "reference_count": 0,
@@ -680,11 +687,13 @@ def _validate_p650_run(run_id: str) -> None:
         raise RuntimeError(f"ToC run did not reach p650: invalid awaiting_approval fixed slots {', '.join(invalid_approval_slots)}")
 
 
-def _validate_frontend_create_run(run_id: str) -> None:
+def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
     _validate_p650_run(run_id)
     run_dir = safe_run_dir(run_id, ROOT)
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
+    if strict_visual_quality:
+        _validate_p680_visual_quality(run_dir)
     state = parse_state_file(run_dir / "state.txt")
     missing_slots = [slot for slot in P680_FIXED_SLOTS if not state.get(f"slot.{slot}.status")]
     if missing_slots:
@@ -761,7 +770,7 @@ def _is_unsupported_method_error(exc: CodexAppServerError) -> bool:
     )
 
 
-async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id: str) -> None:
+async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id: str, stop_target: str = "p680") -> None:
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
     skill_path = _toc_immersive_skill_path()
@@ -787,13 +796,61 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             if not any(skill.get("enabled", True) for skill in matching):
                 raise RuntimeError("Codex skill is disabled: toc-immersive-runner")
         await client.run_skill(
-            text=_toc_immersive_command(topic=topic, source=source, run_id=run_id),
+            text=_toc_immersive_command(topic=topic, source=source, run_id=run_id, stop_target=stop_target),
             skill_path=skill_path,
             cwd=ROOT,
             timeout_seconds=7200,
         )
     finally:
         await client.stop()
+
+
+def _stop_target_contract_reached(run_id: str, stop_target: str) -> bool:
+    try:
+        if stop_target == "p650":
+            _validate_p650_run(run_id)
+        elif stop_target == "p680":
+            _validate_frontend_create_run(run_id, strict_visual_quality=False)
+        else:
+            raise ValueError("stop_target must be p650 or p680")
+    except Exception:
+        return False
+    return True
+
+
+async def _run_toc_skill_helper_until_stop_target(
+    *,
+    topic: str,
+    source: str | None = None,
+    run_id: str,
+    stop_target: str = "p680",
+) -> None:
+    task = asyncio.create_task(_run_toc_skill_helper(topic=topic, source=source, run_id=run_id, stop_target=stop_target))
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=CREATE_SKILL_STOP_POLL_SECONDS)
+            if task in done:
+                await task
+                return
+            if _stop_target_contract_reached(run_id, stop_target):
+                task.cancel()
+                with suppress(asyncio.CancelledError, CodexAppServerError, asyncio.TimeoutError):
+                    await asyncio.wait_for(task, timeout=CREATE_SKILL_CANCEL_TIMEOUT_SECONDS)
+                run_dir = safe_run_dir(run_id, ROOT)
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "runtime.app_server_skill.stop_target": stop_target,
+                        "runtime.app_server_skill.stop_detected": "true",
+                    },
+                )
+                return
+    except Exception:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, CodexAppServerError, asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout=CREATE_SKILL_CANCEL_TIMEOUT_SECONDS)
+        raise
 
 
 async def _run_helper_command(*args: str, timeout: int = 1800) -> str:
@@ -2193,7 +2250,7 @@ def _asset_request_section(*, item_id: str, asset_type: str, output: str, prompt
         [
             f"## {item_id}",
             "",
-            "- tool: `codex_app_server`",
+            "- tool: `codex_builtin_image`",
             f"- asset_type: `{asset_type}`",
             "- execution_lane: `bootstrap_builtin`",
             "- reference_count: `0`",
@@ -2350,7 +2407,7 @@ def _insert_cut_in_manifest(run_dir: Path, req: InsertCutRequest) -> dict[str, s
         "cut_name": req.cut_name.strip(),
         "cut_role": "sub",
         "image_generation": {
-            "tool": "google_nanobanana_2",
+            "tool": "codex_builtin_image",
             "character_ids": [],
             "character_variant_ids": [],
             "object_ids": [],
@@ -2463,53 +2520,153 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
         await client.stop()
 
 
+def _run_relative_key(run_dir: Path, value: str) -> str:
+    return resolve_run_relative(run_dir, value).resolve().relative_to(run_dir.resolve()).as_posix()
+
+
+def _build_generation_groups(items: list[Any], *, run_dir: Path, kind: str) -> list[list[Any]]:
+    output_items = [item for item in items if getattr(item, "output", None)]
+    if not output_items:
+        return []
+    output_to_item: dict[str, Any] = {}
+    for item in output_items:
+        output = _run_relative_key(run_dir, str(item.output))
+        if output in output_to_item:
+            raise RuntimeError(f"{kind} generation plan has duplicate output: {output}")
+        output_to_item[output] = item
+
+    dependencies: dict[str, set[str]] = {item.id: set() for item in output_items}
+    item_by_id = {item.id: item for item in output_items}
+    for item in output_items:
+        for ref in getattr(item, "references", []) or []:
+            ref_key = _run_relative_key(run_dir, str(ref))
+            producer = output_to_item.get(ref_key)
+            if producer is not None:
+                if producer.id == item.id:
+                    raise RuntimeError(f"{kind} generation plan has cyclic reference dependencies: {item.id}")
+                dependencies[item.id].add(producer.id)
+                continue
+            reference = resolve_run_relative(run_dir, str(ref))
+            if not reference.exists() or not reference.is_file():
+                raise RuntimeError(f"{kind} reference not found before generation plan: {item.id}: {ref}")
+            require_image_file(reference)
+
+    groups: list[list[Any]] = []
+    resolved: set[str] = set()
+    pending = set(item_by_id)
+    while pending:
+        ready_ids = [item.id for item in output_items if item.id in pending and dependencies[item.id] <= resolved]
+        if not ready_ids:
+            cycle_ids = ", ".join(sorted(pending))
+            raise RuntimeError(f"{kind} generation plan has cyclic reference dependencies: {cycle_ids}")
+        groups.append([item_by_id[item_id] for item_id in ready_ids])
+        resolved.update(ready_ids)
+        pending.difference_update(ready_ids)
+    return groups
+
+
+def _validate_generation_groups(groups: list[list[Any]], *, run_dir: Path, kind: str) -> None:
+    available = {path.relative_to(run_dir).as_posix() for path in run_dir.glob("assets/**/*") if path.is_file()}
+    for index, group in enumerate(groups, start=1):
+        group_outputs = {str(item.output) for item in group if getattr(item, "output", None)}
+        for item in group:
+            for ref in getattr(item, "references", []) or []:
+                ref_key = _run_relative_key(run_dir, str(ref))
+                if ref_key in group_outputs:
+                    raise RuntimeError(f"{kind} generation group {index} has same-phase reference dependency: {item.id}: {ref}")
+                if ref_key not in available:
+                    producer_in_later_group = any(
+                        ref_key == _run_relative_key(run_dir, str(other.output))
+                        for later in groups[index:]
+                        for other in later
+                        if getattr(other, "output", None)
+                    )
+                    if producer_in_later_group:
+                        raise RuntimeError(f"{kind} generation group {index} depends on a later group: {item.id}: {ref}")
+        available.update(_run_relative_key(run_dir, str(item.output)) for item in group if getattr(item, "output", None))
+
+
+def _validate_generated_group_outputs(group: list[Any], *, run_dir: Path, kind: str, group_index: int) -> None:
+    issues: list[str] = []
+    for item in group:
+        if not getattr(item, "output", None):
+            continue
+        try:
+            output = resolve_run_relative(run_dir, str(item.output))
+            require_image_file(output)
+            if not output.is_file():
+                issues.append(str(item.output))
+                continue
+            validate_image_bytes(output)
+        except (OSError, ValueError) as exc:
+            issues.append(f"{item.output}: {exc}")
+    if issues:
+        raise RuntimeError(f"{kind} generation group {group_index} incomplete: {', '.join(issues)}")
+
+
+async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) -> None:
+    if not getattr(item, "output", None):
+        return
+    if not str(getattr(item, "prompt", "") or "").strip():
+        raise RuntimeError(f"{kind} request has no prompt: {item.id}")
+    destination = resolve_run_relative(run_dir, str(item.output))
+    if destination.exists():
+        return
+    references: list[Path] = []
+    for ref in getattr(item, "references", []) or []:
+        reference = resolve_run_relative(run_dir, str(ref))
+        if not reference.exists() or not reference.is_file():
+            raise RuntimeError(f"{kind} reference not found for {item.id}: {ref}")
+        require_image_file(reference)
+        references.append(reference)
+    client = CodexAppServerClient(cwd=ROOT)
+    try:
+        await client.start()
+        async with _generated_images_cutoff_lock:
+            fallback_cutoff_ns = latest_generated_image_mtime_ns()
+        result = await client.generate_image(
+            prompt=item.prompt,
+            output_path=destination,
+            reference_images=references,
+            item_id=item.id,
+            run_dir=run_dir,
+            fallback_cutoff_ns=fallback_cutoff_ns,
+        )
+        debug_log = write_app_server_image_debug_log(
+            run_dir=run_dir,
+            item_id=item.id,
+            index=1,
+            destination=destination,
+            references=references,
+            prompt=item.prompt,
+            kind=kind,
+            result=result,
+        )
+        if result.saved_path is None:
+            raise RuntimeError(f"Codex app-server did not return an image for {item.id}; see {debug_log}")
+        copy_saved_image(result.saved_path, destination)
+    finally:
+        await client.stop()
+
+
 async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
     items = load_request_items(run_dir, kind)
     if not items:
         raise RuntimeError(f"{kind} request file has no {kind} items")
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
-    client = CodexAppServerClient(cwd=ROOT)
-    try:
-        await client.start()
-        for item in items:
-            if not item.output:
-                continue
-            if not item.prompt.strip():
-                raise RuntimeError(f"{kind} request has no prompt: {item.id}")
-            destination = resolve_run_relative(run_dir, item.output)
-            if destination.exists():
-                continue
-            references: list[Path] = []
-            for ref in item.references:
-                reference = resolve_run_relative(run_dir, ref)
-                if not reference.exists() or not reference.is_file():
-                    raise RuntimeError(f"{kind} reference not found for {item.id}: {ref}")
-                require_image_file(reference)
-                references.append(reference)
-            async with _generated_images_cutoff_lock:
-                fallback_cutoff_ns = latest_generated_image_mtime_ns()
-            result = await client.generate_image(
-                prompt=item.prompt,
-                output_path=destination,
-                reference_images=references,
-                item_id=item.id,
-                run_dir=run_dir,
-                fallback_cutoff_ns=fallback_cutoff_ns,
-            )
-            debug_log = write_app_server_image_debug_log(
-                run_dir=run_dir,
-                item_id=item.id,
-                index=1,
-                destination=destination,
-                references=references,
-                result=result,
-            )
-            if result.saved_path is None:
-                raise RuntimeError(f"Codex app-server did not return an image for {item.id}; see {debug_log}")
-            copy_saved_image(result.saved_path, destination)
-    finally:
-        await client.stop()
+    groups = _build_generation_groups(items, run_dir=run_dir, kind=kind)
+    if not groups:
+        raise RuntimeError(f"{kind} request file has no output items")
+    _validate_generation_groups(groups, run_dir=run_dir, kind=kind)
+    semaphore = asyncio.Semaphore(IMAGE_GENERATION_PARALLELISM)
+    for index, group in enumerate(groups, start=1):
+        async def generate_item(item: Any) -> None:
+            async with semaphore:
+                await _generate_request_item_output(run_dir=run_dir, kind=kind, item=item)
+
+        await asyncio.gather(*(generate_item(item) for item in group))
+        _validate_generated_group_outputs(group, run_dir=run_dir, kind=kind, group_index=index)
 
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
@@ -2529,6 +2686,121 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
             issues.append(f"{item.output}: {exc}")
     if issues:
         raise RuntimeError(f"{kind} image generation incomplete: {', '.join(issues)}")
+
+
+def _validate_p680_visual_quality(run_dir: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(APP_ROOT / "scripts" / "verify-pipeline.py"),
+            "--run-dir",
+            str(run_dir),
+            "--flow",
+            "immersive",
+            "--profile",
+            "standard",
+            "--stage-target",
+            "p680",
+        ],
+        cwd=APP_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"p680 visual quality gate failed: {detail}")
+
+
+def _validate_p560_asset_quality(run_dir: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(APP_ROOT / "scripts" / "verify-pipeline.py"),
+            "--run-dir",
+            str(run_dir),
+            "--flow",
+            "immersive",
+            "--profile",
+            "standard",
+            "--stage-target",
+            "p570",
+        ],
+        cwd=APP_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"p560 bootstrap asset visual gate failed: {detail}")
+
+
+def _bootstrap_asset_items(run_dir: Path) -> list[Any]:
+    return [
+        item
+        for item in load_request_items(run_dir, "asset")
+        if item.output
+        and (
+            item.reference_count == 0
+            or not item.references
+            or str(item.execution_lane or "").strip() == "bootstrap_builtin"
+        )
+    ]
+
+
+def _remove_bootstrap_asset_outputs(run_dir: Path) -> None:
+    for item in _bootstrap_asset_items(run_dir):
+        if not item.output:
+            continue
+        output = resolve_run_relative(run_dir, item.output)
+        with suppress(FileNotFoundError):
+            if output.is_file():
+                output.unlink()
+
+
+async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure_detail: str, attempt: int) -> None:
+    items = _bootstrap_asset_items(run_dir)
+    if not items or app_server_disabled():
+        return
+    await _set_create_job(job_id, {"message": "素材画像を生成中"})
+    client = CodexAppServerClient(cwd=ROOT)
+    try:
+        await client.start()
+        prompts: dict[str, str] = {}
+        for item in items:
+            target = _prompt_target_for_item(item)
+            setting = read_prompt_setting(target, root=ROOT)
+            prompt = await client.regenerate_prompt(
+                item=item_to_api(item),
+                target=target,
+                instruction=(
+                    "Revise this no-reference bootstrap asset prompt because the generated raster failed the visual quality gate. "
+                    "Make the next output unmistakably photorealistic live-action, high-detail, textured, naturally lit, and usable as a downstream reference image. "
+                    "Explicitly avoid flat illustration, vector art, SVG-like shapes, cel shading, anime, cartoon, low-detail poster styling, and simple graphic design. "
+                    "Keep the prompt self-contained Japanese with stable bracketed sections. "
+                    f"Gate failure detail from attempt {attempt}: {failure_detail[:1200]}"
+                ),
+                setting_content=str(setting["content"]),
+                run_dir=run_dir,
+            )
+            prompts[item.id] = prompt
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            update_result = update_request_prompts(run_dir, "asset", prompts, allow_inline_prompt=True)
+            if update_result["missing"]:
+                raise RuntimeError(f"asset prompt repair failed for {', '.join(update_result['missing'])}")
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.asset_visual_gate.repair.status": "done",
+                    "review.asset_visual_gate.repair.attempt": str(attempt),
+                    "review.asset_visual_gate.repair.count": str(len(update_result["updated"])),
+                },
+            )
+    finally:
+        await client.stop()
 
 
 def _mark_image_generation_review_ready(run_id: str) -> None:
@@ -2555,6 +2827,7 @@ def _validate_image_review_ready(run_id: str) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
+    _validate_p680_visual_quality(run_dir)
     state = parse_state_file(run_dir / "state.txt")
     expected = {
         "slot.p660.status": "done",
@@ -2567,21 +2840,55 @@ def _validate_image_review_ready(run_id: str) -> None:
         raise RuntimeError(f"image review handoff incomplete: {', '.join(mismatches)}")
 
 
-async def _generate_create_images(job_id: str, *, run_id: str) -> None:
+async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
-    await _set_create_job(job_id, {"message": "素材画像を生成中"})
-    await _generate_request_outputs(run_dir=run_dir, kind="asset")
+    asset_quality_passed = False
+    last_asset_gate_error = ""
+    for attempt in range(1, BOOTSTRAP_ASSET_MAX_ATTEMPTS + 1):
+        await _set_create_job(job_id, {"message": "素材画像を生成中"})
+        await _generate_request_outputs(run_dir=run_dir, kind="asset")
+        try:
+            _validate_p560_asset_quality(run_dir)
+        except RuntimeError as exc:
+            last_asset_gate_error = str(exc)
+            if attempt >= BOOTSTRAP_ASSET_MAX_ATTEMPTS:
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.asset_visual_gate.status": "needs_frontend_review",
+                        "review.asset_visual_gate.attempts": str(attempt),
+                        "review.asset_visual_gate.last_error": last_asset_gate_error[:2000],
+                    },
+                )
+                break
+            await _repair_bootstrap_asset_prompts(job_id, run_dir=run_dir, failure_detail=last_asset_gate_error, attempt=attempt)
+            _remove_bootstrap_asset_outputs(run_dir)
+        else:
+            asset_quality_passed = True
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.asset_visual_gate.status": "passed",
+                    "review.asset_visual_gate.attempts": str(attempt),
+                },
+            )
+            break
     await _set_create_job(job_id, {"message": "シーン画像を生成中"})
     await _generate_request_outputs(run_dir=run_dir, kind="scene")
     _mark_image_generation_review_ready(run_id)
+    return asset_quality_passed
 
 
 async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) -> None:
     try:
-        await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
-        await _run_toc_skill_helper(topic=title, source=source, run_id=run_id)
+        await _set_create_job(job_id, {"message": "本家ToC工程をp650まで実行中"})
+        await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p650")
+        await _set_create_job(job_id, {"message": "p650成果物を検証中"})
         _validate_created_run(run_id)
-        _validate_frontend_create_run(run_id)
+        _validate_p650_run(run_id)
+        await _upgrade_initial_request_prompts(job_id, run_id=run_id)
+        asset_quality_passed = await _generate_create_images(job_id, run_id=run_id)
+        _validate_frontend_create_run(run_id, strict_visual_quality=asset_quality_passed)
         await _set_create_job(job_id, {"status": "completed"})
     except Exception as exc:
         _cleanup_unscaffolded_run(run_id)
@@ -2752,7 +3059,7 @@ async def api_create_asset(req: AssetCreateRequest) -> dict[str, Any]:
     return {
         "runId": req.run_id,
         "status": "completed",
-        "item": item_to_api(created) if created else {**item, "prompt": prompt, "existingImage": None, "generationStatus": None, "tool": "codex_app_server"},
+        "item": item_to_api(created) if created else {**item, "prompt": prompt, "existingImage": None, "generationStatus": None, "tool": "codex_builtin_image"},
         "references": [reference_to_api(option) for option in list_reference_options(run_dir)],
         "progress": read_run_progress(run_dir),
     }
@@ -3115,6 +3422,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 index=index,
                 destination=destination,
                 references=references,
+                prompt=req.prompt,
+                kind=req.kind,
                 result=result,
             )
         except Exception as exc:
@@ -3124,6 +3433,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 index=index,
                 destination=destination,
                 references=references,
+                prompt=req.prompt,
+                kind=req.kind,
                 result=result,
                 error=str(exc),
             )

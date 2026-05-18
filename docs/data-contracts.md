@@ -155,6 +155,8 @@ eval.production_readiness.loop.current_round=0
 eval.production_readiness.loop.final_report=production_readiness_review.md
 review.script.production_readiness.status=pending|approved|changes_requested|skipped
 gate.script_production_readiness_review=required|optional|skipped
+eval.p400_readiness.status=approved|changes_requested
+eval.p400_readiness.reason_keys=comma,separated,failed,deterministic,checks
 stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.narration.grounding.status=ready|missing_docs|missing_inputs
 stage.narration.grounding.report=logs/grounding/narration.json
@@ -209,6 +211,7 @@ artifact.story_review=output/<topic>_<timestamp>/story_review.md
 artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 artifact.script=output/<topic>_<timestamp>/script.md
 artifact.script_review=output/<topic>_<timestamp>/script_review.md
+artifact.asset_inventory=output/<topic>_<timestamp>/asset_inventory.md
 artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
 artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 artifact.video=output/<topic>_<timestamp>/video.mp4
@@ -266,8 +269,10 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
 - critic agent: 5 agents
   - それぞれ独立に同じ canonical artifact と stage readset を読み、rubric finding を出す
   - critic は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
+  - finding は表層的な「不足」「弱い」「不明」だけで終わらせず、`root_cause`（本質原因）、`downstream_impact`（後段への影響）、`fix_direction`（修正方針）、`acceptance_condition`（次回通過条件）を明示する
 - aggregator: 1 agent
   - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
+  - 採用する blocker には、失敗した check 名だけでなく、その failure を生んだ設計・依存・state・contract 上の原因と、明確な修正方針がある場合の target artifact / section / acceptance condition を書く
   - aggregator も canonical artifact を直接編集しない
 - orchestrator / main agent:
   - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
@@ -442,6 +447,7 @@ p400 の内部 slot:
 
 - `p410`: scene completion gate
   - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
+  - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、および `coverage_review` を持つ
   - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
   - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
   - 具体 reviewer は 5-10 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もり、提案 cut 数だけで足りるかを評価する
@@ -466,7 +472,7 @@ p400 の内部 slot:
 - `p435`: production readiness council
   - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
   - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
-  - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する
+  - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する。`target_duration_seconds` と cut duration 合計の比較を p700 へ defer してはいけない
   - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
   - Orchestrator は各 auditor の意見を統合して Design Owner 向け patch brief を作る
   - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この process 内で downstream design artifacts を触れるのは Design Owner だけとする
@@ -478,6 +484,11 @@ p400 の内部 slot:
 Canonical p400 done 条件:
 
 - `script.md.scenes[]` が `story.md` の主要 scene を coverage している
+- `eval.p400_readiness.status=approved` である。これがない限り p500 asset stage は grounding で `missing_inputs` になり、開始しない
+- `video_manifest.md.video_metadata.target_duration_seconds` は 300-600 秒であり、skeleton または promoted production manifest 上の cut duration 合計が target の 90% 以上である
+- `script.md` と `video_manifest.md` の scene/cut selector が完全一致している
+- `scene_set_review.md` / `scene_detail_review.md` / `cut_blueprint_review.md` / `script_review.md` / `production_readiness_review.md` が required section と passed status を持つ
+- p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p435 は `Design Owner Patch Brief` を持つ
 - 各 scene が `scene_intent` 相当の情報を持つ
   - story purpose
   - audience information
@@ -489,7 +500,7 @@ Canonical p400 done 条件:
 - 各 cut が narration の役割を持つ。無音 cut の場合は、p700 へ渡せる `silence_contract` の必要性が明示されている
 - asset が必要そうな character / object / location / reusable still は、p500 用の dependency hint として列挙されている
 - `human_change_requests[]` が selector 付きで正規化され、p400 内で採用/保留/承認待ちが追跡できる
-- `video_manifest.md` が `manifest_phase: skeleton` として存在し、scene/cut selector が `script.md` と対応している
+- `video_manifest.md` が `manifest_phase: skeleton` として存在する。後段で `production` へ昇格済みの場合も p400 readiness は維持できるが、p400 gate 自体は skeleton manifest の scene/cut selector が `script.md` と対応していることを見る
 - 本番 image prompt、asset 画像、TTS 実行、動画生成、最終 render を p400 で実行していない
 
 ### 1.1 `status` と `stage.*.status` の役割分担
@@ -738,9 +749,9 @@ generator の読み順:
   - ただし scene に `render_units[]` がある場合、非 deleted cut はどれか 1 つの render unit にちょうど 1 回だけ含まれることを正とする
   - `video_generation_requests.md` は render unit selector を出力してよい
 
-### 4.6 `asset_plan.md`（asset stage 正本）
+### 4.6 `asset_inventory.md` / `asset_plan.md`（asset stage 正本）
 
-画像生成の stage 1 では、`video_manifest.md` の前段として `asset_plan.md` を持てる。
+画像生成の stage 1 では、`video_manifest.md` の前段として p520 の `asset_inventory.md` と p530 の `asset_plan.md` を持てる。
 
 - 目的
   - この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅し、reusable asset として設計・review・承認する
@@ -749,6 +760,8 @@ generator の読み順:
   - `story.md`
   - 必要なら `video_manifest.md.assets.*`
 - 出力
+  - `asset_inventory.md`
+  - `asset_plan.md`
   - `assets/characters/*`
   - `assets/objects/*`
   - `assets/locations/*`
@@ -757,12 +770,22 @@ generator の読み順:
 p500 slot contract:
 
 - `p510`: asset grounding。`script.md` / `story.md` / `video_manifest.md` / asset stage docs / template の readset と audit を確定する。
-- `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を漏れなく洗い出す。
+- `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
 - `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
 - `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main agent が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
+
+`asset_inventory.md` の最低限:
+
+- `asset_inventory.source_artifacts[]`
+- `asset_inventory.coverage_scope.characters[]`
+- `asset_inventory.coverage_scope.story_specific_items[]`
+- `asset_inventory.coverage_scope.locations[]`
+- `asset_inventory.coverage_scope.setpieces[]`
+- `asset_inventory.coverage_scope.reusable_stills[]`
+- `asset_inventory.items[]`
 
 最低限の top-level:
 
@@ -788,6 +811,7 @@ p500 slot contract:
 `generation_plan` の追加 field:
 
 - `execution_lane: standard|bootstrap_builtin`
+- `tool: codex_builtin_image`（request materialization 時の標準画像 provider）
 - `bootstrap_allowed: true|false`
 - `bootstrap_reason: no_reference_seed|other`
 
@@ -802,6 +826,7 @@ asset stage の character variant ルール:
 
 bootstrap lane ルール:
 
+- 画像 provider は参照あり/なしを問わず `codex_builtin_image` に固定する
 - `reference_inputs[]` が空で、かつ `bootstrap_allowed=true` の asset だけ `execution_lane=bootstrap_builtin` にできる
 - `reference_inputs[]` が 1 件以上ある asset は常に `execution_lane=standard`
 - `derived_from_asset_id` がある asset は常に `execution_lane=standard`

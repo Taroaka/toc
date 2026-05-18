@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import re
 import shutil
@@ -280,9 +281,11 @@ def _parse_metadata(section: str) -> dict[str, Any]:
             continue
         if stripped.startswith("- references:"):
             value = stripped.split(":", 1)[1].strip()
-            in_references = True
             if value and value not in {"[]", "`[]`"}:
                 metadata["references"].append(_strip_ticks(value))
+                in_references = False
+            else:
+                in_references = not value
             continue
         if in_references and stripped.startswith("- `"):
             # Format: - `label`: `assets/foo.png`
@@ -290,10 +293,12 @@ def _parse_metadata(section: str) -> dict[str, Any]:
             if match:
                 metadata["references"].append(match.group(1).strip())
                 continue
-        if in_references and stripped.startswith("- "):
+        match = re.match(r"-\s*([a-zA-Z0-9_ -]+):\s*(.*)$", stripped)
+        if in_references and match:
+            in_references = False
+        elif in_references and stripped.startswith("- "):
             metadata["references"].append(_strip_ticks(stripped[2:]))
             continue
-        match = re.match(r"-\s*([a-zA-Z0-9_ -]+):\s*(.*)$", stripped)
         if not match:
             continue
         key = match.group(1).strip().replace("-", "_")
@@ -593,6 +598,8 @@ def write_app_server_image_debug_log(
     index: int,
     destination: Path,
     references: list[Path],
+    prompt: str | None = None,
+    kind: str | None = None,
     result: Any | None = None,
     error: str | None = None,
 ) -> Path:
@@ -605,8 +612,12 @@ def write_app_server_image_debug_log(
     payload = {
         "itemId": item_id,
         "candidateIndex": index,
+        "kind": kind,
         "destination": _run_relative_or_string(run_dir, destination),
         "references": [_run_relative_or_string(run_dir, reference) for reference in references],
+        "prompt": prompt,
+        "promptLength": len(prompt or ""),
+        "promptSha256": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest() if prompt is not None else None,
         "status": getattr(result, "status", "exception" if error else "missing") if result is not None else "exception",
         "savedPath": str(getattr(result, "saved_path", "") or ""),
         "source": getattr(result, "source", None) if result is not None else None,
@@ -615,6 +626,10 @@ def write_app_server_image_debug_log(
         "transcript": transcript if isinstance(transcript, list) else [],
     }
     log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as index_file:
+        index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")
     return log_path
 
 

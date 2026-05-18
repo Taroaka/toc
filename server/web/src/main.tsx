@@ -2648,7 +2648,7 @@ function App() {
       id: tempId,
       kind: 'asset',
       assetType: addAssetType,
-      tool: 'codex_app_server',
+      tool: 'codex_builtin_image',
       output: null,
       prompt: addAssetDesignPrompt,
       references: [],

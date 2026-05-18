@@ -77,7 +77,7 @@
 [再生リスト URL]
 
 ▼ 制作ツール
-・画像生成: Gemini / SeaDream
+・画像生成: Codex built-in image generation（gpt-image-2）
 ・音声合成: ElevenLabs
 ・動画生成: Kling 3.0
 ・パイプライン: AIエージェントによる全自動生成

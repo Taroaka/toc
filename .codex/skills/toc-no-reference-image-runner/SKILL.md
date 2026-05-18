@@ -1,6 +1,6 @@
 ---
 name: toc-no-reference-image-runner
-description: Use when this repository needs to generate images with no existing references, routing no-reference asset or scene requests through the shared built-in image generation skill instead of the standard reference-driven providers.
+description: Use when this repository needs to generate images with no existing references through the shared Codex built-in image generation lane.
 ---
 
 # ToC No-Reference Image Runner
@@ -9,8 +9,8 @@ description: Use when this repository needs to generate images with no existing 
 
 This skill is the repository adapter for no-reference image generation.
 
-Use it when an image request has no resolved reference images and should move to
-Codex built-in image generation instead of the repo's standard providers.
+Use it when an image request has no resolved reference images and should use
+Codex built-in image generation.
 
 It delegates actual built-in generation to `$codex-parallel-image-batch`.
 
@@ -26,7 +26,7 @@ Use this skill when all of the following are true:
 Do not use this skill when:
 
 - any resolved reference image is available
-- the request should stay on `google_nanobanana_2`, `gemini_3_1_flash_image`, or `seadream`
+- the request has resolved reference images and should be handled by the normal `codex_builtin_image` reference-aware path
 - the task is only manifest authoring with no image execution
 
 ## Compatibility Note
@@ -83,7 +83,7 @@ For repo scene stills, generate for YouTube horizontal delivery.
 
 ## Guardrails
 
-- Do not send no-reference work back to `google_nanobanana_2`, `gemini_3_1_flash_image`, or `seadream`.
+- Do not send no-reference work to external paid image providers.
 - Do not use this skill when even one required continuity reference is already available.
 - Keep shared planning files single-writer; use this skill for execution, not parallel manifest edits.
 - For scene stills, do not fix portrait outputs by default with center-crop. The

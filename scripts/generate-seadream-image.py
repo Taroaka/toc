@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate a single image via SeaDream / Seedream (OpenAI Images API compatible).
-
-Defaults are configured for BytePlus ModelArk Seedream 4.5.
-"""
+"""Disabled legacy SeaDream/Seedream image generation entrypoint."""
 
 from __future__ import annotations
 
@@ -63,6 +59,10 @@ def _run_ffmpeg_convert_image(src: Path, dst: Path) -> None:
 
 def main() -> None:
     load_env_files(repo_root=REPO_ROOT)
+    raise SystemExit(
+        "Deprecated: external SeaDream image generation is disabled for this repo. "
+        "Use codex_builtin_image / gpt-image-2 through the Codex app-server instead."
+    )
 
     parser = argparse.ArgumentParser(description="Generate an image via SeaDream / Seedream.")
     parser.add_argument("--prompt", required=True, help="Text prompt.")
@@ -128,4 +128,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -504,7 +504,7 @@ def render_scene_manifest_md(
             f"      - cut_id: {idx}",
             f'        cut_role: "{role}"',
             "        image_generation:",
-            '          tool: "google_nanobanana_2"',
+            '          tool: "codex_builtin_image"',
             "          character_ids: []",
             "          character_variant_ids: []",
             "          object_ids: []",
