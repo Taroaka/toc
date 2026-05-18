@@ -798,6 +798,10 @@ class ImageGenParserTests(unittest.TestCase):
         with patch.dict(os.environ, {"TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS": "42"}):
             self.assertEqual(image_generation_turn_timeout_seconds(), 42)
 
+    def test_image_generation_turn_timeout_is_capped_at_30_minutes(self) -> None:
+        with patch.dict(os.environ, {"TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS": "7200"}):
+            self.assertEqual(image_generation_turn_timeout_seconds(), 1800)
+
     def test_generate_image_passes_image_timeout_to_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -263,6 +263,8 @@ Prompt:
 
 Rules:
 - Generate exactly one image.
+- The image must look like a photorealistic live-action film still: real human faces, real fabric, real-world lighting, physical camera lens, practical set or location.
+- Do not make animation, anime, manga, illustration, storybook art, stylized concept art, 3D cartoon, plastic CGI, doll-like faces, painterly fantasy art, or game art.
 - Use a native landscape 16:9 composition unless the prompt explicitly says otherwise.
 - If there are no reference images, keep this as no-reference built-in image generation.
 - Do not edit repository files. The host app will import the saved generated image.
@@ -392,10 +394,13 @@ def _positive_int_env(*names: str, default: int) -> int:
 
 
 def image_generation_turn_timeout_seconds() -> int:
-    return _positive_int_env(
-        "TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS",
-        "TOC_IMAGE_GEN_TIMEOUT_SECONDS",
-        default=7200,
+    return min(
+        _positive_int_env(
+            "TOC_IMAGE_GEN_TURN_TIMEOUT_SECONDS",
+            "TOC_IMAGE_GEN_TIMEOUT_SECONDS",
+            default=1800,
+        ),
+        1800,
     )
 
 
