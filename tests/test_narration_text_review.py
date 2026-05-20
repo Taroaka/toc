@@ -60,6 +60,40 @@ class TestNarrationTextReview(unittest.TestCase):
         self.assertIn("visual_direction_leaked_into_narration", codes)
         self.assertLess(results[0].rubric_scores["tts_readiness"], 0.7)
 
+    def test_p720_gate_flags_ai_thin_abstract_wording(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        entries = [
+            mod.NarrationEntry(
+                scene_id=10,
+                cut_id=1,
+                selector="scene10_cut01",
+                text="このフェーズでは、構造と観点を整理します。次のフレームで要素を見せます。",
+                tts_text="このフェーズでは、構造と観点を整理します。次のフレームで要素を見せます。",
+                tool="elevenlabs",
+                output="assets/audio/scene10_cut01.mp3",
+                duration_seconds=8,
+                image_prompt="主人公が浜辺で立ち止まる。",
+                motion_prompt="波がゆれる。",
+                story_role="middle",
+                phase="development",
+                scene_summary="主人公は迷って立ち止まります。",
+                script_narration="主人公は迷って立ち止まります。",
+                contract={},
+                agent_review_ok=True,
+                human_review_ok=False,
+                human_review_reason="",
+                agent_review_reason_keys=[],
+                agent_review_reason_messages=[],
+                rubric_scores={},
+                overall_score=1.0,
+            )
+        ]
+
+        results = mod.review_entries(entries)
+        codes = [finding.code for outcome in results for finding in outcome.findings]
+
+        self.assertIn("ai_thin_abstract_wording", codes)
+
     def test_review_allows_audio_tags_in_v3_tts_text(self) -> None:
         mod = _load_review_module(REPO_ROOT)
         entries = [

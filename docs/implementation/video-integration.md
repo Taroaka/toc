@@ -143,6 +143,11 @@ generator の既定参照順:
    - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
 3) Narration review を実行し、finding を source manifest に書き戻す
   - `python scripts/review-narration-text-quality.py --manifest output/<run>/video_manifest.md`
+  - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、音声生成へ進めない
+  - p720 では YouTube 由来の薄さ対策を必ず見る
+    - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
+    - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
+    - 言葉の薄さ: `フォーマット` / `フレーム` / `フェーズ` / `構造` / `観点` のような抽象語を連発せず、次文で具体的な人物・行動・場所・物へ落とす
   - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
   - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
   - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
@@ -153,6 +158,11 @@ generator の既定参照順:
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
 5) 次に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
+   - ElevenLabs の pronunciation dictionary を使う場合は、`ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS="dictionary_id:version_id"` または `--elevenlabs-pronunciation-dictionary-locator dictionary_id:version_id` を使う
+   - repo 側の簡易読み替え表を使う場合は、`TOC_TTS_PRONUNCIATION_ALIAS_FILE=path/to/aliases.tsv` または `--tts-pronunciation-alias-file path/to/aliases.tsv` を使う
+     - TSV 例: `売上	うりあげ`
+     - `=>` 形式も可: `取得=>しゅとく`
+   - 日本語では IPA/CMU より alias 型の読み替えを優先する。公式 pronunciation dictionary は最大 3 locator までを TTS request に渡す
 6) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
 7) 実尺が target を満たすかを gate する

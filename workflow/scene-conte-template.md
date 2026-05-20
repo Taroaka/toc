@@ -60,7 +60,8 @@
 
 推奨ルール:
 - 1カット = 1ナレーション
-- 各 production scene は最低2カット。短い scene でも導入/遷移カットと人物/行動/結果カットに分ける
+- cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上
+- target_duration_seconds / 12 を切り上げたカット数も下回らない。短い scene でも導入/遷移カットと人物/行動/結果カットに分ける
 - メインカット（最低1つ）: 5–15 秒（ナレーション実秒）
 - サブカット（最低1つ / 複数可）: 3–15 秒（ナレーション実秒）
 - 15秒以下でも、scene と narration を書き終えた時点で分割の要否を都度判断する

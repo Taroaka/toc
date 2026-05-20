@@ -24,11 +24,13 @@ from server.app import app
 from server.codex_app_server import (
     CodexAppServerClient,
     CodexAppServerError,
+    ImageGenerationResult,
     _extract_prompt_from_agent_text,
     default_app_server_model,
     find_agent_message_texts,
     find_image_generation_items,
     image_generation_saved_path,
+    reject_local_raster_image_result,
     wait_for_generated_image_after,
     wait_for_unclaimed_generated_image_after,
 )
@@ -147,6 +149,9 @@ scenes:
       - cut_id: 10-2
         image_generation:
           output: assets/scenes/scene10_cut2.png
+      - cut_id: 10-3
+        image_generation:
+          output: assets/scenes/scene10_cut3.png
 ```
 """,
         encoding="utf-8",
@@ -199,6 +204,19 @@ scenes:
 ```text
 実写映画風の横長16:9カット。主人公が次の行動へ踏み出す瞬間を具体的に描く。
 ```
+
+## scene10_cut3
+
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene10_cut3.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```text
+実写映画風の横長16:9カット。主人公が場面の出口へ向かい、次のsceneへつながる余韻を具体的に描く。
+```
 """,
         encoding="utf-8",
     )
@@ -214,6 +232,7 @@ def write_valid_p680_artifacts(root: Path, run_id: str) -> Path:
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(PNG_BYTES)
     (run_dir / "assets" / "scenes" / "scene10_cut2.png").write_bytes(PNG_BYTES)
+    (run_dir / "assets" / "scenes" / "scene10_cut3.png").write_bytes(PNG_BYTES)
     with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
         state_file.write(
             "\n".join(
@@ -339,7 +358,7 @@ class ImageGenParserTests(unittest.TestCase):
             )
 
             with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "requires at least 2 cuts"):
+                with self.assertRaisesRegex(RuntimeError, "requires at least 3 cuts"):
                     _validate_p650_run("桃太郎_20260509_1200")
 
     def test_validate_p650_run_requires_request_for_each_cut(self) -> None:
@@ -675,6 +694,18 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(image_generation_saved_path({"saved_path": "/tmp/generated.png"}), "/tmp/generated.png")
         self.assertEqual(image_generation_saved_path({"outputPath": "/tmp/output.png"}), "/tmp/output.png")
         self.assertEqual(image_generation_saved_path({"saved": {"path": "/tmp/nested.png"}}), "/tmp/nested.png")
+
+    def test_reject_local_raster_image_result(self) -> None:
+        result = ImageGenerationResult(
+            saved_path=Path("/tmp/generated.png"),
+            revised_prompt=None,
+            status="completed",
+            transcript=[],
+            source="local_raster_generation_after_app_server_permission_failure",
+        )
+
+        with self.assertRaisesRegex(CodexAppServerError, "unsupported local raster fallback"):
+            reject_local_raster_image_result(result, item_id="scene1")
 
     def test_generate_image_falls_back_to_generated_images_when_saved_path_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1224,6 +1255,38 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(state["runtime.app_server_skill.stop_detected"], "true")
         self.assertEqual(cancelled, [True])
 
+    def test_toc_skill_helper_waits_for_p680_skill_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            events: list[str] = []
+
+            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680"):
+                events.append("started")
+                write_valid_p680_artifacts(root, run_id)
+                await asyncio.sleep(0.02)
+                events.append("completed")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.CREATE_SKILL_STOP_POLL_SECONDS", 0.01),
+                patch("server.image_gen_app._run_toc_skill_helper", fake_toc_skill_helper),
+                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+            ):
+                asyncio.run(
+                    image_gen_app._run_toc_skill_helper_until_stop_target(
+                        topic="桃太郎",
+                        source="桃太郎",
+                        run_id=run_id,
+                        stop_target="p680",
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(root / "output" / run_id / "state.txt")
+
+        self.assertEqual(events, ["started", "completed"])
+        self.assertNotIn("runtime.app_server_skill.stop_detected", state)
+
     def test_create_run_endpoint_uses_title_as_blank_source_and_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1233,7 +1296,7 @@ class ImageGenApiTests(unittest.TestCase):
             async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
                 calls.append((topic, run_id, source, stop_target))
                 events.append(("skill", stop_target))
-                write_valid_p650_artifacts(root, run_id)
+                write_valid_p680_artifacts(root, run_id)
 
             async def fake_upgrade_prompts(_job_id, *, run_id):
                 events.append(("upgrade", run_id))
@@ -1271,10 +1334,10 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["path"], "output/桃太郎_20260509_1200")
         self.assertNotIn("source", create_payload)
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎", "p650")])
-        self.assertEqual(events, [("skill", "p650"), ("upgrade", "桃太郎_20260509_1200"), ("generate", "桃太郎_20260509_1200")])
-        generate_images.assert_awaited_once()
-        upgrade_prompts.assert_awaited_once()
+        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎", "p680")])
+        self.assertEqual(events, [("skill", "p680")])
+        generate_images.assert_not_awaited()
+        upgrade_prompts.assert_not_awaited()
         validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
@@ -1287,7 +1350,7 @@ class ImageGenApiTests(unittest.TestCase):
             async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
                 calls.append((topic, run_id, source, stop_target))
                 events.append(("skill", stop_target))
-                write_valid_p650_artifacts(root, run_id)
+                write_valid_p680_artifacts(root, run_id)
 
             async def fake_upgrade_prompts(_job_id, *, run_id):
                 events.append(("upgrade", run_id))
@@ -1323,10 +1386,10 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_response.status_code, 200)
         self.assertEqual(create_payload["runId"], "桃太郎_20260509_1200")
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料", "p650")])
-        self.assertEqual(events, [("skill", "p650"), ("upgrade", "桃太郎_20260509_1200"), ("generate", "桃太郎_20260509_1200")])
-        generate_images.assert_awaited_once()
-        upgrade_prompts.assert_awaited_once()
+        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料", "p680")])
+        self.assertEqual(events, [("skill", "p680")])
+        generate_images.assert_not_awaited()
+        upgrade_prompts.assert_not_awaited()
         validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
@@ -1373,7 +1436,7 @@ class ImageGenApiTests(unittest.TestCase):
             scene_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
 
         self.assertTrue(scene_exists)
-        self.assertEqual(generated, [("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"])])
+        self.assertEqual(generated, [("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"]), ("scene10_cut3", ["hero.png"])])
         validate_asset_gate.assert_called_once()
         self.assertEqual(validate_asset_gate.call_args.args[0].resolve(), run_dir.resolve())
         self.assertIn("slot.p660.status=done", state)
@@ -2089,11 +2152,11 @@ base b prompt
                         )
 
             manifest = yaml.safe_load(image_gen_app._extract_manifest_yaml_text((run_dir / "video_manifest.md").read_text(encoding="utf-8")))
-            scene_folder_exists = (run_dir / "assets" / "scenes" / "scene10_cut3").is_dir()
-            audio_folder_exists = (run_dir / "assets" / "audio" / "scene10_cut3").is_dir()
+            scene_folder_exists = (run_dir / "assets" / "scenes" / "scene10_cut4").is_dir()
+            audio_folder_exists = (run_dir / "assets" / "audio" / "scene10_cut4").is_dir()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["selector"], "scene10_cut3")
+        self.assertEqual(response.json()["selector"], "scene10_cut4")
         self.assertEqual(manifest["scenes"][0]["cuts"][1]["cut_name"], "新しい接続カット")
         self.assertTrue(scene_folder_exists)
         self.assertTrue(audio_folder_exists)

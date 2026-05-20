@@ -135,7 +135,7 @@ parallel 実行するときの原則:
 
 - 1 subagent = 1 image item
 - output path は item ごとに固定する
-- main agent は spec と summary の single writer になる
+- 担当 L2 supervisor は spec と summary の bucket single writer になる
 - 各 subagent は生成後に自分の output path にだけ import する
 
 例:

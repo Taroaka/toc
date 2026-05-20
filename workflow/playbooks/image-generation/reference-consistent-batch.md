@@ -65,6 +65,7 @@ Canonical reason key:
 - `image_contract_target_focus_unmet`
 - `image_prompt_story_alignment_weak`
 - `image_prompt_subject_specificity_weak`
+- `image_prompt_prompt_craft_weak`
 - `image_prompt_continuity_weak`
 - `image_prompt_not_first_frame_ready`
 - `image_prompt_first_frame_readiness_weak`

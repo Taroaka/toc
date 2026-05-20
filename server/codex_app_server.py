@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,15 @@ class ImageGenerationResult:
     source: str = "app_server"
 
 
+def reject_local_raster_image_result(result: ImageGenerationResult, *, item_id: str) -> None:
+    source = str(getattr(result, "source", "") or "").strip().lower()
+    if source.startswith("local_raster") or "local_raster" in source:
+        raise CodexAppServerError(
+            f"unsupported local raster fallback for {item_id}: {result.source}; "
+            "retry with Codex built-in image generation instead"
+        )
+
+
 class CodexAppServerClient:
     def __init__(self, *, cwd: Path, codex_bin: str = "codex") -> None:
         self.cwd = cwd
@@ -39,6 +49,7 @@ class CodexAppServerClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
+        self._stderr_tail: deque[str] = deque(maxlen=80)
 
     async def start(self) -> None:
         if self.proc is not None:
@@ -48,6 +59,8 @@ class CodexAppServerClient:
         self.proc = await asyncio.create_subprocess_exec(
             self.codex_bin,
             "app-server",
+            "--listen",
+            "stdio://",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -103,6 +116,11 @@ class CodexAppServerClient:
                     future.set_result(message)
             else:
                 await self._notifications.put(message)
+        error = CodexAppServerError(self._format_process_error("Codex app-server closed stdout"))
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
 
     async def _drain_stderr(self) -> None:
         assert self.proc and self.proc.stderr
@@ -110,6 +128,22 @@ class CodexAppServerClient:
             line = await self.proc.stderr.readline()
             if not line:
                 break
+            self._stderr_tail.append(line.decode("utf-8", errors="replace").rstrip())
+
+    def _stderr_summary(self) -> str:
+        tail = "\n".join(line for line in self._stderr_tail if line)
+        return tail.strip()
+
+    def _format_process_error(self, prefix: str) -> str:
+        proc = self.proc
+        returncode = proc.returncode if proc is not None else None
+        details = [prefix]
+        if returncode is not None:
+            details.append(f"returncode={returncode}")
+        stderr = self._stderr_summary()
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        return "; ".join(details)
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         await self.start() if self.proc is None else None
@@ -123,9 +157,17 @@ class CodexAppServerClient:
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = future
         async with self._write_lock:
-            self.proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-            await self.proc.stdin.drain()
-        response = await asyncio.wait_for(future, timeout=120)
+            try:
+                self.proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+                await self.proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                self._pending.pop(request_id, None)
+                raise CodexAppServerError(self._format_process_error(f"Codex app-server pipe closed during {method}")) from exc
+        try:
+            response = await asyncio.wait_for(future, timeout=120)
+        except asyncio.TimeoutError as exc:
+            self._pending.pop(request_id, None)
+            raise CodexAppServerError(self._format_process_error(f"Codex app-server timed out during {method}")) from exc
         if response.get("error"):
             raise CodexAppServerError(str(response["error"]))
         return response.get("result") or {}

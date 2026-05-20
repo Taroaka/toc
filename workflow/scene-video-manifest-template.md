@@ -38,7 +38,8 @@ scenes:
     timestamp: "00:00-00:30"
     # カット設計ルール（推奨）:
     # - 1カット = 1ナレーション
-    # - 各 production scene は最低2カット。scene直下の image_generation だけで済ませない。
+    # - cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
+    # - target_duration_seconds / 12 を切り上げたカット数も下回らない。scene直下の image_generation だけで済ませない。
     # - メインカット（最低1つ）: 5–15秒（ナレーションの実秒ベース）
     # - サブカット（最低1つ）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
     cuts:

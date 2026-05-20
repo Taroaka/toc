@@ -178,6 +178,7 @@ human_review:
 - `image_contract_target_focus_unmet`
 - `image_prompt_story_alignment_weak`
 - `image_prompt_subject_specificity_weak`
+- `image_prompt_prompt_craft_weak`
 - `image_prompt_continuity_weak`
 - `image_prompt_not_first_frame_ready`
 - `image_prompt_first_frame_readiness_weak`
@@ -268,6 +269,20 @@ subagent review の必須 criterion:
 - 英語の混在語 `rideable` は使わず、日本語の `騎乗可能` などへ統一する
 - prompt 本文に人物名があるのに `image_generation.character_ids` が空なら `prompt_mentions_character_but_character_ids_empty` として false にする
 
+cinematic craft criterion:
+
+- 6 block が存在しても、各 block が薄い定型句だけなら合格にしない
+- scene image prompt 本文は、空白除去後 220 文字以上を目安にする
+- subject / blocking / setting / light / camera / material のうち 4 系統以上の具体要素を含める
+  - subject: 人物、顔、表情、視線、手、姿勢
+  - blocking: 前景、中景、背景、距離、向き、手前、奥、斜め、並び
+  - setting: 部屋、道、森、海、城、台所、庭、階段、床、壁、窓、扉
+  - light: 光、影、逆光、月明かり、朝日、夕暮れ、反射、陰影
+  - camera: 構図、クローズアップ、広角、俯瞰、ローアングル、焦点、被写界深度
+  - material: 質感、布、木、石、金属、ガラス、埃、灰、水滴、しわ、擦り傷
+- 抽象語（例: 願い、真夜中、孤独、運命）を `must_include` にする場合は、その抽象語が画面上の物体・姿勢・光・空間配置としてどう見えるかまで prompt 本文へ翻訳する
+- この criterion を満たさない場合は `image_prompt_prompt_craft_weak` を付ける
+
 非視覚メタデータ criterion:
 
 - prompt が API に理解できない制作管理語で scene を説明している場合、subagent は `agent_review_ok: false` にする
@@ -296,14 +311,14 @@ still 生成の既定実行対象:
   - 各担当は `script.md`、`video_manifest.md`、現在の request draft、`docs/implementation/image-prompting.md` を必ず読む
   - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も必ず読む
   - 担当 scene の `visual_beat` を semantic source にして、stateless な request 文へ書き直す
-  - その出力はまず `scratch/request_rewrites/<scene>.md` に置き、main agent が統合して shared request file を更新する
+  - その出力はまず `scratch/request_rewrites/<scene>.md` に置き、担当 `p600` L2 supervisor が統合して shared request file を更新する
 - scene image request の本文を組み立てるときは、`script.md` の `human_review.approved_visual_beat` を最優先し、なければ `visual_beat` を使う
 - 既存の設計メモや旧 docs に `story.md` 参照が残っていても、scene image request の意味設計は `script.md` を優先する
 - `p620` で request を全面改稿する時は、scene 単位で自然言語エージェントへ分割してよい
   - 各 scene subagent は `script.md` / `video_manifest.md` / 現在の `image_generation_requests.md` / `docs/implementation/image-prompting.md` を読む
   - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も読む
   - shared request file は直接編集させず、scene 単位の scratch rewrite を出させる
-  - メインエージェントがそれを統合して `image_generation_requests.md` を更新する
+  - 担当 `p600` L2 supervisor がそれを統合して `image_generation_requests.md` を更新する
   - この scene 分割は image generation run ごとに再現できるよう、順番・担当範囲・統合手順を固定する
   - 採用した rewrite と理由は `subagent_trace` または review artifact に残す
 - scene image prompt は「場面全体の説明」ではなく、**その動画を始める最初の1フレーム**として設計する

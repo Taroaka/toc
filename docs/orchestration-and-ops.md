@@ -82,9 +82,13 @@ audit:
 - **必須レビューゲート**: 事実性（Research）と最終納品（Video）
 - **自動再試行**: 失敗原因が機械的（APIエラー、品質低下）の場合のみ
 - **人間レビュー**: 重要テーマ（時事、政治、医療、法律）は強制
+- **run-level orchestration**: L1 Run Orchestrator は `p100` 番台ごとの L2 P-Bucket Supervisor を順番に起動し、本文 artifact を読まずに handoff artifact と slot state だけで次 bucket へ進む
+- **L2 progress memo**: L1 Run Orchestrator は L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` を追記する。記録対象は L2 supervisor だけで、L3 task/review agents はここへ記録しない
+- **bucket single writer**: L2 P-Bucket Supervisor は担当 bucket 内の canonical artifact、`state.txt`、`p000_index.md` の single writer として動く。L3 task/review agents は isolated output のみを書く
+- **bucket completion artifact**: 各 bucket は完了時に `logs/orchestration/pXXX.supervisor_result.json` を書き、`status` / `completed_slots` / `required_artifacts` / `state_keys` / `review_outputs` / `next_bucket` / `blocked_reason` を残す
 - **grounding preflight**: stage 開始前に `scripts/resolve-stage-grounding.py` を実行し、必要 docs / templates / upstream artifact の解決結果を `logs/grounding/<stage>.json` と `state.txt` へ残す
 - **readset audit**: grounding 後に `scripts/audit-stage-grounding.py` を実行し、`logs/grounding/<stage>.readset.json` と `logs/grounding/<stage>.audit.json` を残す
-- **chat/manual stage helper**: chat で stage 作業を始めるときは `scripts/prepare-stage-context.py` を標準入口として使い、内部で `resolve -> audit -> readset確認` を直列で終えてから編集へ進む。返ってきた `readset_path` を起点に `global_docs -> stage_docs -> templates -> inputs` の順で読んでから編集する
+- **chat/manual stage helper**: chat で stage 作業を始めるときは、担当 L2 supervisor が `scripts/prepare-stage-context.py` を標準入口として使い、内部で `resolve -> audit -> readset確認` を直列で終えてから編集へ進む。返ってきた `readset_path` を起点に `global_docs -> stage_docs -> templates -> inputs` の順で読む
 - **user-triggered subagent audit**: stage 完了後に `scripts/build-subagent-audit-prompt.py` を使って貼り付け用 prompt を生成し、ユーザーが contextless audit subagent を起動して独立検証してもよい。script は `logs/grounding/<stage>.subagent_prompt.md` も保存し、subagent は content artifact を編集しない
 - **user-triggered image judgment subagent**: image prompt の意味評価は `scripts/build-subagent-image-review-prompt.py` で貼り付け用 prompt を生成し、ユーザーが contextless subagent に渡してよい。script は `logs/review/image_prompt.subagent_prompt.md` を保存し、subagent は hard schema 判定ではなく story/script/manifest の意味整合と revision 優先度を見る
 - **review policy**: run 開始時に `review.policy.story|image|narration=required|optional` を固定し、grounding はこの policy に従って承認 gate を有効/無効化する
@@ -160,6 +164,14 @@ grounding 状態と証跡:
 - `stage.<name>.audit.report=logs/grounding/<stage>.audit.json`
 - `stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md`
 - `review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md`
+- `orchestration.pXXX.supervisor.status=done|blocked|failed`
+- `orchestration.pXXX.supervisor.progress=logs/orchestration/l2_supervisor_progress.md`
+- `orchestration.pXXX.supervisor.call_status=invoked|returned|blocked|failed`
+- `orchestration.pXXX.supervisor.invoked_at=ISO8601`
+- `orchestration.pXXX.supervisor.last_event_at=ISO8601`
+- `orchestration.pXXX.supervisor.stop_slot=pXXX`
+- `orchestration.pXXX.supervisor.result=logs/orchestration/pXXX.supervisor_result.json`
+- `orchestration.pXXX.supervisor.finished_at=ISO8601`
 - canonical stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
 - evaluator / verifier では互換 alias として `manifest=scene_implementation`, `image_prompt=scene_implementation`, `video=video_generation` を許可する
 
@@ -197,9 +209,9 @@ run 直下には `p000_index.md` を置き、人間向けの入口にする。
   - `p700`: TTS 実行 / duration fit gate / audio handoff
   の 2 層で扱う
 - 画像生成の request 改稿は、scene 単位で自然言語エージェントへ割り当てる
-  - 各 scene agent は `script.md`、`video_manifest.md`、現在の request draft を読む
+  - 各 scene agent は L2 `p600` supervisor の配下で `script.md`、`video_manifest.md`、現在の request draft を読む
   - その scene の `visual_beat` を semantic source として、stateless な request 文へ落とす
-  - 出力はまず scene-specific scratch rewrite に置き、main agent が統合する
+  - 出力はまず scene-specific scratch rewrite に置き、L2 supervisor が統合する
   - この手順を固定しておくと、毎回の image generation run で再現できる
 
 標準 slot override 例:

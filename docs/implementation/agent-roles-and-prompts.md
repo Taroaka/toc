@@ -9,29 +9,78 @@
 ## 実行モデル
 
 - 起点は Codex 主軸の assistant command（Claude Code slash command 互換も維持）
-- 統括エージェントが `state.txt` を更新
+- ToC run 全体は L1 Run Orchestrator / L2 P-Bucket Supervisor / L3 Task-Review Agent の3階層で動く
+- `state.txt` と `p000_index.md` は append/update されるが、書き手は run 全体で1人ではなく、担当 `p100` 番台の L2 supervisor が bucket single writer として更新する
 - 役割別の振る舞いはこのドキュメントと stage readset を正本にし、Claude Code 互換の agent pack は `.claude/agents/*.md` に置く（例: `director`）
 
 ## 役割と責務
 
-### Orchestrator（統括 / single writer）
-- 入力: user request / `state.txt` / `p000_index.md` / stage readset
-- 出力: canonical artifact updates / state slot updates / subagent task packets
-- 参照: `docs/root-pointer-guide.md` / `docs/system-architecture.md` / `workflow/stage-grounding.yaml`
+### Run Orchestrator（L1 / run-level manager）
+- 入力: user request / stop target / `state.txt` / `p000_index.md` / `logs/orchestration/pXXX.supervisor_result.json`
+- 出力: P-Bucket Supervisor task packet / `logs/orchestration/l2_supervisor_progress.md` progress memo / run-level stop decision / blocked decision
+- 参照: `docs/root-pointer-guide.md` / `docs/system-architecture.md` / `docs/data-contracts.md`
 - 責務:
-  - stage ごとに `prepare-stage-context.py` で readset を確定する
   - `p100`-`p900` の依存順序、review policy、approval gate を管理する
-  - subagent に渡す入力を artifact path / 目的 / 出力先へ限定する
-  - subagent の draft / audit / review / scratch output を読み、canonical artifact へ採用する差分を選ぶ
+  - coarse stop target（例: `p600` -> `p680`）を解決し、必要な bucket だけを順番に起動する
+  - 各 `p100` 番台の L2 supervisor を fresh context で起動し、完了まで待つ
+  - L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` event を追記する
+    - 推奨コマンド: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
+  - L2 supervisor が返った直後に `returned|blocked|failed` event と result path を同じ progress memo / `state.txt` へ追記する
+    - 推奨コマンド: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event returned --stop-slot p680 --result logs/orchestration/p600.supervisor_result.json`
+  - bucket 完了時は supervisor result、required artifact existence、terminal slot state だけを検証する
+  - human review、frontend handoff、hybridization approval を自動承認しない
+- 禁止:
+  - bucket output の本文 artifact（`research.md`, `story.md`, `script.md`, `video_manifest.md` など）を次 bucket 判定のために読む
+  - L2 supervisor の代わりに canonical artifact を統合する
+  - L3 critic / aggregator report を直接読んで修正採否する
+  - L3 task / review agents の呼び出しを run-level progress memo に記録する
+  - 親会話だけにある未記録文脈を次 bucket へ渡す
+
+### P-Bucket Supervisor（L2 / bucket single writer）
+- 入力: L1 task packet / bucket stop slot / upstream artifact paths / stage readset
+- 出力: canonical artifact updates / `state.txt` slot updates / `p000_index.md` refresh / `logs/orchestration/pXXX.supervisor_result.json`
+- 参照: `docs/system-architecture.md` / `workflow/stage-grounding.yaml` / bucket 対応 stage docs
+- 責務:
+  - 担当 `p100` 番台内では single writer として動く
+  - `prepare-stage-context.py` または同等の grounding preflight で readset を確定する
+  - L3 task/review agents に渡す入力を artifact path / 目的 / 出力先へ限定する
+  - L3 の draft / audit / review / scratch output を読み、担当 bucket の canonical artifact へ採用する差分を選ぶ
   - authoring 直後の review slot では、最大 5 round の evaluator-improvement loop を管理する
   - 各 round で 5 critic agents と 1 aggregator agent を isolated output に限定して起動する
   - aggregator report のうち採用する修正だけを canonical artifact へ反映し、次 round / gate close / human handoff を決める
-  - `state.txt` と `p000_index.md` を append / update し、stage verifier へつなぐ
+  - `state.txt` と `p000_index.md` を append / update し、bucket verifier へつなぐ
+  - bucket 完了時に supervisor result JSON を書いて L1 に戻す
 - 禁止:
-  - subagent に未読の親文脈を前提にさせる
-  - 複数 subagent に同じ canonical file を同時編集させる
+  - 他 bucket の canonical artifact を編集する
+  - L1 に本文 artifact の精読を要求する
   - hybridization や human review を自動承認する
   - `state.txt` の置き換えや final status の丸投げを行う
+
+### Task / Review Agent（L3 / isolated worker）
+- 入力: artifact path / readset path / 目的 / isolated output path
+- 出力: `scratch/`, `logs/`, review artifact, generated media, or explicit report
+- 責務:
+  - research scout、story candidate、visual audit、scene/cut worker、critic、aggregator、grounding auditor、image/video/narration reviewer などを担当する
+  - 親会話の未記録文脈に依存しない
+  - canonical artifact 更新が必要な場合は patch brief / finding / scratch draft として L2 に返す
+- 禁止:
+  - canonical artifact、`state.txt`、`p000_index.md` を直接編集する
+  - L1 へ直接 handoff する
+  - approval gate を確定する
+
+### P-Bucket Supervisor Map
+
+| Bucket | Supervisor owns | Typical L3 agents |
+| --- | --- | --- |
+| `p100` Research | `research.md`, research review, source trace, slot state | research scouts, grounding auditor, research critics |
+| `p200` Story | `story.md`, hybridization gate preparation, story review | Director, story candidates, source-vs-creative auditors |
+| `p300` Visual Planning | `visual_value.md`, p400/p500/p600/p700 handoff appendix | Visual Value Ideator, payoff/anchor/risk auditors |
+| `p400` Script | `script.md`, `scene_conte.md`, skeleton `video_manifest.md`, p400 review loops | Immersive Scriptwriter, scene workers, production readiness council |
+| `p500` Asset | `asset_inventory.md`, `asset_plan.md`, asset requests, reusable asset generation | asset planners, continuity reviewers, image runners |
+| `p600` Scene/Image | production image prompts, scene requests, scene still generation, image handoff | scene/cut prompt workers, image prompt judges, image QA |
+| `p700` Narration | narration review, TTS generation, duration fit, audio handoff | Narration Writer, duration reviewers, TTS workers |
+| `p800` Video | motion prompts, clip generation, clip review/exclusions | video prompt reviewers, clip workers, clip reviewers |
+| `p900` Render/QA | render inputs, final render, QA/runtime summary | QA reviewers, runtime summary reviewers |
 
 ### Director（監督）
 - 入力: `research.md`
@@ -98,6 +147,7 @@
   - fail reason を次の修正 action に分解する
   - round 5 後も `changes_requested` の場合は human review / explicit override に回す
   - critic / aggregator は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
+  - loop の起動、修正採否、次 round 判断は L1 ではなく担当 L2 P-Bucket Supervisor が行う
 
 ### QA / Compliance
 - 入力: `research.md`, `story.md`, `script.md`, `video.mp4`

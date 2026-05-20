@@ -237,6 +237,15 @@
 #   artifact.grounding.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.json
 #   artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
 #   artifact.run_index=output/<topic>_<timestamp>/p000_index.md
+#   artifact.l2_supervisor_progress=logs/orchestration/l2_supervisor_progress.md
+#   orchestration.pXXX.supervisor.progress=logs/orchestration/l2_supervisor_progress.md
+#   orchestration.pXXX.supervisor.call_status=invoked|returned|blocked|failed
+#   orchestration.pXXX.supervisor.invoked_at=ISO8601
+#   orchestration.pXXX.supervisor.last_event_at=ISO8601
+#   orchestration.pXXX.supervisor.stop_slot=pXXX
+#   orchestration.pXXX.supervisor.status=done|blocked|failed
+#   orchestration.pXXX.supervisor.result=logs/orchestration/pXXX.supervisor_result.json
+#   orchestration.pXXX.supervisor.finished_at=ISO8601
 #   artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 #   artifact.video=output/<topic>_<timestamp>/video.mp4
 #   artifact.video_review_report=output/<topic>_<timestamp>/video_review.md

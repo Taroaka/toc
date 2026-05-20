@@ -89,6 +89,11 @@ STAGE_RUBRIC_THRESHOLDS = {
     },
 }
 
+CINEMATIC_SCENE_MIN_CUTS = 3
+CINEMATIC_LOW_IMPORTANCE_MIN_CUTS = 2
+CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS = 5
+CINEMATIC_SECONDS_PER_CUT_TARGET = 12
+
 
 def has_todo(text: str) -> bool:
     upper = text.upper()
@@ -914,6 +919,31 @@ def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
     )
 
 
+def _scene_target_duration_seconds(scene: dict[str, Any]) -> float:
+    value = scene.get("target_duration_seconds")
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    value = scene.get("estimated_duration_seconds")
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return 0.0
+
+
+def _cinematic_min_cuts_for_scene(scene: dict[str, Any]) -> int:
+    importance = str(scene.get("importance") or "").strip().lower()
+    if importance in {"high", "critical"}:
+        base_min = CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS
+    elif importance == "low":
+        base_min = CINEMATIC_LOW_IMPORTANCE_MIN_CUTS
+    else:
+        base_min = CINEMATIC_SCENE_MIN_CUTS
+
+    duration = _scene_target_duration_seconds(scene)
+    if duration > 0:
+        base_min = max(base_min, int((duration + CINEMATIC_SECONDS_PER_CUT_TARGET - 1) // CINEMATIC_SECONDS_PER_CUT_TARGET))
+    return base_min
+
+
 def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
     issues: list[str] = []
     concrete_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
@@ -933,7 +963,7 @@ def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
             issues.append(f"scene{scene_id}:terminal_resolution")
 
         cuts = [cut for cut in as_list(scene.get("cuts")) if isinstance(cut, dict)]
-        min_cuts = 3 if importance in {"high", "critical"} else 1
+        min_cuts = _cinematic_min_cuts_for_scene(scene)
         if len(cuts) < min_cuts:
             issues.append(f"scene{scene_id}:cuts<{min_cuts}")
 
@@ -1142,7 +1172,7 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
     return items
 
 
-def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int = 2) -> list[str]:
+def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | None = None) -> list[str]:
     issues: list[str] = []
     for index, scene in enumerate(as_list(manifest.get("scenes")), start=1):
         if not isinstance(scene, dict):
@@ -1156,8 +1186,9 @@ def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int = 2
             for cut in as_list(scene.get("cuts"))
             if not (isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() == "deleted")
         ]
-        if len(cuts) < min_cuts_per_scene:
-            issues.append(f"scene{scene_id}:cuts<{min_cuts_per_scene}")
+        scene_min = min_cuts_per_scene if min_cuts_per_scene is not None else _cinematic_min_cuts_for_scene(scene)
+        if len(cuts) < scene_min:
+            issues.append(f"scene{scene_id}:cuts<{scene_min}")
     return issues
 
 
@@ -1616,14 +1647,14 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     if flow == "immersive":
         experience = nested_get(data, ["video_metadata", "experience"])
         prompt_mentions_text_rule = ("画面内テキスト" in body_text) or ("No on-screen text" in body_text)
-        minimum_cut_issues = _minimum_cut_issues(data, min_cuts_per_scene=2)
+        minimum_cut_issues = _minimum_cut_issues(data)
         add_check(checks, f"{path_label}.experience", non_empty(experience), "immersive manifest records video_metadata.experience", kind="rubric")
         add_check(checks, f"{path_label}.no_onscreen_text_rule", prompt_mentions_text_rule, "immersive manifest includes no on-screen text invariant", kind="rubric")
         add_check(
             checks,
             f"{path_label}.minimum_scene_cuts",
             not minimum_cut_issues,
-            "immersive manifest gives every production scene at least 2 cuts"
+            "immersive manifest gives every production scene enough cuts for cinematic density"
             + (f" (issues: {', '.join(minimum_cut_issues[:8])})" if minimum_cut_issues else ""),
             kind="rubric",
         )

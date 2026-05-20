@@ -792,6 +792,12 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         return InventoryEntry(rel, "p740", "log", "scene stretch review artifact")
     if rel.startswith("logs/review/duration_narration"):
         return InventoryEntry(rel, "p740", "log", "narration stretch review artifact")
+    if rel == "logs/orchestration/l2_supervisor_progress.md":
+        return InventoryEntry(rel, "p010", "log", "L2 P-Bucket Supervisor invocation progress memo")
+    orchestration_result_match = re.match(r"^logs/orchestration/(p[1-9]00)\.supervisor_result\.json$", rel)
+    if orchestration_result_match:
+        bucket = orchestration_result_match.group(1)
+        return InventoryEntry(rel, bucket, "log", f"{bucket} supervisor result handoff artifact")
     eval_match = re.match(r"^logs/eval/([^/]+)/", rel)
     if eval_match:
         stage_name = eval_match.group(1)
@@ -977,10 +983,12 @@ def build_run_index_markdown(run_dir: Path, *, state: dict[str, str] | None = No
             "- `slot.pXXX.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed`",
             "- `slot.pXXX.requirement=required|optional`",
             "- `slot.pXXX.skip_reason=string`",
-            "- `slot.pXXX.note=string`",
-            "- `slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed`",
-            "- `slot.pXXX.review_loop.current_round=0-5`",
-        ]
+        "- `slot.pXXX.note=string`",
+        "- `slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed`",
+        "- `slot.pXXX.review_loop.current_round=0-5`",
+        "- `orchestration.pXXX.supervisor.progress=logs/orchestration/l2_supervisor_progress.md`",
+        "- `orchestration.pXXX.supervisor.call_status=invoked|returned|blocked|failed`",
+    ]
     )
     lines += [
         "",

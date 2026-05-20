@@ -72,6 +72,8 @@
 - subagent audit prompt: `output/<topic>_<timestamp>/logs/grounding/<stage>.subagent_prompt.md`
 - story review subagent prompt: `output/<topic>_<timestamp>/logs/review/story.subagent_prompt.md`
 - image judgment subagent prompt: `output/<topic>_<timestamp>/logs/review/image_prompt.subagent_prompt.md`
+- L2 supervisor progress memo: `output/<topic>_<timestamp>/logs/orchestration/l2_supervisor_progress.md`
+- p-bucket supervisor result: `output/<topic>_<timestamp>/logs/orchestration/pXXX.supervisor_result.json`
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`
 - fixed slot workflow: `p100`-`p900` plus fine-grained slots (`p110`, `p120`, ... `p930`) are global across all stories
 - per-run differences are recorded with `slot.<code>.status`, `slot.<code>.requirement`, `slot.<code>.skip_reason`, `slot.<code>.note`
@@ -171,11 +173,12 @@ grounding preflight の正本:
 2. まず `python scripts/prepare-stage-context.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行する
 3. 返ってきた `readset_path` の `global_docs -> stage_docs -> templates -> inputs` の順に読む
 4. `stage.<name>.grounding.status=ready` かつ `stage.<name>.audit.status=passed` のときだけ成果物を更新する
-5. subagent を呼ぶ場合も、メインエージェントが `readset_path` を確定してから、必要 artifact path / 目的 / 出力先だけを渡す。親会話の未記録文脈を前提にしない
-6. `state.txt` / `p000_index.md` / canonical artifact の最終更新、slot 更新、承認判断はメインエージェントだけが行う。subagent 出力は draft / audit / review / scratch として扱い、メインが採否判断して統合する
-7. 必要なら `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行し、その出力をそのまま contextless subagent に渡す
+5. subagent を呼ぶ場合も、担当 L2 P-Bucket Supervisor が `readset_path` を確定してから、必要 artifact path / 目的 / 出力先だけを渡す。親会話の未記録文脈を前提にしない
+6. L1 Run Orchestrator は L2 P-Bucket Supervisor を起動したことを `logs/orchestration/l2_supervisor_progress.md` に記録する。L3 task/review agents はこの進捗メモには記録しない
+7. `state.txt` / `p000_index.md` / canonical artifact の最終更新、slot 更新、承認判断は担当 bucket の L2 supervisor が行う。L1 Run Orchestrator は bucket 完了後に `logs/orchestration/pXXX.supervisor_result.json`、required artifact existence、terminal slot state だけを検証する
+8. 必要なら `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir <run_dir> [--flow <flow>]` を実行し、その出力をそのまま contextless subagent に渡す
    - prompt artifact は `logs/grounding/<stage>.subagent_prompt.md` に保存され、`state.txt` には `stage.<name>.subagent.prompt=...` が追記される
-8. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
+9. image prompt の意味評価を独立 subagent に切り出すときは `python scripts/build-subagent-image-review-prompt.py --run-dir <run_dir> [--flow <flow>]` を実行する
    - prompt artifact は `logs/review/image_prompt.subagent_prompt.md` に保存され、`state.txt` には `review.image_prompt.subagent.prompt=...` が追記される
 9. audio-only 生成後に尺が target 未満だった場合は、次を使って duration review 用 prompt artifact を生成する
    - `python scripts/build-subagent-duration-scene-review-prompt.py --run-dir <run_dir> --min-seconds <target> --actual-seconds <actual> [--flow <flow>]`
@@ -183,7 +186,7 @@ grounding preflight の正本:
    - prompt artifact は `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` に保存される
 10. 標準運用では prompt builder を直接叩く前に `python scripts/check-audio-duration-gate.py --manifest <run_dir>/video_manifest.md --run-dir <run_dir>` を使い、実尺 gate と prompt 生成を一度に行う
 
-multi-agent が使える環境では、コンテキストを fork しない audit 専用 subagent に `scripts/audit-stage-grounding.py` を実行させてよい。ただし story / script / manifest などの content artifact は編集させず、hard gate は state / report artifact と verifier に置く。
+multi-agent が使える環境では、コンテキストを fork しない audit 専用 subagent に `scripts/audit-stage-grounding.py` を実行させてよい。ただし story / script / manifest などの content artifact は編集させず、hard gate は state / report artifact と verifier に置く。run 全体の通常運用では L1 Run Orchestrator が L2 P-Bucket Supervisor を bucket ごとに起動し、L2 が必要な L3 task/review agents を配下で起動する。
 
 ## Hard Rules
 

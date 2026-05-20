@@ -1,35 +1,43 @@
 ---
 name: toc-immersive-runner
-description: Use when this repository needs to create a ToC immersive cinematic story run from a topic/source in one Codex skill invocation, progressing the regular p100-p680 frontend-review workflow and producing real artifacts rather than placeholder scaffolds.
+description: Use when this repository needs to create a ToC immersive cinematic story run from a topic/source by following the canonical ToC p100-p900 run design, normally stopping at p680 for frontend image review.
 ---
 
 # ToC Immersive Runner
 
 ## Overview
 
-This skill is the Codex-native replacement for the repo's Claude slash command
-`/toc-immersive-ride` when a web/server caller needs one request to create a
-production-ready ToC run.
+This skill is the Codex-native entrypoint for `/toc-immersive-ride` when a
+web/server caller needs one request to create a production-ready immersive ToC
+run. It does not own the overall ToC stage design; it reads and follows the
+canonical run-level design.
 
-Use it as a single orchestration skill. The caller provides:
+Use it as a thin ToC run entrypoint. The caller provides:
 
 - topic/title
 - source text or story/source material
 - run directory
-- stop target, normally `p650` for app-server Image Gen create flows and
-  `p680` for direct one-shot frontend handoff flows
+- stop target, normally `p680` for frontend image review handoff flows
 - experience, normally `cinematic_story`
 
 ## Canonical References
 
-Read these before changing stage behavior:
+Read these before changing stage behavior or deciding agent ownership:
 
 - `docs/root-pointer-guide.md`
+- `docs/system-architecture.md`
+- `docs/implementation/agent-roles-and-prompts.md`
+- `docs/orchestration-and-ops.md`
 - `docs/how-to-run.md`
 - `docs/data-contracts.md`
 - `docs/implementation/immersive-ride-entrypoint.md`
 - `scripts/toc-immersive-ride.py`
 - `.claude/commands/toc/toc-immersive-ride.md` as legacy reference only
+
+This skill must not duplicate the full p100-p900 operating design. The
+canonical design lives in the docs above. This skill only adds the
+`/toc-immersive-ride` constraints: `cinematic_story`, frontend image review
+handoff, and a stop target that normally ends at `p680`.
 
 ## Frontend Create Policy
 
@@ -37,18 +45,17 @@ When `review_policy` is `frontend`, do not pause for CLI human review. Generate
 the review artifacts, write gate/state records, and hand approval to the web UI.
 This is not a review skip. It is a frontend handoff.
 
-For app-server Image Gen create flows, the server asks this skill to stop at
-`p650`, then the server strengthens image prompts, retries bootstrap asset
-generation up to 10 times when the visual gate fails, generates scene images,
-and creates the `p680` frontend image-review handoff. Asset and scene image
-generation each use their own reference-dependency DAG: no-reference requests
-run in the first parallel group, requests whose references are already available
-run in later groups, and each group is gated before the next group starts. If
-the bootstrap asset gate still fails after those retries, the server still hands
-the generated images to the frontend for review instead of leaving the user
-waiting forever.
-Direct one-shot frontend handoff flows may still use `p680` with
-`handoff=frontend_image_review`.
+For app-server Image Gen create flows, the normal stop target is `p680`. The
+skill strengthens image prompts, retries bootstrap asset generation up to 10
+times when the visual gate fails, generates scene images, and creates the
+frontend image-review handoff. Asset and scene image generation each use their
+own reference-dependency DAG: no-reference requests run in the first parallel
+group, requests whose references are already available run in later groups, and
+each group is gated before the next group starts. If the bootstrap asset gate
+still fails after those retries, the server still hands the generated images to
+the frontend for review instead of leaving the user waiting forever.
+Use `p650` only when the caller explicitly asks to stop before scene image
+generation.
 
 ## Required Outcome for `p650` / `p680`
 
@@ -102,106 +109,32 @@ failed check. When the cause and fix are clear, include the target
 artifact/section, concrete fix direction, downstream impact, and acceptance
 condition for the next review round.
 
-## Stage Contract
+## ToC Run Contract
 
-Run stages in the normal ToC order inside one skill invocation:
+Follow the run-level p100-p900 architecture in `docs/system-architecture.md`.
 
-1. `p100` リサーチ
-   - Read `docs/root-pointer-guide.md`.
-   - Use `docs/information-gathering.md` when available.
-   - Produce `research.md` in the supplied run directory.
-   - Mark the relevant p100/p120 state as done.
-2. `p200` 物語
-   - Use `research.md`.
-   - Produce `story.md`.
-   - Mark the relevant p200/p220 state as done.
-3. `p300` 映像設計
-   - Use `research.md` and `story.md`.
-   - Produce `visual_value.md`.
-   - Mark the relevant p300/p310 state as done.
-4. `p400` 台本・マニフェスト
-   - Use `story.md` and `visual_value.md`.
-   - Produce `script.md` and `video_manifest.md`.
-   - Every production scene must be split into at least two cuts from the first
-     create pass. Do not collapse a scene into scene-level `image_generation`.
-     Use `scenes[].cuts[]` with distinct `image_generation.output` paths such as
-     `assets/scenes/scene10_cut1.png` and `assets/scenes/scene10_cut2.png`.
-   - Mark the relevant p400/p420/p450 state as done.
-5. `p520` reusable asset inventory
-   - Inventory the story's characters, story-specific items, used locations,
-     setpieces, and reusable stills in `asset_inventory.md` before authoring requests.
-   - The goal is coverage: every principal visual subject that can cause
-     downstream identity drift must have an asset-plan candidate.
-   - Do not turn one-off cut composition, acting beats, or camera movement into
-     asset entries; leave those for p600.
-6. `p530` / `p540` 素材設計と review/fix loop
-   - Produce or update `asset_plan.md`.
-   - Character references must be designed as full-body front / side / back
-     three-view references. Character variants must derive from the main
-     character reference, not from a new unrelated design.
-   - Run the p540 evaluator-improvement loop when asset coverage is not already
-     approved: review agents check for missing characters, story-specific
-     items, locations, setpieces, reference misuse, lane mistakes, and weak
-     visual specificity. Main applies fixes, then another review round checks
-     again until passed or explicitly overridden.
-7. `p550` 素材リクエスト作成
-   - Produce `asset_generation_requests.md` and
-     `asset_generation_manifest.md`.
-   - Treat `asset_plan.md`, `story.md`, `script.md`, and `video_manifest.md`
-     together as the source of truth. Do not merely copy short
-     `fixed_prompts` into generation prompts.
-   - Include reusable assets for every principal named visual subject needed by
-     the story and scenes: protagonist variants, romantic/decision counterpart,
-     antagonist/authority figures when visible, guide/helper figures, recurring
-     props, setpieces, and recurring locations. For example, a Cinderella run
-     must include the prince if a palace/dance/finding scene uses him.
-   - Each asset prompt must be production-ready Japanese, not a one-line
-     summary. Use stable sections such as `[全体 / 不変条件]`,
-     `[作成するもの]`, `[人物固定]`, `[衣装]`, `[生成方針]`, and `[禁止]`
-     as applicable.
-   - Do not write API-unhelpful production metadata in the prompt body.
-     NG: `物語「シンデレラ」の scene10`, `scene30_cut01`,
-     `この画像は物語「シンデレラ」の一場面`, `後続 scene で使う王子`.
-     OK: `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
-8. `p560` 素材画像生成
-   - For no-reference/bootstrap Codex built-in lane requests, generate the
-     referenced reusable assets.
-   - Prefer `$toc-p500-bootstrap-image-runner` or
-     `$toc-no-reference-image-runner` for the image execution details.
-9. `p650` シーン画像リクエスト作成
-   - Produce `image_generation_requests.md`.
-   - Reject any production scene with fewer than two cuts. Short scenes still need
-     at least an establishing/transition cut and a character/action/result cut.
-   - `image_generation_requests.md` must include every
-     `scenes[].cuts[].image_generation.output`; scene-level request entries are
-     not sufficient.
-   - Scene prompts must be at least as detailed as p550 asset prompts. Do not
-     emit terse scene summaries. Use stable sections such as
-     `[全体 / 不変条件]`, `[登場人物]`, `[小道具 / 舞台装置]`, `[シーン]`,
-     `[連続性]`, and `[禁止]` as applicable.
-   - Rebuild `p000_index.md`.
-10. `p660` シーン画像生成
-   - For `stop_target=p680`, generate scene still images from
-     `image_generation_requests.md` using the same image execution lane as the
-     request file declares.
-   - The repo image provider is `tool: codex_builtin_image` (gpt-image-2 via the
-     Codex app-server). Do not route p500/p600 images to Nano Banana, Gemini
-     image, or SeaDream.
-   - After generation, run the image gate. It must inspect the actual raster
-     image content, not only the extension. If a p600 scene image is
-     vector-like/low-detail and its reference images are clean raster assets,
-     regenerate the p600 scene. If any referenced p500 asset is also
-     vector-like/low-detail, return to p500/p560 and regenerate that reference
-     before retrying p600.
-   - Do not replace this with a server-side postprocess prompt rewrite.
-11. `p670` 画像QA
-   - Create or update review artifacts/state for image QA. Under
-     `review_policy=frontend`, set `slot.p670.status=skipped` when the frontend
-     image review gate is created instead of running CLI QA.
-12. `p680` 画像レビュー引き渡し
-   - Set `slot.p680.status=awaiting_approval`.
-   - Set `review.image.status=pending` and `gate.image_review=required`.
-   - The frontend is responsible for approval/rejection.
+- L1 Run Orchestrator owns bucket order, stop target, and bucket completion
+  validation.
+- L1 records each L2 supervisor invocation in
+  `logs/orchestration/l2_supervisor_progress.md`. Do not record L3 task/review
+  agent invocations in this progress memo.
+- L2 P-Bucket Supervisors own the canonical artifacts, `state.txt`, and
+  `p000_index.md` updates inside their assigned bucket.
+- L3 Task / Review Agents run only under the owning L2 supervisor and write
+  isolated scratch, logs, review artifacts, or explicitly requested generated
+  media.
+- Each completed bucket must leave
+  `logs/orchestration/pXXX.supervisor_result.json` for the L1 validator.
+- Do not make the skill itself a second copy of the stage contract. If a
+  bucket-specific rule is missing or conflicting, update the canonical docs
+  rather than adding a private rule here.
+
+For this skill, the normal bucket range is:
+
+- `stop_target=p680`: run `p100` through `p600` until scene images are generated
+  and image review is handed off to the frontend.
+- `stop_target=p650`: supported only as an explicit early-stop override before
+  scene image generation, after reusable asset generation required by `p650`.
 
 ## Execution Rules
 
@@ -211,9 +144,8 @@ Run stages in the normal ToC order inside one skill invocation:
 - Keep the experience `cinematic_story` unless the caller specifies otherwise.
 - Use `review_policy=frontend` for app-server Image Gen create flows.
 - Use the caller's exact `stop_target`. For app-server Image Gen create flows
-  invoked by `server/image_gen_app.py`, this is normally `p650`; do not generate
-  p660 scene images inside the skill unless the caller explicitly requests
-  `stop_target=p680`.
+  invoked by `server/image_gen_app.py`, this is normally `p680`; generate p660
+  scene images inside the skill for the normal frontend handoff path.
 - Do not continue into narration, video generation, or final render.
 - Use repo scripts/helpers when they already encode the local contract:
   - `scripts/prepare-stage-context.py` as the standard manual/chat stage entry
@@ -225,9 +157,9 @@ Run stages in the normal ToC order inside one skill invocation:
   - `scripts/toc-state.py` for state updates when practical
 - Do not rely on the Claude `.claude/commands/` command being executable by
   Codex. Treat those files as reference material only.
-- Keep shared planning files single-writer. If using subagents, they may draft
-  stage content, but the main skill execution must integrate and write the final
-  shared files.
+- Keep shared planning files bucket-single-writer. L2 P-Bucket Supervisors
+  integrate their bucket's L3 outputs and write the final shared files for that
+  bucket. L1 must not re-integrate bucket content after the supervisor returns.
 - Do not call external video/TTS providers from this skill. For p560 and p660
   image work, use the repo's image execution lanes and delegate to the repo image
   skills named above when appropriate.

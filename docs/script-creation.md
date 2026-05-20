@@ -42,15 +42,17 @@ p400 は次の順で進める。
    - scene ごとに `importance`, `target_duration_seconds`, `estimated_duration_seconds`, `handoff_to_next_scene`（最終 scene は `terminal_resolution`）, `coverage_review` を必須で残す
    - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する
    - `p410b` / `p410c` は内部 review-loop label であり、scaffold の停止位置は `p410`、prompt materialize は `build-review-loop-round.py --slot p410b|p410c` で行う
-   - 抽象 review が合格するまで、main agent が scene 構成と transition を自動修正する
+   - 抽象 review が合格するまで、担当 `p400` L2 supervisor が scene 構成と transition を自動修正する
    - 抽象 review 合格後、具体 per-scene review loop を scene 単位で回し、各 scene の必要性、情報量、内部整合、handoff を `scene_detail_review.md` と `eval.scene_detail.loop.*` に記録する
-   - 具体 review が合格するまで、main agent が各 scene intent を自動修正する
+   - 具体 review が合格するまで、担当 `p400` L2 supervisor が各 scene intent を自動修正する
    - human review は `gate.script_scene_review=required|optional|skipped` に従うが、agent 指摘の自動適用を都度止める gate ではない
 2. `p420 cut blueprint`
    - 全 scene が `review.script.scene_set.status=approved` / `review.script.scene_detail.status=approved` / `agent_review.status=passed` を満たした後だけ cut 化する
-   - scene を 2 個以上の cut に分ける。reference / title / pure transition のような例外は理由を残す
-   - scene 単位で並列 agent に分担してよいが、`script.md` は main agent が single writer として統合する
+   - cinematic_story の production scene は原則 3 cut 以上に分ける。low importance scene だけ 2 cut を許容し、high / critical scene は 5 cut 以上を目安にする
+   - `target_duration_seconds` が長い scene は 1 cut 約 12 秒で割った cut 数を下回らない。reference / title / pure transition のような例外は理由を残す
+   - scene 単位で並列 agent に分担してよいが、`script.md` は担当 `p400` L2 supervisor が bucket single writer として統合する
    - 1 cut は 1 意図に限定する。1 cut の中で場所移動、reveal、感情反転、説明を同時に背負わせない
+   - spectacle / transformation / emotional reversal / proof reveal は 1 cut に圧縮せず、setup / action threshold / payoff / reaction / handoff のように分ける
    - cut ごとに `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を書く
    - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
    - human review は `gate.script_cut_review=required|optional|skipped` に従う
@@ -127,6 +129,7 @@ p410 の review は抽象から具体へ進む。
    - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する
    - 目標動画は最低でも 5-10 分程度を想定し、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる
    - 1 cut はおおよそ 4-15 秒であり、cut が 1 つしかない scene は 4-15 秒程度の尺しか持てないことを明示して評価する
+   - medium 以上の scene が 2 cut だけで済んでいる場合は、情報量・感情変化・次 scene への接続のどれかを失っていないかを blocking finding として扱う
    - この scene で見せるべき内容が、予定 cut ですべて表現されているか確認する
    - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する
    - つながらない場合は、もう 1 cut 追加するか、最終 cut を厚くする修正案を出す
@@ -136,7 +139,7 @@ p410 の review は抽象から具体へ進む。
 
 - scene draft、narration draft、script review は scene / cut 単位で contextless subagent に任せてよい
 - subagent には `story.md`、`visual_value.md`、stage readset、担当 scene / cut、出力先 scratch path だけを渡す
-- `script.md`、skeleton `video_manifest.md`、human change の採否、`subagent_trace` はメインエージェントが統合する
+- `script.md`、skeleton `video_manifest.md`、human change の採否、`subagent_trace` は担当 `p400` L2 supervisor が統合する
 
 ### 位置づけ
 

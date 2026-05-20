@@ -3,9 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import subprocess
+import sys
 
 from toc.harness import sync_run_status
 from toc.run_index import SLOT_BY_CODE, build_run_index_markdown, classify_run_file
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestRunIndex(unittest.TestCase):
@@ -55,6 +60,50 @@ class TestRunIndex(unittest.TestCase):
             self.assertIn("[output] `assets/audio/scene01_cut01.mp3`", index_text)
             self.assertIn("[log] `logs/providers/scene01_image.json`", index_text)
             self.assertIn("[scratch] `scratch/note.txt`", index_text)
+
+    def test_record_l2_supervisor_progress_updates_output_progress_only_for_l2(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_l2_progress_") as td:
+            run_dir = Path(td) / "out" / "topic_20990101_0000"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=進捗テスト\nstatus=INIT\n---\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "record-l2-supervisor-progress.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--bucket",
+                    "p600",
+                    "--event",
+                    "invoked",
+                    "--stop-slot",
+                    "p680",
+                    "--note",
+                    "scene/image supervisor started",
+                    "--at",
+                    "2099-01-01T00:00:00+09:00",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            progress_path = run_dir / "logs" / "orchestration" / "l2_supervisor_progress.md"
+            progress_text = progress_path.read_text(encoding="utf-8")
+            self.assertIn("Only L2 P-Bucket Supervisor invocations are recorded here", progress_text)
+            self.assertIn("| 2099-01-01T00:00:00+09:00 | p600 | p600 P-Bucket Supervisor | invoked | p680 | - | scene/image supervisor started |", progress_text)
+            state_text = (run_dir / "state.txt").read_text(encoding="utf-8")
+            self.assertIn("orchestration.p600.supervisor.call_status=invoked", state_text)
+            self.assertIn("orchestration.p600.supervisor.progress=logs/orchestration/l2_supervisor_progress.md", state_text)
+            index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
+            self.assertIn("[log] `logs/orchestration/l2_supervisor_progress.md`", index_text)
+
+            entry = classify_run_file("logs/orchestration/l2_supervisor_progress.md", run_dir=run_dir)
+            self.assertEqual(entry.slot, "p010")
+            self.assertEqual(entry.role, "log")
 
     def test_classify_scene_series_nested_files_with_scene_subrun_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_run_index_scene_series_") as td:

@@ -144,7 +144,7 @@ output/<topic>_<timestamp>/
   - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
 - reusable asset が多い run では、cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する
   - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を `asset_inventory.md` に網羅する
-  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main が修正して再 review する cycle を最大 5 round 回す
+  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、担当 `p500` L2 supervisor が修正して再 review する cycle を最大 5 round 回す
   - character reference は、全身が見える front / side / back の 3 面図を基本にする
   - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
 - image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
@@ -180,11 +180,23 @@ output/<topic>_<timestamp>/
   - `p800`: video
   - `p900`: render / QA / runtime
 - これらの slot 意味は固定契約で、story ごとに変えない
+- 実行所有権は3階層に分ける
+  - L1 Run Orchestrator: bucket 順序、stop target、approval boundary、bucket 完了検証だけを担当する。本文 artifact は次 bucket 判定のために読まない
+  - L2 P-Bucket Supervisor: `p100`, `p200`, ... `p900` ごとに担当し、その bucket 内の canonical artifact、`state.txt`、`p000_index.md` を更新する single writer になる
+  - L3 Task / Review Agents: critic、aggregator、grounding auditor、scene worker、image/video/narration reviewer など。L2 配下で isolated report / scratch / review artifact だけを書く
+- 各 L2 supervisor は bucket 完了時に `logs/orchestration/pXXX.supervisor_result.json` を書く
+  - L1 はこの result、required artifact の存在、fixed slot の terminal state だけを見て次 bucket を起動する
+- L1 は各 L2 supervisor を起動した時点で `logs/orchestration/l2_supervisor_progress.md` に進捗行を追記する
+  - ここに記録するのは L2 P-Bucket Supervisor の `invoked|returned|blocked|failed` だけ
+  - L3 critic / aggregator / scene worker / image reviewer などの起動履歴はこの進捗メモには書かない
+  - 記録は `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680` の形式で行う
+  - L2 が返った後は `--event returned --result logs/orchestration/p600.supervisor_result.json` を同じ bucket に対して追記する
+  - `scripts/verify-pipeline.py` は target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、`pXXX.supervisor_result.json` を hard gate として検証する
 - authoring 直後の review slot は最大 5 round の evaluator-improvement loop として実行する
   - 各 round は 5 critic agents + 1 aggregator
   - critic は独立 report のみを書き、canonical artifact / `state.txt` / `p000_index.md` を直接編集しない
   - aggregator は 5 critic report を統合して `passed|changes_requested` を返す
-  - メインエージェントが aggregator report から採用する修正だけを canonical artifact へ反映する
+  - 担当 L2 supervisor が aggregator report から採用する修正だけを bucket 内 canonical artifact へ反映する
   - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` として停止し、人間 review / override を待つ
 - `/toc-immersive-ride --stage` は `p100` / `100` のような p番号指定を受け付ける
   - 100 番台の stage target は、stage 冒頭ではなく、その stage の human-review handoff slot まで進める
@@ -257,7 +269,7 @@ python scripts/sync-narration-from-script.py \
     - narration review / TTS / duration gate に必要な最小構造
   - `manifest_phase: production`
     - image / video 実装 field を埋めた生成正本
-- production `video_manifest.md` では各 production scene に最低2つの `cuts[]` を持たせる。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest は p620/p650 review で差し戻す。
+- production `video_manifest.md` では cinematic density contract を満たす。各 production scene は原則 3 cuts 以上、low importance だけ 2 cuts 以上、high / critical は 5 cuts 以上を基準にし、`target_duration_seconds / 12` を切り上げた cut 数も下回らない。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest や、medium 以上が 2 cuts だけで green になる manifest は p620/p650 review で差し戻す。
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
@@ -280,7 +292,9 @@ python scripts/sync-narration-from-script.py \
   - review 実行後に subagent が `agent_review_ok` を更新する
   - `human_review_ok` は初期値 `false`
   - false の cut には reason key を 1 つ以上残す
-  - canonical reason key は `image_contract_missing` / `image_contract_must_include_unmet` / `image_contract_must_avoid_violated` / `image_contract_target_focus_unmet` / `missing_required_prompt_block` / `prompt_not_self_contained` / `prompt_contains_nonvisual_metadata` / `prompt_contains_first_frame_metadata` / `non_japanese_prompt_term` / `prompt_mentions_character_but_character_ids_empty` / `source_anchor_missing_from_prompt` / `missing_character_id` / `missing_object_id` / `prompt_only_local_mismatch` / `prompt_missing_expected_character_anchor` / `prompt_missing_expected_object_anchor` / `prompt_subject_drift` / `blocking_drift` / `image_prompt_not_first_frame_ready` / `image_prompt_story_alignment_weak` / `image_prompt_subject_specificity_weak` / `image_prompt_continuity_weak` / `image_prompt_first_frame_readiness_weak` / `image_prompt_production_readiness_weak`
+  - canonical reason key は `image_contract_missing` / `image_contract_must_include_unmet` / `image_contract_must_avoid_violated` / `image_contract_target_focus_unmet` / `missing_required_prompt_block` / `prompt_not_self_contained` / `prompt_contains_nonvisual_metadata` / `prompt_contains_first_frame_metadata` / `non_japanese_prompt_term` / `prompt_mentions_character_but_character_ids_empty` / `source_anchor_missing_from_prompt` / `missing_character_id` / `missing_object_id` / `prompt_only_local_mismatch` / `prompt_missing_expected_character_anchor` / `prompt_missing_expected_object_anchor` / `prompt_subject_drift` / `blocking_drift` / `image_prompt_not_first_frame_ready` / `image_prompt_story_alignment_weak` / `image_prompt_subject_specificity_weak` / `image_prompt_prompt_craft_weak` / `image_prompt_continuity_weak` / `image_prompt_first_frame_readiness_weak` / `image_prompt_production_readiness_weak`
+  - prompt は 6 block が揃っているだけでは不十分。本文は 220 文字以上を目安にし、subject / blocking / setting / light / camera / material のうち 4 系統以上の具体要素を含める
+  - これを満たさない場合の canonical reason key は `image_prompt_prompt_craft_weak`
   - required block `[全体 / 不変条件]` / `[登場人物]` / `[小道具 / 舞台装置]` / `[シーン]` / `[連続性]` / `[禁止]` のいずれかが欠けていれば、subagent は `agent_review_ok: false` にする
   - この場合の canonical reason key は `missing_required_prompt_block`
   - prompt が `scene03_cut01` のような他 cut 参照や `前カット` / `次カット` / `前のprompt` のような参照依存表現を含む場合、subagent は `agent_review_ok: false` にする
@@ -324,7 +338,7 @@ python scripts/sync-narration-from-script.py \
   - `recreate` を実際に回すときは `--force` を使う
   - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする
   - `--force --test-image-variants N` を併用すれば exploratory variant を複数出せる
-- scene 3 以降など大きい範囲をまとめて見直すときは、scene 単位で request authoring subagent を並列起動して scratch rewrite を作り、メインエージェントが `image_generation_requests.md` へ統合する
+- scene 3 以降など大きい範囲をまとめて見直すときは、scene 単位で request authoring subagent を並列起動して scratch rewrite を作り、担当 `p600` L2 supervisor が `image_generation_requests.md` へ統合する
   - 各担当は `script.md`、`video_manifest.md`、現在の request draft、`docs/implementation/image-prompting.md` を必ず読む
   - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も必ず読む
   - 担当 scene の `visual_beat` を semantic source にして、stateless な request 文へ書き直す

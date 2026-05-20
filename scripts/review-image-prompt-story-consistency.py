@@ -215,6 +215,17 @@ IMAGE_REVIEW_RUBRIC_THRESHOLDS = {
     "production_readiness": 0.60,
 }
 
+PROMPT_CRAFT_MIN_CHARS = 220
+PROMPT_CRAFT_MIN_VISUAL_CATEGORIES = 4
+PROMPT_CRAFT_VISUAL_CATEGORIES = {
+    "subject": ("人物", "主人公", "顔", "表情", "視線", "手", "姿勢", "立ち姿"),
+    "blocking": ("前景", "中景", "背景", "距離", "向き", "手前", "奥", "横", "斜め", "並ぶ", "向き合う"),
+    "setting": ("部屋", "道", "森", "海", "城", "台所", "庭", "階段", "床", "壁", "窓", "扉", "空"),
+    "light": ("光", "影", "逆光", "月明かり", "朝日", "夕暮れ", "薄暗", "反射", "陰影"),
+    "camera": ("構図", "クローズアップ", "広角", "俯瞰", "ローアングル", "焦点", "被写界深度", "フレーム"),
+    "material": ("質感", "布", "木", "石", "金属", "ガラス", "埃", "灰", "水滴", "しわ", "擦り傷"),
+}
+
 MID_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"話し、"),
     re.compile(r"うなずく"),
@@ -257,6 +268,7 @@ SOFT_FINDING_CODES = {
     "image_prompt_subject_specificity_weak",
     "image_prompt_continuity_weak",
     "image_prompt_first_frame_readiness_weak",
+    "image_prompt_prompt_craft_weak",
     "image_prompt_production_readiness_weak",
 }
 
@@ -721,6 +733,30 @@ def _score_from_count(*, total: int, missing: int) -> float:
     return max(0.0, min(1.0, (total - missing) / total))
 
 
+def _prompt_visual_category_hits(prompt: str) -> dict[str, list[str]]:
+    hits: dict[str, list[str]] = {}
+    for category, terms in PROMPT_CRAFT_VISUAL_CATEGORIES.items():
+        matched = [term for term in terms if term in prompt]
+        if matched:
+            hits[category] = matched
+    return hits
+
+
+def prompt_craft_detail_issues(prompt: str) -> list[str]:
+    compact = "".join((prompt or "").split())
+    category_hits = _prompt_visual_category_hits(prompt)
+    issues: list[str] = []
+    if len(compact) < PROMPT_CRAFT_MIN_CHARS:
+        issues.append(f"prompt body is too short for a cinematic scene image ({len(compact)}/{PROMPT_CRAFT_MIN_CHARS} non-space chars).")
+    if len(category_hits) < PROMPT_CRAFT_MIN_VISUAL_CATEGORIES:
+        missing_count = PROMPT_CRAFT_MIN_VISUAL_CATEGORIES - len(category_hits)
+        issues.append(
+            "prompt lacks enough concrete visual craft categories "
+            f"({len(category_hits)}/{PROMPT_CRAFT_MIN_VISUAL_CATEGORIES}; missing at least {missing_count} of subject/blocking/setting/light/camera/material)."
+        )
+    return issues
+
+
 def _contract_string_list(contract: dict[str, Any], key: str) -> list[str]:
     value = contract.get(key)
     if not isinstance(value, list):
@@ -756,8 +792,10 @@ def _score_subject_specificity(
 def _score_prompt_craft(prompt: str, missing_blocks: list[str], independence_issues: list[str]) -> float:
     block_score = _score_from_count(total=len(REQUIRED_PROMPT_BLOCKS), missing=len(missing_blocks))
     issue_penalty = min(0.45, 0.15 * len(independence_issues))
+    detail_issues = prompt_craft_detail_issues(prompt)
+    detail_penalty = min(0.35, 0.18 * len(detail_issues))
     length_bonus = 0.05 if len((prompt or "").splitlines()) >= 8 else 0.0
-    return round(max(0.0, min(1.0, block_score - issue_penalty + length_bonus)), 3)
+    return round(max(0.0, min(1.0, block_score - issue_penalty - detail_penalty + length_bonus)), 3)
 
 
 def _score_continuity_readiness(
@@ -1015,6 +1053,9 @@ def review_entries(
                     message=f"prompt is missing required block `[{block}]`.",
                 )
             )
+        craft_detail_issues = prompt_craft_detail_issues(entry.prompt)
+        for issue in craft_detail_issues:
+            findings.append(Finding(code="image_prompt_prompt_craft_weak", message=issue))
         nonvisual_metadata_issues = find_prompt_nonvisual_metadata_issues(entry.prompt)
         for issue in nonvisual_metadata_issues:
             findings.append(Finding(code="prompt_contains_nonvisual_metadata", message=issue))
@@ -1187,6 +1228,13 @@ def review_entries(
                 Finding(
                     code="image_prompt_subject_specificity_weak",
                     message="prompt is too generic about the main subject, character, or setpiece.",
+                )
+            )
+        if rubric_scores["prompt_craft"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["prompt_craft"]:
+            findings.append(
+                Finding(
+                    code="image_prompt_prompt_craft_weak",
+                    message="prompt has the required blocks but is still too thin in cinematic detail, shot design, or visual specificity.",
                 )
             )
         if rubric_scores["continuity_readiness"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["continuity_readiness"]:

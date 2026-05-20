@@ -15,22 +15,24 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | Area | Decision | Rationale |
 | --- | --- | --- |
 | Deployment mode | Local-only MVP | Fast iteration, zero infra |
-| Execution model | Single-node orchestrator + in-process workers | Lowest complexity for MVP |
+| Execution model | L1 Run Orchestrator + L2 P-Bucket Supervisors + L3 task/review agents | Keeps the run gate-driven while moving long stage context out of the L1 context |
 | Storage | Filesystem object store + PostgreSQL metadata DB | Durable metadata |
 | Job queue | In-process async queue | Simple and sufficient for MVP |
 | State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
 | Providers | LLM via LangChain; image=Codex built-in image generation (`codex_builtin_image` / gpt-image-2); video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
-| Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible while preserving one canonical writer |
+| Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible inside the owning p-bucket supervisor |
 
 ## Component diagram
 
 ```mermaid
 graph TD
   AC[Assistant Command: Codex primary / Claude compatible] --> ORCH[LangGraph Orchestrator]
-  ORCH --> QUEUE[In-process Job Queue]
-  QUEUE --> WORKERS[Workers]
+  ORCH --> L1[L1 Run Orchestrator]
+  L1 --> L2[P-Bucket Supervisor p100-p900]
+  L2 --> L3[Task / Review Agents]
+  L3 --> WORKERS[Workers]
   WORKERS --> PROVIDERS[Image/Video/TTS/LLM Providers]
   ORCH --> META[Metadata DB (PostgreSQL)]
   ORCH --> STATE[State File (state.txt)]
@@ -45,13 +47,17 @@ graph TD
 
 ## Execution model
 
-- Single-node orchestrator runs the LangGraph.
+- Single-node orchestrator runs the LangGraph, but run authorship is split by p-bucket.
+- L1 Run Orchestrator owns bucket order, stop target, human approval boundaries, and bucket completion validation.
+- L2 P-Bucket Supervisor owns one `p100` bucket at a time and is the single writer for that bucket's canonical artifacts, `state.txt` slot updates, and `p000_index.md` refresh.
+- L3 task/review agents run under the active L2 supervisor and write only isolated reports, scratch outputs, review artifacts, or generated media requested by the supervisor.
 - Long-running tasks executed via in-process worker pool (async + process/thread).
 - Concurrency default: 2 workers; configurable via `config/system.yaml`.
 - Parallelism policy (MVP):
   - Core flow is sequential and gate-driven.
-  - Audio-first production order is fixed as:
-    - `RESEARCH -> STORY -> SCRIPT -> NARRATION -> ASSET -> SCENE_IMPLEMENTATION -> VIDEO -> RENDER -> QA`
+  - Production order is fixed as:
+    - `RESEARCH -> STORY -> VISUAL_PLANNING -> SCRIPT -> ASSET -> SCENE_IMPLEMENTATION -> NARRATION -> VIDEO -> RENDER_QA`
+  - L1 never reads the body of bucket output artifacts to decide the next bucket. It checks `logs/orchestration/pXXX.supervisor_result.json`, required artifact existence, and terminal slot state only.
   - Parallelism is allowed only inside a stage whose upstream gate is already complete.
     - `ASSET`: recurring still generation can run in parallel.
     - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production`.
@@ -126,8 +132,70 @@ graph TD
 - authoring 直後の review slot は、単発 review ではなく最大 5 round の evaluator-improvement loop とする。
   - 1 round は 5 critic agents + 1 aggregator で構成する
   - critic / aggregator は `state.txt`、`p000_index.md`、canonical artifact を直接編集しない
-  - メインエージェントが aggregator report を読み、採用する修正だけを canonical artifact に反映する
+  - 担当 L2 P-Bucket Supervisor が aggregator report を読み、採用する修正だけを担当 bucket の canonical artifact に反映する
   - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` で停止し、人間 review / override を待つ
+
+## Run-Level Supervisor Architecture
+
+ToC run 全体は、OpenAI Agents SDK の orchestration / handoff の考え方に合わせて、所有権を3階層に分ける。これは SDK への全面移行を意味しない。Codex-native 運用でも、長い文脈を L2 supervisor に閉じ込め、L1 は handoff artifact だけを見る。
+
+### L1 Run Orchestrator
+
+- 入力: user request / stop target / `state.txt` / `p000_index.md` / bucket supervisor result
+- 出力: 次 bucket の task packet / run-level stop or blocked decision
+- 責務:
+  - `p100 -> p200 -> ... -> p900` の順序と coarse stop target を解決する
+  - 各 bucket の L2 supervisor を fresh context で起動し、完了まで待機する
+  - L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` event を追記する
+    - helper: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
+  - L2 supervisor が返った後に、同じ helper で `returned|blocked|failed` と result path を追記する
+  - bucket 完了時は `logs/orchestration/pXXX.supervisor_result.json`、required artifact existence、terminal slot state だけを検証する
+  - human review、frontend handoff、hybridization approval を自動承認しない
+  - 本文 artifact（例: `research.md`, `story.md`, `script.md`, `video_manifest.md`）を次 bucket 判定のために読まない
+- 禁止:
+  - L2 の代わりに canonical artifact を統合する
+  - L3 critic / aggregator report を直接読み込んで修正判断する
+  - bucket 内の未記録会話文脈を次 bucket へ渡す
+  - L3 task / review agents の起動履歴を run-level progress memo に膨らませる
+
+### L2 P-Bucket Supervisor
+
+- 入力: L1 task packet / stage readset / upstream artifact paths / bucket stop slot
+- 出力: canonical artifact updates / `state.txt` slot updates / `p000_index.md` refresh / `logs/orchestration/pXXX.supervisor_result.json`
+- 責務:
+  - 担当 bucket 内では single writer として動く
+  - `prepare-stage-context.py` または同等の grounding preflight で readset を確定する
+  - 必要な L3 task/review agents を起動し、isolated outputs を採否判断する
+  - authoring-after review loop の round 管理、修正採否、gate close / human handoff を担当する
+  - bucket 最終 slot まで進んだら supervisor result を書き、L1 へ完了を返す
+- 禁止:
+  - 他 bucket の canonical artifact を編集する
+  - L1 に本文 artifact の精読を要求する
+  - approval gate を自動承認する
+
+### L3 Task / Review Agents
+
+- 入力: artifact path / readset path /目的 / isolated output path
+- 出力: `scratch/`, `logs/`, review artifacts, generated media, or explicit report only
+- 責務:
+  - research scout、story candidate、visual audit、scene/cut worker、critic、aggregator、grounding auditor、image/video/narration reviewer などを担当する
+  - 親会話の未記録文脈に依存しない
+  - canonical artifact、`state.txt`、`p000_index.md` を直接編集しない。ただし生成メディアの materialization など、L2 が明示した isolated output は書いてよい
+
+### Bucket Handoff Contract
+
+各 bucket supervisor は完了時に次を満たす。
+
+- L1 が `logs/orchestration/l2_supervisor_progress.md` に L2 supervisor 呼び出しを記録済みである
+- `logs/orchestration/pXXX.supervisor_result.json` を書く
+- `status` は `done|blocked|failed`
+- `completed_slots` に担当 bucket の terminal slot を列挙する
+- `required_artifacts` に L1 validator が存在確認すべき artifact を列挙する
+- `state_keys` にその bucket が更新した主要 state key を列挙する
+- `review_outputs` に review loop / human handoff artifact を列挙する
+- `next_bucket` または `blocked_reason` を明示する
+
+L1 validator はこの result と slot state を検証して次 bucket に進む。artifact 本文の品質判断は L2 supervisor と L3 review loop の責務である。
 
 ## Fixed P-Slot Contract
 
@@ -221,7 +289,7 @@ graph TD
 
 ## Subagent Orchestration Policy
 
-メインエージェントは run 全体の orchestrator / single writer として振る舞う。subagent は contextless / bounded / artifact-scoped な補助役であり、`state.txt`、`p000_index.md`、canonical artifact の最終更新や承認判断を行わない。
+メインエージェントという単一の巨大 context は使わない。run 全体は L1 Run Orchestrator が順序と handoff を管理し、各 `p100` 番台は L2 P-Bucket Supervisor が bucket single writer として担当する。従来 subagent と呼んでいた細かい作業者は L3 Task / Review Agents として L2 配下に置く。
 
 呼び出し条件:
 
@@ -232,23 +300,23 @@ graph TD
 
 slot ごとの標準分担:
 
-| Slot | subagent に任せてよい作業 | メインエージェントの統合責務 |
+| Slot | L2 supervisor の所有範囲 | L3 task/review agents に任せてよい作業 |
 | --- | --- | --- |
-| `p100` research | research scout / evidence collector | `research.md` への統合、source trace、slot 更新 |
-| `p200` story | story candidate / source-vs-creative audit | `story.md` 確定、hybridization 承認確認 |
-| `p300` visual planning | visual-value draft / visual payoff audit / anchor-reference-risk audit | `visual_value.md` 統合、story との矛盾確認、p400/p500/p600/p700 handoff 確認 |
-| `p400` script | scene draft / narration draft | `script.md` と skeleton manifest の統合 |
-| `p500` asset | asset brief / continuity review | asset plan 採用、request 発行、canonical asset 更新 |
-| `p600` scene implementation | scene/cut prompt rewrite / image prompt judgment | production manifest 統合、review finding の採否 |
-| `p700` narration | narration review / duration stretch review | TTS 実行判断、duration gate、manifest 反映 |
-| `p800` video | clip generation fan-out / clip review | 採用判定、manifest 更新、除外理由の記録 |
-| `p900` render / QA | QA reviewer / runtime summary review | final report 生成、完了判定、run closeout |
+| `p100` research | `research.md` への統合、source trace、slot 更新、supervisor result | research scout / evidence collector / research critic |
+| `p200` story | `story.md` 確定、hybridization 承認確認、slot 更新、supervisor result | story candidate / source-vs-creative audit / story critic |
+| `p300` visual planning | `visual_value.md` 統合、story との矛盾確認、p400/p500/p600/p700 handoff 確認 | visual-value draft / visual payoff audit / anchor-reference-risk audit |
+| `p400` script | `script.md` と skeleton manifest の統合、p400 review loops、slot 更新 | scene draft / narration draft / structure-duration-quality council |
+| `p500` asset | asset plan 採用、request 発行、asset generation、canonical asset 更新 | asset brief / coverage review / continuity review / image generation workers |
+| `p600` scene implementation | production manifest 統合、scene requests、scene image generation、image handoff | scene/cut prompt rewrite / image prompt judgment / image QA |
+| `p700` narration | p710-p750 の bucket single writer。TTS 実行判断、duration gate、manifest 反映、audio handoff | narration review / duration stretch review / TTS workers |
+| `p800` video | 採用判定、manifest 更新、除外理由の記録、video handoff | clip generation fan-out / clip review |
+| `p900` render / QA | final report 生成、完了判定、run closeout | QA reviewer / runtime summary review |
 
 Authoring-after review loop の標準分担:
 
 - critic agents: 5 agents per round。rubric finding と修正候補を isolated report に出す
 - aggregator: 1 agent per round。5 critic reports を統合し、`passed|changes_requested` と unresolved findings を返す
-- main agent: aggregator report を根拠に canonical artifact を更新し、次 round 実行または gate close を決める
+- L2 supervisor: aggregator report を根拠に担当 bucket の canonical artifact を更新し、次 round 実行または gate close を決める
 - max rounds: 5。round 5 後の unresolved finding は human review / explicit override に回す
 
 禁止事項:
@@ -261,11 +329,12 @@ Authoring-after review loop の標準分担:
 
 統合手順:
 
-1. subagent output を読む
-2. canonical artifact に採用する差分を選ぶ
+1. L2 supervisor が L3 output を読む
+2. 担当 bucket の canonical artifact に採用する差分を選ぶ
 3. `state.txt` に prompt / output / review summary を append する
 4. verifier または stage review を通す
-5. finding が残る場合は、修正 task を再度 bounded subagent に渡す
+5. finding が残る場合は、修正 task を再度 bounded L3 agent に渡す
+6. bucket 完了時に `logs/orchestration/pXXX.supervisor_result.json` を書く
 
 ## Model/providers
 

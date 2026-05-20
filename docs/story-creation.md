@@ -78,7 +78,7 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 
 - story candidate の複数案出し、source-vs-creative audit、grounding audit は contextless subagent に任せてよい
 - subagent には `research.md`、stage readset、出力先 scratch path、評価目的だけを渡す
-- `story.md` の確定、hybridization 承認確認、`subagent_trace` の採否理由はメインエージェントが統合する
+- `story.md` の確定、hybridization 承認確認、`subagent_trace` の採否理由は担当 `p200` L2 supervisor が統合する
 - p230 `story_review.md` では、subagent が候補スコアリング、20 scene の厚み、根拠境界、後続工程への接続性を評価する
 - p230 は p210 grounding audit と分離する。p210 は前提監査、p230 は成果物レビューである
 

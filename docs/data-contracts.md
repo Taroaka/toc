@@ -246,7 +246,88 @@ eval.narration.unresolved_entries=0
 ---
 ```
 
-### 1.0 Authoring-after evaluator-improvement loop
+### 1.0 Run-level supervisor handoff
+
+ToC run 全体は `p100` 番台ごとの L2 P-Bucket Supervisor に所有権を渡して進める。L1 Run Orchestrator は bucket 完了時に本文 artifact を読まず、supervisor result と slot state だけを検証する。
+
+L1 は L2 supervisor を起動した時点で、run dir 内の進捗メモに呼び出しを残す。記録対象は L2 P-Bucket Supervisor だけで、L3 task / review agents はここへ記録しない。
+
+```text
+output/<topic>_<timestamp>/logs/orchestration/l2_supervisor_progress.md
+```
+
+Markdown table shape:
+
+```markdown
+| at | bucket | supervisor | event | stop_slot | result | note |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-05-20T12:00:00+09:00 | p600 | p600 P-Bucket Supervisor | invoked | p680 | - | frontend handoff path |
+```
+
+- `event`: `invoked|returned|blocked|failed`
+- `bucket`: `p100|p200|...|p900`
+- `result`: 完了後に `logs/orchestration/pXXX.supervisor_result.json` を指す。起動時は `-`
+- L3 の critic / aggregator / scene worker などは isolated artifact にだけ残し、この progress memo には載せない
+- 追記 helper: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
+- `scripts/verify-pipeline.py` は stage target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、supervisor result JSON を検証する
+
+各 bucket は完了時に次の artifact を書く。
+
+```text
+output/<topic>_<timestamp>/logs/orchestration/pXXX.supervisor_result.json
+```
+
+JSON shape:
+
+```json
+{
+  "bucket": "p100",
+  "status": "done",
+  "completed_slots": ["p110", "p120", "p130"],
+  "required_artifacts": [
+    {"path": "research.md", "exists": true, "status": "ready"}
+  ],
+  "state_keys": {
+    "stage.research.status": "done",
+    "slot.p120.status": "done",
+    "slot.p130.status": "done"
+  },
+  "review_outputs": [
+    {"slot": "p130", "path": "research_review.md", "status": "passed"}
+  ],
+  "next_bucket": "p200",
+  "blocked_reason": null
+}
+```
+
+Field contract:
+
+- `bucket`: `p100|p200|...|p900`
+- `status`: `done|blocked|failed`
+- `completed_slots`: 担当 bucket 内で terminal state になった slot
+- `required_artifacts`: L1 が存在確認すべき artifact。本文品質判断ではなく存在・状態確認用
+- `state_keys`: L2 supervisor が更新した主要 state key の latest values
+- `review_outputs`: review loop、human handoff、frontend handoff の report artifacts
+- `next_bucket`: 次に起動すべき bucket。stop target 到達時は `null`
+- `blocked_reason`: `blocked|failed` のとき必須
+
+State key pattern:
+
+```text
+artifact.l2_supervisor_progress=logs/orchestration/l2_supervisor_progress.md
+orchestration.<bucket>.supervisor.progress=logs/orchestration/l2_supervisor_progress.md
+orchestration.<bucket>.supervisor.call_status=invoked|returned|blocked|failed
+orchestration.<bucket>.supervisor.invoked_at=ISO8601
+orchestration.<bucket>.supervisor.last_event_at=ISO8601
+orchestration.<bucket>.supervisor.stop_slot=pXXX
+orchestration.<bucket>.supervisor.status=done|blocked|failed
+orchestration.<bucket>.supervisor.result=logs/orchestration/<bucket>.supervisor_result.json
+orchestration.<bucket>.supervisor.finished_at=ISO8601
+```
+
+L1 はこの result と fixed slot state を検証し、次 bucket の L2 supervisor を起動する。`research.md` / `story.md` / `script.md` / `video_manifest.md` などの本文 artifact を次 bucket 判定のために読まない。
+
+### 1.1 Authoring-after evaluator-improvement loop
 
 Authoring の直後に置かれる review slot は、一回限りの採点ではなく **最大 5 round の evaluator-improvement loop** として扱う。
 
@@ -274,14 +355,14 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
   - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
   - 採用する blocker には、失敗した check 名だけでなく、その failure を生んだ設計・依存・state・contract 上の原因と、明確な修正方針がある場合の target artifact / section / acceptance condition を書く
   - aggregator も canonical artifact を直接編集しない
-- orchestrator / main agent:
+- owning L2 P-Bucket Supervisor:
   - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
   - 修正後、同じ review slot の次 round を実行する
 
 停止条件:
 
 - aggregator が `passed` を返したら loop を終了し、対応 stage を次 slot へ進める
-- aggregator が `changes_requested` を返し、round < 5 なら orchestrator が修正して次 round を実行する
+- aggregator が `changes_requested` を返し、round < 5 なら担当 L2 supervisor が修正して次 round を実行する
 - round 5 後も `changes_requested` なら `eval.<stage>.loop.status=changes_requested` とし、human review / explicit override なしに次工程へ進めない
 
 state key pattern:
@@ -299,7 +380,7 @@ eval.<stage>.loop.round_01.aggregator_prompt=logs/eval/<stage>/round_01/prompts/
 eval.<stage>.loop.round_01.aggregated_review=logs/eval/<stage>/round_01/aggregated_review.md
 ```
 
-`eval.<stage>.*` summary は loop の最新 round / aggregator 結果から更新する。critic 個別 report は根拠 artifact、aggregator report は gate 判定の正本、canonical artifact の最終差分は orchestrator の編集を正本とする。
+`eval.<stage>.*` summary は loop の最新 round / aggregator 結果から更新する。critic 個別 report は根拠 artifact、aggregator report は gate 判定の正本、canonical artifact の最終差分は担当 L2 supervisor の編集を正本とする。
 
 `video_manifest.md` top-level contract:
 
@@ -457,13 +538,13 @@ p400 の内部 slot:
   - 抽象 review loop は `eval.scene_set.loop.*` / `scene_set_review.md` に記録する
   - 具体 review loop は `eval.scene_detail.loop.*` / `scene_detail_review.md` に記録する
   - human review は `gate.script_scene_review` / `review.script.scene_set.status` / `review.script.scene_detail.status` で required|optional|skipped を切り替える
-  - agent 指摘による scene 追加/削除/統合/分割/順序変更、scene intent 修正、transition 補強は main agent が自動適用する
+  - agent 指摘による scene 追加/削除/統合/分割/順序変更、scene intent 修正、transition 補強は担当 `p400` L2 supervisor が自動適用する
 - `p420`: cut blueprints
   - 各 scene を production 用 cut に分解する
   - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を持つ
   - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
   - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
-  - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は main agent / single writer が行う
+  - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は担当 `p400` L2 supervisor / bucket single writer が行う
   - agent review loop は `eval.cut_blueprint.loop.*` / `cut_blueprint_review.md` に記録する
   - human review は `gate.script_cut_review` / `review.script.cut.status` で required|optional|skipped を切り替える
 - `p430`: script review handoff
@@ -772,7 +853,7 @@ p500 slot contract:
 - `p510`: asset grounding。`script.md` / `story.md` / `video_manifest.md` / asset stage docs / template の readset と audit を確定する。
 - `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
 - `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
-- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、main agent が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
+- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、担当 `p500` L2 supervisor が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
@@ -1057,6 +1138,7 @@ Canonical reason key:
 - `image_contract_target_focus_unmet`
 - `image_prompt_story_alignment_weak`
 - `image_prompt_subject_specificity_weak`
+- `image_prompt_prompt_craft_weak`
 - `image_prompt_continuity_weak`
 - `image_prompt_not_first_frame_ready`
 - `image_prompt_first_frame_readiness_weak`

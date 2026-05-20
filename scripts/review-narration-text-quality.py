@@ -51,6 +51,17 @@ VISUAL_DIRECTION_TERMS = (
     "字幕",
 )
 
+AI_THIN_ABSTRACT_TERMS = (
+    "フォーマット",
+    "フレーム",
+    "フェーズ",
+    "プロセス",
+    "レイヤー",
+    "構造",
+    "観点",
+    "要素",
+)
+
 OPENING_ABSTRACT_TERMS = (
     "心",
     "こころ",
@@ -647,9 +658,18 @@ def _score_spoken_japanese(text: str) -> float:
         score -= 0.25
     if re.search(r"である。|なのだ。|したのである。", text):
         score -= 0.15
+    if _has_ai_thin_abstract_pileup(text):
+        score -= 0.20
     if META_MARKER_RE.search(text):
         score -= 0.20
     return max(0.0, min(1.0, score))
+
+
+def _has_ai_thin_abstract_pileup(text: str) -> bool:
+    sentences = [part for part in SENTENCE_SPLIT_RE.split(_strip_audio_tags_for_review(text)) if part.strip()]
+    if any(sum(1 for term in AI_THIN_ABSTRACT_TERMS if term in sentence) >= 2 for sentence in sentences):
+        return True
+    return sum(1 for term in AI_THIN_ABSTRACT_TERMS if term in text) >= 3
 
 
 def score_entry(entry: NarrationEntry) -> tuple[dict[str, float], float]:
@@ -724,6 +744,8 @@ def review_entries(entries: list[NarrationEntry]) -> list[ReviewOutcome]:
             findings.append(Finding(code="missing_pause_punctuation", message="narration text lacks enough punctuation for stable spoken pacing."))
         if any(term in text for term in VISUAL_DIRECTION_TERMS):
             findings.append(Finding(code="visual_direction_leaked_into_narration", message="narration text includes camera or on-screen direction terms that belong in visual prompts, not TTS text."))
+        if _has_ai_thin_abstract_pileup(spoken_text):
+            findings.append(Finding(code="ai_thin_abstract_wording", message="narration text leans on repeated abstract process words; replace or follow them with concrete people, actions, places, or objects."))
 
         rubric_scores, overall_score = score_entry(entry)
         if target_function:

@@ -1533,6 +1533,106 @@ def check_video_scene_series(run_dir: Path) -> tuple[dict[str, Any], dict[str, s
     return make_stage("video", "scenes/*/video.mp4", checks, details={"scene_count": len(scene_dirs)}), {}
 
 
+def _required_orchestration_buckets(stage_target: str) -> list[str]:
+    slot_number = _slot_number(stage_target, default=930)
+    if slot_number < 100:
+        return []
+    terminal_bucket = min(900, max(100, (slot_number // 100) * 100))
+    return [f"p{bucket}" for bucket in range(100, terminal_bucket + 1, 100)]
+
+
+def _progress_has_event(progress_text: str, *, bucket: str, event: str) -> bool:
+    for raw_line in progress_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip().replace("\\|", "|") for cell in stripped.strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        if cells[1] == bucket and cells[3] == event:
+            return True
+    return False
+
+
+def _supervisor_result_issues(path: Path, *, bucket: str) -> list[str]:
+    if not path.exists():
+        return [f"{bucket}:result_missing"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return [f"{bucket}:result_invalid_json"]
+    issues: list[str] = []
+    if payload.get("bucket") != bucket:
+        issues.append(f"{bucket}:result_bucket_mismatch")
+    if payload.get("status") != "done":
+        issues.append(f"{bucket}:result_status_not_done")
+    if not isinstance(payload.get("completed_slots"), list) or not payload.get("completed_slots"):
+        issues.append(f"{bucket}:completed_slots_missing")
+    if not isinstance(payload.get("required_artifacts"), list):
+        issues.append(f"{bucket}:required_artifacts_missing")
+    else:
+        missing_required = [
+            str(item.get("path") or "<unknown>")
+            for item in payload.get("required_artifacts", [])
+            if isinstance(item, dict) and item.get("exists") is False
+        ]
+        if missing_required:
+            issues.append(f"{bucket}:required_artifacts_not_found")
+    if not isinstance(payload.get("state_keys"), dict):
+        issues.append(f"{bucket}:state_keys_missing")
+    return issues
+
+
+def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, Any], dict[str, str]]:
+    checks: list[dict[str, Any]] = []
+    updates: dict[str, str] = {}
+    buckets = _required_orchestration_buckets(stage_target)
+    state = parse_state_file(run_dir / "state.txt")
+    progress_path = run_dir / "logs" / "orchestration" / "l2_supervisor_progress.md"
+    add_check(checks, "orchestration.progress_memo", progress_path.exists(), f"{progress_path.relative_to(run_dir)} exists")
+    progress_text = progress_path.read_text(encoding="utf-8") if progress_path.exists() else ""
+
+    missing_invocations = [bucket for bucket in buckets if not _progress_has_event(progress_text, bucket=bucket, event="invoked")]
+    add_check(
+        checks,
+        "orchestration.l2_invoked",
+        not missing_invocations,
+        "L1 recorded invoked events for every required L2 P-Bucket Supervisor"
+        + (f" (missing: {', '.join(missing_invocations)})" if missing_invocations else ""),
+        kind="rubric",
+    )
+
+    missing_returned_state = [
+        f"{bucket}:{state.get(f'orchestration.{bucket}.supervisor.call_status') or '(unset)'}"
+        for bucket in buckets
+        if state.get(f"orchestration.{bucket}.supervisor.call_status") != "returned"
+    ]
+    add_check(
+        checks,
+        "orchestration.state_terminal",
+        not missing_returned_state,
+        "state.txt records every required L2 P-Bucket Supervisor as returned"
+        + (f" (missing/non-terminal: {', '.join(missing_returned_state)})" if missing_returned_state else ""),
+        kind="rubric",
+    )
+
+    result_issues: list[str] = []
+    for bucket in buckets:
+        result_issues.extend(_supervisor_result_issues(run_dir / "logs" / "orchestration" / f"{bucket}.supervisor_result.json", bucket=bucket))
+    add_check(
+        checks,
+        "orchestration.supervisor_results",
+        not result_issues,
+        "required L2 supervisor result JSON files exist and report status=done"
+        + (f" (issues: {', '.join(result_issues[:8])})" if result_issues else ""),
+        kind="rubric",
+    )
+
+    details = {"required_buckets": buckets}
+    updates["eval.orchestration.score"] = f"{score_from_checks(checks):.4f}"
+    return make_stage("orchestration", "logs/orchestration/l2_supervisor_progress.md / logs/orchestration/pXXX.supervisor_result.json", checks, details=details), updates
+
+
 STAGE_TARGETS = {
     "p130": ["research"],
     "p230": ["research", "story"],
@@ -1630,6 +1730,11 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
     stages: list[dict[str, Any]] = []
     target = normalize_stage_target(stage_target)
     enabled_stages = set(STAGE_TARGETS[target])
+
+    if flow != "scene-series":
+        orchestration_stage, updates = check_orchestration(run_dir, stage_target=target)
+        stages.append(orchestration_stage)
+        stage_updates.update(updates)
 
     if "research" in enabled_stages:
         research_stage, updates = check_research(run_dir, profile)
@@ -1729,7 +1834,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "| --- | --- | --- |",
     ]
 
-    for stage_name in ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
+    for stage_name in ["orchestration", "research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue
@@ -1743,7 +1848,7 @@ def render_run_report(report: dict[str, Any], state: dict[str, str], run_dir: Pa
         "",
     ]
 
-    for stage_name in ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
+    for stage_name in ["orchestration", "research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]:
         stage = report["stages"].get(stage_name)
         if not stage:
             continue

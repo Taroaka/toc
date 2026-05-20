@@ -25,7 +25,9 @@ from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    parse_pronunciation_dictionary_locators,
 )
+from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -71,6 +73,20 @@ def main() -> None:
     parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
     parser.add_argument("--language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
+    parser.add_argument(
+        "--pronunciation-dictionary-locator",
+        action="append",
+        default=None,
+        help="ElevenLabs pronunciation dictionary locator as id:version_id. Can be repeated.",
+    )
+    parser.add_argument(
+        "--tts-pronunciation-alias-file",
+        default=_env(
+            "TOC_TTS_PRONUNCIATION_ALIAS_FILE",
+            str(REPO_ROOT / "config" / "tts-pronunciation-aliases.tsv"),
+        ),
+        help="Optional local JSON/TSV alias file applied to TTS text before the API request.",
+    )
 
     parser.add_argument("--stability", type=float, default=0.35)
     parser.add_argument("--similarity-boost", type=float, default=0.75)
@@ -89,6 +105,11 @@ def main() -> None:
         args.voice_id = DEFAULT_ELEVENLABS_VOICE_ID
     if not args.language_code:
         args.language_code = DEFAULT_ELEVENLABS_LANGUAGE_CODE
+    locators = parse_pronunciation_dictionary_locators(
+        args.pronunciation_dictionary_locator or _env("ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS")
+    )
+    aliases = load_pronunciation_aliases(args.tts_pronunciation_alias_file)
+    prepared_text = prepare_elevenlabs_tts_text(args.text, pronunciation_aliases=aliases)
 
     base = args.api_base.rstrip("/")
     url = f"{base}/text-to-speech/{urllib.parse.quote(args.voice_id)}"
@@ -96,7 +117,7 @@ def main() -> None:
         url += "?" + urllib.parse.urlencode({"output_format": args.output_format})
 
     payload: dict = {
-        "text": args.text,
+        "text": prepared_text.text,
         "model_id": args.model_id,
         "language_code": args.language_code,
         "voice_settings": {
@@ -106,6 +127,8 @@ def main() -> None:
             "use_speaker_boost": bool(args.use_speaker_boost),
         },
     }
+    if locators:
+        payload["pronunciation_dictionary_locators"] = list(locators)
 
     if args.save_request:
         Path(args.save_request).parent.mkdir(parents=True, exist_ok=True)
@@ -127,12 +150,13 @@ def main() -> None:
             model_id=args.model_id,
             output_format=args.output_format,
             language_code=args.language_code,
+            pronunciation_dictionary_locators=locators,
         )
     )
 
     try:
         audio = client.tts(
-            text=args.text,
+            text=prepared_text.text,
             voice_settings=payload["voice_settings"],
         )
     except HttpError as e:

@@ -308,7 +308,56 @@ def _run_grounding(run_dir: Path, stage: str, *, flow: str) -> subprocess.Comple
     )
 
 
+def _write_l2_orchestration_artifacts(run_dir: Path, *, stage_target: str = "p930") -> None:
+    target = VERIFY_MODULE.normalize_stage_target(stage_target)
+    buckets = VERIFY_MODULE._required_orchestration_buckets(target)
+    orchestration_dir = run_dir / "logs" / "orchestration"
+    orchestration_dir.mkdir(parents=True, exist_ok=True)
+    state_updates = {
+        "artifact.l2_supervisor_progress": "logs/orchestration/l2_supervisor_progress.md",
+    }
+    lines = [
+        "# L2 Supervisor Progress",
+        "",
+        "Only L2 P-Bucket Supervisor invocations are recorded here. L3 task/review agents are intentionally omitted.",
+        "",
+        "| at | bucket | supervisor | event | stop_slot | result | note |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for bucket in buckets:
+        result_path = f"logs/orchestration/{bucket}.supervisor_result.json"
+        state_updates[f"orchestration.{bucket}.supervisor.progress"] = "logs/orchestration/l2_supervisor_progress.md"
+        state_updates[f"orchestration.{bucket}.supervisor.call_status"] = "returned"
+        state_updates[f"orchestration.{bucket}.supervisor.invoked_at"] = "2099-01-01T00:00:00+09:00"
+        state_updates[f"orchestration.{bucket}.supervisor.last_event_at"] = "2099-01-01T00:00:01+09:00"
+        state_updates[f"orchestration.{bucket}.supervisor.stop_slot"] = target
+        state_updates[f"orchestration.{bucket}.supervisor.result"] = result_path
+        lines.append(f"| 2099-01-01T00:00:00+09:00 | {bucket} | {bucket} P-Bucket Supervisor | invoked | {target} | - | test fixture |")
+        lines.append(f"| 2099-01-01T00:00:01+09:00 | {bucket} | {bucket} P-Bucket Supervisor | returned | {target} | {result_path} | test fixture |")
+        (orchestration_dir / f"{bucket}.supervisor_result.json").write_text(
+            json.dumps(
+                {
+                    "bucket": bucket,
+                    "status": "done",
+                    "completed_slots": [target],
+                    "required_artifacts": [],
+                    "state_keys": {f"orchestration.{bucket}.supervisor.call_status": "returned"},
+                    "review_outputs": [],
+                    "next_bucket": None,
+                    "blocked_reason": None,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    (orchestration_dir / "l2_supervisor_progress.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+
+
 def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
+    _write_l2_orchestration_artifacts(run_dir)
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -326,6 +375,7 @@ def _resolve_ready_grounding(run_dir: Path, *, flow: str) -> None:
 
 
 def _resolve_ready_p300_grounding(run_dir: Path, *, flow: str) -> None:
+    _write_l2_orchestration_artifacts(run_dir, stage_target="p330")
     for stage in ["research", "story", "visual_value"]:
         result = _run_grounding(run_dir, stage, flow=flow)
         if result.returncode != 0:
@@ -604,7 +654,7 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
             ]
         )
         manifest_lines.extend([f"  - scene_id: {scene_idx}", "    cuts:"])
-        for cut_idx in range(1, 3):
+        for cut_idx in range(1, 4):
             selector = f"scene{scene_idx}_cut{cut_idx}"
             image_output = f"assets/scenes/{selector}.png"
             audio_output = f"assets/audio/{selector}.mp3"
@@ -834,9 +884,79 @@ class TestVerifyPipeline(unittest.TestCase):
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
             self.assertTrue(payload["overall"]["passed"], msg=payload)
             self.assertEqual(payload["stage_target"], "p330")
-            self.assertEqual(set(payload["stages"]), {"research", "story", "visual_value"})
+            self.assertEqual(set(payload["stages"]), {"orchestration", "research", "story", "visual_value"})
+            self.assertEqual(payload["stages"]["orchestration"]["details"]["required_buckets"], ["p100", "p200", "p300"])
             self.assertFalse((run_dir / "script.md").exists())
             self.assertFalse((run_dir / "video_manifest.md").exists())
+
+    def test_check_orchestration_accepts_l2_progress_result_and_terminal_state(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0090"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p300")
+
+            stage, updates = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p330")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(stage["passed"])
+            self.assertTrue(checks["orchestration.progress_memo"])
+            self.assertTrue(checks["orchestration.l2_invoked"])
+            self.assertTrue(checks["orchestration.state_terminal"])
+            self.assertTrue(checks["orchestration.supervisor_results"])
+            self.assertEqual(stage["details"]["required_buckets"], ["p100", "p200", "p300"])
+            self.assertEqual(updates["eval.orchestration.score"], "1.0000")
+
+    def test_check_orchestration_fails_without_l2_progress_memo(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0091"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\n---\n", encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.progress_memo"])
+            self.assertFalse(checks["orchestration.l2_invoked"])
+            self.assertFalse(checks["orchestration.state_terminal"])
+            self.assertFalse(checks["orchestration.supervisor_results"])
+
+    def test_check_orchestration_fails_when_l2_result_is_not_done(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0092"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p100")
+            result_path = run_dir / "logs" / "orchestration" / "p100.supervisor_result.json"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload["status"] = "blocked"
+            result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
+            self.assertIn("p100:result_status_not_done", checks["orchestration.supervisor_results"]["message"])
+
+    def test_check_orchestration_only_requires_buckets_up_to_stage_target(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0093"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p300")
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p330")
+
+            self.assertTrue(stage["passed"], msg=stage)
+            self.assertEqual(stage["details"]["required_buckets"], ["p100", "p200", "p300"])
+            self.assertFalse((run_dir / "logs" / "orchestration" / "p400.supervisor_result.json").exists())
 
     def test_verify_pipeline_normalizes_big_stage_targets_to_handoff_slots(self) -> None:
         cases = {

@@ -51,6 +51,7 @@ from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    parse_pronunciation_dictionary_locators,
 )
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
@@ -59,7 +60,13 @@ from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
 from toc.run_index import write_run_index
 from toc.stage_evaluator import check_manifest_single
-from server.codex_app_server import CodexAppServerClient, app_server_disabled, latest_generated_image_mtime_ns
+from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
+from server.codex_app_server import (
+    CodexAppServerClient,
+    app_server_disabled,
+    latest_generated_image_mtime_ns,
+    reject_local_raster_image_result,
+)
 from server.image_gen import copy_saved_image, write_app_server_image_debug_log
 
 
@@ -1917,6 +1924,10 @@ def _generate_single_audio_scene(
             tts_text = tprefix + "\n\n" + tts_text
         if tsuffix:
             tts_text = tts_text + "\n\n" + tsuffix
+        prepared = prepare_elevenlabs_tts_text(
+            tts_text,
+            pronunciation_aliases=getattr(args, "tts_pronunciation_aliases", ()),
+        )
         normalize_dur = dur if scene.narration_normalize_to_scene_duration else None
         generate_elevenlabs_tts(
             client=elevenlabs_client,
@@ -1924,7 +1935,8 @@ def _generate_single_audio_scene(
             model_id=args.elevenlabs_model_id or "eleven_v3",
             output_format=args.elevenlabs_output_format or "mp3_44100_128",
             language_code=args.elevenlabs_language_code or DEFAULT_ELEVENLABS_LANGUAGE_CODE,
-            text=tts_text,
+            pronunciation_dictionary_locators=getattr(args, "elevenlabs_pronunciation_dictionary_locators", ()),
+            text=prepared.text,
             out_path=out_path,
             duration_seconds=normalize_dur,
             force=args.force,
@@ -2835,6 +2847,7 @@ def generate_elevenlabs_tts(
     model_id: str,
     output_format: str,
     language_code: str,
+    pronunciation_dictionary_locators: tuple[dict[str, str], ...],
     text: str,
     out_path: Path,
     duration_seconds: int | None,
@@ -2858,6 +2871,8 @@ def generate_elevenlabs_tts(
     }
 
     if request_log_path:
+        if pronunciation_dictionary_locators:
+            payload["pronunciation_dictionary_locators"] = list(pronunciation_dictionary_locators)
         request_log_path.parent.mkdir(parents=True, exist_ok=True)
         request_log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -2877,6 +2892,7 @@ def generate_elevenlabs_tts(
                 model_id=model_id,
                 output_format=output_format,
                 language_code=language_code,
+                pronunciation_dictionary_locators=pronunciation_dictionary_locators,
                 voice_settings=payload["voice_settings"],
             )
             break
@@ -3197,6 +3213,7 @@ def generate_codex_builtin_image(
                 run_dir=run_dir,
                 fallback_cutoff_ns=fallback_cutoff_ns,
             )
+            reject_local_raster_image_result(result, item_id=item_id)
             debug_path = write_app_server_image_debug_log(
                 run_dir=run_dir,
                 item_id=item_id,
@@ -4465,6 +4482,20 @@ def main() -> None:
     parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
     parser.add_argument("--elevenlabs-output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
     parser.add_argument("--elevenlabs-language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
+    parser.add_argument(
+        "--elevenlabs-pronunciation-dictionary-locator",
+        action="append",
+        default=None,
+        help="ElevenLabs pronunciation dictionary locator as id:version_id. Can be repeated.",
+    )
+    parser.add_argument(
+        "--tts-pronunciation-alias-file",
+        default=_env(
+            "TOC_TTS_PRONUNCIATION_ALIAS_FILE",
+            str(REPO_ROOT / "config" / "tts-pronunciation-aliases.tsv"),
+        ),
+        help="Optional local JSON/TSV alias file applied to ElevenLabs TTS text before API requests.",
+    )
     parser.add_argument("--tts-prompt-prefix", default="", help="Optional text prepended to every TTS input.")
     parser.add_argument("--tts-prompt-suffix", default="", help="Optional text appended to every TTS input.")
     parser.add_argument("--macos-say-voice", default=_env("MACOS_SAY_VOICE", ""), help="Voice name for macos_say TTS (macOS only).")
@@ -4477,6 +4508,10 @@ def main() -> None:
     args = parser.parse_args()
     if not args.elevenlabs_language_code:
         args.elevenlabs_language_code = DEFAULT_ELEVENLABS_LANGUAGE_CODE
+    args.elevenlabs_pronunciation_dictionary_locators = parse_pronunciation_dictionary_locators(
+        args.elevenlabs_pronunciation_dictionary_locator or _env("ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS")
+    )
+    args.tts_pronunciation_aliases = load_pronunciation_aliases(args.tts_pronunciation_alias_file)
     if args.test_image_variants < 0:
         raise SystemExit("--test-image-variants must be >= 0")
     if args.test_image_variants and not args.force:
@@ -4910,6 +4945,7 @@ def main() -> None:
                     model_id=args.elevenlabs_model_id,
                     output_format=args.elevenlabs_output_format,
                     language_code=args.elevenlabs_language_code,
+                    pronunciation_dictionary_locators=args.elevenlabs_pronunciation_dictionary_locators,
                 )
             )
 

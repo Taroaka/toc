@@ -281,8 +281,8 @@ stage 1 の原則:
   - 各 subagent の入力は `script.md` / `video_manifest.md` / 現在の `image_generation_requests.md` / `docs/implementation/image-prompting.md`
   - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も入力に含める
   - 出力は scene 単位 scratch rewrite
-  - 統合はメインエージェントが行い、最終的な `image_generation_requests.md` を凍結成果物にする
-  - subagent は生成候補、clip review、除外理由の下書きまでを担当し、採用判定と `video_manifest.md` 更新はメインエージェントが行う
+  - 統合は担当 `p600` L2 supervisor が行い、最終的な `image_generation_requests.md` を凍結成果物にする
+  - subagent は生成候補、clip review、除外理由の下書きまでを担当し、採用判定と `video_manifest.md` 更新は担当 bucket の L2 supervisor が行う
   - 採用した subagent output は `subagent_trace` または `logs/review/` に残し、親会話だけにある判断を正本にしない
 - scene image prompt は、カット全体の出来事をそのまま描くのではなく、**その動画を始める最初の1フレーム**として妥当である必要がある
 - `Aが話し、Bがうなずく` のような表現は、動画側で始まるべき動きを still 側で完了させやすいため避ける

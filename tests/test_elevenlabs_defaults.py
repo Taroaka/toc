@@ -7,6 +7,7 @@ from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    parse_pronunciation_dictionary_locators,
 )
 
 
@@ -67,6 +68,35 @@ class TestElevenLabsDefaults(unittest.TestCase):
 
         payload = request_bytes.call_args.kwargs["json_payload"]
         self.assertEqual(payload["language_code"], "ja")
+
+    def test_parse_pronunciation_dictionary_locators_accepts_id_version_tokens(self) -> None:
+        locators = parse_pronunciation_dictionary_locators("dict_1:ver_1,dict_2:ver_2")
+        self.assertEqual(
+            locators,
+            (
+                {"pronunciation_dictionary_id": "dict_1", "version_id": "ver_1"},
+                {"pronunciation_dictionary_id": "dict_2", "version_id": "ver_2"},
+            ),
+        )
+
+    def test_tts_sends_pronunciation_dictionary_locators(self) -> None:
+        client = ElevenLabsClient(
+            ElevenLabsConfig(
+                api_key="test_key",
+                pronunciation_dictionary_locators=(
+                    {"pronunciation_dictionary_id": "dict_1", "version_id": "ver_1"},
+                ),
+            )
+        )
+
+        with patch("toc.providers.elevenlabs.request_bytes", return_value=b"audio") as request_bytes:
+            client.tts(text="こんにちは")
+
+        payload = request_bytes.call_args.kwargs["json_payload"]
+        self.assertEqual(
+            payload["pronunciation_dictionary_locators"],
+            [{"pronunciation_dictionary_id": "dict_1", "version_id": "ver_1"}],
+        )
 
 
 if __name__ == "__main__":

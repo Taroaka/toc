@@ -20,13 +20,20 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .codex_app_server import CodexAppServerClient, CodexAppServerError, app_server_disabled, latest_generated_image_mtime_ns
+from .codex_app_server import (
+    CodexAppServerClient,
+    CodexAppServerError,
+    app_server_disabled,
+    latest_generated_image_mtime_ns,
+    reject_local_raster_image_result,
+)
 from toc.env import load_env_files
 from toc.http import HttpError
 from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id, selector_aliases
 from toc.harness import append_state_snapshot, parse_state_file
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
+from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
     IMAGE_SUFFIXES,
     build_zip,
@@ -568,7 +575,7 @@ def _validate_created_run(run_id: str) -> None:
         raise RuntimeError(f"ToC run was not scaffolded: missing {', '.join(missing)}")
 
 
-def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 2) -> tuple[list[str], set[str]]:
+def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3) -> tuple[list[str], set[str]]:
     issues: list[str] = []
     required_outputs: set[str] = set()
     scenes = data.get("scenes")
@@ -639,7 +646,7 @@ def _validate_p650_run(run_id: str) -> None:
     manifest_data = yaml.safe_load(_extract_manifest_yaml_text(manifest_text)) or {}
     if not isinstance(manifest_data, dict):
         raise RuntimeError("ToC run did not reach p650: video_manifest.md YAML root must be a mapping")
-    cut_issues, required_scene_outputs = _manifest_cut_contract(manifest_data, min_cuts_per_scene=2)
+    cut_issues, required_scene_outputs = _manifest_cut_contract(manifest_data, min_cuts_per_scene=3)
     if cut_issues:
         raise RuntimeError(f"ToC run did not reach p650: invalid cut contract {', '.join(cut_issues)}")
 
@@ -826,6 +833,9 @@ async def _run_toc_skill_helper_until_stop_target(
     stop_target: str = "p680",
 ) -> None:
     task = asyncio.create_task(_run_toc_skill_helper(topic=topic, source=source, run_id=run_id, stop_target=stop_target))
+    if stop_target == "p680":
+        await task
+        return
     try:
         while True:
             done, _pending = await asyncio.wait({task}, timeout=CREATE_SKILL_STOP_POLL_SECONDS)
@@ -1092,8 +1102,11 @@ def _generate_elevenlabs_audio(path: Path, text: str) -> None:
 
     load_env_files(repo_root=ROOT)
     client = ElevenLabsClient(ElevenLabsConfig.from_env())
+    alias_file = os.environ.get("TOC_TTS_PRONUNCIATION_ALIAS_FILE") or str(ROOT / "config" / "tts-pronunciation-aliases.tsv")
+    aliases = load_pronunciation_aliases(alias_file)
+    prepared = prepare_elevenlabs_tts_text(text, pronunciation_aliases=aliases)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(client.tts(text=text))
+    path.write_bytes(client.tts(text=prepared.text))
 
 
 def _generate_macos_say_audio(path: Path, text: str) -> None:
@@ -2632,6 +2645,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             run_dir=run_dir,
             fallback_cutoff_ns=fallback_cutoff_ns,
         )
+        reject_local_raster_image_result(result, item_id=item.id)
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -2881,14 +2895,11 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
 
 async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) -> None:
     try:
-        await _set_create_job(job_id, {"message": "本家ToC工程をp650まで実行中"})
-        await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p650")
-        await _set_create_job(job_id, {"message": "p650成果物を検証中"})
+        await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
+        await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p680")
+        await _set_create_job(job_id, {"message": "p680成果物を検証中"})
         _validate_created_run(run_id)
-        _validate_p650_run(run_id)
-        await _upgrade_initial_request_prompts(job_id, run_id=run_id)
-        asset_quality_passed = await _generate_create_images(job_id, run_id=run_id)
-        _validate_frontend_create_run(run_id, strict_visual_quality=asset_quality_passed)
+        _validate_frontend_create_run(run_id, strict_visual_quality=True)
         await _set_create_job(job_id, {"status": "completed"})
     except Exception as exc:
         _cleanup_unscaffolded_run(run_id)
@@ -3416,6 +3427,7 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 run_dir=run_dir,
                 fallback_cutoff_ns=fallback_cutoff_ns,
             )
+            reject_local_raster_image_result(result, item_id=req.item_id)
             debug_log = write_app_server_image_debug_log(
                 run_dir=run_dir,
                 item_id=req.item_id,

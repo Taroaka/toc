@@ -34,6 +34,27 @@ def _load_export_module(repo_root: Path):
 
 def _structured_prompt(scene_lines: str) -> str:
     return f"""[全体 / 不変条件]
+実写映画調、画像内テキストなし。横長16:9の落ち着いた映画画面として、人物と場所と小道具の関係が一目で読めるようにする。
+
+[登場人物]
+浦島太郎。顔の表情、視線、手の位置、肩の緊張、衣服の布目まで見える。必要な場合は海亀との距離感が分かるように配置する。
+
+[小道具 / 舞台装置]
+海亀、浜辺。濡れた砂、波打ち際の水滴、石や貝殻、遠くの水平線を画面内の実物として置く。
+
+[シーン]
+{scene_lines} 前景に砂と水滴、中景に浦島太郎の姿勢、背景に浜辺と海を置き、次の動きへ入る直前の静かな緊張を作る。
+
+[連続性]
+前後カットと衣装・天候・位置関係を維持する。斜め横からの構図、柔らかい朝の光、足元の影、人物と海亀の向きが矛盾しない。
+
+[禁止]
+ロゴ、字幕、ウォーターマーク。
+"""
+
+
+def _thin_structured_prompt(scene_lines: str) -> str:
+    return f"""[全体 / 不変条件]
 実写映画調、画像内テキストなし。
 
 [登場人物]
@@ -1054,6 +1075,65 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
         )
         findings = [finding.code for outcome in results for finding in outcome.findings]
         self.assertNotIn("missing_required_prompt_block", findings)
+
+    def test_review_flags_structured_but_thin_prompt_craft(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt_collection = f"""# Image Prompt Collection
+
+件数: `1`
+
+## scene01_cut01
+
+- output: `assets/scenes/scene01_cut01.png`
+- narration: `浦島太郎が浜辺に立つ。`
+- rationale: `anchor`
+
+```text
+{_thin_structured_prompt("浦島太郎が浜辺に立つ。")}
+```
+"""
+        manifest = {
+            "assets": {
+                "character_bible": [{"character_id": "urashima", "review_aliases": ["浦島太郎"]}],
+                "object_bible": [{"object_id": "beach", "review_aliases": ["浜辺"]}],
+            },
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "image_generation": {
+                                "character_ids": ["urashima"],
+                                "object_ids": ["beach"],
+                                "contract": {
+                                    "target_focus": "character",
+                                    "must_include": ["浦島太郎", "浜辺"],
+                                    "must_avoid": ["ロゴ", "字幕", "ウォーターマーク"],
+                                    "done_when": ["浦島太郎と浜辺が読める"],
+                                },
+                            },
+                            "audio": {"narration": {"text": "浦島太郎が浜辺に立つ。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        results = mod.review_entries(
+            mod.parse_prompt_collection(prompt_collection),
+            manifest=manifest,
+            story_scene_map={1: "浦島太郎が浜辺に立つ。"},
+            script_scene_map={},
+            story_text="浦島太郎が浜辺に立つ。",
+            script_text="",
+        )
+
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+        self.assertIn("image_prompt_prompt_craft_weak", findings)
+        self.assertTrue(all(mod.is_soft_finding(finding) for outcome in results for finding in outcome.findings))
 
     def test_export_preserves_reason_keys_and_messages(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
