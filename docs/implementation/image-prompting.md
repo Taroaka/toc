@@ -38,6 +38,19 @@
 
 **prompt は 1本の自由文にせず、毎回同じ見出し順で書く。**
 
+scene image prompt は、scene の説明文ではなく、**cut の映像が始まる直前に観客が見る映画的な still** として書く。
+その still は、単に美しい背景ではなく、`scene_contract` の `dramatic_question`、`value_shift.visible_evidence`、`causal_turn`、`visual_thesis` のどれかを画面上で読めるようにする。
+
+最短の変換順:
+
+1. `script.md` の `scene_intent` を読む。
+2. `cut_blueprint.target_beat` と `visual_beat` を読む。
+3. `must_show` を、人物・場所・道具・行為・光・構図に翻訳する。
+4. `first_frame_brief` を、API に渡せる「見えている状態」へ書き換える。
+5. `character_ids` / `object_ids` / `location_ids` と reference を確認する。
+6. 6 block prompt に落とす。
+
+
 prompt 本文は画像生成 provider がそのまま描ける語だけで構成する。`物語「シンデレラ」の scene10`、`この画像は物語「シンデレラ」の一場面`、`scene10_cut01` のような制作管理メタ情報は書かない。必要なのは `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ` のような、画面に現れる具体語である。provider 固定の判断は request metadata / 設計書に置き、prompt 本文には書かない。
 
 さらに、正しい順番は「うまい一文を書く」ではなく、
@@ -183,6 +196,11 @@ human_review:
 - `image_prompt_not_first_frame_ready`
 - `image_prompt_first_frame_readiness_weak`
 - `image_prompt_production_readiness_weak`
+- `prompt_missing_scene_turn`
+- `prompt_lacks_visual_evidence`
+- `prompt_lacks_attention_hierarchy`
+- `prompt_finishes_action_in_still`
+- `prompt_missing_cut_function`
 
 運用ルール:
 
@@ -236,6 +254,8 @@ asset stage での参照原則:
 - p500 / p600 の image request は `tool: codex_builtin_image` で固定する
 - `reference_count == 0` の request は `execution_lane=bootstrap_builtin` の no-reference lane にする
 - `reference_count > 0` の cut image は `execution_lane=standard` に残すが、実行 provider は `codex_builtin_image` のまま変えない
+- 画像成果物は実写系（photorealistic / cinematic / live-action）を必須とする。手続き生成したローカル PNG、placeholder PNG、ベクター風/イラスト風/低情報量 raster は、形式が PNG/JPEG でも canonical p500/p600 output として採用しない
+- `logs/image_generation_prompts.jsonl` に Codex app-server 由来の生成証跡がない画像、または `source=local_raster...` の画像は hard fail とし、再生成する
 
 <!-- image-gen-setting:scene:start -->
 scene image prompt は、動画を始める最初の1フレームとして書く。
@@ -373,6 +393,82 @@ review では次を blocker とする:
 
 ---
 
+## 0) scene contract から prompt への翻訳ルール
+
+p600 は、p400 が作った scene/cut contract を生成 provider が描ける言葉に翻訳する stage である。
+`tts_text` や narration をそのまま絵にするのではなく、scene の劇的責務を画面要素に変換する。
+
+### 0.1 入力優先順位
+
+1. `video_manifest.md.scenes[].cuts[].scene_contract`
+2. `script.md.scenes[].cuts[].visual_beat` / `approved_visual_beat`
+3. `video_manifest.md.assets.*_bible`
+4. `human_change_requests[]` / `approved_image_notes[]`
+5. narration / `tts_text`（補助参照のみ）
+
+### 0.2 変換表
+
+| contract field | prompt への変換 |
+|---|---|
+| `dramatic_question` | `[シーン]` の中で、観客が何を画面から気にするかが読める配置にする |
+| `value_shift.visible_evidence` | 表情、距離、手、姿勢、光の変化、壊れた/残された物などに翻訳する |
+| `causal_turn` | still では「turn が起きる直前」または「turn の結果が初めて見える瞬間」として具体化する |
+| `visual_thesis` | 主被写体、前景アンカー、中景の行為、背景の意味を 1 枚に圧縮する |
+| `must_show` | 画像・動画・ナレーションのどこで回収するかを明確にし、画像に必要なものだけ prompt に書く |
+| `must_avoid` | reveal 早出し、人物混入、場所漂流、文字要素などを `[禁止]` に書く |
+| `first_frame_brief` | prompt 本文に `最初の1フレーム` と書かず、見えている初期状態だけを書く |
+| `motion_brief` | still で完了させず、p800 で動き出せる余白を残す |
+
+### 0.3 映画的 still の必須要件
+
+- **主役の優先順位**が明確である。観客が最初に何を見るかを書き分ける。
+- **前景/中景/背景**がある。平面的な説明絵にしない。
+- **行為の入口**がある。人物や物がすでに全てを終えている絵にしない。
+- **感情の証拠**がある。顔だけでなく距離、姿勢、手、視線、光で読ませる。
+- **因果の証拠**がある。次に何が起こりそうかを、道具・入口・視線・進行方向で示す。
+- **reference の維持点**が明確である。path ではなく、何を同一に保つかを書く。
+
+### 0.4 action 完了絵を避ける
+
+弱い still:
+
+- `王子がガラスの靴を拾い、シンデレラを見つけて微笑んでいる。`
+- `浦島が箱を開け、白い煙が広がって老人になっている。`
+
+強い still:
+
+- `王子の手が階段の手前で止まり、片方のガラスの靴が前景に大きく残っている。奥の扉には去っていく足音の気配だけがある。`
+- `浦島の手が箱の蓋の縁に触れる直前で止まり、蓋の隙間から細い白い光だけが漏れている。顔には迷いが残る。`
+
+前者は scene の turn を still 内で完了させる。後者は p800 で動き出す余白を残す。
+
+### 0.5 attention hierarchy block（推奨）
+
+`[シーン]` には可能なら次の順で書く。
+
+```text
+舞台: <場所・時間・空気>。
+主役: <観客が最初に見る人物/物>。
+前景: <手元/小道具/境界/障害>。
+中景: <人物の姿勢・距離・行為の入口>。
+背景: <場所の意味・危険・誘惑・出口>。
+光: <感情/reveal/時間を示す光>。
+構図: <視線誘導、進行方向、空間の奥行き>。
+```
+
+### 0.6 追加 blocker
+
+review では次を blocker とする。
+
+- scene の `causal_turn` または `value_shift.visible_evidence` が prompt に翻訳されていない。
+  - canonical reason key: `prompt_missing_scene_turn` / `prompt_lacks_visual_evidence`
+- 主被写体の優先順位、前景/中景/背景が曖昧で、観客の視線が迷う。
+  - canonical reason key: `prompt_lacks_attention_hierarchy`
+- still が行為の完了後を描き、p800 で自然に動き出せない。
+  - canonical reason key: `prompt_finishes_action_in_still`
+- cut が setup / pressure / turn / payoff / reaction / handoff のどれを担当するか不明。
+  - canonical reason key: `prompt_missing_cut_function`
+
 ## 1) 画像品質を上げる prompt の原則（portable / cross-model）
 
 ### 1.1 具体に落とす（曖昧語の連打を避ける）
@@ -455,9 +551,13 @@ aspect ratio / size は `image_generation.aspect_ratio` / `image_generation.imag
 <object/setpiece constraints that must stay consistent across scenes>
 
 [シーン]
-舞台: <どこ/いつ/天候>。見せ場: <1文で>.
-構図: <前景/中景/遠景 + 主役の配置>.
-カメラ: <POV/画角/動き（必要ならレンズ感）>.
+舞台: <どこ/いつ/天候/空気>。
+主役: <観客が最初に読む人物/物/場所>。
+前景: <手元/小道具/境界/障害などのアンカー>。
+中景: <人物の姿勢・距離・行為の入口>。
+背景: <場所の意味・危険・誘惑・出口>。
+光: <感情/reveal/時間を示す光>。
+構図: <視線誘導、奥行き、進行方向>。
 
 [連続性]
 前と一致: <光/位置/進行方向>.
@@ -555,71 +655,79 @@ B-roll（キャラを映さない）sceneは `character_ids: []` を明示し、
 
 ### 3.4 Ryugu exploratory block（Otohime 登場前の視覚報酬）
 
-`Ryugu Palace` の内部を見せる場面では、乙姫をすぐに登場させず、まず **4-6 cuts / 1 cut = 約4秒** の探索ブロックとして設計してよい。
+`ryugu_palace` の内部を見せる場面では、乙姫をすぐに登場させず、まず **4-6 cuts / 1 cut = 約4秒** の探索ブロックとして設計してよい。
 
 このブロックの目的は次の通り。
 
-- 竜宮城を「説明」ではなく「発見」で見せる
-- 実写の見せ物として、建築・機構・光・群泳を先に印象づける
-- 乙姫の登場を遅らせ、次のドラマの入口を強くする
+- 竜宮城を「説明」ではなく「発見」で見せる。
+- 実写の見せ物として、建築・機構・光・群泳を先に印象づける。
+- 乙姫の登場を遅らせ、次のドラマの入口を強くする。
 
 推奨ルール:
 
-- `character_ids: []` を基本にし、乙姫は出さない
-- `object_ids: ["ryugu_palace"]` を使い、舞台装置を固定する
-- 各 cut は `4` 秒前後、ナレーションなし
-- 最後の cut は「乙姫が現れる直前の門/回廊/玉座の間の入口」で止める
+- `character_ids: []` を基本にし、乙姫は出さない。
+- `object_ids: ["ryugu_palace"]` を使い、舞台装置を固定する。
+- 各 cut は `4` 秒前後、ナレーションなし。
+- 最後の cut は「乙姫が現れる直前の門/回廊/玉座の間の入口」で止める。
 
-Ryugu 探索ブロックの prompt には、以下の順で書くと安定しやすい。
+竜宮城探索ブロックの prompt には、以下の順で書くと安定しやすい。
 
-1. `[全体 / 不変条件]` に実写・シネマ・プラクティカルを明記する
-2. `[小道具 / 舞台装置]` に `ryugu_palace` の固定フレーズを入れる
-3. `[シーン]` で gate / corridor / atrium / spectacle / threshold を cut ごとに変える
-4. `[連続性]` では、この画像だけで何が読み取れるべきかを書く。前後の cut を前提にした記述は request 本文に入れない
-5. `[禁止]` に文字要素とアニメ調を再掲する
+1. `[全体 / 不変条件]` に実写・映画照明・実物セット感を明記する。
+2. `[登場人物]` には `人物なし。乙姫も背景人物も入れない` と書く。
+3. `[小道具 / 舞台装置]` に `ryugu_palace` の固定フレーズを入れる。
+4. `[シーン]` で門 / 回廊 / 吹き抜け / 光の仕掛け / threshold を cut ごとに変える。
+5. `[連続性]` では、この画像だけで何が読み取れるべきかを書く。前後の cut を前提にした記述は request 本文に入れない。
+6. `[禁止]` に文字要素とアニメ調を再掲する。
 
 例:
 
 ```text
 [全体 / 不変条件]
-実写、シネマティック、プラクティカルエフェクト。自然な映画照明。
-画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+実写映画調、自然な映画照明、実物セット感。水中の光は幻想的だが、素材は珊瑚・真珠層・濡れた金属として実在感を持たせる。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+
+[登場人物]
+人物なし。乙姫も背景人物も入れない。
 
 [小道具 / 舞台装置]
-Ryugu Palace is built from living coral, mother-of-pearl, and lacquered bronze ribs; wet sheen; realistic scale.
-Interior features suspended bubble-lanterns and bioluminescent coral chandeliers; no text signage.
-Showmanship: distant atrium, swirling fish schools, controlled currents.
+竜宮城は生きた珊瑚、真珠層、漆を塗った青銅の骨組みでできている。表面は濡れた艶を持ち、実写の巨大建築として縮尺が分かる。
+内部には泡の灯籠、発光する珊瑚のシャンデリア、ゆっくり制御された潮流、遠くを回る魚群がある。看板、刻印、銘板はない。
 
 [シーン]
-珊瑚門が開く。回廊が深く伸びる。建築そのものが生き物のように呼吸する。
-最後の cut は、乙姫が現れる直前の入口で止める。
+舞台: 竜宮城の入口回廊。
+主役: 半分開いた珊瑚門と、その奥に続く発光する回廊。
+前景: 濡れた珊瑚の床と、ゆっくり上がる小さな泡。
+中景: 門の骨組みが左右から画面を囲み、観客の視線を奥へ導く。
+背景: 遠くの吹き抜けで魚群が渦を作り、宮殿そのものが呼吸しているように見える。
+光: 上方から揺れる水面光、奥から淡い金色の反射。
+構図: 縦型9:16、門を前景フレームにし、回廊の奥行きを中央に置く。
+
+[連続性]
+この画像だけで、招かれた者だけが入れる別世界の入口だと読める。乙姫はまだ現れず、次に奥へ進める余白を残す。
+
+[禁止]
+乙姫、人物、画面内テキスト、字幕、看板、銘板、ウォーターマーク、ロゴ、アニメ調、漫画調、イラスト調、読めない形、平面的な水族館背景。
 ```
 
-例:
+manifest 断片例:
 
 ```yaml
-assets:
-  character_bible:
-    - character_id: "momotaro"
-      reference_images: ["assets/characters/momotaro.png"]
-      fixed_prompts: ["momotaro matches reference exactly"]
-    - character_id: "oni_leader"
-      reference_images: ["assets/characters/oni_leader.png"]
-      fixed_prompts: ["oni leader matches reference exactly"]
-
 scenes:
-  - scene_id: 5
-    image_generation:
-      character_ids: ["momotaro", "oni_leader"]
-      references: []
-      prompt: |
-        [GLOBAL / INVARIANTS]
-        ...
+  - scene_id: 50
+    cuts:
+      - cut_id: 1
+        cut_role: "visual_payoff"
+        scene_contract:
+          cut_function: "setup"
+          target_beat: "竜宮城を説明ではなく発見として見せる"
+          first_frame_brief: "人物なし。半分開いた珊瑚門の奥に発光する回廊が見える"
+          motion_brief: "カメラがゆっくり門の奥へ進み、泡と魚群だけが動く"
+        image_generation:
+          character_ids: []
+          object_ids: ["ryugu_palace"]
+          location_ids: ["ryugu_palace_corridor"]
 ```
 
----
-
-## 4) 具体例（immersive ride）
+## 4) 具体例（cinematic story）
 
 ### 4.1 Character turnaround 基準画像（scene_id: 0, full-body only）
 
@@ -630,73 +738,101 @@ scenes:
 `scene_id: 0` は character_reference 専用に分け、story scene の spacing と混ぜない。
 
 ```text
-[GLOBAL / INVARIANTS]
-Photorealistic, cinematic, practical effects. Natural film lighting. No text.
+[全体 / 不変条件]
+実写映画調、自然な映画照明、人物参照用の清潔な背景。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
 
-[SCENE]
-Character reference. Full-body head-to-toe, feet fully visible (no cropping).
-Neutral studio-like background, soft key light + gentle rim light, sharp focus.
+[登場人物]
+主人公の全身参照。頭からつま先まで全身が見える。顔、髪型、年齢感、体格、衣装の形と素材が後続sceneで再利用できるように明瞭。
 
-[AVOID]
-anime/cartoon/illustration, exaggerated makeup, text, watermark.
+[小道具 / 舞台装置]
+主役級の小道具は持たせない。衣装と身体シルエットの確認を優先する。
+
+[シーン]
+舞台: 参照画像用のニュートラルな室内。
+主役: 人物の全身。
+前景: なし。足先まで隠さない。
+中景: 人物が直立し、自然な姿勢で立つ。
+背景: 余計な装飾のない薄い背景。
+光: 柔らかなキーライトと弱いリムライト。
+構図: 縦型、全身が切れない中央構図。
+
+[連続性]
+この画像だけで、後続sceneが参照すべき顔、髪型、体格、衣装、足元までのシルエットが分かる。
+
+[禁止]
+顔寄り、上半身だけ、足先のクロップ、アニメ調、漫画調、イラスト調、過度なメイク、画面内テキスト、ウォーターマーク。
 ```
 
 ### 4.2 Scene 1（世界への入口）
 
 ```text
-[GLOBAL / INVARIANTS]
-実写、シネマティック、プラクティカルエフェクト（実物セット感）。アニメ調なし。
-視点: 客観（三人称）。1カット内で視点ブレさせない。
-画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+[全体 / 不変条件]
+実写映画調、自然な映画照明、実物セット感。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。視点は客観三人称で固定。
 
-[CHARACTERS]
-The story character(s) MUST match the reference image exactly (same face, hair, outfit).
+[登場人物]
+物語キャラクターが映る場合は character_bible の参照画像と同じ顔、髪型、衣装、年齢感を維持する。人物が映らない場合は人物なしと明示する。
 
-[SCENE]
-Setting: dusk, misty entrance gate into the world of <topic>. Practical set pieces, real lighting.
-Key moment: the gate opens and a story character draws you into the world.
-Composition: 前景=導線（道/門柱/光の筋）; 中景=物語キャラ; 遠景=発光するゲート（中央）。
+[小道具 / 舞台装置]
+入口の門、濡れた石畳、奥へ続く光の筋を場所アンカーとして扱う。看板や刻印で説明しない。
 
-[CONTINUITY]
-Set up next: 導線が左へカーブし、左側から暖かい光が漏れる。
+[シーン]
+舞台: 夕暮れの霧がかかった異世界の入口。
+主役: 半分だけ開いた大きな門。観客はその奥に何があるかを気にする。
+前景: 濡れた石畳と低い霧。画面下から門へ向かう導線を作る。
+中景: 門の隙間に立つ人物、または人物なしの場合は門の影。
+背景: 門の奥から漏れる暖かい光と、まだ見えない世界の輪郭。
+光: 外側は青灰色、門の内側だけ暖色。
+構図: 縦型9:16、門を中央に置き、道の線で視線を奥へ導く。
 
-[AVOID]
-anime/cartoon/illustration, CGI look, distorted hands, extra fingers, text, logos.
+[連続性]
+この画像だけで、日常の外側から未知の世界へ入る直前だと読める。次cutでは門の奥へ進める余白を残す。
+
+[禁止]
+アニメ調、漫画調、イラスト調、CGIだけに見える質感、歪んだ手、余計な指、画面内テキスト、ロゴ。
 ```
 
 ### 4.3 Scene 2（最初の見せ場へ）
 
 ```text
-[GLOBAL / INVARIANTS]
-実写、シネマティック、プラクティカルエフェクト（実物セット感）。アニメ調なし。
-視点: 客観（三人称）。カメラ高さは安定。画面内テキストなし。
+[全体 / 不変条件]
+実写映画調、自然な映画照明、実物セット感。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。カメラ高さは安定。
 
-[CHARACTERS]
-The story character(s) match the reference image exactly.
+[登場人物]
+登場人物が映る場合は参照画像と同じ人物。顔、髪型、衣装、体格を維持する。見せ場の対象が主役の場合、人物は中景または端に控えめに置く。
 
-[SCENE]
-Setting: <topic> の世界の新エリアへカメラが入る。実物の霧と水しぶき。金属の濡れ反射。
-Key moment: the first big reveal appears ahead.
-Composition: 中景=物語キャラ（必要なら）; 遠景=見せ場の対象（中央）; 前景=霧/水しぶきは控えめ。
+[小道具 / 舞台装置]
+scene の主役級 setpiece を object_bible と一致させる。材質、構造、光、縮尺感を維持し、文字で説明しない。
 
-[CONTINUITY]
-Must match previous: 光源方向/色温度/空気感。
-Set up next: 見せ場の対象がフレームを支配し、次カットで寄れる状態にする。
+[シーン]
+舞台: <topic> の世界の新エリアへ入った直後。霧、水しぶき、濡れた金属反射がある。
+主役: 最初の大きな見せ場が奥に現れる。まだ全貌は見せ切らず、観客が近づきたくなる状態。
+前景: 控えめな霧と水滴。視界を邪魔しない。
+中景: 必要なら物語キャラクターの背中や横顔。視線は見せ場へ向く。
+背景: 見せ場の対象が画面奥を支配する。
+光: 前sceneと光源方向/色温度をつなぎつつ、奥から強い反射光が出る。
+構図: 奥行きを強調し、次cutで寄れるよう主役対象を中央奥に置く。
 
-[AVOID]
-anime/cartoon/illustration, unreadable shapes, extreme motion blur, text, watermark.
+[連続性]
+前sceneの光源方向と空気感を保つ。この画像だけで、次cutが見せ場へ寄っていくことが分かる。
+
+[禁止]
+アニメ調、漫画調、イラスト調、読めない形、極端なモーションブラー、画面内テキスト、ウォーターマーク。
 ```
 
 ---
-
 ## 5) チェックリスト（生成前レビュー）
 
 - [ ] 視点（POV/三人称）とカメラ意図が明示されている（1カット内でブレない）
 - [ ] “画面内のアンカー”が書かれている（前景/中景/背景の配置。手元固定に限らない）
-- [ ] 参照画像を使う前提の文がある（“must match reference” 等）
+- [ ] 観客が最初に見る主被写体の優先順位が明確である
+- [ ] `scene_contract.value_shift.visible_evidence` が画面要素へ翻訳されている
+- [ ] `causal_turn` が、起きる直前または結果が初めて読める状態として具体化されている
+- [ ] still が action 完了絵になっておらず、p800 で自然に動き出せる余白がある
+- [ ] 参照画像を使う前提の文がある。path ではなく、何を一致させるかを書いている
 - [ ] 禁止事項（文字/アニメ調/崩れ手）が短く入っている
 - [ ] scene固有の差分（場所/時間/出来事）が 1〜3文で具体
 - [ ] continuity が1行でも入っている（この画像だけで読み取れる状態の明記）
+- [ ] prompt 本文に `scene_id` / `cut_id` / `最初の1フレーム` / 作品タイトルだけの説明が残っていない
 
 ---
 

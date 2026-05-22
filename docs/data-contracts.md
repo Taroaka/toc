@@ -269,6 +269,7 @@ Markdown table shape:
 - `result`: 完了後に `logs/orchestration/pXXX.supervisor_result.json` を指す。起動時は `-`
 - L3 の critic / aggregator / scene worker などは isolated artifact にだけ残し、この progress memo には載せない
 - 追記 helper: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
+- `returned|blocked|failed` の terminal event では `--result logs/orchestration/pXXX.supervisor_result.json` を必須にする
 - `scripts/verify-pipeline.py` は stage target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、supervisor result JSON を検証する
 
 各 bucket は完了時に次の artifact を書く。

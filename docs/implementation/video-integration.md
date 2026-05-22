@@ -142,8 +142,9 @@ generator の既定参照順:
    - 終盤の学び/余韻パートだけ、満足感のために軽く言語化してよい
    - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
 3) Narration review を実行し、finding を source manifest に書き戻す
-  - `python scripts/review-narration-text-quality.py --manifest output/<run>/video_manifest.md`
+  - `python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings`
   - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、音声生成へ進めない
+  - p720 runner は deterministic reviewer で `audio.narration.review` を source manifest に書き戻し、その結果を `logs/eval/narration/round_01/critic_*.md` と `aggregated_review.md` へ L3 artifact として展開する
   - p720 では YouTube 由来の薄さ対策を必ず見る
     - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
     - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
@@ -158,6 +159,7 @@ generator の既定参照順:
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
 5) 次に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
+   - `--skip-narration-review` を付けない限り、この audio-only 実行は p730 前に p720 L3 runner を自動実行する
    - ElevenLabs の pronunciation dictionary を使う場合は、`ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS="dictionary_id:version_id"` または `--elevenlabs-pronunciation-dictionary-locator dictionary_id:version_id` を使う
    - repo 側の簡易読み替え表を使う場合は、`TOC_TTS_PRONUNCIATION_ALIAS_FILE=path/to/aliases.tsv` または `--tts-pronunciation-alias-file path/to/aliases.tsv` を使う
      - TSV 例: `売上	うりあげ`

@@ -71,7 +71,9 @@ content for:
 - `asset_generation_requests.md`
 - `asset_generation_manifest.md`
 - generated reusable asset image files referenced by asset requests when the
-  request is on the Codex built-in no-reference lane
+  request is on the Codex built-in no-reference lane. These must be
+  photorealistic/live-action Codex app-server image generation outputs with
+  generation provenance, not local procedural raster fallbacks.
 - `image_generation_requests.md`
 - `p000_index.md`
 
@@ -180,8 +182,10 @@ Before reporting completion:
 5. Verify every fixed slot from `p110` through the stop target has a terminal status.
    Use `awaiting_approval` only for the review/handoff slots listed above.
 6. For `stop_target=p680`, verify generated asset and scene image outputs exist,
-   verify generated assets/scene stills are not vector-like or low-detail
-   rasters, and verify `review.image.status=pending` plus
+   verify generated assets/scene stills are photorealistic/live-action
+   Codex app-server outputs with generation provenance, not local procedural
+   raster fallbacks, and not vector-like / illustration-like / low-detail
+   rasters. Verify `review.image.status=pending` plus
    `gate.image_review=required`.
 7. Rebuild or update `p000_index.md`.
 8. Summarize the run directory and current p stage.

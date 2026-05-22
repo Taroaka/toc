@@ -59,6 +59,7 @@ from .image_gen import (
     target_to_request_kind,
     update_request_prompts,
     validate_image_bytes,
+    write_app_server_debug_log,
     write_app_server_image_debug_log,
     write_prompt_setting,
 )
@@ -561,10 +562,31 @@ def _write_asset_request_files(run_dir: Path) -> list[dict[str, Any]]:
 
 
 async def _set_create_job(job_id: str, patch: dict[str, Any]) -> None:
+    log_payload: dict[str, Any] | None = None
     async with _create_jobs_lock:
         job = _create_jobs.get(job_id)
         if job:
             job.update(patch)
+            log_payload = dict(job)
+    if log_payload:
+        try:
+            run_dir = safe_run_dir(str(log_payload.get("runId") or ""), ROOT)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="create_job_update",
+                status=str(log_payload.get("status") or "unknown"),
+                item_id=job_id,
+                request={"patch": patch},
+                response={
+                    "jobId": job_id,
+                    "runId": log_payload.get("runId"),
+                    "message": log_payload.get("message"),
+                    "error": log_payload.get("error"),
+                    "errorCode": log_payload.get("errorCode"),
+                },
+            )
+        except Exception:
+            pass
 
 
 def _validate_created_run(run_id: str) -> None:
@@ -783,15 +805,40 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
     skill_path = _toc_immersive_skill_path()
     if not skill_path.is_file():
         raise RuntimeError(f"Codex skill not found: {skill_path}")
+    run_dir = safe_run_dir(run_id, ROOT)
     client = CodexAppServerClient(cwd=ROOT)
+    skill_text = _toc_immersive_command(topic=topic, source=source, run_id=run_id, stop_target=stop_target)
     try:
         await client.start()
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="skill_start",
+            status="started",
+            item_id="toc-immersive-runner",
+            request={"topic": topic, "stopTarget": stop_target, "skillPath": str(skill_path.relative_to(ROOT))},
+        )
         try:
             skills = await client.list_skills(cwd=ROOT, force_reload=True)
         except CodexAppServerError as exc:
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="skill_list",
+                status="failed" if not _is_unsupported_method_error(exc) else "unsupported",
+                item_id="toc-immersive-runner",
+                request={"forceReload": True},
+                error=str(exc),
+            )
             if not _is_unsupported_method_error(exc):
                 raise
         else:
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="skill_list",
+                status="completed",
+                item_id="toc-immersive-runner",
+                request={"forceReload": True},
+                response={"skillCount": len(skills), "matched": any(skill.get("name") == "toc-immersive-runner" for skill in skills)},
+            )
             matching = [skill for skill in skills if skill.get("name") == "toc-immersive-runner"]
             if not matching:
                 raise RuntimeError("Codex skill is not visible to app-server: toc-immersive-runner")
@@ -802,12 +849,30 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
                 raise RuntimeError(f"Codex skill path mismatch: expected {skill_path}")
             if not any(skill.get("enabled", True) for skill in matching):
                 raise RuntimeError("Codex skill is disabled: toc-immersive-runner")
-        await client.run_skill(
-            text=_toc_immersive_command(topic=topic, source=source, run_id=run_id, stop_target=stop_target),
+        transcript = await client.run_skill(
+            text=skill_text,
             skill_path=skill_path,
             cwd=ROOT,
             timeout_seconds=7200,
         )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="skill_run",
+            status="completed",
+            item_id="toc-immersive-runner",
+            request={"textLength": len(skill_text), "skillPath": str(skill_path.relative_to(ROOT)), "stopTarget": stop_target},
+            transcript=transcript,
+        )
+    except Exception as exc:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="skill_run",
+            status="failed",
+            item_id="toc-immersive-runner",
+            request={"textLength": len(skill_text), "skillPath": str(skill_path.relative_to(ROOT)), "stopTarget": stop_target},
+            error=str(exc),
+        )
+        raise
     finally:
         await client.stop()
 
@@ -2486,6 +2551,74 @@ def _prompt_target_for_item(item: Any) -> str:
     return "item"
 
 
+async def _regenerate_prompt_with_log(
+    client: CodexAppServerClient,
+    *,
+    run_dir: Path,
+    item: dict[str, Any],
+    target: str,
+    instruction: str,
+    setting_content: str,
+    operation: str = "prompt_regeneration",
+) -> str:
+    item_id = str(item.get("id") or item.get("itemId") or "prompt")
+    request = {
+        "target": target,
+        "itemId": item_id,
+        "instructionLength": len(instruction),
+        "settingLength": len(setting_content),
+    }
+    try:
+        prompt = await client.regenerate_prompt(
+            item=item,
+            target=target,
+            instruction=instruction,
+            setting_content=setting_content,
+            run_dir=run_dir,
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation=operation,
+            status="completed",
+            item_id=item_id,
+            request=request,
+            response={"promptLength": len(prompt), "promptPreview": prompt[:500]},
+        )
+        return prompt
+    except Exception as exc:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation=operation,
+            status="failed",
+            item_id=item_id,
+            request=request,
+            error=str(exc),
+        )
+        raise
+
+
+async def _start_app_server_with_log(client: CodexAppServerClient, *, run_dir: Path, operation: str, item_id: str) -> None:
+    try:
+        await client.start()
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation=f"{operation}_start",
+            status="completed",
+            item_id=item_id,
+            request={"cwd": str(ROOT)},
+        )
+    except Exception as exc:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation=f"{operation}_start",
+            status="failed",
+            item_id=item_id,
+            request={"cwd": str(ROOT)},
+            error=str(exc),
+        )
+        raise
+
+
 async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     if app_server_disabled():
@@ -2493,7 +2626,7 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
     await _set_create_job(job_id, {"message": "画像生成プロンプトを高密度化中"})
     client = CodexAppServerClient(cwd=ROOT)
     try:
-        await client.start()
+        await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_upgrade", item_id="create_flow")
         for kind in ("asset", "scene"):
             items = [item for item in load_request_items(run_dir, kind) if _prompt_needs_quality_upgrade(item)]
             if not items:
@@ -2502,7 +2635,9 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
             for item in items:
                 target = _prompt_target_for_item(item)
                 setting = read_prompt_setting(target, root=ROOT)
-                prompt = await client.regenerate_prompt(
+                prompt = await _regenerate_prompt_with_log(
+                    client,
+                    run_dir=run_dir,
                     item=item_to_api(item),
                     target=target,
                     instruction=(
@@ -2515,7 +2650,7 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
                         "Do not shorten or summarize. Make the prompt production-ready for cinematic live-action image generation."
                     ),
                     setting_content=str(setting["content"]),
-                    run_dir=run_dir,
+                    operation="prompt_upgrade",
                 )
                 prompts[item.id] = prompt
             async with _serialized_run_write(run_dir, "run_artifacts"):
@@ -2619,12 +2754,32 @@ def _validate_generated_group_outputs(group: list[Any], *, run_dir: Path, kind: 
 
 async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) -> None:
     if not getattr(item, "output", None):
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_item_generation",
+            status="skipped",
+            item_id=str(getattr(item, "id", "")),
+            request={"kind": kind, "reason": "missing output"},
+        )
         return
     if not str(getattr(item, "prompt", "") or "").strip():
         raise RuntimeError(f"{kind} request has no prompt: {item.id}")
     destination = resolve_run_relative(run_dir, str(item.output))
     if destination.exists():
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_item_generation",
+            status="skipped",
+            item_id=str(item.id),
+            request={
+                "kind": kind,
+                "reason": "destination already exists",
+                "output": str(item.output),
+                "destination": str(destination),
+            },
+        )
         return
+    started = time.monotonic()
     references: list[Path] = []
     for ref in getattr(item, "references", []) or []:
         reference = resolve_run_relative(run_dir, str(ref))
@@ -2632,7 +2787,25 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             raise RuntimeError(f"{kind} reference not found for {item.id}: {ref}")
         require_image_file(reference)
         references.append(reference)
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="request_item_generation",
+        status="started",
+        item_id=str(item.id),
+        request={
+            "kind": kind,
+            "output": str(item.output),
+            "destination": str(destination),
+            "referenceCount": len(references),
+            "references": [str(ref) for ref in references],
+            "promptLength": len(str(item.prompt or "")),
+            "executionLane": str(getattr(item, "execution_lane", "") or ""),
+            "assetType": str(getattr(item, "asset_type", "") or ""),
+        },
+    )
     client = CodexAppServerClient(cwd=ROOT)
+    result = None
+    debug_log = None
     try:
         await client.start()
         async with _generated_images_cutoff_lock:
@@ -2645,7 +2818,6 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             run_dir=run_dir,
             fallback_cutoff_ns=fallback_cutoff_ns,
         )
-        reject_local_raster_image_result(result, item_id=item.id)
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -2656,9 +2828,46 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             kind=kind,
             result=result,
         )
+        reject_local_raster_image_result(result, item_id=item.id)
         if result.saved_path is None:
             raise RuntimeError(f"Codex app-server did not return an image for {item.id}; see {debug_log}")
         copy_saved_image(result.saved_path, destination)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_item_generation",
+            status="completed",
+            item_id=str(item.id),
+            request={"kind": kind, "output": str(item.output)},
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                "debugLog": debug_log.relative_to(run_dir).as_posix() if debug_log else "",
+                "savedPath": str(result.saved_path),
+                "source": result.source,
+                "destinationExists": destination.exists(),
+            },
+        )
+    except Exception as exc:
+        write_app_server_image_debug_log(
+            run_dir=run_dir,
+            item_id=item.id,
+            index=1,
+            destination=destination,
+            references=references,
+            prompt=item.prompt,
+            kind=kind,
+            result=result,
+            error=str(exc),
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_item_generation",
+            status="failed",
+            item_id=str(item.id),
+            request={"kind": kind, "output": str(item.output), "referenceCount": len(references)},
+            response={"elapsedMs": int((time.monotonic() - started) * 1000)},
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     finally:
         await client.stop()
 
@@ -2673,14 +2882,75 @@ async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
     if not groups:
         raise RuntimeError(f"{kind} request file has no output items")
     _validate_generation_groups(groups, run_dir=run_dir, kind=kind)
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="request_generation_batch",
+        status="started",
+        item_id=kind,
+        request={
+            "kind": kind,
+            "itemCount": len(items),
+            "groupCount": len(groups),
+            "parallelism": IMAGE_GENERATION_PARALLELISM,
+            "groups": [
+                {
+                    "index": group_index,
+                    "itemIds": [str(getattr(item, "id", "")) for item in group],
+                    "outputs": [str(getattr(item, "output", "") or "") for item in group],
+                }
+                for group_index, group in enumerate(groups, start=1)
+            ],
+        },
+    )
     semaphore = asyncio.Semaphore(IMAGE_GENERATION_PARALLELISM)
     for index, group in enumerate(groups, start=1):
+        group_started = time.monotonic()
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_generation_group",
+            status="started",
+            item_id=f"{kind}_group_{index}",
+            request={
+                "kind": kind,
+                "groupIndex": index,
+                "groupCount": len(groups),
+                "itemIds": [str(getattr(item, "id", "")) for item in group],
+            },
+        )
+
         async def generate_item(item: Any) -> None:
             async with semaphore:
                 await _generate_request_item_output(run_dir=run_dir, kind=kind, item=item)
 
-        await asyncio.gather(*(generate_item(item) for item in group))
-        _validate_generated_group_outputs(group, run_dir=run_dir, kind=kind, group_index=index)
+        try:
+            await asyncio.gather(*(generate_item(item) for item in group))
+            _validate_generated_group_outputs(group, run_dir=run_dir, kind=kind, group_index=index)
+        except Exception as exc:
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="request_generation_group",
+                status="failed",
+                item_id=f"{kind}_group_{index}",
+                request={"kind": kind, "groupIndex": index, "itemCount": len(group)},
+                response={"elapsedMs": int((time.monotonic() - group_started) * 1000)},
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_generation_group",
+            status="completed",
+            item_id=f"{kind}_group_{index}",
+            request={"kind": kind, "groupIndex": index, "itemCount": len(group)},
+            response={"elapsedMs": int((time.monotonic() - group_started) * 1000)},
+        )
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="request_generation_batch",
+        status="completed",
+        item_id=kind,
+        request={"kind": kind, "itemCount": len(items), "groupCount": len(groups)},
+    )
 
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
@@ -2782,12 +3052,14 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
     await _set_create_job(job_id, {"message": "素材画像を生成中"})
     client = CodexAppServerClient(cwd=ROOT)
     try:
-        await client.start()
+        await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_repair", item_id="asset_visual_gate")
         prompts: dict[str, str] = {}
         for item in items:
             target = _prompt_target_for_item(item)
             setting = read_prompt_setting(target, root=ROOT)
-            prompt = await client.regenerate_prompt(
+            prompt = await _regenerate_prompt_with_log(
+                client,
+                run_dir=run_dir,
                 item=item_to_api(item),
                 target=target,
                 instruction=(
@@ -2798,7 +3070,7 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
                     f"Gate failure detail from attempt {attempt}: {failure_detail[:1200]}"
                 ),
                 setting_content=str(setting["content"]),
-                run_dir=run_dir,
+                operation="prompt_repair",
             )
             prompts[item.id] = prompt
         async with _serialized_run_write(run_dir, "run_artifacts"):
@@ -2893,17 +3165,104 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     return asset_quality_passed
 
 
+def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
+    raw = str(exc).strip()
+    if not raw:
+        raw = type(exc).__name__
+    normalized = " ".join(raw.split())
+    if "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
+        prefix = "Codex app-server の状態DBを初期化できませんでした"
+    elif "stream disconnected" in normalized or "backend-api/codex/responses" in normalized:
+        prefix = "Codex app-server の画像生成通信が途中で切断されました"
+    elif "did not return an image" in normalized or "savedPath" in normalized:
+        prefix = "Codex app-server が画像ファイルを返しませんでした"
+    elif "p680 visual quality gate failed" in normalized:
+        prefix = "p680 の画像品質検証に失敗しました"
+    else:
+        prefix = "ToC作成に失敗しました"
+    message = f"{prefix}: {normalized}"
+    if len(message) > max_length:
+        return message[: max_length - 1] + "…"
+    return message
+
+
 async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) -> None:
+    run_dir_for_log = safe_run_dir(run_id, ROOT)
+    job_started = time.monotonic()
     try:
+        write_app_server_debug_log(
+            run_dir=run_dir_for_log,
+            operation="create_job_step",
+            status="started",
+            item_id=job_id,
+            request={"step": "toc_skill", "title": title, "sourceLength": len(source), "runId": run_id},
+        )
         await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
         await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p680")
+        write_app_server_debug_log(
+            run_dir=run_dir_for_log,
+            operation="create_job_step",
+            status="completed",
+            item_id=job_id,
+            request={"step": "toc_skill", "runId": run_id},
+            response={"elapsedMs": int((time.monotonic() - job_started) * 1000)},
+        )
+        validation_started = time.monotonic()
+        write_app_server_debug_log(
+            run_dir=run_dir_for_log,
+            operation="create_job_step",
+            status="started",
+            item_id=job_id,
+            request={"step": "p680_validation", "runId": run_id},
+        )
         await _set_create_job(job_id, {"message": "p680成果物を検証中"})
         _validate_created_run(run_id)
         _validate_frontend_create_run(run_id, strict_visual_quality=True)
+        write_app_server_debug_log(
+            run_dir=run_dir_for_log,
+            operation="create_job_step",
+            status="completed",
+            item_id=job_id,
+            request={"step": "p680_validation", "runId": run_id},
+            response={"elapsedMs": int((time.monotonic() - validation_started) * 1000)},
+        )
         await _set_create_job(job_id, {"status": "completed"})
     except Exception as exc:
         _cleanup_unscaffolded_run(run_id)
-        await _set_create_job(job_id, {"status": "failed", "error": "ToC作成に失敗しました", "errorCode": type(exc).__name__, "message": "作成失敗"})
+        detail = _create_run_error_message(exc)
+        try:
+            run_dir = safe_run_dir(run_id, ROOT)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="create_job_step",
+                status="failed",
+                item_id=job_id,
+                request={"runId": run_id, "title": title, "sourceLength": len(source)},
+                response={"elapsedMs": int((time.monotonic() - job_started) * 1000)},
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            if (run_dir / "state.txt").exists():
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "status": "FAILED",
+                        "runtime.stage": "create_run_failed",
+                        "runtime.create_job.status": "failed",
+                        "runtime.create_job.error_code": type(exc).__name__,
+                        "last_error": detail,
+                    },
+                )
+        except Exception:
+            pass
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+        )
 
 
 @router.get("/image_gen", response_class=HTMLResponse)
@@ -2954,6 +3313,19 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    write_app_server_debug_log(
+        run_dir=_run_dir,
+        operation="create_job_start",
+        status="running",
+        item_id=job_id,
+        request={
+            "title": title,
+            "sourceLength": len(source),
+            "runId": run_id,
+            "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
+        },
+        response={"path": f"output/{run_id}"},
+    )
     asyncio.create_task(_run_create_job(job_id, title=title, source=source, run_id=run_id))
     return job
 
@@ -3031,8 +3403,10 @@ async def api_create_asset(req: AssetCreateRequest) -> dict[str, Any]:
     }
     client = CodexAppServerClient(cwd=ROOT)
     try:
-        await client.start()
-        prompt = await client.regenerate_prompt(
+        await _start_app_server_with_log(client, run_dir=run_dir, operation="asset_create_prompt", item_id=item_id)
+        prompt = await _regenerate_prompt_with_log(
+            client,
+            run_dir=run_dir,
             item=item,
             target=target,
             instruction=(
@@ -3041,7 +3415,7 @@ async def api_create_asset(req: AssetCreateRequest) -> dict[str, Any]:
                 f"Asset title: {req.title.strip()}"
             ),
             setting_content=str(setting["content"]),
-            run_dir=run_dir,
+            operation="asset_create_prompt",
         )
     except CodexAppServerError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3398,6 +3772,7 @@ async def api_final_render(req: FinalRenderRequest) -> dict[str, Any]:
 
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
     destination = candidate_path(run_dir, req.item_id, index)
+    started = time.monotonic()
     references = []
     for ref in req.references:
         try:
@@ -3411,6 +3786,20 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
         references.append(reference)
     if app_server_disabled():
         raise HTTPException(status_code=503, detail="Codex app-server is disabled")
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="candidate_generation",
+        status="started",
+        item_id=req.item_id,
+        request={
+            "kind": req.kind,
+            "candidateIndex": index,
+            "destination": destination.relative_to(run_dir).as_posix(),
+            "referenceCount": len(references),
+            "references": [ref.relative_to(run_dir).as_posix() if ref.is_relative_to(run_dir) else str(ref) for ref in references],
+            "promptLength": len(req.prompt),
+        },
+    )
     async with _generated_images_cutoff_lock:
         fallback_cutoff_ns = latest_generated_image_mtime_ns()
     async with _generation_semaphore:
@@ -3450,12 +3839,30 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 result=result,
                 error=str(exc),
             )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="candidate_generation",
+                status="failed",
+                item_id=req.item_id,
+                request={"kind": req.kind, "candidateIndex": index, "destination": destination.relative_to(run_dir).as_posix()},
+                response={"elapsedMs": int((time.monotonic() - started) * 1000), "debugLog": debug_log.relative_to(run_dir).as_posix() if debug_log else None},
+                error=f"{type(exc).__name__}: {exc}",
+            )
             raise
         finally:
             await client.stop()
     debug_log_path = debug_log.relative_to(run_dir).as_posix() if debug_log else None
     result_source = getattr(result, "source", "app_server")
     if result.saved_path is None:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="candidate_generation",
+            status="failed",
+            item_id=req.item_id,
+            request={"kind": req.kind, "candidateIndex": index, "destination": destination.relative_to(run_dir).as_posix()},
+            response={"elapsedMs": int((time.monotonic() - started) * 1000), "debugLog": debug_log_path, "source": result_source},
+            error="Codex app-server did not return imageGeneration.savedPath",
+        )
         return {
             "index": index,
             "status": "failed",
@@ -3466,6 +3873,19 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "source": result_source,
         }
     copy_saved_image(result.saved_path, destination)
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="candidate_generation",
+        status="completed",
+        item_id=req.item_id,
+        request={"kind": req.kind, "candidateIndex": index, "destination": destination.relative_to(run_dir).as_posix()},
+        response={
+            "elapsedMs": int((time.monotonic() - started) * 1000),
+            "debugLog": debug_log_path,
+            "source": result_source,
+            "savedPath": str(result.saved_path),
+        },
+    )
     return {
         "index": index,
         "status": "completed",
@@ -3532,13 +3952,15 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
         async with semaphore:
             client = CodexAppServerClient(cwd=ROOT)
             try:
-                await client.start()
-                prompt = await client.regenerate_prompt(
+                await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_regeneration", item_id=item.id)
+                prompt = await _regenerate_prompt_with_log(
+                    client,
+                    run_dir=run_dir,
                     item=item_to_api(item),
                     target=req.target,
                     instruction=req.instruction,
                     setting_content=setting["content"],
-                    run_dir=run_dir,
+                    operation="prompt_regeneration",
                 )
                 return {"itemId": item.id, "prompt": prompt}
             finally:
@@ -3616,13 +4038,41 @@ async def api_chat_turn(req: ChatTurnRequest) -> dict[str, Any]:
         async with _chat_turn_lock:
             client = await get_codex_client()
             cwd = safe_run_dir(req.run_id, ROOT) if req.run_id else ROOT
+            log_dir = cwd if req.run_id else ROOT
             thread_id = _chat_threads.get(req.session_id)
-            if not thread_id:
-                thread_id = await client.start_thread(cwd=cwd)
-                if len(_chat_threads) >= 32:
-                    _chat_threads.pop(next(iter(_chat_threads)))
-                _chat_threads[req.session_id] = thread_id
-            transcript = await client.run_turn(thread_id=thread_id, text=req.message, cwd=cwd, timeout_seconds=300)
+            try:
+                if not thread_id:
+                    thread_id = await client.start_thread(cwd=cwd)
+                    write_app_server_debug_log(
+                        run_dir=log_dir,
+                        operation="chat_thread_start",
+                        status="completed",
+                        item_id=req.session_id,
+                        request={"cwd": str(cwd), "sessionId": req.session_id},
+                        response={"threadId": thread_id},
+                    )
+                    if len(_chat_threads) >= 32:
+                        _chat_threads.pop(next(iter(_chat_threads)))
+                    _chat_threads[req.session_id] = thread_id
+                transcript = await client.run_turn(thread_id=thread_id, text=req.message, cwd=cwd, timeout_seconds=300)
+                write_app_server_debug_log(
+                    run_dir=log_dir,
+                    operation="chat_turn",
+                    status="completed",
+                    item_id=req.session_id,
+                    request={"threadId": thread_id, "messageLength": len(req.message), "runId": req.run_id},
+                    transcript=transcript,
+                )
+            except Exception as exc:
+                write_app_server_debug_log(
+                    run_dir=log_dir,
+                    operation="chat_turn",
+                    status="failed",
+                    item_id=req.session_id,
+                    request={"threadId": thread_id, "messageLength": len(req.message), "runId": req.run_id},
+                    error=str(exc),
+                )
+                raise
     messages: list[str] = []
     approvals: list[dict[str, Any]] = []
     for event in transcript:

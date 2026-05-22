@@ -653,6 +653,61 @@ def _output_exists(run_dir: Path, rel: str) -> bool:
     return path.exists() and path.is_file()
 
 
+def _image_generation_provenance_by_destination(run_dir: Path) -> dict[str, dict[str, Any]]:
+    """Return latest app-server image-generation log payload by run-relative destination."""
+
+    log_path = run_dir / "logs" / "image_generation_prompts.jsonl"
+    if not log_path.exists():
+        return {}
+    by_destination: dict[str, dict[str, Any]] = {}
+    for raw_line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        destination = str(payload.get("destination") or "").strip()
+        if not destination:
+            continue
+        by_destination[destination] = payload
+    return by_destination
+
+
+def _image_generation_provenance_failures(
+    run_dir: Path,
+    outputs: list[str],
+    *,
+    provenance: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    records = provenance if provenance is not None else _image_generation_provenance_by_destination(run_dir)
+    failures: list[str] = []
+    for output in outputs:
+        rel = str(output or "").strip()
+        if not rel:
+            continue
+        record = records.get(rel)
+        if not record:
+            failures.append(f"{rel}: missing app-server generation provenance")
+            continue
+        source = str(record.get("source") or "").strip().lower()
+        status = str(record.get("status") or "").strip().lower()
+        saved_path = str(record.get("savedPath") or "").strip()
+        error = str(record.get("error") or "").strip()
+        if "local_raster" in source:
+            failures.append(f"{rel}: unsupported local raster fallback source={source}")
+        elif status not in {"completed", "success"}:
+            failures.append(f"{rel}: generation status {status or '(missing)'}")
+        elif not saved_path:
+            failures.append(f"{rel}: missing savedPath in generation provenance")
+        elif error:
+            failures.append(f"{rel}: generation log contains error")
+    return failures
+
+
 def _asset_manifest_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data.get("asset_generation_manifest"), dict):
         items = data["asset_generation_manifest"].get("items")
@@ -1181,9 +1236,11 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
     )
 
     output_failures: list[str] = []
+    planned_outputs: list[str] = []
     for entry in entries:
         asset_id = _entry_asset_id(entry) or "<missing_asset_id>"
         outputs = _entry_outputs(entry)
+        planned_outputs.extend(outputs)
         if not outputs:
             output_failures.append(f"{asset_id}: no output path")
             continue
@@ -1197,6 +1254,18 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         "asset.output_files",
         target_number < 560 or (bool(entries) and not output_failures),
         "all approved/generated asset output files exist under the run directory",
+        kind="rubric",
+    )
+
+    provenance = _image_generation_provenance_by_destination(run_dir)
+    asset_provenance_failures = _image_generation_provenance_failures(run_dir, planned_outputs, provenance=provenance)
+    if asset_provenance_failures:
+        details["asset_generation_provenance_failures"] = asset_provenance_failures[:20]
+    add_check(
+        checks,
+        "asset.generation_provenance_app_server",
+        target_number < 560 or (bool(entries) and not asset_provenance_failures),
+        "generated p500 asset images have Codex app-server provenance and are not local raster fallbacks",
         kind="rubric",
     )
 
@@ -1214,7 +1283,7 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         checks,
         "asset.visual_not_vector_like",
         target_number < 560 or (bool(entries) and not visual_quality_issues),
-        "generated p500 asset images are inspectable raster images and not vector-like/low-detail",
+        "generated p500 asset images are photorealistic/live-action candidates and not vector-like/low-detail",
         kind="rubric",
     )
 
@@ -1374,6 +1443,15 @@ def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
         request_items,
         expected_outputs,
     )
+    scene_output_relpaths = [
+        str(path.relative_to(run_dir))
+        for path in expected_outputs
+        if path.exists() and path.is_file() and path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES
+    ]
+    provenance = _image_generation_provenance_by_destination(run_dir)
+    scene_provenance_failures = _image_generation_provenance_failures(run_dir, scene_output_relpaths, provenance=provenance)
+    if scene_provenance_failures:
+        details["image_generation_provenance_failures"] = scene_provenance_failures[:20]
     visual_quality_issues = [
         f"{stat.get('selector', '<missing_selector>')}: {stat.get('path', '(unknown)')} - {stat.get('issue')}"
         for stat in visual_quality_stats
@@ -1405,16 +1483,23 @@ def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     )
     add_check(
         checks,
+        "image.generation_provenance_app_server",
+        bool(expected_outputs) and not scene_provenance_failures,
+        "generated p600 scene images have Codex app-server provenance and are not local raster fallbacks",
+        kind="rubric",
+    )
+    add_check(
+        checks,
         "image.visual_not_vector_like",
         bool(expected_outputs) and not uninspected_outputs and not visual_quality_issues,
-        "generated p600 scene images are inspectable raster images and not vector-like/low-detail",
+        "generated p600 scene images are photorealistic/live-action candidates and not vector-like/low-detail",
         kind="rubric",
     )
     add_check(
         checks,
         "image.references_not_vector_like",
         not reference_quality_issues,
-        "p600 reference images are inspectable raster images; vector-like references route regeneration back to p500",
+        "p600 reference images are photorealistic/live-action candidates; vector-like references route regeneration back to p500",
         kind="rubric",
     )
 
@@ -1554,7 +1639,39 @@ def _progress_has_event(progress_text: str, *, bucket: str, event: str) -> bool:
     return False
 
 
-def _supervisor_result_issues(path: Path, *, bucket: str) -> list[str]:
+TERMINAL_SLOT_STATUSES = {"done", "skipped", "awaiting_approval"}
+
+
+def _slot_number_from_code(slot: Any) -> int | None:
+    if not isinstance(slot, str):
+        return None
+    match = re.fullmatch(r"p(\d{3})", slot.strip())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _is_slot_in_bucket(slot: Any, bucket: str) -> bool:
+    slot_number = _slot_number_from_code(slot)
+    bucket_number = _slot_number_from_code(bucket)
+    if slot_number is None or bucket_number is None:
+        return False
+    return bucket_number <= slot_number <= bucket_number + 99
+
+
+def _relative_required_artifact_path(run_dir: Path, value: Any) -> tuple[Path | None, str]:
+    if not isinstance(value, str) or not value.strip():
+        return None, "<missing>"
+    raw_path = Path(value.strip())
+    resolved = raw_path if raw_path.is_absolute() else run_dir / raw_path
+    try:
+        relative = resolved.resolve().relative_to(run_dir.resolve())
+    except ValueError:
+        return None, value.strip()
+    return run_dir / relative, str(relative)
+
+
+def _supervisor_result_issues(path: Path, *, run_dir: Path, bucket: str, state: dict[str, str]) -> list[str]:
     if not path.exists():
         return [f"{bucket}:result_missing"]
     try:
@@ -1566,20 +1683,51 @@ def _supervisor_result_issues(path: Path, *, bucket: str) -> list[str]:
         issues.append(f"{bucket}:result_bucket_mismatch")
     if payload.get("status") != "done":
         issues.append(f"{bucket}:result_status_not_done")
-    if not isinstance(payload.get("completed_slots"), list) or not payload.get("completed_slots"):
+    completed_slots = payload.get("completed_slots")
+    if not isinstance(completed_slots, list) or not completed_slots:
         issues.append(f"{bucket}:completed_slots_missing")
-    if not isinstance(payload.get("required_artifacts"), list):
-        issues.append(f"{bucket}:required_artifacts_missing")
+    elif not all(_is_slot_in_bucket(slot, bucket) for slot in completed_slots):
+        issues.append(f"{bucket}:completed_slots_outside_bucket")
     else:
-        missing_required = [
-            str(item.get("path") or "<unknown>")
-            for item in payload.get("required_artifacts", [])
-            if isinstance(item, dict) and item.get("exists") is False
+        non_terminal_slots = [
+            f"{slot}:{state.get(f'slot.{slot}.status') or '(unset)'}"
+            for slot in completed_slots
+            if state.get(f"slot.{slot}.status", "").strip().lower() not in TERMINAL_SLOT_STATUSES
         ]
-        if missing_required:
-            issues.append(f"{bucket}:required_artifacts_not_found")
-    if not isinstance(payload.get("state_keys"), dict):
+        if non_terminal_slots:
+            issues.append(f"{bucket}:completed_slots_not_terminal")
+
+    required_artifacts = payload.get("required_artifacts")
+    if not isinstance(required_artifacts, list):
+        issues.append(f"{bucket}:required_artifacts_missing")
+    elif not required_artifacts:
+        issues.append(f"{bucket}:required_artifacts_empty")
+    else:
+        for item in required_artifacts:
+            if not isinstance(item, dict):
+                issues.append(f"{bucket}:required_artifact_invalid")
+                continue
+            required_path, display_path = _relative_required_artifact_path(run_dir, item.get("path"))
+            if required_path is None:
+                issues.append(f"{bucket}:required_artifact_invalid_path:{display_path}")
+                continue
+            if item.get("exists") is False or not required_path.exists():
+                issues.append(f"{bucket}:required_artifact_not_found:{display_path}")
+
+    state_keys = payload.get("state_keys")
+    if not isinstance(state_keys, dict):
         issues.append(f"{bucket}:state_keys_missing")
+    elif not state_keys:
+        issues.append(f"{bucket}:state_keys_empty")
+    else:
+        for key, value in state_keys.items():
+            if not isinstance(key, str) or not key.strip():
+                issues.append(f"{bucket}:state_key_invalid")
+                continue
+            actual = state.get(key)
+            expected = str(value)
+            if actual != expected:
+                issues.append(f"{bucket}:state_key_mismatch:{key}")
     return issues
 
 
@@ -1602,23 +1750,35 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
         kind="rubric",
     )
 
-    missing_returned_state = [
-        f"{bucket}:{state.get(f'orchestration.{bucket}.supervisor.call_status') or '(unset)'}"
-        for bucket in buckets
-        if state.get(f"orchestration.{bucket}.supervisor.call_status") != "returned"
-    ]
+    missing_returned_state: list[str] = []
+    for bucket in buckets:
+        prefix = f"orchestration.{bucket}.supervisor"
+        call_status = state.get(f"{prefix}.call_status")
+        supervisor_status = state.get(f"{prefix}.status")
+        finished_at = state.get(f"{prefix}.finished_at")
+        if call_status != "returned" or supervisor_status != "done" or not finished_at:
+            missing_returned_state.append(
+                f"{bucket}:call_status={call_status or '(unset)'},status={supervisor_status or '(unset)'},finished_at={finished_at or '(unset)'}"
+            )
     add_check(
         checks,
         "orchestration.state_terminal",
         not missing_returned_state,
-        "state.txt records every required L2 P-Bucket Supervisor as returned"
+        "state.txt records every required L2 P-Bucket Supervisor as returned and done"
         + (f" (missing/non-terminal: {', '.join(missing_returned_state)})" if missing_returned_state else ""),
         kind="rubric",
     )
 
     result_issues: list[str] = []
     for bucket in buckets:
-        result_issues.extend(_supervisor_result_issues(run_dir / "logs" / "orchestration" / f"{bucket}.supervisor_result.json", bucket=bucket))
+        result_issues.extend(
+            _supervisor_result_issues(
+                run_dir / "logs" / "orchestration" / f"{bucket}.supervisor_result.json",
+                run_dir=run_dir,
+                bucket=bucket,
+                state=state,
+            )
+        )
     add_check(
         checks,
         "orchestration.supervisor_results",

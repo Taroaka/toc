@@ -2847,13 +2847,13 @@ def generate_elevenlabs_tts(
     model_id: str,
     output_format: str,
     language_code: str,
-    pronunciation_dictionary_locators: tuple[dict[str, str], ...],
     text: str,
     out_path: Path,
     duration_seconds: int | None,
     force: bool,
     request_log_path: Path | None,
     dry_run: bool,
+    pronunciation_dictionary_locators: tuple[dict[str, str], ...] = (),
 ) -> None:
     if out_path.exists() and not force:
         return
@@ -3213,7 +3213,6 @@ def generate_codex_builtin_image(
                 run_dir=run_dir,
                 fallback_cutoff_ns=fallback_cutoff_ns,
             )
-            reject_local_raster_image_result(result, item_id=item_id)
             debug_path = write_app_server_image_debug_log(
                 run_dir=run_dir,
                 item_id=item_id,
@@ -3224,6 +3223,7 @@ def generate_codex_builtin_image(
                 kind="manifest",
                 result=result,
             )
+            reject_local_raster_image_result(result, item_id=item_id)
             if log_path:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text(
@@ -3244,6 +3244,37 @@ def generate_codex_builtin_image(
             if result.saved_path is None:
                 raise SystemExit(f"Codex app-server did not return an image for {item_id}; see {debug_path}")
             copy_saved_image(result.saved_path, out_path)
+        except Exception as exc:
+            debug_path = write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id=item_id,
+                index=1,
+                destination=out_path,
+                references=list(reference_images or []),
+                prompt=prompt,
+                kind="manifest",
+                result=result,
+                error=str(exc),
+            )
+            if log_path:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    json.dumps(
+                        {
+                            "tool": CODEX_BUILTIN_IMAGE_TOOL,
+                            "model": "gpt-image-2",
+                            "debug_log": str(debug_path.relative_to(run_dir)),
+                            "status": getattr(result, "status", "exception") if result is not None else "exception",
+                            "source": getattr(result, "source", "") if result is not None else "",
+                            "saved_path": str(getattr(result, "saved_path", "") or "") if result is not None else "",
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            raise
         finally:
             await client.stop()
 
@@ -4638,9 +4669,13 @@ def main() -> None:
     if not args.skip_audio and not args.skip_narration_review:
         review_cmd = [
             sys.executable,
-            str(REPO_ROOT / "scripts/review-narration-text-quality.py"),
+            str(REPO_ROOT / "scripts/run-p720-narration-l3.py"),
+            "--run-dir",
+            str(base_dir),
             "--manifest",
             str(manifest_path),
+            "--script",
+            str(base_dir / "script.md"),
             "--fail-on-findings",
         ]
         subprocess.run(review_cmd, check=True)

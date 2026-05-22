@@ -31,6 +31,76 @@ p400 は、scene を直接画像や動画にする stage ではない。
 - manifest へ渡す: provider prompt、asset path、生成結果、採用判定、実行 wiring
 - 編集前に確認する: 事実関係、theme、主人公、reveal 順序、承認済み human request、変更禁止 scope
 
+### p400 Cinematic Scene Design Contract（映画的 scene 契約）
+
+p400 の scene 設計は「台本を時間で割る」作業ではなく、story の各部分を **映画で観客が体験する劇的単位**へ変換する作業である。
+各 scene は、情報、感情、因果、視覚価値のいずれかを前進させる。何も変化しない scene は、短くても長くても production scene としては弱い。
+
+#### 必須設計原則
+
+- scene は topic ではなく event として書く。
+  - 弱い: `浦島が竜宮城を見る scene`
+  - 強い: `浦島が竜宮城の美しさに呑まれ、帰る意思が一時的に弱まる scene`
+- scene は必ず `before_state → pressure → turn → after_state` を持つ。
+- scene は「観客がこの scene 中に追う問い」を持つ。問いがない scene は、単なる説明または素材集になりやすい。
+- scene は `visual_thesis` を持つ。これは p600 が一枚絵として描ける scene の代表的意味であり、単なる美術説明ではない。
+- scene の終点は、次 scene の起点を発生させる。`handoff_to_next_scene` が弱い scene は、cut を追加するか scene を統合する。
+- reveal は早出ししない。観客に渡す情報と withheld 情報を別々に書く。
+- spectacle は物語から独立した飾りではなく、誘惑、圧力、危険、発見、報酬、喪失のいずれかに接続する。
+
+#### scene contract の必須 field
+
+```yaml
+scene_intent:
+  importance: "low|medium|high|critical"
+  target_duration_seconds: 24
+  estimated_duration_seconds: 24
+  story_purpose: "この scene が全体で進めるもの"
+  dramatic_question: "この scene の間、観客が追う問い"
+  scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+  value_shift:
+    from: "scene開始時の状態"
+    to: "scene終了時の状態"
+    visible_evidence: ["画面で読める変化の証拠"]
+  causal_turn: "次sceneを発生させる不可逆の出来事/決断/発見"
+  audience_information: []
+  withheld_information: []
+  reveal_constraints: []
+  affect_transition: "観客感情の変化"
+  character_state:
+    start: "人物の心理/関係/身体状態"
+    end: "scene終了時の心理/関係/身体状態"
+    visible_behavior: ["表情/姿勢/距離/手の動きなど"]
+  visual_thesis: "この scene を代表する映画的な一枚絵の考え方"
+  spatial_plan:
+    location_id: ""
+    screen_geography: "前景/中景/背景、進行方向、重要な入口/出口"
+    continuity_anchors: []
+  production_risks: []
+  handoff_to_next_scene: "次へ渡す視覚/音/因果アンカー"
+  coverage_review:
+    audience_information_covered: false
+    visualizable_action_covered: false
+    value_shift_visible: false
+    causal_turn_visible: false
+    next_scene_connection_checked: false
+  handoff_notes:
+    p500_asset: []
+    p600_image: []
+    p700_narration: []
+    p800_video: []
+```
+
+#### scene を落とす blocking 条件
+
+- `dramatic_question` がない、または scene 内で問いが進まない。
+- `value_shift.from/to` が同じで、変化を示す `visible_evidence` もない。
+- `causal_turn` が次 scene に影響しない。
+- `visual_thesis` が抽象語だけで、画面上の人物・場所・道具・光・構図に翻訳できない。
+- scene が narration の説明絵でしかなく、映像だけで読める行為や証拠がない。
+- spectacle cut が物語上の誘惑/恐怖/報酬/危険/発見に接続していない。
+
+
 ### p400 scene/cut design slots
 
 p400 は次の順で進める。
@@ -80,16 +150,42 @@ p400 は次の順で進める。
 
 ```yaml
 scene_intent:
+  importance: "low|medium|high|critical"
+  target_duration_seconds: 24
+  estimated_duration_seconds: 24
   story_purpose: "この scene が物語全体で担う役割"
+  dramatic_question: "この scene の間、観客が追う問い"
+  scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+  value_shift:
+    from: "scene開始時の状態"
+    to: "scene終了時の状態"
+    visible_evidence: ["画面だけで変化が読める証拠"]
+  causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
   audience_information: ["この scene で観客に渡す情報"]
   withheld_information: ["この scene ではまだ見せない情報"]
   reveal_constraints: ["初出や早出しを避ける対象"]
   affect_transition: "前 scene からの感情変化"
+  character_state:
+    start: "人物の心理/関係/身体状態"
+    end: "scene終了時の心理/関係/身体状態"
+    visible_behavior: ["表情/姿勢/距離/手の動きなど"]
   visual_value_source: "visual_value.md の対応 part / none"
+  visual_thesis: "この scene を代表する映画的な一枚絵"
+  spatial_plan:
+    location_id: ""
+    screen_geography: "前景/中景/背景、入口/出口、進行方向"
+    continuity_anchors: []
   production_risks: ["後続 stage で崩れやすい点"]
+  handoff_to_next_scene: "次 scene へつなぐ視覚/音/因果アンカー。最終 scene は terminal_resolution"
+  coverage_review:
+    audience_information_covered: false
+    visualizable_action_covered: false
+    value_shift_visible: false
+    causal_turn_visible: false
+    next_scene_connection_checked: false
   handoff_notes:
     p500_asset: ["asset 化すべき候補"]
-    p600_image: ["first frame / visual prompt で守ること"]
+    p600_image: ["still prompt で守るべき visual proof / 初期状態"]
     p700_narration: ["ナレーションで補うこと / 補わないこと"]
     p800_video: ["motion で守ること"]
 ```
@@ -101,12 +197,17 @@ scene_intent:
 ```yaml
 cut_blueprint:
   cut_role: "main|sub|transition|reaction|visual_payoff"
+  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
   duration_intent: "short|standard|hold"
   target_beat: "この cut で伝える 1 つのこと"
+  screen_question: "この cut の間、観客が画面から読む問い"
+  dramatic_job: "scene 全体の pressure / turn / payoff のどこを担当するか"
   must_show: ["画・音・動きのどこかで必ず見せるもの"]
   must_avoid: ["drift / reveal 破り / 説明過多など"]
   done_when: ["reviewer が完了判断できる条件"]
   visual_beat: "画として何が見えるか"
+  first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない"
+  motion_brief: "still から始まる動き。新情報を勝手に足さない"
   narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
   asset_dependency_hint:
     character_ids: []
@@ -679,13 +780,19 @@ scenes:
         depth: "前景・中景・背景の要素"
         lighting: "照明の方向・質感"
 
-      # AI生成用プロンプト（完成形）
-      generation_prompt: |
-        [主題] + [スタイル] + [環境] + [照明] + [カメラ]
-        例: "A young woman with oval face and short black hair,
-        wearing navy blue hoodie, standing in a modern apartment,
-        morning sunlight streaming through windows, medium shot,
-        looking thoughtfully out the window"
+      # p600 への画像設計 handoff
+      # p400 では完成 prompt を書かない。ここでは「何を描くべきか」の意味と画面証拠だけを残す。
+      p600_image_handoff:
+        visual_thesis: "この scene を代表する一枚絵の考え方"
+        first_frame_brief: "動画が動き出す直前に見えている初期状態"
+        subject_priority: ["最優先で読ませる人物/物/場所"]
+        screen_evidence: ["観客が画面だけで理解できる証拠"]
+        blocking_notes: "前景/中景/背景、視線、距離、入口/出口"
+        lighting_notes: "感情と reveal に対応する光"
+        forbidden_prompt_metadata:
+          - "scene_id / cut_id"
+          - "物語タイトルだけでの説明"
+          - "最初の1フレーム / first frame という制作メタ"
 
     # --- 音声指示 ---
     audio:
@@ -728,6 +835,23 @@ scenes:
       to_next_scene: "cut | fade | dissolve | wipe"
       duration: 0.5  # トランジションの秒数
 ```
+
+### 3.2.1 映画的 scene の内部構造
+
+scene は cut の集合ではなく、cut を束ねる劇的な流れを持つ。
+標準形は次の 5 段階で考える。
+
+```yaml
+cinematic_scene_structure:
+  setup: "場所・人物状態・観客の問いを立てる"
+  pressure: "欲望/障害/危険/誘惑を画面上で強める"
+  threshold: "引き返せない一歩の直前を見せる"
+  turn: "発見/決断/失敗/反転など、sceneの価値が変わる瞬間"
+  payoff_or_handoff: "変化の結果、または次sceneへの未解決アンカー"
+```
+
+cut 数が少ない場合でも、この 5 段階のどれを省略しているかを明示する。
+`high` / `critical` scene で pressure と reaction が無い場合は、観客が感情変化を体験する前に話だけが進みやすいため blocking finding とする。
 
 ### 3.3 シーン間の連続性
 
@@ -1270,13 +1394,22 @@ scenes:
         depth: "plants in foreground, subject in middle, window in background"
         lighting: "soft natural light from right"
 
-      generation_prompt: |
-        A young person with oval face and dark brown eyes, short black hair,
-        wearing navy blue hoodie over white t-shirt,
-        standing in a modern apartment living room,
-        morning sunlight streaming through large windows,
-        medium shot, looking thoughtfully out the window,
-        cinematic, warm color grading, shallow depth of field
+      p600_image_handoff:
+        visual_thesis: "朝の室内で、主人公が日常の中に違和感を覚え始める一枚絵"
+        first_frame_brief: "主人公が窓の外へ視線を向ける直前。コーヒーマグと開いたノートPCが前景にあり、朝光が横顔を照らす"
+        subject_priority:
+          - "主人公の横顔と視線"
+          - "日常を示す前景の小道具"
+          - "外の光"
+        screen_evidence:
+          - "観客が、主人公が何かに気づきかけていると読める"
+          - "まだ行動は始まっておらず、次cutで動き出せる"
+        blocking_notes: "前景に机とマグ、中景に主人公、背景に窓。視線は画面奥へ流す"
+        lighting_notes: "朝の自然光。穏やかだが、少し冷たい影を残す"
+        forbidden_prompt_metadata:
+          - "scene_id / cut_id"
+          - "物語タイトルだけでの説明"
+          - "最初の1フレーム / first frame という制作メタ"
 
     audio:
       narration:

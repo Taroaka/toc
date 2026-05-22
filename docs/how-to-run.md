@@ -129,6 +129,8 @@ output/<topic>_<timestamp>/
 - 外部課金系の画像 provider（Nano Banana / Gemini image / SeaDream）は標準経路では使わない
 - 互換のため、旧 `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` 表記を読んだ場合も実行時は `codex_builtin_image` に正規化する
 - provider 固定は request metadata / 設計書の責務であり、生成 prompt 本文には書かない
+- 画像成果物は実写系（photorealistic / cinematic / live-action）を必須にする。ローカルで手続き生成した疑似ラスター PNG、placeholder PNG、ベクター風/イラスト風/低情報量 raster は canonical p500/p600 成果物として採用しない
+- p500 / p600 の検証では、画像ファイルの存在だけでなく `logs/image_generation_prompts.jsonl` の Codex app-server 生成証跡を確認する。`source=local_raster...` の fallback は hard fail とし、権限エラー時もローカル生成 PNG で代替しない
 - `reference_count == 0` の image request は互換 lane 名 `execution_lane=bootstrap_builtin` のまま扱う
 - `reference_count > 0` の image request は `execution_lane=standard` のまま扱うが、実行 provider は `codex_builtin_image` で固定する
 - 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
@@ -191,6 +193,7 @@ output/<topic>_<timestamp>/
   - L3 critic / aggregator / scene worker / image reviewer などの起動履歴はこの進捗メモには書かない
   - 記録は `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680` の形式で行う
   - L2 が返った後は `--event returned --result logs/orchestration/p600.supervisor_result.json` を同じ bucket に対して追記する
+  - `returned|blocked|failed` の terminal event では result JSON path を必ず渡す
   - `scripts/verify-pipeline.py` は target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、`pXXX.supervisor_result.json` を hard gate として検証する
 - authoring 直後の review slot は最大 5 round の evaluator-improvement loop として実行する
   - 各 round は 5 critic agents + 1 aggregator
@@ -333,7 +336,7 @@ python scripts/sync-narration-from-script.py \
   - `generation_status` は `missing|created|recreate`
   - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
   - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
-  - p600 の画像gateは生成済み scene still と参照画像を実画像として検査する。scene still がベクター風で参照画像が正常なら p600 を再生成し、参照画像もベクター風なら p500/p560 の参照asset再生成へ戻す
+  - p600 の画像gateは生成済み scene still と参照画像を実画像として検査する。scene still がベクター風/イラスト風/低情報量 raster で参照画像が正常なら p600 を再生成し、参照画像も同様に失敗するなら p500/p560 の参照asset再生成へ戻す。生成証跡が app-server 由来でない場合も再生成対象にする
   - 画像生成は依存のない cut から並列化され、`--image-max-concurrency` で同時実行数を制御できる（上限 10）
   - `recreate` を実際に回すときは `--force` を使う
   - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする

@@ -1,103 +1,154 @@
-# Scene Outline / Asset Brief Template
+# Scene Outline / Cinematic Scene Contract Template
 #
-# Purpose:
-# - This artifact is the bridge between story and generation prompts.
-# - For unknown topics (modern people/news), do NOT rely on model memory.
-#   Put enough grounded information here so image/video prompts can be derived.
-#
-# Notes:
-# - Keep keys ASCII.
-# - Facts must reference research `fact_id` / `source_id` when possible.
-# - Creative "set dressing" is allowed, but must be labeled as such.
+# 目的:
+# - story.md と generation prompt の間で、scene の劇的責務を固定する。
+# - p400 では完成 prompt を書かず、p600/p800 が迷わない scene/cut contract を作る。
+# - keys は ASCII のままにし、値とコメントは日本語で書く。
+# - 事実は research の fact_id / source_id に紐づけ、創作補完は creative_inventions に明示する。
+
 scene_outline_metadata:
   topic: "<topic>"
   source_research: "output/<topic>_<timestamp>/research.md"
   source_story: "output/<topic>_<timestamp>/story.md"
+  source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "<ISO8601>"
-  method_used: "<scene method>"
-  version: 1
-  scene_count: 20
+  method_used: "cinematic_scene_contract"
+  version: 2
+  scene_count: 0
 
-scene_outline:
-  global_constraints:
-    pov: "tbd"                 # e.g. first-person POV / third-person
-    style: "tbd"               # e.g. photorealistic / cinematic / practical effects
-    must_include: ["string"]   # invariants across scenes (hands/bar/boat/etc)
-    must_avoid: ["string"]     # global negatives (anime/text/watermark/etc)
-    image_policy: "reuse anchors unless a new continuity anchor is needed"
-    references:
-      # Optional, but recommended when you already have them.
-      # Image/video methods should include these as multi-image references.
-      character_images: ["assets/characters/character.png"]
-      style_images: ["assets/styles/style_ref.png"]
-      object_images: ["assets/scenes/object_ref.png"]
-      notes: "string"
+scene_design_rules:
+  p400_does_not_write_final_prompt: true
+  scene_must_have_value_shift: true
+  scene_must_have_causal_turn: true
+  cut_must_have_single_intent: true
+  prompt_language: "ja"
+  no_on_screen_text: true
+  image_policy: "新規 still は continuity anchor が必要な cut に集中させ、既存 anchor を再利用できる場合は再利用する"
 
-  scenes:
-    - scene_id: 1
-      phase: "opening|development|ordeal|transformation|ending"
+global_constraints:
+  aspect_ratio: "9:16"
+  visual_style: "実写映画調、自然な映画照明、実物セット感"
+  global_must_include:
+    - "前景/中景/背景の空間設計"
+    - "観客が最初に読む主被写体"
+  global_must_avoid:
+    - "画面内テキスト"
+    - "字幕"
+    - "ウォーターマーク"
+    - "ロゴ"
+    - "アニメ/漫画/イラスト調"
+  references:
+    character_images: []
+    style_images: []
+    object_images: []
+    location_images: []
+    notes: "参照画像 path は metadata に保持し、prompt 本文には path を書かない"
 
-      # From story (human-facing)
-      narration: "string"
-      story_visual: "string"
-      research_refs: ["string"]
+story_truth:
+  theme: "<story theme>"
+  protagonist: "<protagonist>"
+  reveal_order_summary: "<reveal order>"
+  forbidden_changes:
+    - "story.md の事実関係/reveal順序/主人公/themeを無断変更しない"
 
-      # Story responsibility
-      goal: "string"
-      conflict: "string"
-      stakes: "string"
+scenes:
+  - scene_id: 1
+    scene_name: "<短いscene名>"
+    importance: "low|medium|high|critical"
+    target_duration_seconds: 24
+    estimated_duration_seconds: 24
+    phase: "opening|development|ordeal|transformation|ending"
 
-      # Grounding: what must be true / sourced
-      factual_anchors:
-        fact_ids: ["F1"]
-        source_ids: ["S1"]
-        notes: "string"
+    scene_intent:
+      story_purpose: "この scene が物語全体で担う役割"
+      dramatic_question: "この scene の間、観客が追う問い"
+      scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+      value_shift:
+        from: "scene開始時の状態"
+        to: "scene終了時の状態"
+        visible_evidence:
+          - "画面だけで変化が読める証拠"
+      causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
+      audience_information:
+        - "この scene で観客に渡す情報"
+      withheld_information:
+        - "この scene ではまだ見せない情報"
+      reveal_constraints:
+        - "早出し禁止の情報"
+      affect_transition: "観客感情の変化"
+      character_state:
+        start: "人物の心理/関係/身体状態"
+        end: "scene終了時の心理/関係/身体状態"
+        visible_behavior:
+          - "表情/姿勢/距離/手の動きなど"
+      visual_thesis: "この scene を代表する映画的な一枚絵の考え方"
+      handoff_to_next_scene: "次 scene へつなぐ視覚/音/因果アンカー。最終 scene は terminal_resolution"
 
-      # Visual design (generator-facing)
+    grounding:
+      research_refs:
+        fact_ids: []
+        source_ids: []
+        notes: "事実根拠。創作補完は creative_inventions に分ける"
+      creative_inventions:
+        - invention: "創作補完の内容"
+          purpose: "映像化/感情設計上の目的"
+          must_not_conflict_with: []
+
+    visual_world:
       setting:
-        location: "string"         # concrete place or set description
-        time_of_day: "string"
-        weather: "string"
-        environment: "string"
-      characters_present: ["string"]
-      props_set_pieces: ["string"]
-      action_beats: ["string"]     # 3-6 short actions in order
+        location: "具体的な場所またはセット"
+        time_of_day: "朝|昼|夕方|夜|不明"
+        weather: "天候/空気"
+        environment: "場所の質感、音、密度"
+      spatial_plan:
+        screen_geography: "前景/中景/背景、入口/出口、進行方向"
+        continuity_anchors:
+          - "前後sceneで一致させる光/方向/物/人物状態"
+      characters_present: []
+      props_set_pieces: []
+      object_ids: []
+      location_ids: []
 
-      camera:
-        pov: "string"
-        shot: "string"             # wide/medium/close etc
-        movement: "string"         # dolly/pan/track etc
-        lens: "string"             # optional
-        framing: "string"          # optional composition notes
+    handoff_notes:
+      p500_asset:
+        - "asset 化すべき人物/場所/道具/状態"
+      p600_image:
+        - "still prompt で守るべき visual proof / 初期状態"
+      p700_narration:
+        - "ナレーションで補うこと / 補わないこと"
+      p800_video:
+        - "motion で守ること"
 
-      lighting_color:
-        lighting: "string"
-        palette: ["string"]
-        mood: "string"
+    coverage_review:
+      audience_information_covered: false
+      visualizable_action_covered: false
+      value_shift_visible: false
+      causal_turn_visible: false
+      next_scene_connection_checked: false
+      notes: "未達なら cut 追加または scene 再設計"
 
-      continuity:
-        transition_in: "string"
-        transition_out: "string"
-        anchor_to_next: "string"   # match-cut anchor
-        must_match_prev: ["string"]
-        must_match_next: ["string"]
-
-      # Prompt guidance (to be converted to actual prompts later)
-      prompt_guidance:
-        image_focus: "string"
-        image_negative: "string"
-        video_motion: "string"
-        video_negative: "string"
-        creative_inventions: ["string"]  # explicitly label invented set dressing
-
-      # Optional: scene-level follow-up research (for unknown topics / missing specifics).
-      # If required fields are "tbd", create a task here and resolve it BEFORE generation.
-      research_tasks:
-        - task_id: "SR1"
-          question: "string"
-          why: "string"
-          query_suggestions: ["string"]
-          preferred_source_types: ["primary|academic|news|encyclopedia|other"]
-          outputs_expected: ["facts.items[] candidates", "setting details", "props_set_pieces additions"]
-          status: "todo|in_progress|done"
-          evidence_path: "output/<topic>_<timestamp>/scenes/scene01/evidence.md"
+    cuts:
+      - cut_id: 1
+        cut_role: "main|sub|transition|reaction|visual_payoff"
+        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+        duration_intent: "short|standard|hold"
+        target_duration_seconds: 8
+        target_beat: "この cut で伝える1つのこと"
+        screen_question: "この cut の間、観客が画面から読む問い"
+        dramatic_job: "scene全体のpressure/turn/payoffのどこを担当するか"
+        visual_beat: "画として何が見えるか"
+        must_show:
+          - "画・音・動きのどこかで必ず見せるもの"
+        must_avoid:
+          - "drift / reveal破り / 説明過多など"
+        done_when:
+          - "reviewer が完了判断できる条件"
+        first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+        motion_brief: "still から始まる動き。新しい物語情報を勝手に追加しない"
+        narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
+        narration_text: "<必要ならナレーション。silent cut は空文字>"
+        asset_dependency_hint:
+          character_ids: []
+          object_ids: []
+          location_ids: []
+          reusable_still_candidates: []

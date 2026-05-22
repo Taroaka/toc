@@ -19,6 +19,55 @@ VERIFY_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY_MODULE)
 
 
+ORCHESTRATION_BUCKET_TERMINAL_SLOTS = {
+    "p100": "p130",
+    "p200": "p230",
+    "p300": "p330",
+    "p400": "p450",
+    "p500": "p570",
+    "p600": "p680",
+    "p700": "p750",
+    "p800": "p850",
+    "p900": "p930",
+}
+
+ORCHESTRATION_REQUIRED_ARTIFACT_FIXTURES: dict[str, dict[str, str | bytes]] = {
+    "p100": {"research.md": "# Research\n\n```yaml\ntopic: \"fixture\"\n```\n"},
+    "p200": {"story.md": "# Story\n\n```yaml\nscript:\n  scenes: []\n```\n"},
+    "p300": {"visual_value.md": "# Visual Value\n\n```yaml\nscene_visual_values: []\n```\n"},
+    "p400": {
+        "script.md": "# Script\n\nfixture\n",
+        "video_manifest.md": "```yaml\nvideo_metadata:\n  topic: \"fixture\"\nscenes: []\n```\n",
+    },
+    "p500": {
+        "asset_inventory.md": "```yaml\nasset_inventory:\n  items: []\n```\n",
+        "asset_plan.md": "```yaml\nassets:\n  characters: []\n```\n",
+    },
+    "p600": {"image_generation_requests.md": "# Image Generation Requests\n\nfixture\n"},
+    "p700": {"narration_text_review.md": "# Narration Text Review\n\nfixture\n"},
+    "p800": {"video_manifest.md": "```yaml\nvideo_metadata:\n  topic: \"fixture\"\nscenes: []\n```\n"},
+    "p900": {"video.mp4": b"placeholder"},
+}
+
+
+def _ensure_fixture_artifact(path: Path, value: str | bytes) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(value, bytes):
+        path.write_bytes(value)
+    else:
+        path.write_text(value, encoding="utf-8")
+
+
+def _orchestration_bucket_terminal_slot(bucket: str, target: str) -> str:
+    bucket_number = int(bucket.removeprefix("p"))
+    target_number = int(target.removeprefix("p"))
+    if bucket_number <= target_number <= bucket_number + 99:
+        return target
+    return ORCHESTRATION_BUCKET_TERMINAL_SLOTS[bucket]
+
+
 def _write_photo_like_test_png(path: Path, *, width: int = 320, height: int = 180) -> None:
     import math
 
@@ -49,6 +98,34 @@ def _write_photo_like_test_png(path: Path, *, width: int = 320, height: int = 18
         y = (index * 31) % height
         draw.ellipse((x, y, min(width, x + 25), min(height, y + 40)), fill=(180, 160, 130, 120))
     image.save(path)
+
+
+def _append_app_server_image_provenance(run_dir: Path, destination: str, *, item_id: str = "item", source: str = "app_server") -> None:
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{item_id}.json"
+    payload = {
+        "itemId": item_id,
+        "candidateIndex": 1,
+        "kind": "test",
+        "destination": destination,
+        "references": [],
+        "prompt": "実写映画風。画面内テキストなし。",
+        "promptLength": 16,
+        "promptSha256": "test",
+        "status": "completed",
+        "savedPath": f"/tmp/{Path(destination).name}",
+        "source": source,
+        "revisedPrompt": None,
+        "error": None,
+        "transcript": [],
+        "debugLog": log_path.relative_to(run_dir).as_posix(),
+    }
+    log_path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as index_file:
+        index_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _write_vector_like_test_png(path: Path, *, width: int = 768, height: int = 384) -> None:
@@ -326,22 +403,36 @@ def _write_l2_orchestration_artifacts(run_dir: Path, *, stage_target: str = "p93
     ]
     for bucket in buckets:
         result_path = f"logs/orchestration/{bucket}.supervisor_result.json"
+        terminal_slot = _orchestration_bucket_terminal_slot(bucket, target)
+        required_artifacts = []
+        for artifact_path, fixture_value in ORCHESTRATION_REQUIRED_ARTIFACT_FIXTURES[bucket].items():
+            _ensure_fixture_artifact(run_dir / artifact_path, fixture_value)
+            required_artifacts.append({"path": artifact_path, "exists": True, "status": "ready"})
         state_updates[f"orchestration.{bucket}.supervisor.progress"] = "logs/orchestration/l2_supervisor_progress.md"
         state_updates[f"orchestration.{bucket}.supervisor.call_status"] = "returned"
+        state_updates[f"orchestration.{bucket}.supervisor.status"] = "done"
         state_updates[f"orchestration.{bucket}.supervisor.invoked_at"] = "2099-01-01T00:00:00+09:00"
         state_updates[f"orchestration.{bucket}.supervisor.last_event_at"] = "2099-01-01T00:00:01+09:00"
+        state_updates[f"orchestration.{bucket}.supervisor.finished_at"] = "2099-01-01T00:00:01+09:00"
         state_updates[f"orchestration.{bucket}.supervisor.stop_slot"] = target
         state_updates[f"orchestration.{bucket}.supervisor.result"] = result_path
+        state_updates[f"slot.{terminal_slot}.status"] = "done"
         lines.append(f"| 2099-01-01T00:00:00+09:00 | {bucket} | {bucket} P-Bucket Supervisor | invoked | {target} | - | test fixture |")
         lines.append(f"| 2099-01-01T00:00:01+09:00 | {bucket} | {bucket} P-Bucket Supervisor | returned | {target} | {result_path} | test fixture |")
+        result_state_keys = {
+            f"orchestration.{bucket}.supervisor.call_status": "returned",
+            f"orchestration.{bucket}.supervisor.status": "done",
+            f"orchestration.{bucket}.supervisor.result": result_path,
+            f"slot.{terminal_slot}.status": "done",
+        }
         (orchestration_dir / f"{bucket}.supervisor_result.json").write_text(
             json.dumps(
                 {
                     "bucket": bucket,
                     "status": "done",
-                    "completed_slots": [target],
-                    "required_artifacts": [],
-                    "state_keys": {f"orchestration.{bucket}.supervisor.call_status": "returned"},
+                    "completed_slots": [terminal_slot],
+                    "required_artifacts": required_artifacts,
+                    "state_keys": result_state_keys,
                     "review_outputs": [],
                     "next_bucket": None,
                     "blocked_reason": None,
@@ -516,6 +607,7 @@ asset_generation_manifest:
     )
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+    _append_app_server_image_provenance(run_dir, "assets/characters/momotaro_seed.png", item_id="momotaro_seed")
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
 
@@ -548,6 +640,7 @@ def _write_image_requests_from_manifest(run_dir: Path, *, reference: str = "asse
     sections = ["# Image Generation Requests", ""]
     for index, output in enumerate(outputs, start=1):
         selector = Path(output).stem
+        _append_app_server_image_provenance(run_dir, output, item_id=selector)
         sections.extend(
             [
                 f"## {selector}",
@@ -755,6 +848,9 @@ scenes:
 """,
         encoding="utf-8",
     )
+    _append_app_server_image_provenance(run_dir, output, item_id="scene10_cut1")
+    if reference == "assets/characters/momotaro_seed.png":
+        _append_app_server_image_provenance(run_dir, reference, item_id="momotaro_seed")
 
 
 class TestVerifyPipeline(unittest.TestCase):
@@ -944,6 +1040,76 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
             self.assertIn("p100:result_status_not_done", checks["orchestration.supervisor_results"]["message"])
 
+    def test_check_orchestration_fails_when_required_artifact_is_missing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0094"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p100")
+            (run_dir / "research.md").unlink()
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
+            self.assertIn("p100:required_artifact_not_found:research.md", checks["orchestration.supervisor_results"]["message"])
+
+    def test_check_orchestration_fails_when_completed_slot_is_outside_bucket(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0095"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p100")
+            result_path = run_dir / "logs" / "orchestration" / "p100.supervisor_result.json"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload["completed_slots"] = ["p330"]
+            result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
+            self.assertIn("p100:completed_slots_outside_bucket", checks["orchestration.supervisor_results"]["message"])
+
+    def test_check_orchestration_fails_when_completed_slot_is_not_terminal_in_state(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0096"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p100")
+            append_state_snapshot(run_dir / "state.txt", {"slot.p130.status": "pending"})
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
+            self.assertIn("p100:completed_slots_not_terminal", checks["orchestration.supervisor_results"]["message"])
+
+    def test_check_orchestration_fails_when_result_state_key_mismatches_state(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0097"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p100")
+            result_path = run_dir / "logs" / "orchestration" / "p100.supervisor_result.json"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload["state_keys"]["slot.p130.status"] = "awaiting_approval"
+            result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_orchestration(run_dir, stage_target="p130")
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertFalse(checks["orchestration.supervisor_results"]["passed"])
+            self.assertIn("p100:state_key_mismatch:slot.p130.status", checks["orchestration.supervisor_results"]["message"])
+
     def test_check_orchestration_only_requires_buckets_up_to_stage_target(self) -> None:
         import tempfile
 
@@ -1016,6 +1182,7 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertTrue(checks["asset.review_approved"])
             self.assertTrue(checks["asset.request_metadata"])
             self.assertTrue(checks["asset.request_prompt_no_production_meta"])
+            self.assertTrue(checks["asset.generation_provenance_app_server"])
             self.assertTrue(checks["asset.visual_not_vector_like"])
 
     def test_check_asset_rejects_vector_like_generated_asset_output(self) -> None:
@@ -1051,8 +1218,33 @@ class TestVerifyPipeline(unittest.TestCase):
 
             self.assertTrue(checks["image.visual_not_vector_like"])
             self.assertTrue(checks["image.references_not_vector_like"])
+            self.assertTrue(checks["image.generation_provenance_app_server"])
             self.assertTrue(checks["image.request_lane_consistency"])
             self.assertNotIn("image_regeneration_plan", stage["details"])
+
+    def test_check_image_rejects_local_raster_provenance_even_when_png_is_complex(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0607"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+            (run_dir / "logs" / "image_generation_prompts.jsonl").unlink()
+            _append_app_server_image_provenance(
+                run_dir,
+                "assets/scenes/scene10.png",
+                item_id="scene10_cut1",
+                source="local_raster_generation_after_app_server_permission_failure",
+            )
+            _append_app_server_image_provenance(run_dir, "assets/characters/momotaro_seed.png", item_id="momotaro_seed")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.generation_provenance_app_server"])
+            self.assertIn("local raster fallback", "\n".join(stage["details"]["image_generation_provenance_failures"]))
 
     def test_check_image_rejects_no_reference_standard_lane(self) -> None:
         import tempfile

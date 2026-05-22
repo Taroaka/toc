@@ -1,8 +1,10 @@
-# scene単体: 動画マニフェストテンプレ
+# scene単体: 動画マニフェストテンプレ（改善版）
 
 このテンプレは `output/<topic>_<timestamp>/scenes/sceneXX/video_manifest.md` 用。
+scene 単体 run でも、p400 の cinematic scene contract → p600 still → p800 motion の責務を崩さない。
 
 ```yaml
+manifest_phase: "production"
 video_metadata:
   topic: "<topic>"
   source_run: "output/<topic>_<timestamp>/"
@@ -13,171 +15,176 @@ video_metadata:
   resolution: "1080x1920"
 
 assets:
+  character_bible: []
   style_guide:
-    visual_style: "tbd"
+    visual_style: "実写映画調、自然な映画照明、実物セット感"
     reference_images: []
-
-  # 主役級アイテム / 舞台装置（任意だが推奨）
+    forbidden:
+      - "画面内テキスト"
+      - "字幕"
+      - "ウォーターマーク"
+      - "ロゴ"
+      - "アニメ/漫画/イラスト調"
   object_bible: []
-  # - object_id: "tbd_setpiece"
-  #   kind: "setpiece"  # setpiece|artifact|phenomenon
-  #   reference_images:
-  #     - "assets/objects/tbd_setpiece.png"
-  #   fixed_prompts:
-  #     - "材質/構造/機構の不変条件"
-  #     - "文字/看板/銘板なし。形/光/動きで見せる"
-  #   cinematic:
-  #     role: "映画での役割"
-  #     visual_takeaways:
-  #       - "映像だけで伝えるべき情報"
-  #     spectacle_details:
-  #       - "見せ場ディテール"
+  location_bible: []
+
+human_change_requests: []
 
 scenes:
   - scene_id: 1
     timestamp: "00:00-00:30"
-    # カット設計ルール（推奨）:
-    # - 1カット = 1ナレーション
-    # - cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
-    # - target_duration_seconds / 12 を切り上げたカット数も下回らない。scene直下の image_generation だけで済ませない。
-    # - メインカット（最低1つ）: 5–15秒（ナレーションの実秒ベース）
-    # - サブカット（最低1つ）: 3–15秒（短尺3–4秒はサブのみ。単一カットのナレーションで3秒は使わない）
+    scene_intent:
+      importance: "medium"
+      target_duration_seconds: 30
+      estimated_duration_seconds: 30
+      story_purpose: "この scene が物語全体で担う役割"
+      dramatic_question: "この scene の間、観客が追う問い"
+      scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+      value_shift:
+        from: "開始時の状態"
+        to: "終了時の状態"
+        visible_evidence:
+          - "画面だけで変化が読める証拠"
+      causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
+      audience_information: []
+      withheld_information: []
+      reveal_constraints: []
+      affect_transition: "観客感情の変化"
+      visual_thesis: "この scene を代表する映画的な一枚絵"
+      handoff_to_next_scene: "terminal_resolution または次sceneへのアンカー"
+      production_risks: []
+      handoff_notes:
+        p500_asset: []
+        p600_image: []
+        p700_narration: []
+        p800_video: []
+      coverage_review:
+        audience_information_covered: false
+        visualizable_action_covered: false
+        value_shift_visible: false
+        causal_turn_visible: false
+        next_scene_connection_checked: false
+
+    # カット設計ルール:
+    # - 1カット = 1意図。
+    # - production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
+    # - target_duration_seconds / 12 を切り上げたカット数を下回らない。
     cuts:
       - cut_id: 1
-        cut_role: "main"  # main|sub
+        cut_role: "main"
+        cut_status: "active"
+        scene_contract:
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          target_beat: "この cut で伝える1つのこと"
+          screen_question: "観客が画面から読む問い"
+          dramatic_job: "scene全体のどこを担当するか"
+          visual_beat: "画として何が見えるか"
+          first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          motion_brief: "still から自然に始まる動き"
+          must_show: []
+          must_avoid: []
+          done_when: []
         image_generation:
-          # 新規の静止画は、連続性アンカーを作る cut だけに集中させる。
-          # それ以外は、既存の参照画像や直前 cut の anchor frame を再利用してよい。
-          # 後段動画の first frame 候補として設計するが、`最初の1フレーム` /
-          # `1フレーム目` / `first frame` は prompt 本文に入れない。
-          # その情報は prompt_authoring_context などの非APIメタデータにだけ残す。
-          # review metadata は image_generation.review 側で管理する:
-          # contract:
-          #   target_focus: "character"
-          #   must_include: []
-          #   must_avoid: []
-          #   done_when: []
-          # review:
-          #   agent_review_ok: true
-          #   agent_review_reason_keys: []
-          #   agent_review_reason_messages: []
-          #   rubric_scores: {}
-          #   overall_score: 0.0
-          #   human_review_ok: false
-          #   human_review_reason: ""
-          # false reason は修正対象を示し、fix 後に subagent が true へ戻す。
-          # required block:
-          # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
-          # 1 つでも欠けていれば subagent review は false にする。
-          # p500/p600 image provider は codex_builtin_image 固定。
-          # no-reference の entry だけ実行時に `execution_lane=bootstrap_builtin` として扱う。
-          # tool: "codex_builtin_image"  # standard repo image provider (gpt-image-2 via Codex app-server)
           tool: "codex_builtin_image"
-          character_ids: ["character_id_here"]  # Use [] for B-roll scenes with no characters visible
-          character_variant_ids: []  # Optional: pick a specific state/time variant for the active character(s)
-          object_ids: []  # Use [] when no item / setpiece anchor is needed
-          object_variant_ids: []  # Optional: pick a specific object/setpiece variant when needed
+          character_ids: []
+          character_variant_ids: []
+          object_ids: []
+          object_variant_ids: []
+          location_ids: []
+          location_variant_ids: []
+          applied_request_ids: []
+          prompt_authoring_context:
+            image_role: "video_first_frame_candidate"
+            first_frame_question: "この動画がこの静止画から動き出すなら、冒頭で何が見えているべきか"
+            api_prompt_policy: "do_not_include_authoring_context"
+          contract:
+            target_focus: "character|relationship|setpiece|blocking|environment"
+            must_include: []
+            must_avoid: []
+            done_when: []
+          review:
+            agent_review_ok: false
+            agent_review_reason_keys: []
+            agent_review_reason_messages: []
+            rubric_scores: {}
+            overall_score: 0.0
+            human_review_ok: false
+            human_review_reason: ""
           prompt: |
             [全体 / 不変条件]
-            TODO: スタイル/POVの不変条件。画面内テキストなし、字幕なし、ウォーターマークなし。
+            実写映画調、自然な映画照明、実物セット感。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
 
             [登場人物]
-            TODO: 誰が映るか + 参照一致ルール（必要なら）。
+            TODO: 映る人物を具体化する。人物が映らない場合は「人物なし。背景人物も入れない」と書く。
+
+            [小道具 / 舞台装置]
+            TODO: 必須の小道具・舞台装置・場所アンカーを書く。無い場合も「この場面で主役級の小道具はない」と明示する。
 
             [シーン]
-            TODO: 舞台 + 見せ場 + 構図（前景/中景/遠景）。
+            舞台: TODO。
+            主役: TODO。
+            前景: TODO。
+            中景: TODO。
+            背景: TODO。
+            光: TODO。
+            構図: TODO。
 
             [連続性]
-            TODO: 前と一致 / 次への仕込み。
+            TODO: この画像だけで読み取れる人物状態・場所・進行方向・次へのアンカーを書く。前cutの記憶に依存しない。
 
             [禁止]
-            TODO: 禁止（例: 文字/ウォーターマーク/ロゴ + 望まないスタイル）。
+            画面内テキスト、字幕、ウォーターマーク、ロゴ、アニメ調、漫画調、イラスト調、人物や手の崩れ、reveal早出し。
           output: "assets/scenes/scene1_cut1_base.png"
           iterations: 4
           selected: null
+        still_image_plan:
+          mode: "generate_still|reuse_anchor|no_dedicated_still"
+          generation_status: "missing|created|recreate"
+          rationale: ""
+          source: ""
         video_generation:
-          # tool: "google_veo_3_1"  # disabled; routed to Kling for safety
-          # tool: "kling_3_0"
-          # tool: "kling_3_0_omni"
-          # tool: "seedance"       # BytePlus ModelArk Seedance (video; see ARK_* env)
           tool: "kling_3_0"
-          duration_seconds: 15
+          duration_seconds: 10
           input_image: "assets/scenes/scene1_cut1_base.png"
-          motion_prompt: "TODO: カメラ/動き"
+          input_asset_id: "scene1_cut1_base"
+          first_frame_asset_id: ""
+          last_frame_asset_id: ""
+          reference_asset_ids: []
+          motion_prompt: |
+            cut_function: <scene_contract.cut_function>
+            camera: TODO
+            subject_motion: TODO
+            environment_motion: TODO
+            emotional_change: TODO
+            end_state: TODO
+            avoid: 新キャラ追加、重要道具の追加、reveal早出し、画面内テキスト、過剰なズーム。
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
           narration:
             contract:
-              target_function: ""
+              target_function: "setup|fact|emotion|contrast|aftertaste|silent"
               must_cover: []
               must_avoid: []
               done_when: []
-            # review metadata は audio.narration.review に保持する。
-            text: "TODO: ナレーション（メイン=5–15秒。複数カットなら Part 1/2 等）"
+            text: "TODO: ナレーション。silent cut の場合は空文字にし、tool: silent と silence_contract を持つ。"
+            tts_text: "TODO"
             tool: "elevenlabs"
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false
-      - cut_id: 2
-        cut_role: "sub"  # main|sub
-        image_generation:
-          # 新規生成を前提にしない。必要なときだけ anchor を更新する。
-          # required block:
-          # [全体 / 不変条件] / [登場人物] / [小道具 / 舞台装置] / [シーン] / [連続性] / [禁止]
-          tool: "codex_builtin_image"
-          character_ids: ["character_id_here"]
-          character_variant_ids: []
-          object_ids: []
-          object_variant_ids: []
-          prompt: |
-            [全体 / 不変条件]
-            TODO: 前と同じスタイル/禁止。画面内テキストなし。
-
-            [登場人物]
-            TODO: 誰が映るか + 参照一致ルール（必要なら）。
-
-            [小道具 / 舞台装置]
-            TODO: 必須の小道具 / 舞台装置（無ければ空 block を残す）。
-
-            [シーン]
-            TODO: 続き（結論/根拠/締め）。
-
-            [連続性]
-            TODO: 前 cut / 次 cut とどうつなぐか。
-
-            [禁止]
-            TODO: 禁止（例: 文字/ウォーターマーク/ロゴ + 望まないスタイル）。
-          output: "assets/scenes/scene1_cut2_base.png"
-          iterations: 4
-          selected: null
-        video_generation:
-          tool: "kling_3_0"
-          duration_seconds: 15
-          input_image: "assets/scenes/scene1_cut2_base.png"
-          motion_prompt: "TODO: カメラ/動き"
-          output: "assets/scenes/scene1_cut2_video.mp4"
-        audio:
-          narration:
-            contract:
-              target_function: ""
-              must_cover: []
-              must_avoid: []
-              done_when: []
-            # review metadata は audio.narration.review に保持する。
-            text: "TODO: ナレーション（サブ=3–15秒。短尺3–4秒はサブカットとしてのみ使用）"
-            tool: "elevenlabs"
-            output: "assets/audio/scene1_cut2_narration.mp3"
-            normalize_to_scene_duration: false
-    text_overlay:
-      main_text: "<main_text>"
-      sub_text: "<question>"
 
 final_output:
   video_file: "video.mp4"
   thumbnail: "thumb.png"
 
 quality_check:
+  review_contract:
+    target_outcome: "publishable_short|draft_review|internal_preview"
+    must_have_artifacts: ["video.mp4"]
+    must_avoid: []
+    done_when: []
+  scene_value_shift_visible: false
+  causal_turn_visible: false
   visual_consistency: false
   audio_sync: false
-  subtitle_readable: false
   aspect_ratio_correct: true
 ```

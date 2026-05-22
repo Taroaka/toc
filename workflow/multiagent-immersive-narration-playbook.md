@@ -56,14 +56,16 @@ python scripts/ai/merge-immersive-narration.py \
 
 ## Phase 2.5: Narration review（直列）
 
-統合後に subagent review を実行し、`audio.narration.review` を source manifest に書き戻す:
+統合後に p720 L3 review を実行し、`audio.narration.review` を source manifest に書き戻し、5 critic + 1 aggregator artifact を残す:
 
 ```bash
-python scripts/review-narration-text-quality.py \
-  --manifest "output/<topic>_<timestamp>_immersive/video_manifest.md"
+python scripts/run-p720-narration-l3.py \
+  --run-dir "output/<topic>_<timestamp>_immersive" \
+  --fail-on-findings
 ```
 
 - finding が出た scene/cut は `agent_review_ok: false` と reason key を持つ
+- L3 artifact は `logs/eval/narration/round_01/critic_*.md` と `logs/eval/narration/round_01/aggregated_review.md` に残る
 - contract 未定義や must cover 未達も finding になる
 - fix は source manifest 側へ反映し、再 review してから次へ進む
 - `human_review_ok: true` は例外許容の記録であり、subagent finding 自体は消さない

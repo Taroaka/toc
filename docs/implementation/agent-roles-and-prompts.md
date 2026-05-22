@@ -168,7 +168,17 @@
 - 入力: `scenes/sceneXX/evidence.md`
 - 出力: `scenes/sceneXX/script.md`（30–60s）
 - 品質ゲート: シーン必要性（ストーリー前進 / 矛盾・停滞なし / 登場人物の不可欠性 / テーマ整合）を自己点検して出力末尾に記録
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 - Claude Code 互換 agent 定義: `.claude/agents/scene-scriptwriter.md`
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+- エージェント定義: `.claude/agents/scene-scriptwriter.md`
+>>>>>>> theirs
 
 ## プロンプト構成
 

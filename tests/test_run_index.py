@@ -92,18 +92,58 @@ class TestRunIndex(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             progress_path = run_dir / "logs" / "orchestration" / "l2_supervisor_progress.md"
+            result_path = run_dir / "logs" / "orchestration" / "p600.supervisor_result.json"
+            result_path.write_text('{"bucket":"p600","status":"done"}\n', encoding="utf-8")
+
+            returned = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "record-l2-supervisor-progress.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--bucket",
+                    "p600",
+                    "--event",
+                    "returned",
+                    "--stop-slot",
+                    "p680",
+                    "--result",
+                    "logs/orchestration/p600.supervisor_result.json",
+                    "--note",
+                    "scene/image supervisor completed",
+                    "--at",
+                    "2099-01-01T00:01:00+09:00",
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(returned.returncode, 0, msg=returned.stderr)
             progress_text = progress_path.read_text(encoding="utf-8")
             self.assertIn("Only L2 P-Bucket Supervisor invocations are recorded here", progress_text)
             self.assertIn("| 2099-01-01T00:00:00+09:00 | p600 | p600 P-Bucket Supervisor | invoked | p680 | - | scene/image supervisor started |", progress_text)
+            self.assertIn(
+                "| 2099-01-01T00:01:00+09:00 | p600 | p600 P-Bucket Supervisor | returned | p680 | logs/orchestration/p600.supervisor_result.json | scene/image supervisor completed |",
+                progress_text,
+            )
             state_text = (run_dir / "state.txt").read_text(encoding="utf-8")
-            self.assertIn("orchestration.p600.supervisor.call_status=invoked", state_text)
+            self.assertIn("orchestration.p600.supervisor.call_status=returned", state_text)
+            self.assertIn("orchestration.p600.supervisor.status=done", state_text)
+            self.assertIn("orchestration.p600.supervisor.finished_at=2099-01-01T00:01:00+09:00", state_text)
+            self.assertIn("orchestration.p600.supervisor.result=logs/orchestration/p600.supervisor_result.json", state_text)
             self.assertIn("orchestration.p600.supervisor.progress=logs/orchestration/l2_supervisor_progress.md", state_text)
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
             self.assertIn("[log] `logs/orchestration/l2_supervisor_progress.md`", index_text)
+            self.assertIn("[log] `logs/orchestration/p600.supervisor_result.json`", index_text)
 
             entry = classify_run_file("logs/orchestration/l2_supervisor_progress.md", run_dir=run_dir)
             self.assertEqual(entry.slot, "p010")
             self.assertEqual(entry.role, "log")
+            result_entry = classify_run_file("logs/orchestration/p600.supervisor_result.json", run_dir=run_dir)
+            self.assertEqual(result_entry.slot, "p600")
+            self.assertEqual(result_entry.role, "log")
 
     def test_classify_scene_series_nested_files_with_scene_subrun_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_run_index_scene_series_") as td:

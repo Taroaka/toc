@@ -41,7 +41,7 @@ def reject_local_raster_image_result(result: ImageGenerationResult, *, item_id: 
 class CodexAppServerClient:
     def __init__(self, *, cwd: Path, codex_bin: str = "codex") -> None:
         self.cwd = cwd
-        self.codex_bin = codex_bin
+        self.codex_bin = os.environ.get("TOC_CODEX_BIN", "").strip() or codex_bin
         self.proc: asyncio.subprocess.Process | None = None
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}

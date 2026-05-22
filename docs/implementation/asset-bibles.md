@@ -7,6 +7,7 @@
 - 書籍/絵本でディテールが浅いまま語られてきた舞台装置を、**予算無限の実写映画**として成立する密度に引き上げる
 - 物語のメイン筋に直接関係しない“ショー/仕掛け/誘惑”も、映像の魅力として積極的に設計し、sceneごとの思いつきにしない
 - 文字で説明せず、**映像だけで情報が伝わる**ようにする（看板/刻印/字幕に頼らない）
+- asset を単なる「きれいな物」ではなく、scene の pressure / turn / payoff / handoff を担う **劇的装置**として固定する
 
 ---
 
@@ -94,13 +95,13 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 - やること: 生成済み asset が p600 の continuity anchor として使えるか確認する。
 - review 観点: character の顔・髪・年齢感・衣装・3 面図、object の silhouette / material / scale、location の spatial identity / major structure / lighting、variant の同一性、`existing_outputs[]`、`review.status`、manifest status。
-- gate: 生成画像そのものを確認し、ベクター風・フラットな塗り・低情報量の PNG/JPEG は p600 に渡さず p560 へ戻す。`verify-pipeline.py` の `asset.visual_not_vector_like` が失敗した場合も同じ扱い。
+- gate: 生成画像そのものを確認し、実写系（photorealistic / cinematic / live-action）ではない画像、ベクター風・フラットな塗り・低情報量の PNG/JPEG は p600 に渡さず p560 へ戻す。ローカル手続き生成の疑似ラスター PNG は、見た目が複雑でも canonical asset として採用しない。`verify-pipeline.py` の `asset.generation_provenance_app_server` または `asset.visual_not_vector_like` が失敗した場合も同じ扱い。
 - ゴール: p600 の scene / cut prompt が参照できる approved asset path が揃い、未承認・不足・差し替え対象が明示されていること。
 
 #### p660 scene image generation gate
 
 - p600 の scene still も、出力ファイルの拡張子だけでなく実画像を開いて検査する。
-- `verify-pipeline.py` の `image.visual_not_vector_like` が失敗し、`image.references_not_vector_like` が通っている場合は、参照画像は使えるため p600 scene image を再生成する。
+- `verify-pipeline.py` の `image.generation_provenance_app_server` または `image.visual_not_vector_like` が失敗し、`image.references_not_vector_like` が通っている場合は、参照画像は使えるため p600 scene image を再生成する。権限エラーや app-server 失敗時にローカル疑似ラスターを置いて通過扱いにしない。
 - `image.references_not_vector_like` が失敗した場合は、p600 の再生成だけでは直らない。`image_regeneration_plan` に従い、該当する p500/p560 reference asset を先に再生成し、ベクター風でなくなったことを確認してから p600 をやり直す。
 - この gate は PNG/JPEG/WebP の拡張子判定ではなく、Pillow で読める raster の画素情報量、thumbnail color diversity、bytes per megapixel を使う。
 
@@ -190,6 +191,47 @@ review で最低限確認する項目:
 
 ---
 
+## 2.5) scene から asset を逆算する
+
+asset は「作ると便利な素材」ではなく、scene の劇的機能を安定させるための continuity anchor である。
+p500 では `script.md` の `scene_intent` と `cut_blueprint` を読み、次の観点で asset 化を判断する。
+
+### asset 化すべきもの
+
+- 複数 scene / cut で同一性が必要な人物、衣装、身体状態。
+- scene の `causal_turn` を担う小道具。例: 鍵、箱、手紙、傷、証拠品。
+- scene の `visual_thesis` を支える場所。例: 灰の台所、王宮の階段、海底宮殿の門。
+- spectacle の核になる舞台装置。例: 開く門、呼吸する封印、群泳する回廊。
+- p800 motion で変化するが、形状を固定したい物。例: 開く前の箱、閉じた扉、崩れる前の橋。
+
+### asset 化しないもの
+
+- 単発 cut のカメラ差分。
+- 人物の一時的な手の位置や表情だけの差分。
+- 物語上の同一性が不要な群衆や背景の一部。
+- narration の比喩だけで、画面に直接出ない概念。
+
+### asset entry に追加推奨する cinematic field
+
+```yaml
+cinematic:
+  role: "scene で担う劇的役割。誘惑/境界/証拠/代償/帰還など"
+  scene_usage:
+    first_appearance: "どの scene/cut で初めて見せるか"
+    reveal_stage: "concealed|hinted|featured|transformed|aftermath"
+    pressure_function: "観客や人物にどんな圧力をかけるか"
+    payoff_function: "どんな視覚報酬または意味の回収になるか"
+  visual_takeaways: []
+  spectacle_details: []
+  continuity_risks: []
+```
+
+### staged reveal の原則
+
+重要 asset は、初出で全部見せない。
+`hinted → featured → transformed → aftermath` のように、scene 間で情報量を増やすと映画的な期待が生まれる。
+ただし reveal 順序は `script.md.scene_intent.reveal_constraints` に従い、asset prompt 側で早出ししない。
+
 ## 3) 書くべきディテール（設計観点）
 
 各 object について、少なくとも以下を一度設計して固定する:
@@ -221,17 +263,17 @@ assets:
       kind: "setpiece"
       reference_images: ["assets/objects/ryugu_palace_exterior.png", "assets/objects/ryugu_palace_hall.png"]
       fixed_prompts:
-        - "Ryugu Palace is built from living coral, mother-of-pearl, and lacquered bronze ribs; wet sheen; realistic scale"
-        - "Interior features suspended bubble-lanterns and bioluminescent coral chandeliers; no text signage"
-        - "Showmanship: distant aquarium-like grand atrium with swirling fish schools and controlled currents"
+        - "竜宮城は生きた珊瑚、真珠層、漆を塗った青銅の骨組みでできている。濡れた艶があり、実写の巨大建築として縮尺が分かる"
+        - "内部には泡の灯籠、発光する珊瑚のシャンデリア、ゆっくり制御された潮流がある。看板や刻印で説明しない"
+        - "見せ場: 遠くの大吹き抜けで魚群が渦を作り、水中の光が建築を横切る"
       cinematic:
-        role: "Threshold + temptation; a paradise that feels too perfect to leave"
+        role: "境界 + 誘惑。完璧すぎて帰る意思を弱める楽園"
         visual_takeaways:
-          - "This place is alive; architecture and ocean are one organism"
-          - "Time feels different here (slow drift, impossible calm)"
+          - "この場所は生きている。建築と海が一つの生物のように感じられる"
+          - "時間の流れが現実と違う。静かで、遅く、危うい"
         spectacle_details:
-          - "Hidden coral doors open with water pressure; reveal a moving underwater light show"
-          - "Ceiling ripples like a calm sea surface, casting animated caustics"
+          - "水圧で隠し珊瑚扉が開き、奥の水中光ショーが現れる"
+          - "天井が穏やかな水面のように揺れ、壁に光の波紋を落とす"
 ```
 
 ### 4.2 玉手箱（`tamatebako` / artifact）
@@ -250,15 +292,15 @@ assets:
       kind: "artifact"
       reference_images: ["assets/objects/tamatebako_closeup.png"]
       fixed_prompts:
-        - "Tamatebako is an ornate lacquered box with gold inlay and shell mosaics; hyper-detailed craftsmanship"
-        - "Temptation mechanism: seals shimmer and subtly respond to proximity; no engraved letters"
-        - "Opening consequence is hinted visually (hairline cracks of light, drifting ash motes trapped under the lid)"
+        - "玉手箱は黒漆と金細工、貝殻のモザイクで作られた精密な箱。小さいが重く、工芸の痕跡が見える"
+        - "誘惑の仕組み: 封印が近づく手に反応してかすかに光る。文字や刻印で説明しない"
+        - "開封の代償は、蓋の隙間から漏れる細い光、閉じ込められた灰の粒、表面の微細なひびで暗示する"
       cinematic:
-        role: "Gift + taboo; the irresistible wrong choice"
+        role: "贈与 + 禁忌 + 代償。抗いがたい誤った選択"
         visual_takeaways:
-          - "You can feel the rule: do not open, yet it begs to be opened"
+          - "開けてはいけないというルールと、開けたくなる誘惑が同時に伝わる"
         spectacle_details:
-          - "The lid boundary emits slow, breathing light like a living seal"
+          - "蓋の境界が、生きた封印のようにゆっくり呼吸する光を放つ"
 ```
 
 ---

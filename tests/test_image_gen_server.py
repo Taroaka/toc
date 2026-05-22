@@ -322,6 +322,22 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(payload["stop_target"], "p650")
         self.assertIn("Run the canonical p100-p650 frontend-review workflow in one skill invocation.", command)
 
+    def test_create_run_error_message_preserves_app_server_detail(self) -> None:
+        message = image_gen_app._create_run_error_message(
+            RuntimeError("stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)")
+        )
+
+        self.assertIn("画像生成通信が途中で切断", message)
+        self.assertIn("stream disconnected", message)
+
+    def test_create_run_error_message_identifies_readonly_codex_state(self) -> None:
+        message = image_gen_app._create_run_error_message(
+            RuntimeError("failed to initialize sqlite state runtime under /Users/example/.codex: attempt to write a readonly database")
+        )
+
+        self.assertIn("状態DBを初期化できませんでした", message)
+        self.assertIn("readonly database", message)
+
     def test_validate_created_run_requires_scaffold_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -501,6 +517,8 @@ class ImageGenParserTests(unittest.TestCase):
     def test_run_toc_skill_helper_requires_visible_skill_exact_path_when_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            (root / "output" / run_id).mkdir(parents=True)
             skill_path = root / ".codex" / "skills" / "toc-immersive-runner" / "SKILL.md"
             skill_path.parent.mkdir(parents=True)
             skill_path.write_text("---\nname: toc-immersive-runner\n---\n", encoding="utf-8")
@@ -527,11 +545,13 @@ class ImageGenParserTests(unittest.TestCase):
                     patch("server.image_gen_app.CodexAppServerClient", FakeClient),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "path mismatch"):
-                        asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="資料", run_id="桃太郎_20260509_1200"))
+                        asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="資料", run_id=run_id))
 
     def test_run_toc_skill_helper_allows_unsupported_skills_list_and_runs_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            (root / "output" / run_id).mkdir(parents=True)
             skill_path = root / ".codex" / "skills" / "toc-immersive-runner" / "SKILL.md"
             skill_path.parent.mkdir(parents=True)
             skill_path.write_text("---\nname: toc-immersive-runner\n---\n", encoding="utf-8")
@@ -559,7 +579,7 @@ class ImageGenParserTests(unittest.TestCase):
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.CodexAppServerClient", FakeClient),
                 ):
-                    asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="鬼ヶ島の資料", run_id="桃太郎_20260509_1200"))
+                    asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="鬼ヶ島の資料", run_id=run_id))
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["skill_path"], skill_path)
@@ -833,6 +853,12 @@ class ImageGenParserTests(unittest.TestCase):
     def test_default_app_server_model_can_be_overridden(self) -> None:
         with patch.dict(os.environ, {"TOC_CODEX_APP_SERVER_MODEL": "gpt-5.4"}):
             self.assertEqual(default_app_server_model(), "gpt-5.4")
+
+    def test_codex_bin_can_be_overridden_for_app_server(self) -> None:
+        with patch.dict(os.environ, {"TOC_CODEX_BIN": "/opt/homebrew/bin/codex"}):
+            client = CodexAppServerClient(cwd=Path("/tmp"))
+
+        self.assertEqual(client.codex_bin, "/opt/homebrew/bin/codex")
 
     def test_run_turn_raises_on_failed_turn(self) -> None:
         async def run() -> None:
@@ -1945,8 +1971,96 @@ base b prompt
         self.assertIn('"prompt": "prompt"', log_payload)
         self.assertIn('"promptSha256"', log_payload)
         self.assertIn('"transcript"', log_payload)
+        self.assertIn('"destinationDetails"', log_payload)
+        self.assertIn('"referenceDetails"', log_payload)
+        self.assertIn('"referenceCount": 0', log_payload)
         self.assertTrue(prompt_log_exists)
         self.assertIn('"prompt": "prompt"', prompt_log_payload)
+
+    def test_create_flow_logs_local_raster_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    return ImageGenerationResult(
+                        saved_path=Path("/tmp/local.png"),
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="local_raster_generation_after_app_server_permission_failure",
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="scene1_cut1",
+                kind="scene",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/scenes/scene1.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+            ):
+                with self.assertRaisesRegex(CodexAppServerError, "unsupported local raster fallback"):
+                    asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
+
+            prompt_log = run_dir / "logs" / "image_generation_prompts.jsonl"
+            payload = prompt_log.read_text(encoding="utf-8")
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertIn("local_raster_generation_after_app_server_permission_failure", payload)
+        self.assertIn("unsupported local raster fallback", payload)
+        self.assertIn('"destinationDetails"', payload)
+        self.assertIn('"referenceCount": 0', payload)
+        self.assertIn('"operation": "request_item_generation"', event_payload)
+        self.assertIn('"status": "failed"', event_payload)
+
+    def test_prompt_regeneration_failure_writes_app_server_event_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+
+            class FakeClient:
+                async def regenerate_prompt(self, **_kwargs):
+                    raise CodexAppServerError("prompt regeneration failed")
+
+            with self.assertRaisesRegex(CodexAppServerError, "prompt regeneration failed"):
+                asyncio.run(
+                    image_gen_app._regenerate_prompt_with_log(
+                        FakeClient(),  # type: ignore[arg-type]
+                        run_dir=run_dir,
+                        item={"id": "scene1"},
+                        target="scene",
+                        instruction="rewrite",
+                        setting_content="setting",
+                        operation="prompt_regeneration",
+                    )
+                )
+
+            events = run_dir / "logs" / "app_server" / "events.jsonl"
+            payload = events.read_text(encoding="utf-8")
+
+        self.assertIn('"operation": "prompt_regeneration"', payload)
+        self.assertIn('"status": "failed"', payload)
+        self.assertIn("prompt regeneration failed", payload)
 
     def test_prompt_settings_api_reads_and_writes_existing_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

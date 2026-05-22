@@ -591,6 +591,22 @@ def _run_relative_or_string(run_dir: Path, path: Path) -> str:
         return str(path)
 
 
+def _path_debug_details(run_dir: Path, path: Path) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "path": _run_relative_or_string(run_dir, path),
+        "exists": path.exists(),
+        "isFile": path.is_file(),
+    }
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        details["statError"] = str(exc)
+        return details
+    details["sizeBytes"] = stat.st_size
+    details["mtimeMs"] = int(stat.st_mtime * 1000)
+    return details
+
+
 def write_app_server_image_debug_log(
     *,
     run_dir: Path,
@@ -610,11 +626,15 @@ def write_app_server_image_debug_log(
     log_path = log_dir / f"{stamp}_{time.time_ns()}_{safe_id}_candidate_{index:02d}.json"
     transcript = getattr(result, "transcript", []) if result is not None else []
     payload = {
+        "loggedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "itemId": item_id,
         "candidateIndex": index,
         "kind": kind,
         "destination": _run_relative_or_string(run_dir, destination),
+        "destinationDetails": _path_debug_details(run_dir, destination),
         "references": [_run_relative_or_string(run_dir, reference) for reference in references],
+        "referenceDetails": [_path_debug_details(run_dir, reference) for reference in references],
+        "referenceCount": len(references),
         "prompt": prompt,
         "promptLength": len(prompt or ""),
         "promptSha256": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest() if prompt is not None else None,
@@ -627,6 +647,41 @@ def write_app_server_image_debug_log(
     }
     log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as index_file:
+        index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")
+    return log_path
+
+
+def write_app_server_debug_log(
+    *,
+    run_dir: Path,
+    operation: str,
+    status: str,
+    item_id: str | None = None,
+    request: dict[str, Any] | None = None,
+    response: dict[str, Any] | None = None,
+    transcript: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+) -> Path:
+    safe_operation = re.sub(r"[^a-zA-Z0-9_.-]+", "_", operation).strip("_") or "operation"
+    log_dir = run_dir / "logs" / "app_server" / safe_operation
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id or "operation").strip("_") or "operation"
+    log_path = log_dir / f"{stamp}_{time.time_ns()}_{safe_id}.json"
+    payload = {
+        "loggedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "operation": operation,
+        "itemId": item_id,
+        "status": status,
+        "request": request or {},
+        "response": response or {},
+        "transcript": transcript or [],
+        "error": error,
+    }
+    log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    index_path = run_dir / "logs" / "app_server" / "events.jsonl"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with index_path.open("a", encoding="utf-8") as index_file:
         index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")

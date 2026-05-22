@@ -2754,8 +2754,8 @@ function App() {
       setCreateRunStatus('ToCを作成中');
 
       let latest = created;
-      for (let attempt = 0; attempt < 900; attempt += 1) {
-        await sleep(2000);
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await sleep(60000);
         latest = await jsonFetch<CreateRunJob>(`/api/image-gen/runs/create/${encodeURIComponent(created.jobId)}`);
         if (latest.message) setCreateRunStatus(latest.message);
         if (latest.status === 'completed' || latest.status === 'failed') break;
@@ -2768,7 +2768,7 @@ function App() {
       await loadRunRequests(created.runId, viewKind);
     } catch (error) {
       console.error(error);
-      setCreateRunError('ToC作成に失敗しました');
+      setCreateRunError(error instanceof Error ? error.message : String(error));
       setCreateRunStatus('作成失敗');
       void loadRuns();
     } finally {

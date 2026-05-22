@@ -67,6 +67,7 @@ class TestReviewLoop(unittest.TestCase):
         self.assertEqual(updates["eval.story.loop.max_rounds"], "5")
         self.assertEqual(updates["eval.story.loop.final_report"], "story_review.md")
         self.assertEqual(stage_for_slot("p640"), "scene_implementation_judgment")
+        self.assertEqual(stage_for_slot("p720"), "narration")
         self.assertEqual(stage_for_slot("850"), "video_generation_review")
         self.assertEqual(stage_for_slot("p410b"), "scene_set")
         self.assertEqual(stage_for_slot("410c"), "scene_detail")
@@ -80,6 +81,8 @@ class TestReviewLoop(unittest.TestCase):
         self.assertEqual(REVIEW_LOOP_SPECS["scene_detail"].final_report, "scene_detail_review.md")
         self.assertEqual(REVIEW_LOOP_SPECS["cut_blueprint"].final_report, "cut_blueprint_review.md")
         self.assertEqual(REVIEW_LOOP_SPECS["production_readiness"].final_report, "production_readiness_review.md")
+        self.assertEqual(REVIEW_LOOP_SPECS["narration"].final_report, "narration_text_review.md")
+        self.assertEqual(REVIEW_LOOP_SPECS["narration"].source_artifacts, ("script.md", "video_manifest.md"))
 
     def test_aggregated_review_requires_five_critics(self) -> None:
         reports = [f"- status: changes_requested\n- note: critic {idx}" for idx in range(1, 6)]
@@ -230,6 +233,7 @@ class TestReviewLoop(unittest.TestCase):
         self.assertEqual(classify_run_file("logs/eval/scene_implementation_judgment/round_01/aggregated_review.md").slot, "p640")
         self.assertEqual(classify_run_file("logs/eval/video_generation_motion/round_01/aggregated_review.md").slot, "p820")
         self.assertEqual(classify_run_file("logs/eval/video_generation_review/round_01/aggregated_review.md").slot, "p850")
+        self.assertEqual(classify_run_file("logs/eval/narration/round_01/aggregated_review.md").slot, "p720")
 
     def test_run_index_classifies_review_loop_artifacts(self) -> None:
         entry = classify_run_file("logs/eval/story/round_01/aggregated_review.md")

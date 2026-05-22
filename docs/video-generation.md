@@ -177,6 +177,41 @@ Step 3: 品質確認
 
 **理由**: 動画生成は画像生成の10-100倍のコスト。静止画での事前検証が最も効率的。
 
+### 2.2.0 Scene-to-Clip 接続原則
+
+動画生成では、scene/cut の設計を motion prompt まで保つ。
+高品質な still があっても、motion prompt が cut の役割を理解していなければ、clip は「絵が動いただけ」になりやすい。
+
+原則:
+
+- p400 の `cut_blueprint.cut_function` を p800 の `motion_prompt` に反映する。
+  - `setup`: 空間を読ませる穏やかなカメラ。
+  - `pressure`: 距離、遮蔽物、視線、環境音で緊張を上げる。
+  - `threshold`: 手、足、扉、蓋、境界など「一歩手前」を動かす。
+  - `turn`: 新しい情報が見えるが、過剰に説明しない。
+  - `payoff`: 観客が待っていた視覚報酬を見せる。
+  - `reaction`: 変化が人物の表情/姿勢/沈黙に残る。
+  - `handoff`: 次 cut / scene へ向かう視線、音、方向、物を残す。
+- p600 still は action を完了させず、p800 motion が始まる余白を残す。
+- p800 motion は p600 still に無い人物・重要道具・新しい reveal を勝手に追加しない。
+- narration は motion の説明書ではない。映像で読めることを重複説明しすぎない。
+- first/last frame を使う場合は、scene の空間方向と人物状態が破綻しないようにする。
+
+motion prompt の最小構造:
+
+```yaml
+video_generation:
+  motion_prompt: |
+    cut_function: <setup|pressure|threshold|turn|payoff|reaction|handoff>
+    camera: <静止画から自然に始まるカメラ移動>
+    subject_motion: <人物/物の最小動作>
+    environment_motion: <光/風/水/群衆/煙など>
+    emotional_change: <動きで読ませる変化>
+    end_state: <次cutへつなぐ最後の状態>
+    avoid: <新キャラ追加、reveal早出し、過剰ズーム、文字>
+```
+
+
 ### 2.2.1 Human Review Change-Request Loop
 
 人間レビューは `approved|changes_requested` の二値だけで終わらせない。
@@ -285,6 +320,8 @@ stage 1 の原則:
   - subagent は生成候補、clip review、除外理由の下書きまでを担当し、採用判定と `video_manifest.md` 更新は担当 bucket の L2 supervisor が行う
   - 採用した subagent output は `subagent_trace` または `logs/review/` に残し、親会話だけにある判断を正本にしない
 - scene image prompt は、カット全体の出来事をそのまま描くのではなく、**その動画を始める最初の1フレーム**として妥当である必要がある
+- still は `cut_blueprint.cut_function` に対応して設計する。setup cut と turn cut では、同じ場所でも構図・距離・光の役割が違う
+- `first_frame_brief` と `motion_brief` が矛盾する場合は、p800 へ進まず p600 / p400 の設計へ戻す
 - `Aが話し、Bがうなずく` のような表現は、動画側で始まるべき動きを still 側で完了させやすいため避ける
 - 推奨は、抽象的に `動き出す直前` と書くのではなく、その場面の動きに応じて `まだ口を開く前`, `まだうなずき始めていない`, `差し出す直前`, `一歩目の体重移動の直前` のように具体化すること
 - `最初の1フレーム` / `1フレーム目` / `first frame` という制作メタ情報そのものは request 本文に入れない。これは p600 authoring / review の前提であり、画像生成 API に渡す意味がない

@@ -21,6 +21,11 @@ EVENT_TO_CALL_STATUS = {
     "blocked": "blocked",
     "failed": "failed",
 }
+EVENT_TO_SUPERVISOR_STATUS = {
+    "returned": "done",
+    "blocked": "blocked",
+    "failed": "failed",
+}
 
 
 def _escape_table_cell(value: str) -> str:
@@ -83,6 +88,9 @@ def build_state_updates(*, bucket: str, event: str, stop_slot: str, result: str,
     }
     if event == "invoked":
         updates[f"{prefix}.invoked_at"] = at
+    if event in EVENT_TO_SUPERVISOR_STATUS:
+        updates[f"{prefix}.status"] = EVENT_TO_SUPERVISOR_STATUS[event]
+        updates[f"{prefix}.finished_at"] = at
     if stop_slot:
         updates[f"{prefix}.stop_slot"] = stop_slot
     if result:
@@ -105,6 +113,8 @@ def main() -> int:
     run_dir = args.run_dir.resolve()
     at = args.at.strip() or now_iso()
     supervisor = args.supervisor.strip() or f"{args.bucket} P-Bucket Supervisor"
+    if args.event in EVENT_TO_SUPERVISOR_STATUS and not args.result.strip():
+        parser.error("--result is required for returned/blocked/failed events")
     progress = append_progress(
         run_dir=run_dir,
         bucket=args.bucket,
