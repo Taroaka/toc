@@ -144,12 +144,29 @@ class TestReviewLoop(unittest.TestCase):
             self.assertTrue((run_dir / critic_prompt_relpath("scene_set", 1, 1)).exists())
             scene_prompt = (run_dir / critic_prompt_relpath("scene_set", 1, 1)).read_text(encoding="utf-8")
             self.assertIn("visual_value.md", scene_prompt)
+            self.assertIn("critic_focus: scene_count_coverage", scene_prompt)
+            self.assertIn("maximal_meaningful", scene_prompt)
+            scene_aggregate_prompt = (run_dir / aggregator_prompt_relpath("scene_set", 1)).read_text(encoding="utf-8")
+            self.assertIn("scene_count_coverage", scene_aggregate_prompt)
+            self.assertIn("scene_count_gate", scene_aggregate_prompt)
             self.assertTrue((run_dir / critic_prompt_relpath("scene_detail", 1, 1)).exists())
             detail_prompt = (run_dir / critic_prompt_relpath("scene_detail", 1, 1)).read_text(encoding="utf-8")
             self.assertIn("5-10 minute video", detail_prompt)
             self.assertIn("4-15 seconds", detail_prompt)
             self.assertIn("next scene", detail_prompt)
+            self.assertIn("critic_focus: scene_detail_structure", detail_prompt)
             self.assertTrue((run_dir / critic_prompt_relpath("cut_blueprint", 1, 1)).exists())
+            cut_prompt = (run_dir / critic_prompt_relpath("cut_blueprint", 1, 1)).read_text(encoding="utf-8")
+            self.assertIn("critic_focus: cut_intent_isolation", cut_prompt)
+            self.assertIn("one intent", cut_prompt)
+            cut_aggregate_prompt = (run_dir / aggregator_prompt_relpath("cut_blueprint", 1)).read_text(encoding="utf-8")
+            self.assertIn("Cut Blueprint Gate", render_aggregated_review(
+                stage="cut_blueprint",
+                round_number=1,
+                critic_reports=["- critic_focus: cut_intent_isolation"] * REVIEW_LOOP_CRITIC_COUNT,
+                status="passed",
+            ))
+            self.assertIn("cut_blueprint_gate", cut_aggregate_prompt)
             self.assertTrue((run_dir / critic_prompt_relpath("production_readiness", 1, 1)).exists())
             readiness_prompt = (run_dir / critic_prompt_relpath("production_readiness", 1, 1)).read_text(encoding="utf-8")
             self.assertIn("Structure Auditor", readiness_prompt)

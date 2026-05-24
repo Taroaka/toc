@@ -41,6 +41,10 @@ p400 の scene 設計は「台本を時間で割る」作業ではなく、story
 - scene は topic ではなく event として書く。
   - 弱い: `浦島が竜宮城を見る scene`
   - 強い: `浦島が竜宮城の美しさに呑まれ、帰る意思が一時的に弱まる scene`
+- scene 数は、承認済み story の主要 beat を落とさず、意味のある production scene として成立する範囲で最大化する。
+  - まず不足しない方向へ scene を追加/分割し、願望の発生、拒絶、選択、変身、対決、証拠 reveal、照合、帰結のような不可逆 beat を 1 scene に圧縮しない。
+  - 上限は固定数ではなく「これ以上 scene を増やしても独立した `dramatic_question` / `value_shift` / `causal_turn` を持てず、各 scene 内の cut 設計を厚くした方が品質が上がる」地点とする。
+  - 追加候補の scene が既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持たない場合は、scene 追加ではなく p420 の cut 増厚で扱う。
 - scene は必ず `before_state → pressure → turn → after_state` を持つ。
 - scene は「観客がこの scene 中に追う問い」を持つ。問いがない scene は、単なる説明または素材集になりやすい。
 - scene は `visual_thesis` を持つ。これは p600 が一枚絵として描ける scene の代表的意味であり、単なる美術説明ではない。
@@ -110,7 +114,10 @@ p400 は次の順で進める。
    - `visual_value.md` がある場合は、その scene の visual value / anchor / regeneration risk を読む
    - scene ごとに、観客へ渡す情報、まだ隠す情報、感情変化、根拠境界、後続 stage への注意を残す
    - scene ごとに `importance`, `target_duration_seconds`, `estimated_duration_seconds`, `handoff_to_next_scene`（最終 scene は `terminal_resolution`）, `coverage_review` を必須で残す
+   - scene-set 初稿は圧縮優先にしない。主要 beat が scene として独立可能なら一度 scene 化し、review で「追加するより cut を厚くした方が良い」と説明できるところまで scene 数を増やす
    - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する
+   - 抽象 scene-set review は、1体の汎用 reviewer だけで見切らない。少なくとも `scene_count_coverage`, `dramatic_structure`, `reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` の観点に分け、必要に応じて複数 critic agent で独立評価する
+   - 標準の 5 critic 構成では、critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` として役割分担する
    - `p410b` / `p410c` は内部 review-loop label であり、scaffold の停止位置は `p410`、prompt materialize は `build-review-loop-round.py --slot p410b|p410c` で行う
    - 抽象 review が合格するまで、担当 `p400` L2 supervisor が scene 構成と transition を自動修正する
    - 抽象 review 合格後、具体 per-scene review loop を scene 単位で回し、各 scene の必要性、情報量、内部整合、handoff を `scene_detail_review.md` と `eval.scene_detail.loop.*` に記録する
@@ -125,6 +132,8 @@ p400 は次の順で進める。
    - spectacle / transformation / emotional reversal / proof reveal は 1 cut に圧縮せず、setup / action threshold / payoff / reaction / handoff のように分ける
    - cut ごとに `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を書く
    - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
+   - cut blueprint review は、critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
+   - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame / motion readiness、multimodal contract、duration / handoff が説明できる場合だけ `approved` にする
    - human review は `gate.script_cut_review=required|optional|skipped` に従う
 3. `p430 script review`
    - `script.md` を正本として、scene/cut loop 後の最終集約 review を行う
@@ -207,7 +216,7 @@ cut_blueprint:
   done_when: ["reviewer が完了判断できる条件"]
   visual_beat: "画として何が見えるか"
   first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない"
-  motion_brief: "still から始まる動き。新情報を勝手に足さない"
+  motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
   narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
   asset_dependency_hint:
     character_ids: []
@@ -225,6 +234,16 @@ p410 の review は抽象から具体へ進む。
 
 1. `scene_set_review`
    - 全 scene の概要を見て、不足 scene、不要 scene、統合/分割すべき scene、順序、scene 間の話の接続を評価する
+   - scene 数は、意味のある scene として成立する範囲で最大化されているかを評価する
+   - 「次に追加できる scene は何か」「それを追加せず cut 増厚で扱う理由は何か」を説明できない場合は `approved` にしない
+   - `scene_count_coverage` reviewer は、承認済み story の主要 beat が既存 scene に埋もれていないかを専門に見る
+   - `dramatic_structure` reviewer は、各 scene が独立した問い・価値変化・因果 turn を持つかを見る
+   - `reveal_order` reviewer は、追加/分割した scene が reveal の早出しや欠落を起こしていないかを見る
+   - `duration_density` reviewer は、全体尺・scene 重要度・cut 数から、scene 追加と cut 増厚のどちらが品質に効くかを見る
+   - `visual_production` reviewer は、追加 scene が後段 p500/p600/p800 で実際に映像化できる visible evidence を持つかを見る
+   - `handoff_integrity` reviewer は、scene 間の因果と handoff が途切れていないかを見る
+   - aggregator は全 reviewer の finding を統合し、`maximal_meaningful` の stop condition が説明できる場合だけ `approved` にする
+   - 標準 5 critic では `dramatic_structure` と `reveal_order` を同一 critic が担当してよいが、report では判定を分ける
    - この review が `approved` になるまで、per-scene review や cut blueprint へ進まない
 2. `scene_detail_review`
    - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する
@@ -238,7 +257,9 @@ p410 の review は抽象から具体へ進む。
 
 ### Subagent use
 
-- scene draft、narration draft、script review は scene / cut 単位で contextless subagent に任せてよい
+- scene draft、scene-set review、scene-detail review、narration draft、script review は scene / cut / review 観点単位で contextless subagent に任せてよい
+- scene-set review は複数 subagent を推奨する。少なくとも `scene_count_coverage` は独立させ、scene 数を最大化せず圧縮した案が通らないようにする
+- 1つの subagent に全観点を背負わせる場合でも、出力には `scene_count_coverage`, `dramatic_structure`, `reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` の各判定を分けて残す
 - subagent には `story.md`、`visual_value.md`、stage readset、担当 scene / cut、出力先 scratch path だけを渡す
 - `script.md`、skeleton `video_manifest.md`、human change の採否、`subagent_trace` は担当 `p400` L2 supervisor が統合する
 
@@ -1559,3 +1580,76 @@ production_notes:
 ---
 
 *最終更新: 2026-01-11*
+
+## p420 Cut Design Upgrade v2.1
+
+改善版では、p420 cut blueprint を `viewer-facing cinematic beat` の設計として扱う。scene から cut を作るときは、scene の `dramatic_question`、`value_shift.visible_evidence`、`causal_turn`、`reveal_constraints`、`handoff_to_next_scene` を cut 列のどこで回収するかを先に決める。
+
+追加の正本は `docs/implementation/cut-loop.md` と `workflow/cut-blueprint-template.yaml`。
+
+### p420 Additional Output
+
+```yaml
+coverage_plan:
+  coverage_strategy: "3_cut|5_cut|7_cut|spectacle_ladder|custom"
+  min_cut_count:
+    by_importance: 3
+    by_duration: 3
+    selected: 3
+    exception_reason: ""
+  function_sequence: []
+  scene_obligations:
+    audience_information_to_cover: []
+    withheld_information_to_preserve: []
+    visual_evidence_to_show: []
+    causal_turn_cut_selector: ""
+    handoff_cut_selector: ""
+```
+
+各 cut は `cut_contract` を正本にする。既存 reader のために `scene_contract` は互換 alias として残してよい。
+
+```yaml
+cut_contract:
+  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+  viewer_contract:
+    target_beat: ""
+    screen_question: ""
+    visual_proof: ""
+    must_show: []
+    must_avoid: []
+    done_when: []
+  cinematic_contract: {}
+  continuity_contract: {}
+  first_frame_contract:
+    first_frame_brief: ""
+    action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+  motion_contract:
+    motion_brief: ""
+    end_state: ""
+  narration_contract:
+    role: "setup|fact|emotion|contrast|aftertaste|silent"
+    silence_reason: ""
+  downstream_handoff: {}
+```
+
+### Cut Count and Split Rules
+
+- low scene: 2 cuts 以上。
+- medium scene: 3 cuts 以上。
+- high scene: 5 cuts 以上。
+- critical scene: 7 cuts 以上。
+- さらに `ceil(target_duration_seconds / 8)` を下回らない。
+- 1 cut が 12 秒を超える場合は、意図的な hold / silence / spectacle である理由を残す。
+- spectacle / transformation / emotional reversal / proof reveal は `approach -> mechanism -> threshold -> reveal/payoff -> reaction -> handoff` に分ける。
+
+### Blocking Conditions
+
+- `target_beat` が scene summary になっている。
+- `screen_question` がない。
+- `visual_proof` がない。
+- `first_frame_brief` が行為完了後の説明絵になっている。
+- `motion_brief` が別 scene の出来事を始めている。
+- narration が映像のキャプションになっている。
+- turn の前に threshold がない。
+- turn / payoff の後に reaction がない。
+- 最終 cut が次 cut / 次 scene への handoff を持たない。

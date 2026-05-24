@@ -154,7 +154,8 @@ scenes:
     # - 1カット = 1意図。
     # - 1カット = 1ナレーション、または明示された silent cut。
     # - cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
-    # - target_duration_seconds / 12 を切り上げたカット数も下回らない。
+    # - target_duration_seconds / 8 を切り上げたカット数も下回らない。
+    # - cut_contract が正本。scene_contract は既存 reader 向け互換 alias。
     cuts:
       - cut_id: 1
         cut_role: "main"  # main|sub|transition|reaction|visual_payoff
@@ -164,6 +165,49 @@ scenes:
           source_request_ids: []
           status: "implemented|verified|waived"
           notes: ""
+        cut_contract:
+          schema_version: "2.1"
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          viewer_contract:
+            target_beat: "この cut で観客に体験させる1つのこと"
+            screen_question: "この cut の間、観客が画面から読む問い"
+            dramatic_job: "scene全体のどこを担当するか"
+            emotional_micro_shift: {from: "", to: ""}
+            visual_proof: "映像だけで target_beat が成立したと分かる証拠"
+            must_show: []
+            must_avoid: []
+            done_when: []
+          cinematic_contract:
+            camera_intent: "観客の視線をどこへ導くか"
+            subject_priority: {primary: "", secondary: "", background: ""}
+            screen_geography: {foreground: "", midground: "", background: "", screen_direction: ""}
+          continuity_contract:
+            start_state: {}
+            end_state: {}
+            carry_forward_to_next_cut: []
+          first_frame_contract:
+            imageable: true
+            first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+            action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+          motion_contract:
+            movable: true
+            motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+            end_state: "次 cut へ渡す最後の状態"
+            must_not_add: []
+          narration_contract:
+            speakable_or_silent: true
+            role: "setup|fact|emotion|contrast|aftertaste|silent"
+            target_function: "この声が cut で果たす役割"
+            text: ""
+            tts_text: ""
+            silence_reason: ""
+          downstream_handoff:
+            p500_asset: {}
+            p600_image: {}
+            p700_narration: {}
+            p800_video: {}
+            carries_to_next_cut: []
+            carries_to_next_scene: []
         scene_contract:
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           target_beat: "この cut で伝える1つのこと"
@@ -171,7 +215,7 @@ scenes:
           dramatic_job: "scene全体の pressure / turn / payoff のどこを担当するか"
           visual_beat: "画として何が見えるか"
           first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
-          motion_brief: "still から自然に始まる動き"
+          motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
           must_show:
             - "image prompt / motion / narration のどこかで必ず見せる"
           must_avoid:
@@ -207,6 +251,14 @@ scenes:
             overall_score: 0.0
             human_review_ok: false
             human_review_reason: ""
+            triangulation_review:
+              same_target_beat: false
+              image_supports_motion_start: false
+              motion_reaches_declared_end_state: false
+              narration_not_captioning_image: false
+              reveal_constraints_preserved: false
+              continuity_preserved: false
+              handoff_visible_or_audible: false
           human_review:
             status: "pending|approved|changes_requested"
             notes: ""

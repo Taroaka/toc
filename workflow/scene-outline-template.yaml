@@ -17,6 +17,10 @@ scene_outline_metadata:
   scene_count: 0
 
 scene_design_rules:
+  scene_count_strategy: "maximal_meaningful"
+  scene_count_goal: "承認済み story の主要 beat を落とさず、独立した production scene として成立する範囲で scene 数を最大化する"
+  scene_count_stop_condition: "これ以上 scene を増やしても独立した dramatic_question / value_shift / causal_turn を持てず、各 scene 内の cut 設計を厚くした方が品質が上がる"
+  scene_count_review_required: true
   p400_does_not_write_final_prompt: true
   scene_must_have_value_shift: true
   scene_must_have_causal_turn: true
@@ -144,7 +148,7 @@ scenes:
         done_when:
           - "reviewer が完了判断できる条件"
         first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
-        motion_brief: "still から始まる動き。新しい物語情報を勝手に追加しない"
+        motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
         narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
         narration_text: "<必要ならナレーション。silent cut は空文字>"
         asset_dependency_hint:

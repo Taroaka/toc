@@ -1,0 +1,62 @@
+# Cut Handoff Matrix Template v2.1
+
+cut_handoff_matrix_version: "2.1"
+scene_id: "1"
+scene_selector: "scene1"
+scene_obligations:
+  dramatic_question: ""
+  value_shift_visible_evidence: []
+  causal_turn: ""
+  handoff_to_next_scene: ""
+
+cuts:
+  - selector: "scene1_cut1"
+    cut_function: "setup"
+    target_beat: ""
+    receives_from_previous:
+      visual: ""
+      audio: ""
+      causal: ""
+      character_state: ""
+      prop_state: ""
+      spatial_state: ""
+    delivers_to_next:
+      visual: ""
+      audio: ""
+      causal: ""
+      character_state: ""
+      prop_state: ""
+      spatial_state: ""
+    downstream:
+      p500_asset:
+        required_assets: []
+        missing_assets: []
+      p600_image:
+        first_frame_requirements: []
+        must_not_show: []
+      p700_narration:
+        role: "setup|fact|emotion|contrast|aftertaste|silent"
+        must_cover: []
+        must_avoid: []
+      p800_video:
+        motion_start: ""
+        end_state: ""
+        must_not_add: []
+    review:
+      handoff_clear: false
+      continuity_clear: false
+      reveal_safe: false
+      downstream_ready: false
+      findings: []
+
+scene_level_review:
+  all_scene_obligations_covered: false
+  no_overloaded_cuts: false
+  no_missing_thresholds: false
+  no_missing_reactions: false
+  final_handoff_clear: false
+  ready_for_p500: false
+  ready_for_p600: false
+  ready_for_p700: false
+  ready_for_p800: false
+

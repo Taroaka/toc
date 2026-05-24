@@ -193,6 +193,7 @@ Step 3: 品質確認
   - `reaction`: 変化が人物の表情/姿勢/沈黙に残る。
   - `handoff`: 次 cut / scene へ向かう視線、音、方向、物を残す。
 - p600 still は action を完了させず、p800 motion が始まる余白を残す。
+- `motion_brief` は p800 専用入力であり、p600 image prompt authoring では参照しない。p600 は `first_frame_brief` までを使い、動画開始後の動きは知らない前提で still を作る。
 - p800 motion は p600 still に無い人物・重要道具・新しい reveal を勝手に追加しない。
 - narration は motion の説明書ではない。映像で読めることを重複説明しすぎない。
 - first/last frame を使う場合は、scene の空間方向と人物状態が破綻しないようにする。
@@ -321,7 +322,8 @@ stage 1 の原則:
   - 採用した subagent output は `subagent_trace` または `logs/review/` に残し、親会話だけにある判断を正本にしない
 - scene image prompt は、カット全体の出来事をそのまま描くのではなく、**その動画を始める最初の1フレーム**として妥当である必要がある
 - still は `cut_blueprint.cut_function` に対応して設計する。setup cut と turn cut では、同じ場所でも構図・距離・光の役割が違う
-- `first_frame_brief` と `motion_brief` が矛盾する場合は、p800 へ進まず p600 / p400 の設計へ戻す
+- p600 image prompt authoring は `first_frame_brief` を使い、`motion_brief` は読まない
+- `first_frame_brief` と `motion_brief` が矛盾する場合は、p800 へ進まず p400 の cut blueprint 設計へ戻す。p600 still prompt に `motion_brief` を混ぜて解決しない
 - `Aが話し、Bがうなずく` のような表現は、動画側で始まるべき動きを still 側で完了させやすいため避ける
 - 推奨は、抽象的に `動き出す直前` と書くのではなく、その場面の動きに応じて `まだ口を開く前`, `まだうなずき始めていない`, `差し出す直前`, `一歩目の体重移動の直前` のように具体化すること
 - `最初の1フレーム` / `1フレーム目` / `first frame` という制作メタ情報そのものは request 本文に入れない。これは p600 authoring / review の前提であり、画像生成 API に渡す意味がない

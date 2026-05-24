@@ -116,7 +116,7 @@
 - screen_question: `<このカットの間、観客が画面から読む問い>`
 - visual_beat: `<画として何が見えるか>`
 - first_frame_brief: `<動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない>`
-- motion_brief: `<still から自然に始まる動き>`
+- motion_brief: `<p800 motion prompt 専用。p600 image prompt authoring では参照しない>`
 - narration_role: `setup|fact|emotion|contrast|aftertaste|silent`
 - narration_text: `<このカットのナレーション。silent の場合は空文字>`
 - shot_type: `<WS/MS/CU/POV/etc>`

@@ -45,6 +45,13 @@ When `review_policy` is `frontend`, do not pause for CLI human review. Generate
 the review artifacts, write gate/state records, and hand approval to the web UI.
 This is not a review skip. It is a frontend handoff.
 
+Frontend create is not a fast scaffold path. It must run every non-human route
+that the repo can run before the handoff: grounding, deterministic verifier
+gates, review-loop prompt/report/aggregate materialization, story/image prompt
+consistency review, asset request materialization, asset generation, scene
+request materialization, scene generation, and p650/p680 validation. The only
+thing deferred to the frontend is the human approval decision itself.
+
 For app-server Image Gen create flows, the normal stop target is `p680`. The
 skill strengthens image prompts, retries bootstrap asset generation up to 10
 times when the visual gate fails, generates scene images, and creates the
@@ -140,6 +147,25 @@ For this skill, the normal bucket range is:
 
 ## Execution Rules
 
+- For `review_policy=frontend` app-server create flows, use the repo CLI as the
+  canonical Codex entrypoint instead of hand-authoring the run in chat:
+
+  ```bash
+  python scripts/toc-immersive-frontend-run.py \
+    --topic "<topic>" \
+    --source "<source>" \
+    --run-dir "<run_dir>" \
+    --stop-target "<p650|p680>"
+  ```
+
+  This helper creates p100-p650 artifacts, runs grounding/preflight, materializes
+  canonical review-loop prompts/reports/aggregates, runs deterministic story and
+  image-prompt consistency checks, uses the existing Codex app-server image lane
+  for p560/p660 unless `--materialize-only` is explicitly passed for tests,
+  rebuilds `p000_index.md`, and validates the requested stop target. Do not use
+  `scripts/toc-immersive-ride.py` as the completion path for this frontend
+  create flow; it is a scaffold helper and is not sufficient for p650/p680
+  success.
 - Use the exact run directory supplied by the caller. Do not create a second run
   directory.
 - Keep all user-facing generated artifacts in Japanese.

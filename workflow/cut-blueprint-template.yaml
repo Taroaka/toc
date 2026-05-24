@@ -1,0 +1,193 @@
+# Cut Blueprint Template v2.1
+# p420 creates this structure, then materializes it into script.md and video_manifest.md.
+
+cut_blueprint_version: "2.1"
+legacy_compatibility:
+  copy_to_scene_contract: true
+  copy_legacy_cut_blueprint_fields: true
+  note: "cut_contract is canonical. Copy core fields to scene_contract/cut_blueprint while legacy readers exist."
+
+source_scene:
+  scene_id: "1"
+  selector: "scene1"
+  scene_intent_snapshot:
+    importance: "medium" # low|medium|high|critical
+    target_duration_seconds: 24
+    dramatic_question: ""
+    scene_spine: "setup -> pressure -> turn -> payoff -> handoff"
+    value_shift:
+      from: ""
+      to: ""
+      visible_evidence: []
+    causal_turn: ""
+    audience_information: []
+    withheld_information: []
+    reveal_constraints: []
+    visual_thesis: ""
+    handoff_to_next_scene: ""
+
+coverage_plan:
+  coverage_strategy: "3_cut|5_cut|7_cut|spectacle_ladder|custom"
+  min_cut_count:
+    by_importance: 3
+    by_duration: 3
+    selected: 3
+    exception_reason: ""
+  function_sequence:
+    - setup
+    - pressure
+    - threshold
+    - turn
+    - reaction
+    - handoff
+  scene_obligations:
+    audience_information_to_cover: []
+    withheld_information_to_preserve: []
+    visual_evidence_to_show: []
+    causal_turn_cut_selector: ""
+    handoff_cut_selector: ""
+
+cuts:
+  - cut_id: 1
+    selector: "scene1_cut1"
+    cut_status: "active" # active|deleted
+    deletion_reason: ""
+    cut_contract:
+      schema_version: "2.1"
+      cut_role: "main" # main|sub|transition|reaction|visual_payoff
+      cut_function: "setup" # setup|pressure|threshold|turn|payoff|reaction|handoff
+      duration_intent: "short" # short|standard|hold
+      target_duration_seconds: 6
+      duration_exception:
+        allowed: false
+        reason: ""
+      viewer_contract:
+        target_beat: ""
+        screen_question: ""
+        dramatic_job: ""
+        emotional_micro_shift:
+          from: ""
+          to: ""
+        audience_information: []
+        withheld_information: []
+        reveal_constraints: []
+        visual_proof: ""
+        must_show: []
+        must_avoid: []
+        done_when: []
+      cinematic_contract:
+        pov: "third_person|subjective_pov|over_the_shoulder|insert|establishing"
+        shot_size: "wide|medium|closeup|extreme_closeup|insert"
+        camera_angle: "eye_level|low_angle|high_angle|overhead|tracking"
+        camera_intent: ""
+        subject_priority:
+          primary: ""
+          secondary: ""
+          background: ""
+        screen_geography:
+          foreground: ""
+          midground: ""
+          background: ""
+          screen_direction: "left_to_right|right_to_left|toward_camera|away_from_camera|static"
+          entrance_exit: ""
+        lighting_intent: ""
+        edit_relation:
+          previous_cut: ""
+          next_cut: ""
+      continuity_contract:
+        location_ids: []
+        location_variant_ids: []
+        character_ids: []
+        character_variant_ids: []
+        object_ids: []
+        object_variant_ids: []
+        start_state:
+          character_state: ""
+          prop_state: ""
+          spatial_state: ""
+          time_state: ""
+        end_state:
+          character_state: ""
+          prop_state: ""
+          spatial_state: ""
+          time_state: ""
+        carry_forward_to_next_cut: []
+        continuity_risks: []
+      first_frame_contract:
+        imageable: true
+        image_role: "video_first_frame_candidate"
+        first_frame_brief: ""
+        action_completion_state: "pre_action" # pre_action|early_action|mid_action|aftermath|hold
+        must_include: []
+        must_avoid: []
+        composition_requirements:
+          foreground: ""
+          midground: ""
+          background: ""
+          light: ""
+          frame_edge_handoff: ""
+        still_done_when: []
+      motion_contract:
+        movable: true
+        motion_brief: ""
+        camera_motion: "static|slow_push|slow_pull|pan|tilt|tracking|handheld_subtle"
+        subject_motion: ""
+        environment_motion: ""
+        emotional_change: ""
+        end_state: ""
+        must_not_add: []
+      narration_contract:
+        speakable_or_silent: true
+        role: "setup" # setup|fact|emotion|contrast|aftertaste|silent
+        target_function: ""
+        must_cover: []
+        must_avoid:
+          - "visible content captioning"
+        timing:
+          start: "early" # early|mid|late|none
+          end: "on_cut_end" # before_turn|on_cut_end|after_visual|none
+        text: ""
+        tts_text: ""
+        silence_reason: ""
+      downstream_handoff:
+        p500_asset:
+          asset_candidates: []
+          continuity_anchor_needed: false
+        p600_image:
+          prompt_requirements: []
+          reference_requirements: []
+        p700_narration:
+          narration_requirements: []
+        p800_video:
+          motion_requirements: []
+          last_frame_or_end_state: ""
+        carries_to_next_cut: []
+        carries_to_next_scene: []
+    scene_contract_alias:
+      cut_function: "<cut_contract.cut_function>"
+      target_beat: "<cut_contract.viewer_contract.target_beat>"
+      screen_question: "<cut_contract.viewer_contract.screen_question>"
+      dramatic_job: "<cut_contract.viewer_contract.dramatic_job>"
+      visual_beat: "<cut_contract.viewer_contract.visual_proof>"
+      first_frame_brief: "<cut_contract.first_frame_contract.first_frame_brief>"
+      motion_brief: "<cut_contract.motion_contract.motion_brief>"
+      must_show: "<cut_contract.viewer_contract.must_show>"
+      must_avoid: "<cut_contract.viewer_contract.must_avoid>"
+      done_when: "<cut_contract.viewer_contract.done_when>"
+    review:
+      agent_review:
+        status: "pending" # pending|passed|changes_requested|waived
+        reason_keys: []
+        notes: ""
+      human_review:
+        status: "pending" # pending|approved|changes_requested|waived
+        notes: ""
+      triangulation_review:
+        same_target_beat: false
+        image_supports_motion_start: false
+        motion_reaches_declared_end_state: false
+        narration_not_captioning_image: false
+        reveal_constraints_preserved: false
+        continuity_preserved: false
+        handoff_visible_or_audible: false
+

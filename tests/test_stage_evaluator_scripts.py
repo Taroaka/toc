@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, parse_state_file
 from toc import stage_evaluator as STAGE_EVALUATOR
+from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
 
 
 def _good_research_yaml() -> str:
@@ -208,9 +209,46 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         round_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir = round_dir / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
         for idx in range(1, 6):
-            (round_dir / f"critic_{idx}.md").write_text("- status: passed\n", encoding="utf-8")
+            focus_name = stage_focus.get(idx, ("", ""))[0]
+            focus_line = f"- critic_focus: {focus_name}\n" if focus_name else ""
+            (round_dir / f"critic_{idx}.md").write_text(f"{focus_line}- status: passed\n", encoding="utf-8")
+            (prompt_dir / f"critic_{idx}.prompt.md").write_text(
+                f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
+                encoding="utf-8",
+            )
         patch_heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
+        scene_count_gate = []
+        if stage_focus:
+            if stage in SCENE_REVIEW_CRITIC_FOCUS:
+                scene_count_gate = [
+                    "## Scene Count Gate",
+                    "",
+                    "- maximal_meaningful_stop_condition: no additional independent scene remains",
+                    "- next_scene_candidate: none",
+                    "- cut_thickening_reason: additional material repeats the same scene turn",
+                    "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed",
+                    "",
+                ]
+            else:
+                scene_count_gate = [
+                    "## Cut Blueprint Gate",
+                    "",
+                    "- cut_intent_isolation: passed",
+                    "- beat_ladder_coverage: passed",
+                    "- first_frame_motion_readiness: passed",
+                    "- multimodal_contract_coverage: passed",
+                    "- duration_density_and_handoff: passed",
+                    "- coverage_plan_complete: passed",
+                    "- continuity_contract_complete: passed",
+                    "- narration_contract_complete: passed",
+                    "- downstream_handoff_complete: passed",
+                    "- triangulation_review_ready: passed",
+                    "",
+                ]
         (round_dir / "aggregated_review.md").write_text(
             "\n".join(
                 [
@@ -228,6 +266,7 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "",
                     "[]",
                     "",
+                    *scene_count_gate,
                     f"## {patch_heading}",
                     "",
                     "No changes.",

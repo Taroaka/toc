@@ -269,6 +269,14 @@ class TestImagePromptStoryReview(unittest.TestCase):
         findings = [finding.code for outcome in results for finding in outcome.findings]
         self.assertIn("prompt_contains_first_frame_metadata", findings)
 
+    def test_review_flags_motion_brief_leak_in_image_prompt_body(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt = "灰の台所。motion_brief: このあとシンデレラが階段を駆け下りる。"
+        issues = mod.find_prompt_motion_brief_leak_issues(prompt)
+        self.assertTrue(issues)
+
     def test_review_flags_missing_source_anchor_and_missing_object_id(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)

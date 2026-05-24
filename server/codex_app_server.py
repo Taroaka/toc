@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,18 @@ class CodexAppServerError(RuntimeError):
 
 _claimed_generated_images: set[str] = set()
 _claimed_generated_images_lock = asyncio.Lock()
+_CODEX_HOME_FALLBACK_FILES = {
+    ".codex-global-state.json",
+    "auth.json",
+    "config.toml",
+    "installation_id",
+    "internal_storage.json",
+    "models_cache.json",
+    "version.json",
+}
+_CODEX_HOME_FALLBACK_RELATIVE_FILES = {
+    Path("browser") / "config.toml",
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,32 @@ class CodexAppServerClient:
         self._stderr_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
         self._stderr_tail: deque[str] = deque(maxlen=80)
+        self._codex_home: Path | None = None
+
+    def _resolve_codex_home(self, env: dict[str, str] | None = None) -> Path:
+        if self._codex_home is not None:
+            return self._codex_home
+        env = env or os.environ
+        raw_codex_home = env.get("CODEX_HOME", "").strip()
+        codex_home = Path(raw_codex_home) if raw_codex_home else None
+        if codex_home is None or not _is_writable_directory(codex_home):
+            source_home = codex_home or (Path.home() / ".codex")
+            fallback_home = Path(tempfile.gettempdir()) / "toc-codex-home"
+            fallback_home.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                fallback_home.chmod(0o700)
+            _copy_codex_home_portable_files(source_home, fallback_home)
+            codex_home = fallback_home
+        self._codex_home = codex_home
+        return codex_home
+
+    def _subprocess_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env["CODEX_HOME"] = str(self._resolve_codex_home(env))
+        return env
+
+    def generated_images_root(self) -> Path:
+        return self._resolve_codex_home() / "generated_images"
 
     async def start(self) -> None:
         if self.proc is not None:
@@ -65,6 +104,7 @@ class CodexAppServerClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.cwd),
+            env=self._subprocess_env(),
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
@@ -289,9 +329,11 @@ class CodexAppServerClient:
         item_id: str,
         run_dir: Path,
         fallback_cutoff_ns: int | None = None,
+        timeout_seconds: int = 900,
     ) -> ImageGenerationResult:
         thread_id = await self.start_thread(cwd=run_dir)
-        cutoff_ns = fallback_cutoff_ns if fallback_cutoff_ns is not None else latest_generated_image_mtime_ns()
+        generated_root = self.generated_images_root()
+        cutoff_ns = fallback_cutoff_ns if fallback_cutoff_ns is not None else latest_generated_image_mtime_ns(generated_root)
         reference_lines = "\n".join(f"- {p.name}: attached local image" for p in reference_images) or "- none"
         text = f"""Use Codex built-in image generation to create one image candidate.
 
@@ -316,9 +358,10 @@ Rules:
                 text=text,
                 cwd=run_dir,
                 local_images=reference_images,
+                timeout_seconds=timeout_seconds,
             )
         )
-        fallback_task = asyncio.create_task(wait_for_unclaimed_generated_image_after(cutoff_ns))
+        fallback_task = asyncio.create_task(wait_for_unclaimed_generated_image_after(cutoff_ns, root=generated_root))
         done, _pending = await asyncio.wait({turn_task, fallback_task}, return_when=asyncio.FIRST_COMPLETED)
         if fallback_task in done:
             fallback = fallback_task.result()
@@ -345,7 +388,7 @@ Rules:
         saved = image_generation_saved_path(latest)
         source = "app_server"
         if not saved:
-            fallback = await claim_latest_generated_image_after(cutoff_ns)
+            fallback = await claim_latest_generated_image_after(cutoff_ns, root=generated_root)
             if fallback:
                 saved = str(fallback)
                 source = "generated_images_fallback"
@@ -401,6 +444,41 @@ def app_server_disabled() -> bool:
 
 def default_app_server_model() -> str:
     return os.environ.get("TOC_CODEX_APP_SERVER_MODEL", "").strip()
+
+
+def _is_writable_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".toc_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _copy_codex_home_portable_files(source_home: Path, fallback_home: Path) -> None:
+    if not source_home.exists() or source_home.resolve() == fallback_home.resolve():
+        return
+    for name in _CODEX_HOME_FALLBACK_FILES:
+        source = source_home / name
+        if source.is_file():
+            _copy_codex_home_file(source, fallback_home / name)
+    for relative in _CODEX_HOME_FALLBACK_RELATIVE_FILES:
+        source = source_home / relative
+        if source.is_file():
+            _copy_codex_home_file(source, fallback_home / relative)
+
+
+def _copy_codex_home_file(source: Path, destination: Path) -> None:
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        source_mode = source.stat().st_mode & 0o777
+        if source_mode:
+            destination.chmod(source_mode)
+    except OSError:
+        return
 
 
 def _extract_prompt_from_agent_text(text: str) -> str:

@@ -197,6 +197,17 @@ PROMPT_FIRST_FRAME_METADATA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = 
     ),
 )
 
+PROMPT_MOTION_BRIEF_LEAK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"motion[_\s-]*brief|モーション\s*ブリーフ|p800\s*(?:motion|動画|専用)", re.I),
+        "prompt contains motion_brief / p800 authoring metadata. Image prompts must use only the visible initial state.",
+    ),
+    (
+        re.compile(r"このあと|その後|次に(?:は)?|続いて|やがて"),
+        "prompt describes future motion after the still. Keep future action in p800 motion prompt, not p600 image prompt.",
+    ),
+)
+
 IMAGE_REVIEW_RUBRIC_WEIGHTS = {
     "story_alignment": 0.25,
     "subject_specificity": 0.20,
@@ -279,6 +290,7 @@ HARD_FINDING_CODES = {
     "prompt_not_self_contained",
     "prompt_contains_nonvisual_metadata",
     "prompt_contains_first_frame_metadata",
+    "prompt_leaks_motion_brief",
     "prompt_mentions_character_but_character_ids_empty",
     "missing_character_id",
     "missing_object_id",
@@ -466,6 +478,14 @@ def find_prompt_nonvisual_metadata_issues(prompt: str) -> list[str]:
 def find_prompt_first_frame_metadata_issues(prompt: str) -> list[str]:
     issues: list[str] = []
     for pattern, message in PROMPT_FIRST_FRAME_METADATA_PATTERNS:
+        if pattern.search(prompt or ""):
+            issues.append(message)
+    return issues
+
+
+def find_prompt_motion_brief_leak_issues(prompt: str) -> list[str]:
+    issues: list[str] = []
+    for pattern, message in PROMPT_MOTION_BRIEF_LEAK_PATTERNS:
         if pattern.search(prompt or ""):
             issues.append(message)
     return issues
@@ -764,6 +784,41 @@ def _contract_string_list(contract: dict[str, Any], key: str) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _nested_contract_value(contract: dict[str, Any], *paths: str) -> Any:
+    for path in paths:
+        cur: Any = contract
+        ok = True
+        for key in path.split("."):
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur[key]
+        if ok:
+            return cur
+    return None
+
+
+def _nested_contract_string(contract: dict[str, Any], *paths: str) -> str:
+    value = _nested_contract_value(contract, *paths)
+    return str(value).strip() if value is not None else ""
+
+
+def _nested_contract_list(contract: dict[str, Any], *paths: str) -> list[str]:
+    for path in paths:
+        value = _nested_contract_value(contract, path)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _cut_contract_for_node(node: dict[str, Any]) -> dict[str, Any]:
+    for key in ("cut_contract", "scene_contract", "cut_blueprint"):
+        value = node.get(key) if isinstance(node, dict) else None
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
 def _text_contains_any(text: str, needles: list[str] | tuple[str, ...]) -> bool:
     probe = text or ""
     return any(needle and needle in probe for needle in needles)
@@ -984,8 +1039,44 @@ def review_entries(
         contract = entry.contract if isinstance(entry.contract, dict) and entry.contract else {}
         if not contract and isinstance(image_generation, dict) and isinstance(image_generation.get("contract"), dict):
             contract = dict(image_generation.get("contract") or {})
+        cut_contract = _cut_contract_for_node(cut) if isinstance(cut, dict) else {}
 
         findings: list[Finding] = []
+
+        if not is_reference_entry and cut_contract:
+            cut_must_show = _nested_contract_list(cut_contract, "must_show", "viewer_contract.must_show")
+            cut_must_avoid = _nested_contract_list(cut_contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
+            first_frame_brief = _nested_contract_string(cut_contract, "first_frame_brief", "first_frame_contract.first_frame_brief")
+            visual_proof = _nested_contract_string(cut_contract, "visual_beat", "viewer_contract.visual_proof")
+            missing_cut_terms = [item for item in cut_must_show if item not in entry.prompt]
+            for item in missing_cut_terms:
+                findings.append(
+                    Finding(
+                        code="cut_contract_must_show_unmet",
+                        message=f"cut contract requires `{item}` but the image prompt does not include it.",
+                    )
+                )
+            for item in [item for item in cut_must_avoid if item in entry.prompt]:
+                findings.append(
+                    Finding(
+                        code="cut_contract_must_avoid_violated",
+                        message=f"cut contract forbids `{item}` but the image prompt includes it.",
+                    )
+                )
+            if not first_frame_brief:
+                findings.append(
+                    Finding(
+                        code="cut_contract_first_frame_missing",
+                        message="cut_contract.first_frame_contract.first_frame_brief is missing; p600 cannot produce a startable still.",
+                    )
+                )
+            if visual_proof and not any(term in entry.prompt for term in extract_terms(visual_proof)):
+                findings.append(
+                    Finding(
+                        code="image_prompt_story_alignment_weak",
+                        message="image prompt does not clearly contain terms from cut_contract.viewer_contract.visual_proof.",
+                    )
+                )
 
         for violation in find_reveal_violations_for_surface(
             scene_id=entry.scene_id,
@@ -1064,8 +1155,12 @@ def review_entries(
         for issue in first_frame_metadata_issues:
             findings.append(Finding(code="prompt_contains_first_frame_metadata", message=issue))
 
+        motion_brief_leak_issues = find_prompt_motion_brief_leak_issues(entry.prompt)
+        for issue in motion_brief_leak_issues:
+            findings.append(Finding(code="prompt_leaks_motion_brief", message=issue))
+
         independence_issues = find_prompt_independence_issues(entry.prompt)
-        if nonvisual_metadata_issues or first_frame_metadata_issues:
+        if nonvisual_metadata_issues or first_frame_metadata_issues or motion_brief_leak_issues:
             independence_issues = [
                 issue for issue in independence_issues if issue != "prompt references another scene/cut directly."
             ]

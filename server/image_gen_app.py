@@ -16,8 +16,45 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+try:
+    from fastapi import APIRouter, HTTPException, Query
+    from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+except ModuleNotFoundError:  # pragma: no cover - CLI-only environments may omit FastAPI.
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: Any = None) -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    class _CliOnlyRouter:
+        def get(self, *args: Any, **kwargs: Any) -> Any:
+            def decorator(func: Any) -> Any:
+                return func
+
+            return decorator
+
+        post = get
+
+    def APIRouter(*args: Any, **kwargs: Any) -> _CliOnlyRouter:
+        return _CliOnlyRouter()
+
+    def Query(default: Any = None, **kwargs: Any) -> Any:
+        return default
+
+    class Response:  # noqa: D101
+        pass
+
+    class FileResponse(Response):  # noqa: D101
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class HTMLResponse(Response):  # noqa: D101
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class StreamingResponse(Response):  # noqa: D101
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
 from pydantic import BaseModel, Field
 
 from .codex_app_server import (
@@ -110,6 +147,12 @@ P650_FIXED_SLOTS = (
 P680_FIXED_SLOTS = (*P650_FIXED_SLOTS, "p660", "p670", "p680")
 BOOTSTRAP_ASSET_MAX_ATTEMPTS = 10
 IMAGE_GENERATION_PARALLELISM = max(1, int(os.environ.get("TOC_IMAGE_GEN_PARALLELISM", "4") or "4"))
+IMAGE_GENERATION_ITEM_MAX_ATTEMPTS = max(1, int(os.environ.get("TOC_IMAGE_GEN_ITEM_MAX_ATTEMPTS", "3") or "3"))
+IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS", "300") or "300"),
+)
+PROMPT_REPAIR_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("TOC_PROMPT_REPAIR_TIMEOUT_SECONDS", "120") or "120"))
 CREATE_SKILL_STOP_POLL_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_STOP_POLL_SECONDS", "10") or "10"))
 CREATE_SKILL_CANCEL_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_CANCEL_TIMEOUT_SECONDS", "10") or "10"))
 SLOT_TERMINAL_STATES = {"done", "skipped", "awaiting_approval"}
@@ -126,6 +169,23 @@ SLOT_AWAITING_APPROVAL_ALLOWED = {
     "p680",
 }
 
+TRANSIENT_CODEX_IMAGE_ERRORS = (
+    "stream disconnected",
+    "backend-api/codex/responses",
+    "connection reset",
+    "timed out during turn/start",
+    "turn timed out",
+)
+
+
+def _continue_generation_after_item_error(kind: str) -> bool:
+    configured = os.environ.get("TOC_IMAGE_GEN_CONTINUE_ON_ITEM_ERROR", "").strip().lower()
+    if configured in {"1", "true", "yes", "on"}:
+        return True
+    if configured in {"0", "false", "no", "off"}:
+        return False
+    return kind == "scene"
+
 
 class GenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
@@ -139,8 +199,8 @@ class GenerateRequest(BaseModel):
 class BulkGenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(asset|scene)$")
-    items: list[GenerateRequest] = Field(min_length=1, max_length=8)
-    concurrency: int = Field(default=2, ge=1, le=16)
+    items: list[GenerateRequest] = Field(min_length=1, max_length=100)
+    concurrency: int = Field(default=2, ge=1, le=100)
 
 
 class InsertItem(BaseModel):
@@ -303,7 +363,7 @@ _create_jobs: dict[str, dict[str, Any]] = {}
 _codex_client: CodexAppServerClient | None = None
 _client_lock = asyncio.Lock()
 _create_jobs_lock = asyncio.Lock()
-_generation_semaphore = asyncio.Semaphore(16)
+_generation_semaphore = asyncio.Semaphore(100)
 _video_generation_semaphore = asyncio.Semaphore(4)
 _narration_generation_semaphore = asyncio.Semaphore(4)
 _generated_images_cutoff_lock = asyncio.Lock()
@@ -786,6 +846,35 @@ async def _run_toc_run_helper(*, topic: str, run_id: str) -> str:
     return stdout.decode("utf-8", errors="replace").strip()
 
 
+async def _run_toc_immersive_frontend_cli_helper(
+    *,
+    topic: str,
+    source: str | None = None,
+    run_id: str,
+    stop_target: str = "p680",
+) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(ROOT / "scripts" / "toc-immersive-frontend-run.py"),
+        "--topic",
+        topic,
+        "--source",
+        (source or "").strip() or topic,
+        "--run-dir",
+        f"output/{run_id}",
+        "--stop-target",
+        stop_target,
+        cwd=str(ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=7200)
+    if proc.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail or f"toc-immersive-frontend-run exited with status {proc.returncode}")
+    return stdout.decode("utf-8", errors="replace").strip()
+
+
 def _is_unsupported_method_error(exc: CodexAppServerError) -> bool:
     message = str(exc).lower()
     return any(
@@ -795,6 +884,19 @@ def _is_unsupported_method_error(exc: CodexAppServerError) -> bool:
             "unknown method",
             "unsupported method",
             "no such method",
+        )
+    )
+
+
+def _is_skill_configuration_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "codex skill not found",
+            "skill is not visible",
+            "skill path mismatch",
+            "skill is disabled",
         )
     )
 
@@ -863,6 +965,28 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             request={"textLength": len(skill_text), "skillPath": str(skill_path.relative_to(ROOT)), "stopTarget": stop_target},
             transcript=transcript,
         )
+        if not _stop_target_contract_reached(run_id, stop_target):
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="skill_contract_fallback",
+                status="started",
+                item_id="toc-immersive-runner",
+                request={"stopTarget": stop_target, "reason": "skill_completed_without_stop_target_contract"},
+            )
+            stdout = await _run_toc_immersive_frontend_cli_helper(
+                topic=topic,
+                source=source,
+                run_id=run_id,
+                stop_target=stop_target,
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="skill_contract_fallback",
+                status="completed",
+                item_id="toc-immersive-runner",
+                request={"stopTarget": stop_target},
+                response={"stdout": stdout[-2000:]},
+            )
     except Exception as exc:
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -872,7 +996,29 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             request={"textLength": len(skill_text), "skillPath": str(skill_path.relative_to(ROOT)), "stopTarget": stop_target},
             error=str(exc),
         )
-        raise
+        if _is_skill_configuration_error(exc):
+            raise
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="skill_contract_fallback",
+            status="started",
+            item_id="toc-immersive-runner",
+            request={"stopTarget": stop_target, "reason": f"skill_error:{type(exc).__name__}"},
+        )
+        stdout = await _run_toc_immersive_frontend_cli_helper(
+            topic=topic,
+            source=source,
+            run_id=run_id,
+            stop_target=stop_target,
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="skill_contract_fallback",
+            status="completed",
+            item_id="toc-immersive-runner",
+            request={"stopTarget": stop_target},
+            response={"stdout": stdout[-2000:]},
+        )
     finally:
         await client.stop()
 
@@ -1479,6 +1625,30 @@ def _validate_review_item_paths(run_dir: Path, item: FrontendReviewItem, *, stri
     _validate_run_relative_audio_path(run_dir, item.render_narration_path, must_exist=False)
     if item.render_video_path:
         _validate_run_relative_video_path(run_dir, item.render_video_path, must_exist=False)
+
+
+def _validate_candidate_matches_output(run_dir: Path, candidate: Path, output: str) -> None:
+    expected_item_id: str | None = None
+    for kind in ("asset", "scene"):
+        try:
+            items = load_request_items(run_dir, kind)
+        except (FileNotFoundError, ValueError):
+            continue
+        for item in items:
+            if item.output == output:
+                expected_item_id = item.id
+                break
+        if expected_item_id:
+            break
+    if expected_item_id is None:
+        return
+    expected_dir = candidate_path(run_dir, expected_item_id, 1).parent.name
+    actual_dir = candidate.parent.name
+    if actual_dir != expected_dir:
+        raise ValueError(
+            f"candidate item mismatch: {candidate.relative_to(run_dir).as_posix()} cannot be inserted into {output}; "
+            f"expected candidate directory {expected_dir}"
+        )
 
 
 def _frontend_review_dir(run_dir: Path) -> Path:
@@ -2752,6 +2922,40 @@ def _validate_generated_group_outputs(group: list[Any], *, run_dir: Path, kind: 
         raise RuntimeError(f"{kind} generation group {group_index} incomplete: {', '.join(issues)}")
 
 
+def _is_transient_codex_image_error(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSIENT_CODEX_IMAGE_ERRORS)
+
+
+def _has_completed_app_server_image_provenance(run_dir: Path, *, item_id: str, destination: Path) -> bool:
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    if not log_dir.exists():
+        return False
+    destination_key = _run_relative_key(run_dir, str(destination))
+    for log_path in sorted(log_dir.glob("*.json"), reverse=True):
+        try:
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(payload.get("itemId") or "") != str(item_id):
+            continue
+        try:
+            logged_destination = _run_relative_key(run_dir, str(payload.get("destination") or ""))
+        except ValueError:
+            continue
+        if logged_destination != destination_key:
+            continue
+        if str(payload.get("status") or "").lower() not in {"completed", "succeeded"}:
+            continue
+        source = str(payload.get("source") or "").lower()
+        if "local_raster" in source:
+            continue
+        return True
+    return False
+
+
 async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) -> None:
     if not getattr(item, "output", None):
         write_app_server_debug_log(
@@ -2766,19 +2970,33 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
         raise RuntimeError(f"{kind} request has no prompt: {item.id}")
     destination = resolve_run_relative(run_dir, str(item.output))
     if destination.exists():
+        if _has_completed_app_server_image_provenance(run_dir, item_id=str(item.id), destination=destination):
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="request_item_generation",
+                status="skipped",
+                item_id=str(item.id),
+                request={
+                    "kind": kind,
+                    "reason": "destination already exists",
+                    "output": str(item.output),
+                    "destination": str(destination),
+                },
+            )
+            return
+        destination.unlink()
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="request_item_generation",
-            status="skipped",
+            status="retrying",
             item_id=str(item.id),
             request={
                 "kind": kind,
-                "reason": "destination already exists",
+                "reason": "removed existing destination without completed app-server provenance",
                 "output": str(item.output),
                 "destination": str(destination),
             },
         )
-        return
     started = time.monotonic()
     references: list[Path] = []
     for ref in getattr(item, "references", []) or []:
@@ -2801,6 +3019,8 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             "promptLength": len(str(item.prompt or "")),
             "executionLane": str(getattr(item, "execution_lane", "") or ""),
             "assetType": str(getattr(item, "asset_type", "") or ""),
+            "timeoutSeconds": IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS,
+            "maxAttempts": IMAGE_GENERATION_ITEM_MAX_ATTEMPTS,
         },
     )
     client = CodexAppServerClient(cwd=ROOT)
@@ -2808,16 +3028,38 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
     debug_log = None
     try:
         await client.start()
+        generated_root = client.generated_images_root() if hasattr(client, "generated_images_root") else None
         async with _generated_images_cutoff_lock:
-            fallback_cutoff_ns = latest_generated_image_mtime_ns()
-        result = await client.generate_image(
-            prompt=item.prompt,
-            output_path=destination,
-            reference_images=references,
-            item_id=item.id,
-            run_dir=run_dir,
-            fallback_cutoff_ns=fallback_cutoff_ns,
-        )
+            fallback_cutoff_ns = latest_generated_image_mtime_ns(generated_root)
+        for attempt in range(1, IMAGE_GENERATION_ITEM_MAX_ATTEMPTS + 1):
+            try:
+                result = await asyncio.wait_for(
+                    client.generate_image(
+                        prompt=item.prompt,
+                        output_path=destination,
+                        reference_images=references,
+                        item_id=item.id,
+                        run_dir=run_dir,
+                        fallback_cutoff_ns=fallback_cutoff_ns,
+                        timeout_seconds=max(1, int(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS)),
+                    ),
+                    timeout=IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS,
+                )
+                break
+            except Exception as exc:
+                if attempt >= IMAGE_GENERATION_ITEM_MAX_ATTEMPTS or not _is_transient_codex_image_error(exc):
+                    raise
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="request_item_generation_retry",
+                    status="retrying",
+                    item_id=str(item.id),
+                    request={"kind": kind, "output": str(item.output), "attempt": attempt},
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                await client.stop()
+                client = CodexAppServerClient(cwd=ROOT)
+                await client.start()
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -2873,6 +3115,11 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
 
 
 async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
+    async with _serialized_run_write(run_dir, f"{kind}_generation"):
+        await _generate_request_outputs_unlocked(run_dir=run_dir, kind=kind)
+
+
+async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> None:
     items = load_request_items(run_dir, kind)
     if not items:
         raise RuntimeError(f"{kind} request file has no {kind} items")
@@ -2918,12 +3165,40 @@ async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
             },
         )
 
+        continue_after_item_error = _continue_generation_after_item_error(kind)
+        failure_event = asyncio.Event()
+
         async def generate_item(item: Any) -> None:
             async with semaphore:
-                await _generate_request_item_output(run_dir=run_dir, kind=kind, item=item)
+                if failure_event.is_set() and not continue_after_item_error:
+                    return
+                try:
+                    await _generate_request_item_output(run_dir=run_dir, kind=kind, item=item)
+                except Exception:
+                    if not continue_after_item_error:
+                        failure_event.set()
+                    raise
 
         try:
-            await asyncio.gather(*(generate_item(item) for item in group))
+            tasks = [asyncio.create_task(generate_item(item)) for item in group]
+            if continue_after_item_error:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                first_exception = next((result for result in results if isinstance(result, Exception)), None)
+                if first_exception is not None:
+                    try:
+                        _validate_generated_group_outputs(group, run_dir=run_dir, kind=kind, group_index=index)
+                    except RuntimeError as validation_exc:
+                        raise validation_exc from first_exception
+                    raise first_exception
+            else:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                first_exception = next((task.exception() for task in done if task.exception() is not None), None)
+                if first_exception is not None:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    raise first_exception
+                await asyncio.gather(*pending)
             _validate_generated_group_outputs(group, run_dir=run_dir, kind=kind, group_index=index)
         except Exception as exc:
             write_app_server_debug_log(
@@ -3147,8 +3422,37 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                     },
                 )
                 break
-            await _repair_bootstrap_asset_prompts(job_id, run_dir=run_dir, failure_detail=last_asset_gate_error, attempt=attempt)
-            _remove_bootstrap_asset_outputs(run_dir)
+            try:
+                await asyncio.wait_for(
+                    _repair_bootstrap_asset_prompts(
+                        job_id,
+                        run_dir=run_dir,
+                        failure_detail=last_asset_gate_error,
+                        attempt=attempt,
+                    ),
+                    timeout=PROMPT_REPAIR_TIMEOUT_SECONDS,
+                )
+                _remove_bootstrap_asset_outputs(run_dir)
+            except Exception as repair_exc:
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="prompt_repair",
+                    status="failed",
+                    item_id="asset_visual_gate",
+                    request={"attempt": attempt, "timeoutSeconds": PROMPT_REPAIR_TIMEOUT_SECONDS},
+                    error=f"{type(repair_exc).__name__}: {repair_exc}",
+                )
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.asset_visual_gate.status": "needs_frontend_review",
+                        "review.asset_visual_gate.attempts": str(attempt),
+                        "review.asset_visual_gate.last_error": last_asset_gate_error[:2000],
+                        "review.asset_visual_gate.repair.status": "failed",
+                        "review.asset_visual_gate.repair.error": str(repair_exc)[:2000],
+                    },
+                )
+                break
         else:
             asset_quality_passed = True
             append_state_snapshot(
@@ -3170,7 +3474,12 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
     if not raw:
         raw = type(exc).__name__
     normalized = " ".join(raw.split())
-    if "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
+    normalized_lower = normalized.lower()
+    if "401 unauthorized" in normalized_lower or "missing bearer or basic authentication" in normalized_lower:
+        prefix = "Codex app-server の画像生成認証が不足しています"
+    elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeouterror" in normalized_lower:
+        prefix = "Codex app-server の画像生成がタイムアウトしました"
+    elif "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
         prefix = "Codex app-server の状態DBを初期化できませんでした"
     elif "stream disconnected" in normalized or "backend-api/codex/responses" in normalized:
         prefix = "Codex app-server の画像生成通信が途中で切断されました"
@@ -3179,7 +3488,7 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
     elif "p680 visual quality gate failed" in normalized:
         prefix = "p680 の画像品質検証に失敗しました"
     else:
-        prefix = "ToC作成に失敗しました"
+        return "ToC作成に失敗しました"
     message = f"{prefix}: {normalized}"
     if len(message) > max_length:
         return message[: max_length - 1] + "…"
@@ -3907,22 +4216,40 @@ async def api_generate(req: GenerateRequest) -> dict[str, Any]:
 async def api_generate_bulk(req: BulkGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     total_candidates = sum(item.candidate_count for item in req.items)
-    if total_candidates > 32:
-        raise HTTPException(status_code=400, detail="bulk generation is limited to 32 total candidates")
-    semaphore = asyncio.Semaphore(req.concurrency)
+    if total_candidates > 100:
+        raise HTTPException(status_code=400, detail="bulk generation is limited to 100 total candidates")
+    normalized_items = [item.model_copy(update={"run_id": req.run_id, "kind": req.kind}) for item in req.items]
+    candidates_by_item: list[list[dict[str, Any]]] = [[] for _ in normalized_items]
+    semaphore = asyncio.Semaphore(min(req.concurrency, max(total_candidates, 1)))
+    jobs = [
+        (item_position, item, candidate_index)
+        for item_position, item in enumerate(normalized_items)
+        for candidate_index in range(1, item.candidate_count + 1)
+    ]
 
-    async def guarded(item: GenerateRequest) -> dict[str, Any]:
-        normalized = item.model_copy(update={"run_id": req.run_id, "kind": req.kind})
+    async def guarded(item_position: int, item: GenerateRequest, candidate_index: int) -> tuple[int, dict[str, Any]]:
         async with semaphore:
-            return await api_generate(normalized)
+            try:
+                return item_position, await _generate_one(run_dir, item, candidate_index)
+            except Exception as exc:
+                return item_position, {
+                    "index": candidate_index,
+                    "status": "failed",
+                    "path": None,
+                    "error": str(exc),
+                }
 
-    results = await asyncio.gather(*(guarded(item) for item in req.items), return_exceptions=True)
+    for item_position, candidate in await asyncio.gather(*(guarded(*job) for job in jobs)):
+        candidates_by_item[item_position].append(candidate)
+
     payload = []
-    for item, result in zip(req.items, results, strict=False):
-        if isinstance(result, Exception):
-            payload.append({"itemId": item.item_id, "error": "generation failed", "candidates": []})
-        else:
-            payload.append(result)
+    for item, candidates in zip(normalized_items, candidates_by_item, strict=False):
+        candidates.sort(key=lambda candidate: int(candidate.get("index") or 0))
+        has_error = candidates and not any(candidate.get("path") for candidate in candidates)
+        result: dict[str, Any] = {"itemId": item.item_id, "candidates": candidates}
+        if has_error:
+            result["error"] = "generation failed"
+        payload.append(result)
     return {"runId": req.run_id, "kind": req.kind, "results": payload}
 
 
@@ -4028,7 +4355,11 @@ async def api_insert_bulk(req: BulkInsertRequest) -> dict[str, Any]:
         candidate = resolve_run_relative(run_dir, item.candidate_path)
         if not candidate.exists():
             raise HTTPException(status_code=404, detail=f"candidate not found: {item.candidate_path}")
-        inserted.append(insert_candidate(run_dir, candidate, item.output))
+        try:
+            _validate_candidate_matches_output(run_dir, candidate, item.output)
+            inserted.append(insert_candidate(run_dir, candidate, item.output))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"inserted": inserted}
 
 

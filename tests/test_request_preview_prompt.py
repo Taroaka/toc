@@ -16,6 +16,8 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
+
 
 def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
     manifest_path = run_dir / "video_manifest.md"
@@ -68,7 +70,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         if not isinstance(cuts, list):
             cuts = []
             scene["cuts"] = cuts
-        while len([cut for cut in cuts if isinstance(cut, dict) and str(cut.get("cut_status") or "").lower() != "deleted"]) < 2:
+        while len([cut for cut in cuts if isinstance(cut, dict) and str(cut.get("cut_status") or "").lower() != "deleted"]) < 3:
             cuts.append(
                 {
                     "cut_id": len(cuts) + 1,
@@ -173,8 +175,8 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "phase": "development",
                 "importance": "medium",
                 "summary": "request preview 用の p400 readiness scene。",
-                "target_duration_seconds": max(30, len(script_cuts) * 15),
-                "estimated_duration_seconds": max(30, len(script_cuts) * 15),
+                "target_duration_seconds": max(36, len(script_cuts) * 12),
+                "estimated_duration_seconds": max(36, len(script_cuts) * 12),
                 "handoff_to_next_scene": "次へつながる",
                 "terminal_resolution": "preview 完了",
                 "coverage_review": {
@@ -191,7 +193,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
     while total_duration < 300:
         filler_cuts = []
         manifest_cuts = []
-        for cut_id in (1, 2):
+        for cut_id in (1, 2, 3):
             total_duration += 15
             manifest_cuts.append(
                 {
@@ -232,8 +234,8 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "phase": "development",
                 "importance": "medium",
                 "summary": "尺を満たす filler scene。",
-                "target_duration_seconds": 30,
-                "estimated_duration_seconds": 30,
+                "target_duration_seconds": 36,
+                "estimated_duration_seconds": 36,
                 "handoff_to_next_scene": "次へつながる",
                 "terminal_resolution": "preview 完了",
                 "coverage_review": {
@@ -270,11 +272,44 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         round_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir = round_dir / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
         for index in range(1, 6):
-            (round_dir / f"critic_{index}.md").write_text("status: passed\n\ncritic passed\n", encoding="utf-8")
+            focus_name = stage_focus.get(index, ("", ""))[0]
+            focus_line = f"critic_focus: {focus_name}\n" if focus_name else ""
+            (round_dir / f"critic_{index}.md").write_text(f"{focus_line}status: passed\n\ncritic passed\n", encoding="utf-8")
+            (prompt_dir / f"critic_{index}.prompt.md").write_text(
+                f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
+                encoding="utf-8",
+            )
         patch = "## Design Owner Patch Brief" if stage == "production_readiness" else "## Generator Patch Brief"
+        scene_count_gate = ""
+        if stage in SCENE_REVIEW_CRITIC_FOCUS:
+            scene_count_gate = (
+                "## Scene Count Gate\n"
+                "- maximal_meaningful_stop_condition: no additional independent scene remains\n"
+                "- next_scene_candidate: none\n"
+                "- cut_thickening_reason: additional material repeats the same scene turn\n"
+                "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed\n"
+            )
+        elif stage_focus:
+            scene_count_gate = (
+                "## Cut Blueprint Gate\n"
+                "- cut_intent_isolation: passed\n"
+                "- beat_ladder_coverage: passed\n"
+                "- first_frame_motion_readiness: passed\n"
+                "- multimodal_contract_coverage: passed\n"
+                "- duration_density_and_handoff: passed\n"
+                "- coverage_plan_complete: passed\n"
+                "- continuity_contract_complete: passed\n"
+                "- narration_contract_complete: passed\n"
+                "- downstream_handoff_complete: passed\n"
+                "- triangulation_review_ready: passed\n"
+            )
         (round_dir / "aggregated_review.md").write_text(
             "status: passed\n\n## Blocking Findings\nnone\n## Recommended Changes\nnone\n## Rejected Suggestions\nnone\n"
+            + scene_count_gate
             + patch
             + "\nnone\n## Round Summary\npassed\n",
             encoding="utf-8",
@@ -792,6 +827,61 @@ scenes:
             self.assertIn("## scene1_cut3", request_text)
             self.assertIn("- still_mode: `no_dedicated_still`", request_text)
             self.assertIn("motion chain: scene01_cut01 -> scene02_cut01", request_text)
+
+    def test_cut_contract_feeds_image_and_video_prompts_without_motion_leak(self) -> None:
+        manifest_yaml = """
+video_metadata:
+  topic: "シンデレラ"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        cut_contract:
+          cut_function: "threshold"
+          viewer_contract:
+            target_beat: "階段に残された靴へ王子の注意が集まる"
+            screen_question: "王子は消えた相手の証拠に気づくのか"
+            visual_proof: "前景のガラスの靴と、奥で止まる王子の手"
+            must_show: ["ガラスの靴"]
+            must_avoid: ["馬車"]
+          cinematic_contract:
+            subject_priority:
+              primary: "ガラスの靴"
+              secondary: "王子の手"
+            screen_geography:
+              foreground: "階段の端の靴"
+              midground: "手を伸ばす王子"
+              background: "空になった階段"
+          first_frame_contract:
+            first_frame_brief: "動画が動き出す直前に見えている初期状態。王子の手はまだ靴に触れていない"
+          motion_contract:
+            motion_brief: "王子の手が靴へゆっくり近づく"
+            end_state: "手が靴に触れる直前で止まる"
+            must_not_add: ["新しい人物"]
+        image_generation:
+          tool: "codex_builtin_image"
+          prompt: "灰色の城階段。自然な映画照明。"
+          output: "assets/scenes/scene01_cut01.png"
+        video_generation:
+          tool: "kling"
+          motion_prompt: "低い位置からゆっくり寄る。"
+          output: "assets/videos/scene01_cut01.mp4"
+"""
+        _, _, scenes = MODULE.parse_manifest_yaml_full(manifest_yaml)
+        scene = scenes[0]
+
+        image_prompt = MODULE._compose_final_image_prompt(scene, prefix="", suffix="")
+        self.assertIn("ガラスの靴", image_prompt)
+        self.assertIn("王子の手はまだ靴に触れていない", image_prompt)
+        self.assertIn("灰色の城階段", image_prompt)
+        self.assertNotIn("motion_brief", image_prompt)
+        self.assertNotIn("王子の手が靴へゆっくり近づく", image_prompt)
+        self.assertNotIn("最初の1フレーム", image_prompt)
+
+        video_prompt = MODULE._compose_final_video_prompt(scene, prefix="", suffix="")
+        self.assertIn("motion_brief: 王子の手が靴へゆっくり近づく", video_prompt)
+        self.assertIn("end_state: 手が靴に触れる直前で止まる", video_prompt)
+        self.assertIn("低い位置からゆっくり寄る。", video_prompt)
 
     def test_recreate_archives_existing_image_to_test_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

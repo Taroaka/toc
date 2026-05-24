@@ -352,9 +352,11 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
   - それぞれ独立に同じ canonical artifact と stage readset を読み、rubric finding を出す
   - critic は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
   - finding は表層的な「不足」「弱い」「不明」だけで終わらせず、`root_cause`（本質原因）、`downstream_impact`（後段への影響）、`fix_direction`（修正方針）、`acceptance_condition`（次回通過条件）を明示する
+  - `p410b` / `p410c` では、必要に応じて critic を `scene_count_coverage`, `dramatic_structure`, `reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` に分ける。標準 5 critic 構成では critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` とする
 - aggregator: 1 agent
   - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
   - 採用する blocker には、失敗した check 名だけでなく、その failure を生んだ設計・依存・state・contract 上の原因と、明確な修正方針がある場合の target artifact / section / acceptance condition を書く
+  - `p410b` / `p410c` の aggregator は、次に追加できる scene 候補と、それを scene 追加ではなく cut 増厚へ回す理由が説明されるまで `passed` にしない
   - aggregator も canonical artifact を直接編集しない
 - owning L2 P-Bucket Supervisor:
   - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
@@ -531,6 +533,8 @@ p400 の内部 slot:
   - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
   - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、および `coverage_review` を持つ
   - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
+  - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
+  - `p410b` の stop condition は、これ以上 scene を増やしても既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持てず、cut 設計を厚くした方が品質が上がると説明できる状態である
   - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
   - 具体 reviewer は 5-10 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もり、提案 cut 数だけで足りるかを評価する
   - 1 cut はおおよそ 4-15 秒であるため、1 cut しかない scene は 4-15 秒程度にしかならないことを finding に明記する
@@ -546,6 +550,8 @@ p400 の内部 slot:
   - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
   - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
   - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は担当 `p400` L2 supervisor / bucket single writer が行う
+  - p420 cut review は critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
+  - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame と motion の責務分離、multimodal contract、duration / handoff が説明できる場合だけ passed を返す
   - agent review loop は `eval.cut_blueprint.loop.*` / `cut_blueprint_review.md` に記録する
   - human review は `gate.script_cut_review` / `review.script.cut.status` で required|optional|skipped を切り替える
 - `p430`: script review handoff
@@ -1131,6 +1137,7 @@ Canonical reason key:
 - `prompt_not_self_contained`
 - `prompt_contains_nonvisual_metadata`
 - `prompt_contains_first_frame_metadata`
+- `prompt_leaks_motion_brief`
 - `non_japanese_prompt_term`
 - `prompt_mentions_character_but_character_ids_empty`
 - `image_contract_missing`
@@ -1467,3 +1474,73 @@ Canonical reason key:
 - `reference_usage_target_missing`
 - `dotted_selector_invalid`
 - `renumber_trace_missing`
+
+## Cut Contract v2.1
+
+`video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。既存 runtime が `scene_contract` を読む場合は、`cut_contract` の主要 field を `scene_contract` に複写する。
+
+```yaml
+cut_contract:
+  schema_version: "2.1"
+  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+  viewer_contract:
+    target_beat: ""
+    screen_question: ""
+    dramatic_job: ""
+    emotional_micro_shift:
+      from: ""
+      to: ""
+    visual_proof: ""
+    must_show: []
+    must_avoid: []
+    done_when: []
+  cinematic_contract:
+    camera_intent: ""
+    subject_priority: {}
+    screen_geography: {}
+  continuity_contract:
+    start_state: {}
+    end_state: {}
+    carry_forward_to_next_cut: []
+  first_frame_contract:
+    imageable: true
+    first_frame_brief: ""
+    action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+  motion_contract:
+    movable: true
+    motion_brief: ""
+    end_state: ""
+    must_not_add: []
+  narration_contract:
+    speakable_or_silent: true
+    role: "setup|fact|emotion|contrast|aftertaste|silent"
+    target_function: ""
+    text: ""
+    tts_text: ""
+    silence_reason: ""
+  downstream_handoff:
+    p500_asset: {}
+    p600_image: {}
+    p700_narration: {}
+    p800_video: {}
+```
+
+Additional cut review reason keys:
+
+```yaml
+- cut_contract_missing
+- cut_missing_screen_question
+- cut_missing_visual_proof
+- cut_missing_narration_contract
+- cut_narration_is_caption
+- cut_silent_without_reason
+- cut_downstream_handoff_missing
+- cut_triangulation_unready
+- handoff_image_motion_mismatch
+- handoff_narration_captioning
+- handoff_motion_adds_new_story
+- handoff_still_finishes_action
+- handoff_reveal_early
+- handoff_end_state_missing
+- handoff_audio_visual_conflict
+```

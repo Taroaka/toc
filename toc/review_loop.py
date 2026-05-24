@@ -29,6 +29,98 @@ REVIEW_CAUSAL_ANALYSIS_GUIDANCE = dedent(
 ).strip()
 
 
+SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
+    "scene_set": {
+        1: (
+            "scene_count_coverage",
+            "Verify that the approved story beats are expanded to the maximal meaningful scene count. "
+            "Block approval if a beat with its own dramatic question, value shift, and causal turn is buried inside another scene.",
+        ),
+        2: (
+            "dramatic_structure_and_reveal_order",
+            "Verify that each scene has an independent dramatic question, value shift, and causal turn, and that scene additions or splits do not break reveal order.",
+        ),
+        3: (
+            "duration_density",
+            "Verify whether scene count, target duration, importance, and planned cut density are sufficient for the target video length. "
+            "Decide where scene splitting is better than cut thickening.",
+        ),
+        4: (
+            "visual_production",
+            "Verify that every proposed scene can hand visible evidence, visual thesis, and asset/image/video requirements to p500/p600/p800.",
+        ),
+        5: (
+            "handoff_integrity",
+            "Verify scene-to-scene causality and handoff: each scene ending must generate the next scene's starting pressure or question.",
+        ),
+    },
+    "scene_detail": {
+        1: (
+            "scene_detail_structure",
+            "Verify this scene's necessity, internal logic, and independent dramatic question/value shift/causal turn within the maximal scene set.",
+        ),
+        2: (
+            "scene_detail_density",
+            "Verify this scene's cut count, target duration, emotional weight, and whether to add cuts or split the scene.",
+        ),
+        3: (
+            "scene_detail_handoff",
+            "Verify incoming and outgoing handoff with neighboring scenes, including the final cut's ability to trigger the next scene.",
+        ),
+        4: (
+            "scene_detail_reveal_order",
+            "Verify that this scene neither reveals future information too early nor omits information the audience needs here.",
+        ),
+        5: (
+            "scene_detail_visual_production",
+            "Verify that this scene's visible evidence, visual thesis, and p500/p600/p800 handoff are concrete enough for production.",
+        ),
+    },
+}
+
+CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
+    1: (
+        "cut_intent_isolation",
+        "Verify that each cut carries exactly one viewer-facing intent and does not combine location move, reveal, emotional reversal, explanation, reaction, and next-scene handoff in one cut.",
+    ),
+    2: (
+        "beat_ladder_coverage",
+        "Verify that cut_function roles cover the scene spine and that scene obligations are assigned: dramatic question, value_shift.visible_evidence, causal_turn, reveal constraints, reaction, and handoff.",
+    ),
+    3: (
+        "first_frame_motion_readiness",
+        "Verify that first_frame_contract is a startable p600 still input, action_completion_state is not an unintended aftermath, and motion_contract remains a p800-only input instead of leaking into image prompt authoring.",
+    ),
+    4: (
+        "multimodal_contract_coverage",
+        "Verify that cut_contract.viewer/cinematic/continuity/narration/downstream fields are concrete and that image, motion, and narration can satisfy the same target_beat without narration-only explanation.",
+    ),
+    5: (
+        "duration_density_and_handoff",
+        "Verify cut count, duration intent, importance-based density, continuity between cuts, final-cut handoff, and downstream handoff readiness for p500/p600/p700/p800.",
+    ),
+}
+
+CUT_BLUEPRINT_GATE_MARKERS: tuple[str, ...] = (
+    "## Cut Blueprint Gate",
+    "cut_intent_isolation",
+    "beat_ladder_coverage",
+    "first_frame_motion_readiness",
+    "multimodal_contract_coverage",
+    "duration_density_and_handoff",
+    "coverage_plan_complete",
+    "continuity_contract_complete",
+    "narration_contract_complete",
+    "downstream_handoff_complete",
+    "triangulation_review_ready",
+)
+
+REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE: dict[str, dict[int, tuple[str, str]]] = {
+    **SCENE_REVIEW_CRITIC_FOCUS,
+    "cut_blueprint": CUT_BLUEPRINT_CRITIC_FOCUS,
+}
+
+
 @dataclass(frozen=True)
 class ReviewLoopSpec:
     stage: str
@@ -210,6 +302,17 @@ def final_review_relpath(stage: str) -> Path:
 
 
 def review_guidance_for_stage(stage: str) -> str:
+    if stage == "scene_set":
+        return dedent(
+            """
+            Stage-specific review criteria:
+            - Apply `maximal_meaningful` scene count strategy: do not approve a compressed scene set while an approved story beat can stand as its own production scene.
+            - A beat deserves its own scene when it has an independent dramatic_question, value_shift, causal_turn, and visible evidence.
+            - The stop condition is not a fixed scene count. Pass only when the next plausible scene would repeat an existing question/value shift/causal turn and cut thickening would improve quality more than another scene.
+            - Always name the next scene candidate that could be added. If you reject it, explain why it belongs inside existing scene cuts instead.
+            - Check story coverage, scene order, reveal order, target duration, visual production handoff, and scene-to-scene causality.
+            """
+        ).strip()
     if stage == "asset":
         return dedent(
             """
@@ -228,6 +331,9 @@ def review_guidance_for_stage(stage: str) -> str:
         return dedent(
             """
             Stage-specific review criteria:
+            - Keep `maximal_meaningful` in force at the per-scene level: decide whether this scene should remain one scene, be split into multiple scenes, or be thickened with more cuts.
+            - A split is required when a sub-beat has its own dramatic_question, value_shift, causal_turn, and visible evidence.
+            - Cut thickening is preferred only when the added material supports the same scene question/value shift/causal turn.
             - Judge whether the proposed cut count can carry this scene in a final 5-10 minute video.
             - Estimate the scene's needed duration from total scene count, scene importance, reveal weight, and emotional weight.
             - Treat one cut as roughly 4-15 seconds; explicitly flag that a one-cut scene can only carry about 4-15 seconds.
@@ -235,6 +341,21 @@ def review_guidance_for_stage(stage: str) -> str:
             - Review the next scene as context. Decide whether the current scene's final cut connects to the next scene.
             - If the final cut does not connect, recommend either adding one more cut or thickening the final cut.
             - Return concrete add/thicken/delete recommendations that main can auto-apply.
+            """
+        ).strip()
+    if stage == "cut_blueprint":
+        return dedent(
+            """
+            Stage-specific review criteria:
+            - Apply the cut density contract after p410 scenes are approved: every production scene must have enough cuts to make its scene_spine visible.
+            - One cut must carry one intent only (one viewer-facing intent). If a cut contains location change, reveal, emotional reversal, explanation, reaction, and next-scene handoff together, return changes_requested.
+            - Important beats such as transformation, discovery, confrontation, emotional reversal, and proof reveal must be split into setup / pressure or threshold / turn or payoff / reaction / handoff as appropriate.
+            - Require a coverage plan that maps scene obligations to cuts: dramatic_question, value_shift.visible_evidence, causal_turn, reveal constraints, audience information, and handoff_to_next_scene.
+            - first_frame_contract must describe a startable still just before motion begins; it must not be a completed action or production metadata.
+            - motion_contract is p800-only. p600 image prompt authoring must not read it or summarize future motion into the still prompt.
+            - p420 must still ensure motion_contract can start from first_frame_contract without inventing a new story event, but that compatibility check belongs to cut/video planning, not image prompt authoring.
+            - viewer_contract, cinematic_contract, continuity_contract, narration_contract, downstream_handoff, and triangulation_review must be concrete enough for p600 image, p700 narration, and p800 motion to verify.
+            - The final cut of each scene must hand off to the next scene or terminal resolution through visible action, object, gaze, sound, or causal pressure.
             """
         ).strip()
     if stage == "production_readiness":
@@ -291,6 +412,26 @@ def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic
     readset_path = run_dir / "logs" / "grounding" / f"{readset_stage}.readset.json"
     own_report = (run_dir / critic_relpath(stage, round_number, critic_number)).resolve()
     stage_guidance = review_guidance_for_stage(stage)
+    focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {}).get(critic_number)
+    focus_name = ""
+    if focus is not None:
+        focus_name, focus_guidance = focus
+        stage_guidance = "\n\n".join(
+            part
+            for part in (
+                stage_guidance,
+                dedent(
+                    f"""
+                    Critic focus for this prompt:
+                    - role: {focus_name}
+                    - responsibility: {focus_guidance}
+                    - You may mention findings outside this focus, but prioritize this role and make its pass/fail judgment explicit.
+                    """
+                ).strip(),
+            )
+            if part
+        )
+    focus_output_line = f"- critic_focus: {focus_name}\n        " if focus_name else ""
     guidance_block = f"\n\n{stage_guidance}" if stage_guidance else ""
     return dedent(
         f"""
@@ -307,7 +448,7 @@ def render_critic_prompt(*, run_dir: Path, stage: str, round_number: int, critic
         {REVIEW_CAUSAL_ANALYSIS_GUIDANCE}
         {guidance_block}
         Return markdown for `{own_report}` with:
-        - status: passed|changes_requested
+        {focus_output_line}- status: passed|changes_requested
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, fix_direction, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_direction, acceptance_condition
         - rejected_suggestions[]
@@ -342,6 +483,38 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
             """
         ).strip()
         brief_label = "generator_patch_brief"
+    stage_guidance = ""
+    if stage in REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE:
+        roles = "\n".join(
+            f"- critic_{idx}: {name}"
+            for idx, (name, _) in sorted(REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE[stage].items())
+        )
+        if stage in SCENE_REVIEW_CRITIC_FOCUS:
+            stage_guidance = dedent(
+                f"""
+                Stage-specific aggregation rule:
+                {roles}
+                For p410 scene review, do not pass until the `maximal_meaningful`
+                scene count stop condition is explicit: name the next plausible scene
+                candidate, and explain why it should be rejected in favor of cut
+                thickening. If critic_1 has an unresolved scene_count_coverage blocker,
+                the aggregate status must be changes_requested.
+                """
+            ).strip()
+        elif stage == "cut_blueprint":
+            stage_guidance = dedent(
+                f"""
+                Stage-specific aggregation rule:
+                {roles}
+                For p420 cut review, do not pass until the cut blueprint gate is explicit:
+                each cut has one intent, the beat ladder covers the scene spine, coverage_plan maps
+                scene obligations to cuts, first_frame_contract and motion_contract are startable,
+                viewer/cinematic/continuity/narration/downstream fields are concrete, triangulation
+                review is ready, and cut density/handoff are sufficient. If critic_1 has an unresolved
+                cut_intent_isolation blocker, the aggregate status must be changes_requested.
+                """
+            ).strip()
+    guidance_block = f"\n\n{stage_guidance}" if stage_guidance else ""
     return dedent(
         f"""
         You are the aggregator in the ToC {spec.title}.
@@ -354,9 +527,12 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
         Apply the same causal-analysis rule as the critics: every adopted blocker
         must name the essential cause, not only the failed check, and every clear
         fix must include a concrete fix plan and acceptance condition.
+        {guidance_block}
 
         Write markdown suitable for `{aggregate_path}` and final summary `{final_path}` with:
         - status: passed|changes_requested
+        - scene_count_gate: for p410 stages include maximal_meaningful_stop_condition, next_scene_candidate, cut_thickening_reason, and critic_1_scene_count_coverage_resolution
+        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, beat_ladder_coverage, first_frame_motion_readiness, multimodal_contract_coverage, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
         - rejected_suggestions[]
@@ -405,14 +581,48 @@ def render_aggregated_review(
         "",
         "Aggregator must list rejected critic suggestions and why they were not adopted.",
         "",
-        f"## {patch_brief_heading}",
-        "",
-        f"{patch_brief_text} Include target files/sections, concrete edits, root cause being fixed, and acceptance condition.",
-        "",
-        "## Round Summary",
-        "",
-        "Aggregator must summarize the essential causes found in this round, which fixes are clear, and why the loop can stop or must continue.",
     ]
+    if stage in SCENE_REVIEW_CRITIC_FOCUS:
+        sections.extend(
+            [
+                "## Scene Count Gate",
+                "",
+                "- maximal_meaningful_stop_condition: TODO",
+                "- next_scene_candidate: TODO",
+                "- cut_thickening_reason: TODO",
+                "- critic_1_scene_count_coverage_resolution: TODO",
+                "",
+            ]
+        )
+    if stage == "cut_blueprint":
+        sections.extend(
+            [
+                "## Cut Blueprint Gate",
+                "",
+                "- cut_intent_isolation: TODO",
+                "- beat_ladder_coverage: TODO",
+                "- first_frame_motion_readiness: TODO",
+                "- multimodal_contract_coverage: TODO",
+                "- duration_density_and_handoff: TODO",
+                "- coverage_plan_complete: TODO",
+                "- continuity_contract_complete: TODO",
+                "- narration_contract_complete: TODO",
+                "- downstream_handoff_complete: TODO",
+                "- triangulation_review_ready: TODO",
+                "",
+            ]
+        )
+    sections.extend(
+        [
+            f"## {patch_brief_heading}",
+            "",
+            f"{patch_brief_text} Include target files/sections, concrete edits, root cause being fixed, and acceptance condition.",
+            "",
+            "## Round Summary",
+            "",
+            "Aggregator must summarize the essential causes found in this round, which fixes are clear, and why the loop can stop or must continue.",
+        ]
+    )
     for idx, report in enumerate(critic_reports, start=1):
         sections.extend(["", f"## Critic {idx} Input", "", report.strip()])
     return "\n".join(sections).rstrip() + "\n"

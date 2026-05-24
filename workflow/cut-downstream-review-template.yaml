@@ -1,0 +1,49 @@
+# Cut Downstream Triangulation Review Template v2.1
+
+triangulation_review_version: "2.1"
+selector: "scene1_cut1"
+source_cut_contract:
+  cut_function: ""
+  target_beat: ""
+  visual_proof: ""
+  first_frame_brief: ""
+  motion_brief: ""
+  narration_role: ""
+  handoff: ""
+
+p600_image_review:
+  prompt_uses_first_frame_only: false
+  prompt_contains_no_authoring_metadata: false
+  still_does_not_finish_action: false
+  visual_proof_visible: false
+  continuity_anchors_present: false
+  reveal_constraints_preserved: false
+  findings: []
+
+p700_narration_review:
+  narration_role_matches_contract: false
+  narration_not_captioning_image: false
+  silent_cut_has_reason: false
+  does_not_add_new_story_fact: false
+  timing_supports_visual_beat: false
+  findings: []
+
+p800_video_review:
+  motion_starts_from_still: false
+  motion_does_not_add_new_story: false
+  motion_reaches_declared_end_state: false
+  cut_function_executed: false
+  handoff_visible_or_audible: false
+  findings: []
+
+overall:
+  same_target_beat: false
+  image_supports_motion_start: false
+  motion_reaches_declared_end_state: false
+  narration_not_captioning_image: false
+  reveal_constraints_preserved: false
+  continuity_preserved: false
+  handoff_visible_or_audible: false
+  status: "pending|passed|changes_requested|waived"
+  blocking_reason_keys: []
+

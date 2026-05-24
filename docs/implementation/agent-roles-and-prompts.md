@@ -75,7 +75,7 @@
 | `p100` Research | `research.md`, research review, source trace, slot state | research scouts, grounding auditor, research critics |
 | `p200` Story | `story.md`, hybridization gate preparation, story review | Director, story candidates, source-vs-creative auditors |
 | `p300` Visual Planning | `visual_value.md`, p400/p500/p600/p700 handoff appendix | Visual Value Ideator, payoff/anchor/risk auditors |
-| `p400` Script | `script.md`, `scene_conte.md`, skeleton `video_manifest.md`, p400 review loops | Immersive Scriptwriter, scene workers, production readiness council |
+| `p400` Script | `script.md`, `scene_conte.md`, skeleton `video_manifest.md`, p400 review loops | Immersive Scriptwriter, scene workers, scene count coverage / dramatic structure / reveal order / duration density / visual production / handoff critics, production readiness council |
 | `p500` Asset | `asset_inventory.md`, `asset_plan.md`, asset requests, reusable asset generation | asset planners, continuity reviewers, image runners |
 | `p600` Scene/Image | production image prompts, scene requests, scene still generation, image handoff | scene/cut prompt workers, image prompt judges, image QA |
 | `p700` Narration | narration review, TTS generation, duration fit, audio handoff | Narration Writer, duration reviewers, TTS workers |
@@ -136,6 +136,28 @@
 ### Reviewer（Director兼務可）
 - 入力: scene draft / script
 - 出力: `accept | revise` + 理由
+
+### p410 Scene Review Critics
+- 入力: `story.md` / `visual_value.md` / `script.md` scene draft / stage readset
+- 出力: 観点別 critic report。canonical artifact は編集しない
+- 役割:
+  - critic_1 `scene_count_coverage`: scene 数が `maximal_meaningful` まで展開され、独立 scene 化すべき主要 beat が埋もれていないかを見る
+  - critic_2 `dramatic_structure + reveal_order`: 各 scene が独立した問い・価値変化・因果 turn を持つか、scene 追加/分割で reveal の早出し、欠落、順序破壊がないかを見る
+  - critic_3 `duration_density`: scene 追加と cut 増厚のどちらが品質に効くかを、目標尺・重要度・cut 数で見る
+  - critic_4 `visual_production`: 追加 scene が p500/p600/p800 へ渡せる visible evidence を持つかを見る
+  - critic_5 `handoff_integrity`: scene 間の因果と handoff が途切れていないかを見る
+  - aggregator は各 critic を統合し、次に追加できる scene と cut 増厚へ回す理由が説明できる場合だけ pass を返す
+
+### p420 Cut Blueprint Review Critics
+- 入力: `story.md` / `visual_value.md` / `script.md` cut blueprint draft / stage readset
+- 出力: 観点別 critic report。canonical artifact は編集しない
+- 役割:
+  - critic_1 `cut_intent_isolation`: 1 cut = 1 intent が守られ、場所移動/reveal/感情反転/説明/反応を詰め込んでいないかを見る
+  - critic_2 `beat_ladder_coverage`: cut_function 列が scene_spine を進め、重要 beat が段階分解されているかを見る
+  - critic_3 `first_frame_motion_readiness`: first_frame_brief が p600 still の入力として完結し、motion_brief が p800 専用入力として分離されているかを見る
+  - critic_4 `multimodal_contract_coverage`: target_beat / must_show / must_avoid / done_when が image / narration / motion へ渡せるかを見る
+  - critic_5 `duration_density_and_handoff`: 重要度・尺・cut数・最終cutのhandoffが十分かを見る
+  - aggregator は各 critic を統合し、`Cut Blueprint Gate` の全項目が説明できる場合だけ pass を返す
 
 ### Stage Evaluator
 - 入力: `research.md` / `script.md` / `video_manifest.md` / `video.mp4`

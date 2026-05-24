@@ -10,7 +10,7 @@ from typing import Any
 from toc.grounding import grounding_validation
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
-from toc.review_loop import REVIEW_LOOP_CRITIC_COUNT
+from toc.review_loop import CUT_BLUEPRINT_GATE_MARKERS, REVIEW_LOOP_CRITIC_COUNT, REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
 
 
 STAGE_RUBRIC_WEIGHTS = {
@@ -157,6 +157,81 @@ def contract_list(contract: dict[str, Any], key: str) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _contract_value(contract: dict[str, Any], *paths: str) -> Any:
+    for path in paths:
+        cur: Any = contract
+        ok = True
+        for key in path.split("."):
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur[key]
+        if ok and non_empty(cur):
+            return cur
+    return None
+
+
+def _contract_string(contract: dict[str, Any], *paths: str) -> str:
+    value = _contract_value(contract, *paths)
+    return str(value).strip() if value is not None else ""
+
+
+def _contract_list_paths(contract: dict[str, Any], *paths: str) -> list[str]:
+    for path in paths:
+        value = _contract_value(contract, path)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _node_cut_contract(node: dict[str, Any]) -> dict[str, Any]:
+    for key in ("cut_contract", "scene_contract", "cut_blueprint"):
+        value = node.get(key) if isinstance(node, dict) else None
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _cut_contract_complete(contract: dict[str, Any]) -> bool:
+    if not isinstance(contract, dict) or not contract:
+        return False
+    return (
+        non_empty(_contract_string(contract, "cut_function"))
+        and non_empty(_contract_string(contract, "target_beat", "viewer_contract.target_beat"))
+        and non_empty(_contract_string(contract, "visual_beat", "viewer_contract.visual_proof"))
+        and non_empty(_contract_string(contract, "first_frame_brief", "first_frame_contract.first_frame_brief"))
+        and non_empty(_contract_string(contract, "motion_brief", "motion_contract.motion_brief"))
+        and non_empty(_contract_string(contract, "narration_role", "narration_contract.role"))
+        and bool(_contract_list_paths(contract, "must_show", "viewer_contract.must_show"))
+        and bool(_contract_list_paths(contract, "done_when", "viewer_contract.done_when"))
+    )
+
+
+def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(contract, dict) or not contract:
+        return ["cut_contract:missing"]
+    if not non_empty(_contract_string(contract, "cut_function")):
+        issues.append("cut_function")
+    if not non_empty(_contract_string(contract, "target_beat", "viewer_contract.target_beat")):
+        issues.append("viewer_contract.target_beat")
+    if not non_empty(_contract_string(contract, "screen_question", "viewer_contract.screen_question")):
+        issues.append("viewer_contract.screen_question")
+    if not non_empty(_contract_string(contract, "visual_beat", "viewer_contract.visual_proof")):
+        issues.append("viewer_contract.visual_proof")
+    if not bool(_contract_list_paths(contract, "must_show", "viewer_contract.must_show")):
+        issues.append("viewer_contract.must_show")
+    if not bool(_contract_list_paths(contract, "done_when", "viewer_contract.done_when")):
+        issues.append("viewer_contract.done_when")
+    if not non_empty(_contract_string(contract, "first_frame_brief", "first_frame_contract.first_frame_brief")):
+        issues.append("first_frame_contract.first_frame_brief")
+    if not non_empty(_contract_string(contract, "motion_brief", "motion_contract.motion_brief")):
+        issues.append("motion_contract.motion_brief")
+    if not non_empty(_contract_string(contract, "narration_role", "narration_contract.role")):
+        issues.append("narration_contract.role")
+    return issues
 
 
 def score_from_ratio(numerator: float, denominator: float) -> float:
@@ -711,7 +786,7 @@ def _manifest_rubric(nodes: list[dict[str, Any]], body_text: str) -> dict[str, f
             )
             if narration_text or is_intentional_silence:
                 narration_count += 1
-        if isinstance(node.get("scene_contract"), dict):
+        if _node_cut_contract(node):
             contract_count += 1
         if isinstance(video_generation, dict) and video_generation.get("duration_seconds"):
             pass
@@ -891,6 +966,10 @@ def _scene_has_intent(scene: dict[str, Any]) -> bool:
 
 
 def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
+    contract = _node_cut_contract(cut)
+    if contract and _cut_contract_complete(contract):
+        return True
+
     blueprint = cut.get("cut_blueprint")
     if not isinstance(blueprint, dict):
         return False
@@ -1355,6 +1434,16 @@ def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("sce
         critic_reports = sorted(round_dir.glob("critic_*.md"))
         if len(critic_reports) != REVIEW_LOOP_CRITIC_COUNT:
             issues.append(f"{stage}:critics<{REVIEW_LOOP_CRITIC_COUNT}")
+        stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
+        for critic_number, (focus_name, _) in stage_focus.items():
+            prompt_path = round_dir / "prompts" / f"critic_{critic_number}.prompt.md"
+            if not prompt_path.exists():
+                issues.append(f"{stage}:critic_{critic_number}_prompt_missing")
+            elif focus_name not in prompt_path.read_text(encoding="utf-8"):
+                issues.append(f"{stage}:critic_{critic_number}_prompt_missing_focus:{focus_name}")
+            report_path = round_dir / f"critic_{critic_number}.md"
+            if report_path.exists() and focus_name not in report_path.read_text(encoding="utf-8"):
+                issues.append(f"{stage}:critic_{critic_number}_report_missing_focus:{focus_name}")
         aggregate = round_dir / "aggregated_review.md"
         if not aggregate.exists():
             issues.append(f"{stage}:aggregated_review_missing")
@@ -1367,6 +1456,21 @@ def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("sce
         patch_heading = "## Design Owner Patch Brief" if stage == "production_readiness" else "## Generator Patch Brief"
         if patch_heading not in aggregate_text:
             issues.append(f"{stage}:missing:{patch_heading}")
+        if stage_focus:
+            markers = (
+                (
+                    "## Scene Count Gate",
+                    "maximal_meaningful_stop_condition",
+                    "next_scene_candidate",
+                    "cut_thickening_reason",
+                    "critic_1_scene_count_coverage_resolution",
+                )
+                if stage in SCENE_REVIEW_CRITIC_FOCUS
+                else CUT_BLUEPRINT_GATE_MARKERS
+            )
+            for marker in markers:
+                if marker not in aggregate_text:
+                    issues.append(f"{stage}:missing:{marker}")
     return issues
 
 
@@ -1669,7 +1773,7 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         return make_stage("manifest", path.name, checks), updates
 
     text, data = load_structured_document(path)
-    body_text = flatten_without_keys(data, excluded={"scene_contract", "review_contract", "evaluation_contract"}) or text
+    body_text = flatten_without_keys(data, excluded={"cut_contract", "scene_contract", "review_contract", "evaluation_contract"}) or text
     _append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
     raw_manifest_phase = data.get("manifest_phase")
     manifest_phase = str(raw_manifest_phase or "production").strip().lower()
@@ -1741,6 +1845,7 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     reveal_constraints = _load_script_reveal_constraints(run_dir)
     human_change_issues = _human_change_request_issues(data, run_dir=run_dir)
     contract_missing = False
+    contract_structure_issues: list[str] = []
     must_show_failed = False
     must_avoid_failed = False
     target_beat_failed = False
@@ -1753,13 +1858,16 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
                 str(((((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration") or {}) if isinstance(((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration"), dict) else {}).get("text") or ""),
             ]
         )
-        contract = node.get("scene_contract") if isinstance(node.get("scene_contract"), dict) else {}
+        contract = _node_cut_contract(node)
         if not contract:
             contract_missing = True
             continue
-        must_show = contract_list(contract, "must_show")
-        must_avoid = contract_list(contract, "must_avoid")
-        target_beat = str(contract.get("target_beat") or "").strip()
+        if isinstance(node.get("cut_contract"), dict):
+            for issue in _cut_contract_structure_issues(contract):
+                contract_structure_issues.append(f"{selector}:{issue}")
+        must_show = _contract_list_paths(contract, "must_show", "viewer_contract.must_show")
+        must_avoid = _contract_list_paths(contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
+        target_beat = _contract_string(contract, "target_beat", "viewer_contract.target_beat")
         if must_show and not all(term in combined for term in must_show):
             must_show_failed = True
         if must_avoid and any(term in combined for term in must_avoid):
@@ -1780,7 +1888,16 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
                     if subject_id in declared_character_ids or subject_id in prompt:
                         reveal_failed = True
     if contract_missing:
-        add_check(checks, "manifest.contract_missing", False, "one or more scene/cut nodes are missing scene_contract.", kind="rubric")
+        add_check(checks, "manifest.contract_missing", False, "one or more scene/cut nodes are missing cut_contract or legacy scene_contract.", kind="rubric")
+    if contract_structure_issues:
+        add_check(
+            checks,
+            "manifest.cut_contract_structure",
+            False,
+            "one or more cut_contract nodes are missing required viewer/first-frame/motion/narration fields"
+            + (f" (issues: {', '.join(contract_structure_issues[:8])})" if contract_structure_issues else ""),
+            kind="rubric",
+        )
     if must_show_failed:
         add_check(checks, "manifest.contract_must_show_unmet", False, "scene/cut contract must_show items are not fully represented.", kind="rubric")
     if must_avoid_failed:
@@ -1827,7 +1944,7 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
     for path in manifest_paths:
         text, data = load_structured_document(path)
         local_checks: list[dict[str, Any]] = []
-        body_text = flatten_without_keys(data, excluded={"scene_contract", "review_contract", "evaluation_contract"}) or text
+        body_text = flatten_without_keys(data, excluded={"cut_contract", "scene_contract", "review_contract", "evaluation_contract"}) or text
         if str(data.get("manifest_phase") or "production").strip().lower() != "production":
             phase_ok = False
         _manifest_checks(local_checks, body_text, data, profile=profile, flow="scene-series", path_label=path.name)

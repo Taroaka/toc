@@ -34,6 +34,8 @@
 `server/app.py` は shared entrypoint として扱い、共通 middleware、static mount、router 組み立てだけに寄せる。LINE 側と image generation app 側の責務を混ぜない。
 `/image_gen` と `/api/*` は `TOC_SERVER_TOKEN` 必須で fail closed にする。ローカル検証で明示的に外す場合だけ `TOC_SERVER_AUTH_DISABLED=1` を使う。
 
+フロントから物語を1から作る Image generation app の create flow は、server 都合の最短 scaffold として実装しない。人間承認だけを frontend handoff にし、それ以外の grounding、deterministic verifier、review-loop prompt/report/aggregate materialization、story/image prompt consistency review、asset/scene request materialization、asset/scene image generation、p650/p680 validation は通常経路を通す。`server/image_gen_app.py` はこの orchestration を呼び出す入口に留め、品質 gate や artifact 契約を迂回する独自ショートカットを持たない。
+
 ## Read Next
 
 - 用語集: `docs/data-contracts.md` の "Core Terms / Glossary"

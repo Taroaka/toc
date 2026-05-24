@@ -283,8 +283,15 @@ type CreateRunJob = {
 type CandidatesResponse = {
   itemId: string;
   candidates: Candidate[];
+  error?: string;
   durationSeconds?: number;
   minDurationSeconds?: number | null;
+};
+
+type BulkGenerateResponse = {
+  runId: string;
+  kind: 'asset' | 'scene';
+  results: CandidatesResponse[];
 };
 
 type EnlargedImage = {
@@ -1997,64 +2004,75 @@ function App() {
     if (!runId) return;
     ensureItemsInState(targetItems);
     const targetIds = new Set(targetItems.map((item) => item.id));
-    const concurrency = Math.min(Math.max(candidateCount, 1), 4, Math.max(targetItems.length, 1));
+    const totalCandidates = targetItems.length * candidateCount;
+    const concurrency = Math.min(Math.max(totalCandidates, 1), 100);
     setBulkGenerating(true);
     setBulkTotal(targetIds.size);
     setBulkCompletedCount(0);
     setBulkFailedCount(0);
     setInsertStatus('idle');
+    setActiveItemId(targetItems[0]?.id ?? null);
     setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, generating: true, candidates: [] } : item)));
-    let completed = 0;
-    let failed = 0;
-    let cursor = 0;
-
-    const runNext = async (): Promise<void> => {
-      const item = targetItems[cursor];
-      cursor += 1;
-      if (!item) return;
-      try {
-        const data = await generateWithRecovery(item);
-        const hasCandidate = data.candidates.some((candidate) => candidate.path);
-        if (hasCandidate) completed += 1;
-        else failed += 1;
-        setItems((prev) =>
-          prev.map((prevItem) =>
-            prevItem.id === item.id
-              ? {
-                  ...prevItem,
-                  generating: false,
-                  candidates: data.candidates,
-                  selectedCandidatePath: data.candidates.find((candidate) => candidate.path)?.path ?? null,
-                }
-              : prevItem,
-          ),
-        );
-      } catch (error) {
-        failed += 1;
-        setItems((prev) =>
-          prev.map((prevItem) =>
-            prevItem.id === item.id
-              ? {
-                  ...prevItem,
-                  generating: false,
-                  candidates: [{ index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) }],
-                }
-              : prevItem,
-          ),
-        );
-      } finally {
-        setBulkCompletedCount(completed);
-        setBulkFailedCount(failed);
-        await runNext();
-      }
-    };
 
     try {
-      await Promise.all(Array.from({ length: concurrency }, () => runNext()));
+      const data = await jsonFetch<BulkGenerateResponse>('/api/image-gen/generate-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: runId,
+          kind: viewKind,
+          items: targetItems.map((item) => ({
+            run_id: runId,
+            kind: viewKind,
+            item_id: item.id,
+            prompt: item.draftPrompt,
+            references: item.selectedReferences.map((ref) => ref.path),
+            candidate_count: candidateCount,
+          })),
+          concurrency,
+        }),
+      });
+      const resultsById = new Map(data.results.map((result) => [result.itemId, result]));
+      let completed = 0;
+      let failed = 0;
+      setItems((prev) =>
+        prev.map((prevItem) => {
+          if (!targetIds.has(prevItem.id)) return prevItem;
+          const result = resultsById.get(prevItem.id);
+          const candidates = result?.candidates?.length
+            ? result.candidates
+            : [{ index: 1, status: 'failed', path: null, error: result?.error ?? 'generation failed' }];
+          if (candidates.some((candidate) => candidate.path)) completed += 1;
+          else failed += 1;
+          return {
+            ...prevItem,
+            generating: false,
+            candidates,
+            selectedCandidatePath: candidates.find((candidate) => candidate.path)?.path ?? null,
+          };
+        }),
+      );
+      setBulkCompletedCount(completed);
+      setBulkFailedCount(failed);
+    } catch (error) {
+      const message = candidateErrorMessage(error);
+      setBulkCompletedCount(0);
+      setBulkFailedCount(targetIds.size);
+      setItems((prev) =>
+        prev.map((prevItem) =>
+          targetIds.has(prevItem.id)
+            ? {
+                ...prevItem,
+                generating: false,
+                candidates: [{ index: 1, status: 'failed', path: null, error: message }],
+              }
+            : prevItem,
+        ),
+      );
     } finally {
       setBulkGenerating(false);
     }
-  }, [candidateCount, ensureItemsInState, generateWithRecovery, runId]);
+  }, [candidateCount, ensureItemsInState, runId, viewKind]);
 
   const generateBulk = async () => {
     await generateItems([...visibleItems]);

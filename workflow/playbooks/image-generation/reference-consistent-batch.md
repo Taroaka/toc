@@ -57,6 +57,7 @@ Canonical reason key:
 - `prompt_not_self_contained`
 - `prompt_contains_nonvisual_metadata`
 - `prompt_contains_first_frame_metadata`
+- `prompt_leaks_motion_brief`
 - `non_japanese_prompt_term`
 - `prompt_mentions_character_but_character_ids_empty`
 - `image_contract_missing`

@@ -78,6 +78,22 @@ def write_valid_p650_artifacts(root: Path, run_id: str) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "characters" / "hero.png").write_bytes(PNG_BYTES)
+    image_gen.write_app_server_image_debug_log(
+        run_dir=run_dir,
+        item_id="hero",
+        index=1,
+        destination=run_dir / "assets" / "characters" / "hero.png",
+        references=[],
+        prompt="実写映画風の主人公参照画像。",
+        kind="asset",
+        result=ImageGenerationResult(
+            saved_path=run_dir / "assets" / "characters" / "hero.png",
+            revised_prompt=None,
+            status="completed",
+            transcript=[],
+            source="app_server",
+        ),
+    )
     terminal_slots = {
         "p110": "done",
         "p120": "done",
@@ -338,6 +354,19 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIn("状態DBを初期化できませんでした", message)
         self.assertIn("readonly database", message)
 
+    def test_create_run_error_message_identifies_missing_codex_image_auth(self) -> None:
+        message = image_gen_app._create_run_error_message(
+            RuntimeError("unexpected status 401 Unauthorized: Missing bearer or basic authentication in header")
+        )
+
+        self.assertIn("画像生成認証が不足", message)
+        self.assertIn("401 Unauthorized", message)
+
+    def test_create_run_error_message_identifies_image_timeout(self) -> None:
+        message = image_gen_app._create_run_error_message(TimeoutError())
+
+        self.assertIn("画像生成がタイムアウト", message)
+
     def test_validate_created_run_requires_scaffold_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -556,6 +585,7 @@ class ImageGenParserTests(unittest.TestCase):
             skill_path.parent.mkdir(parents=True)
             skill_path.write_text("---\nname: toc-immersive-runner\n---\n", encoding="utf-8")
             calls: list[dict[str, Any]] = []
+            fallback_calls: list[dict[str, Any]] = []
 
             class FakeClient:
                 def __init__(self, *, cwd):
@@ -574,10 +604,17 @@ class ImageGenParserTests(unittest.TestCase):
                     calls.append(kwargs)
                     return []
 
+            async def fake_frontend_cli_helper(**kwargs):
+                fallback_calls.append(kwargs)
+                write_valid_p680_artifacts(root, run_id)
+                return "fallback completed"
+
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                 ):
                     asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="鬼ヶ島の資料", run_id=run_id))
 
@@ -586,6 +623,7 @@ class ImageGenParserTests(unittest.TestCase):
         payload = json.loads(calls[0]["text"].split("Request JSON:\n", 1)[1])
         self.assertEqual(payload["topic"], "桃太郎")
         self.assertEqual(payload["source"], "鬼ヶ島の資料")
+        self.assertEqual(fallback_calls, [{"topic": "桃太郎", "source": "鬼ヶ島の資料", "run_id": run_id, "stop_target": "p680"}])
 
     def test_read_run_progress_uses_p000_stage_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -806,6 +844,84 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIsNotNone(result.saved_path)
         self.assertEqual(result.saved_path.name, "generated.png")
         self.assertEqual(result.source, "generated_images_early_fallback")
+
+    def test_codex_app_server_uses_writable_fallback_home_when_env_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TMPDIR": tmp}, clear=False):
+                os.environ.pop("CODEX_HOME", None)
+                client = CodexAppServerClient(cwd=Path(tmp))
+                env = client._subprocess_env()
+
+        self.assertIn("CODEX_HOME", env)
+        self.assertTrue(Path(env["CODEX_HOME"]).is_dir())
+        self.assertNotEqual(env["CODEX_HOME"], str(Path.home() / ".codex"))
+
+    def test_codex_app_server_fallback_home_preserves_portable_auth_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_home = root / "readonly-codex-home"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text('{"token":"redacted"}', encoding="utf-8")
+            (source_home / "config.toml").write_text("model = \"test\"\n", encoding="utf-8")
+            (source_home / "browser").mkdir()
+            (source_home / "browser" / "config.toml").write_text("enabled = true\n", encoding="utf-8")
+            (source_home / "state_5.sqlite").write_text("do not copy", encoding="utf-8")
+            (source_home / "generated_images").mkdir()
+            (source_home / "generated_images" / "old.png").write_bytes(PNG_BYTES)
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(source_home)}, clear=False),
+                patch("server.codex_app_server.tempfile.gettempdir", return_value=str(root)),
+                patch("server.codex_app_server._is_writable_directory", return_value=False),
+            ):
+                client = CodexAppServerClient(cwd=root)
+                env = client._subprocess_env()
+
+            fallback_home = root / "toc-codex-home"
+
+            self.assertEqual(env["CODEX_HOME"], str(fallback_home))
+            self.assertEqual((fallback_home / "auth.json").read_text(encoding="utf-8"), '{"token":"redacted"}')
+            self.assertEqual((fallback_home / "config.toml").read_text(encoding="utf-8"), 'model = "test"\n')
+            self.assertTrue((fallback_home / "browser" / "config.toml").exists())
+            self.assertFalse((fallback_home / "state_5.sqlite").exists())
+            self.assertFalse((fallback_home / "generated_images" / "old.png").exists())
+
+    def test_generate_image_fallback_uses_effective_writable_codex_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            generated_dir = root / "toc-codex-home" / "generated_images" / "session"
+            generated_dir.mkdir(parents=True)
+            client = CodexAppServerClient(cwd=root)
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**_kwargs):
+                (generated_dir / "generated.png").write_bytes(PNG_BYTES)
+                return [{"method": "turn/completed", "params": {"turnId": "turn-1"}}]
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("server.codex_app_server.tempfile.gettempdir", return_value=str(root)),
+            ):
+                result = asyncio.run(
+                    client.generate_image(
+                        prompt="prompt",
+                        output_path=run_dir / "candidate.png",
+                        reference_images=[],
+                        item_id="scene1",
+                        run_dir=run_dir,
+                    )
+                )
+
+        self.assertIsNotNone(result.saved_path)
+        self.assertEqual(result.saved_path, generated_dir / "generated.png")
+        self.assertEqual(result.source, "generated_images_fallback")
 
     def test_wait_for_generated_image_after_returns_stable_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2033,6 +2149,440 @@ base b prompt
         self.assertIn('"operation": "request_item_generation"', event_payload)
         self.assertIn('"status": "failed"', event_payload)
 
+    def test_create_flow_retries_transient_codex_image_disconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            generated = Path(tmp) / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+
+            class FakeClient:
+                attempts = 0
+
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    type(self).attempts += 1
+                    if type(self).attempts == 1:
+                        raise CodexAppServerError(
+                            "stream disconnected before completion: error sending request for url "
+                            "(https://chatgpt.com/backend-api/codex/responses)"
+                        )
+                    return ImageGenerationResult(
+                        saved_path=generated,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="scene1_cut1",
+                kind="scene",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/scenes/scene1.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+            ):
+                asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+            output_exists = (run_dir / "assets" / "scenes" / "scene1.png").exists()
+
+        self.assertEqual(FakeClient.attempts, 2)
+        self.assertTrue(output_exists)
+        self.assertIn('"operation": "request_item_generation_retry"', event_payload)
+        self.assertIn('"status": "retrying"', event_payload)
+
+    def test_image_generation_item_timeout_fails_without_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+
+            class SlowClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    await asyncio.sleep(5)
+                    raise AssertionError("unreachable")
+
+            item = image_gen.ImageRequestItem(
+                id="slow_scene",
+                kind="scene",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/scenes/slow_scene.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="standard",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.CodexAppServerClient", SlowClient),
+                patch("server.image_gen_app.IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS", 0.01),
+                patch("server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS", 1),
+            ):
+                with self.assertRaises(TimeoutError):
+                    asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertIn('"operation": "request_item_generation"', event_payload)
+        self.assertIn('"status": "failed"', event_payload)
+
+    def test_request_generation_is_serialized_per_run_and_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            active = 0
+            max_active = 0
+
+            async def fake_unlocked(*, run_dir: Path, kind: str) -> None:
+                nonlocal active, max_active
+                active += 1
+                max_active = max(max_active, active)
+                await asyncio.sleep(0.05)
+                active -= 1
+
+            async def run_two() -> None:
+                await asyncio.gather(
+                    image_gen_app._generate_request_outputs(run_dir=run_dir, kind="scene"),
+                    image_gen_app._generate_request_outputs(run_dir=run_dir, kind="scene"),
+                )
+
+            with patch("server.image_gen_app._generate_request_outputs_unlocked", fake_unlocked):
+                asyncio.run(run_two())
+
+        self.assertEqual(max_active, 1)
+
+    def test_create_flow_regenerates_existing_output_without_completed_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            destination = run_dir / "assets" / "objects" / "stale.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"stale")
+            generated = Path(tmp) / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    return ImageGenerationResult(
+                        saved_path=generated,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="stale_asset",
+                kind="asset",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/objects/stale.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+            ):
+                asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+            destination_bytes = destination.read_bytes()
+
+        self.assertEqual(destination_bytes, PNG_BYTES)
+        self.assertIn("removed existing destination without completed app-server provenance", event_payload)
+        self.assertIn('"status": "completed"', event_payload)
+
+    def test_create_flow_skips_existing_output_with_completed_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            destination = run_dir / "assets" / "objects" / "done.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(PNG_BYTES)
+            image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="done_asset",
+                index=1,
+                destination=destination,
+                references=[],
+                prompt="実写映画風。",
+                kind="asset",
+                result=ImageGenerationResult(
+                    saved_path=destination,
+                    revised_prompt=None,
+                    status="completed",
+                    transcript=[],
+                    source="app_server",
+                ),
+            )
+
+            class FailingClient:
+                def __init__(self, **_kwargs):
+                    raise AssertionError("existing provenanced output should be skipped")
+
+            item = image_gen.ImageRequestItem(
+                id="done_asset",
+                kind="asset",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/objects/done.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.CodexAppServerClient", FailingClient),
+            ):
+                asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+            destination_bytes = destination.read_bytes()
+
+        self.assertEqual(destination_bytes, PNG_BYTES)
+        self.assertIn('"reason": "destination already exists"', event_payload)
+
+    def test_create_flow_hands_off_when_asset_prompt_repair_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            calls: list[str] = []
+
+            async def fake_generate_request_outputs(*, run_dir: Path, kind: str) -> None:
+                calls.append(kind)
+
+            def fake_validate_p560_asset_quality(_run_dir: Path) -> None:
+                raise RuntimeError("p560 bootstrap asset visual gate failed: low detail raster")
+
+            async def fake_repair_bootstrap_asset_prompts(*_args: Any, **_kwargs: Any) -> None:
+                raise TimeoutError("repair timed out")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                patch("server.image_gen_app._validate_p560_asset_quality", fake_validate_p560_asset_quality),
+                patch("server.image_gen_app._repair_bootstrap_asset_prompts", fake_repair_bootstrap_asset_prompts),
+            ):
+                result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id="sample_run"))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertFalse(result)
+        self.assertEqual(calls, ["asset", "scene"])
+        self.assertEqual(state["review.asset_visual_gate.status"], "needs_frontend_review")
+        self.assertEqual(state["review.asset_visual_gate.repair.status"], "failed")
+        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+        self.assertIn('"operation": "prompt_repair"', event_payload)
+        self.assertIn('"status": "failed"', event_payload)
+
+    def test_request_generation_group_cancels_sibling_items_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## fast_fail
+
+- output: `assets/objects/fast_fail.png`
+
+```text
+fail prompt
+```
+
+## slow_item
+
+- output: `assets/objects/slow_item.png`
+
+```text
+slow prompt
+```
+""",
+                encoding="utf-8",
+            )
+            slow_cancelled = False
+
+            async def fake_generate_item(*, run_dir: Path, kind: str, item: Any) -> None:
+                nonlocal slow_cancelled
+                if item.id == "fast_fail":
+                    await asyncio.sleep(0.05)
+                    raise RuntimeError("fast failure")
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    slow_cancelled = True
+                    raise
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._generate_request_item_output", fake_generate_item),
+                patch.dict(os.environ, {"TOC_IMAGE_GEN_DISABLE_CODEX_APP_SERVER": ""}, clear=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "fast failure"):
+                    asyncio.run(image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset"))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertTrue(slow_cancelled)
+        self.assertIn('"operation": "request_generation_group"', event_payload)
+        self.assertIn('"status": "failed"', event_payload)
+
+    def test_request_generation_group_does_not_start_queued_items_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## fast_fail
+
+- output: `assets/objects/fast_fail.png`
+
+```text
+fail prompt
+```
+
+## slow_item
+
+- output: `assets/objects/slow_item.png`
+
+```text
+slow prompt
+```
+
+## queued_item
+
+- output: `assets/objects/queued_item.png`
+
+```text
+queued prompt
+```
+""",
+                encoding="utf-8",
+            )
+            started: list[str] = []
+
+            async def fake_generate_item(*, run_dir: Path, kind: str, item: Any) -> None:
+                started.append(item.id)
+                if item.id == "fast_fail":
+                    await asyncio.sleep(0.02)
+                    raise RuntimeError("fast failure")
+                await asyncio.sleep(1)
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.IMAGE_GENERATION_PARALLELISM", 2),
+                patch("server.image_gen_app._generate_request_item_output", fake_generate_item),
+                patch.dict(os.environ, {"TOC_IMAGE_GEN_DISABLE_CODEX_APP_SERVER": ""}, clear=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "fast failure"):
+                    asyncio.run(image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset"))
+
+        self.assertIn("fast_fail", started)
+        self.assertIn("slow_item", started)
+        self.assertNotIn("queued_item", started)
+
+    def test_scene_generation_continues_after_item_failure_for_resume_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## fail_scene
+
+- output: `assets/scenes/fail_scene.png`
+
+```text
+fail prompt
+```
+
+## good_scene
+
+- output: `assets/scenes/good_scene.png`
+
+```text
+good prompt
+```
+""",
+                encoding="utf-8",
+            )
+            started: list[str] = []
+
+            async def fake_generate_item(*, run_dir: Path, kind: str, item: Any) -> None:
+                started.append(item.id)
+                if item.id == "fail_scene":
+                    raise RuntimeError("scene failure")
+                output = image_gen_app.resolve_run_relative(run_dir, item.output)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(PNG_BYTES)
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.IMAGE_GENERATION_PARALLELISM", 1),
+                patch("server.image_gen_app._generate_request_item_output", fake_generate_item),
+                patch.dict(os.environ, {"TOC_IMAGE_GEN_CONTINUE_ON_ITEM_ERROR": ""}, clear=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "scene generation group 1 incomplete"):
+                    asyncio.run(image_gen_app._generate_request_outputs(run_dir=run_dir, kind="scene"))
+
+            good_exists = (run_dir / "assets" / "scenes" / "good_scene.png").exists()
+
+        self.assertEqual(started, ["fail_scene", "good_scene"])
+        self.assertTrue(good_exists)
+
     def test_prompt_regeneration_failure_writes_app_server_event_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "output" / "sample_run"
@@ -3099,11 +3649,114 @@ scene two prompt
                             },
                         )
                         generated_exists = (
-                            parent_run / "assets/test/image_gen_candidates/scene1_cut1/candidate_01.png"
+                            parent_run / "assets/test/image_gen_candidates/scene1_cut1/scene1_cut1_candidate_01.png"
                         ).resolve().exists()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(generated_exists)
+
+    def test_insert_bulk_rejects_candidate_when_item_id_does_not_match_output_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## object_alpha_ref
+
+- output: `assets/objects/object_alpha_ref.png`
+
+```text
+object alpha
+```
+
+## location_beta_ref
+
+- output: `assets/locations/location_beta_ref.png`
+
+```text
+location beta
+```
+""",
+                encoding="utf-8",
+            )
+            candidate = run_dir / "assets/test/image_gen_candidates/object_alpha_ref/object_alpha_ref_candidate_01.png"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(PNG_BYTES)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/insert-bulk",
+                            json={
+                                "items": [
+                                    {
+                                        "run_id": "sample_run",
+                                        "candidate_path": "assets/test/image_gen_candidates/object_alpha_ref/object_alpha_ref_candidate_01.png",
+                                        "output": "assets/locations/location_beta_ref.png",
+                                    }
+                                ]
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("candidate item mismatch", response.text)
+
+    def test_bulk_generation_flattens_candidates_across_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "parent"
+            run_dir.mkdir(parents=True)
+            active = 0
+            max_active = 0
+            calls: list[tuple[str, int]] = []
+
+            async def fake_generate_one(_run_dir: Path, req: Any, index: int) -> dict[str, Any]:
+                nonlocal active, max_active
+                active += 1
+                max_active = max(max_active, active)
+                calls.append((req.item_id, index))
+                await asyncio.sleep(0.01)
+                active -= 1
+                return {
+                    "index": index,
+                    "status": "completed",
+                    "path": f"assets/test/image_gen_candidates/{req.item_id}/candidate_{index:02d}.png",
+                }
+
+            items = [
+                {
+                    "run_id": "child",
+                    "kind": "asset",
+                    "item_id": f"scene{i}_cut1",
+                    "prompt": "prompt",
+                    "references": [],
+                    "candidate_count": 2,
+                }
+                for i in range(1, 6)
+            ]
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app._generate_one", fake_generate_one):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/generate-bulk",
+                            json={
+                                "run_id": "parent",
+                                "kind": "scene",
+                                "items": items,
+                                "concurrency": 10,
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body["results"]), 5)
+        self.assertTrue(all(len(result["candidates"]) == 2 for result in body["results"]))
+        self.assertEqual(len(calls), 10)
+        self.assertEqual(max_active, 10)
 
 
 if __name__ == "__main__":

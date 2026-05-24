@@ -557,7 +557,8 @@ def candidate_dir(run_dir: Path, item_id: str) -> Path:
 
 
 def candidate_path(run_dir: Path, item_id: str, index: int) -> Path:
-    return candidate_dir(run_dir, item_id) / f"candidate_{index:02d}.png"
+    safe_id = candidate_dir(run_dir, item_id).name
+    return candidate_dir(run_dir, item_id) / f"{safe_id}_candidate_{index:02d}.png"
 
 
 def list_candidate_items(run_dir: Path, item_id: str) -> list[dict[str, Any]]:

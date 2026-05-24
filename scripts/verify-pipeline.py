@@ -1141,6 +1141,7 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         plan_text, plan_data = load_structured_document(asset_plan)
     entries = _asset_entries(plan_data)
     details["asset_plan_entry_count"] = len(entries)
+    planned_asset_ids = {_entry_asset_id(entry) for entry in entries if _entry_asset_id(entry)}
     add_check(
         checks,
         "asset.plan_structured",
@@ -1153,6 +1154,23 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         "asset.no_todo",
         target_number < 530 or not has_todo(plan_text),
         "asset_plan.md does not contain TODO/TBD markers",
+        kind="rubric",
+    )
+    coverage_scope = inventory_root.get("coverage_scope") if isinstance(inventory_root, dict) else {}
+    required_inventory_ids = {
+        str(asset_id).strip()
+        for key in ("characters", "story_specific_items", "locations")
+        for asset_id in as_list(coverage_scope.get(key) if isinstance(coverage_scope, dict) else [])
+        if str(asset_id).strip()
+    }
+    missing_plan_coverage = sorted(required_inventory_ids - planned_asset_ids)
+    if missing_plan_coverage:
+        details["asset_plan_missing_inventory_coverage"] = missing_plan_coverage[:20]
+    add_check(
+        checks,
+        "asset.plan_covers_inventory_scope",
+        target_number < 530 or not missing_plan_coverage,
+        "asset_plan.md includes every character/story-specific item/location declared in asset_inventory.coverage_scope",
         kind="rubric",
     )
 

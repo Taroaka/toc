@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot
+from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
 
 VERIFY_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify-pipeline.py"
 SPEC = importlib.util.spec_from_file_location("verify_pipeline", VERIFY_SCRIPT_PATH)
@@ -687,11 +688,43 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         round_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir = round_dir / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
         for idx in range(1, 6):
-            (round_dir / f"critic_{idx}.md").write_text("- status: passed\n", encoding="utf-8")
+            focus_name = stage_focus.get(idx, ("", ""))[0]
+            focus_line = f"- critic_focus: {focus_name}\n" if focus_name else ""
+            (round_dir / f"critic_{idx}.md").write_text(f"{focus_line}- status: passed\n", encoding="utf-8")
+            (prompt_dir / f"critic_{idx}.prompt.md").write_text(
+                f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
+                encoding="utf-8",
+            )
         heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
+        scene_count_gate = ""
+        if stage in SCENE_REVIEW_CRITIC_FOCUS:
+            scene_count_gate = (
+                "## Scene Count Gate\n\n"
+                "- maximal_meaningful_stop_condition: no additional independent scene remains\n"
+                "- next_scene_candidate: none\n"
+                "- cut_thickening_reason: additional material repeats the same scene turn\n"
+                "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed\n\n"
+            )
+        elif stage_focus:
+            scene_count_gate = (
+                "## Cut Blueprint Gate\n\n"
+                "- cut_intent_isolation: passed\n"
+                "- beat_ladder_coverage: passed\n"
+                "- first_frame_motion_readiness: passed\n"
+                "- multimodal_contract_coverage: passed\n"
+                "- duration_density_and_handoff: passed\n"
+                "- coverage_plan_complete: passed\n"
+                "- continuity_contract_complete: passed\n"
+                "- narration_contract_complete: passed\n"
+                "- downstream_handoff_complete: passed\n"
+                "- triangulation_review_ready: passed\n\n"
+            )
         (round_dir / "aggregated_review.md").write_text(
-            f"- status: passed\n\n## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n## Rejected Suggestions\n\n[]\n\n## {heading}\n\nNo changes.\n\n## Round Summary\n\npassed\n",
+            f"- status: passed\n\n## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n## Rejected Suggestions\n\n[]\n\n{scene_count_gate}## {heading}\n\nNo changes.\n\n## Round Summary\n\npassed\n",
             encoding="utf-8",
         )
 

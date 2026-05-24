@@ -20,7 +20,7 @@ script_metadata:
 
 subagent_trace:
   - subagent_id: "scene-draft-001"
-    role: "scene_draft|scene_set_review|scene_detail_review|cut_draft|cut_review|cut_merge|narration_draft|script_review|production_readiness"
+    role: "scene_draft|scene_set_review|scene_count_coverage|dramatic_structure|reveal_order|duration_density|visual_production|handoff_integrity|scene_detail_review|cut_draft|cut_review|cut_merge|narration_draft|script_review|production_readiness"
     input_artifact: "output/<topic>_<timestamp>/story.md"
     output_artifact: "output/<topic>_<timestamp>/scratch/script_scene01.md"
     accepted_by_main: false
@@ -66,6 +66,39 @@ human_review_criteria:
 
 scene_set_review:
   status: "pending|approved|changes_requested|skipped"
+  scene_count_strategy:
+    mode: "maximal_meaningful"
+    expansion_goal: "承認済み story の主要 beat を落とさず、独立した劇的変化を持つ production scene として成立する範囲で最大化する"
+    stop_condition: "次に追加する scene が既存 scene と同じ dramatic_question / value_shift / causal_turn しか持てず、scene 数を増やすより cut 設計を厚くした方が品質が上がる"
+    approval_questions:
+      - "独立 scene 化すべき願望の発生、拒絶、選択、変身、対決、証拠 reveal、照合、帰結が既存 scene に埋もれていないか"
+      - "次に追加できる scene は何か"
+      - "その候補を scene 追加ではなく cut 増厚へ回す理由は何か"
+  critic_assignment:
+    critic_1: "scene_count_coverage"
+    critic_2: "dramatic_structure + reveal_order"
+    critic_3: "duration_density"
+    critic_4: "visual_production"
+    critic_5: "handoff_integrity"
+  reviewer_roles:
+    - role: "scene_count_coverage"
+      responsibility: "承認済み story の主要 beat が scene として最大限展開されているかを評価する"
+      blocking_if: "独立 scene 化すべき beat が既存 scene 内に埋もれている"
+    - role: "dramatic_structure"
+      responsibility: "各 scene が独立した dramatic_question / value_shift / causal_turn を持つかを評価する"
+      blocking_if: "追加/既存 scene が同じ問い・同じ価値変化・同じ因果 turn を重複している"
+    - role: "reveal_order"
+      responsibility: "scene 追加/分割が reveal の早出し、欠落、順序破壊を起こしていないかを評価する"
+      blocking_if: "後半で見せるべき情報が早出しされる、または重要 reveal が消える"
+    - role: "duration_density"
+      responsibility: "目標尺、scene 重要度、cut 数から scene 追加と cut 増厚のどちらが品質に効くかを評価する"
+      blocking_if: "scene を増やすべき範囲で cut 増厚に逃げている、またはその逆"
+    - role: "visual_production"
+      responsibility: "追加 scene が p500/p600/p800 へ渡せる visible evidence と visual thesis を持つかを評価する"
+      blocking_if: "scene が説明だけで、画面上の人物・場所・道具・行為に翻訳できない"
+    - role: "handoff_integrity"
+      responsibility: "scene 間の因果、問い、視線・音・道具などの handoff が途切れていないかを評価する"
+      blocking_if: "scene 間の接続が narration 依存で、次 scene を発生させる因果が弱い"
   review_policy:
     agent_review: "required"
     human_review: "required|optional|skipped"
@@ -94,6 +127,15 @@ scene_detail_review:
       - "この scene で見せるべき内容が cut に全て載っているか確認する"
       - "次 scene の内容も読み、最終 cut が次 scene につながるか判断する"
       - "つながらない場合は cut 追加または最終 cut の増厚を要求する"
+      - "この scene が最大化された scene set の中で独立した問い・価値変化・因果 turn を持つか確認する"
+      - "この scene をさらに分割すべきか、または cut 設計を厚くすべきか判断する"
+  reviewer_roles:
+    - role: "scene_detail_structure"
+      responsibility: "単一 scene の必要性、内部整合、独立した劇的変化を評価する"
+    - role: "scene_detail_density"
+      responsibility: "scene 内の情報量と cut 数が重要度・尺に合っているかを評価する"
+    - role: "scene_detail_handoff"
+      responsibility: "前後 scene との因果接続と handoff が足りるかを評価する"
   review_policy:
     agent_review: "required"
     human_review: "required|optional|skipped"
@@ -109,6 +151,29 @@ scene_detail_review:
 
 cut_blueprint_review:
   status: "pending|approved|changes_requested|skipped"
+  critic_assignment:
+    critic_1: "cut_intent_isolation"
+    critic_2: "beat_ladder_coverage"
+    critic_3: "first_frame_motion_readiness"
+    critic_4: "multimodal_contract_coverage"
+    critic_5: "duration_density_and_handoff"
+  cut_blueprint_gate:
+    cut_intent_isolation: "pending|passed|changes_requested"
+    beat_ladder_coverage: "pending|passed|changes_requested"
+    first_frame_motion_readiness: "pending|passed|changes_requested"
+    multimodal_contract_coverage: "pending|passed|changes_requested"
+    duration_density_and_handoff: "pending|passed|changes_requested"
+  reviewer_roles:
+    - role: "cut_intent_isolation"
+      responsibility: "1 cut が 1 intent に限定され、場所移動/reveal/感情反転/説明/反応を同時に背負っていないかを評価する"
+    - role: "beat_ladder_coverage"
+      responsibility: "cut_function 列が scene_spine を進め、重要 beat が必要な段階へ分解されているかを評価する"
+    - role: "first_frame_motion_readiness"
+      responsibility: "first_frame_brief が p600 still の入力として完結し、motion_brief は p800 専用入力として分離されているかを評価する"
+    - role: "multimodal_contract_coverage"
+      responsibility: "target_beat / must_show / must_avoid / done_when が image / narration / motion に渡せるかを評価する"
+    - role: "duration_density_and_handoff"
+      responsibility: "重要度・尺・cut数・最終cutのhandoffが十分かを評価する"
   review_policy:
     agent_review: "required"
     human_review: "required|optional|skipped"
@@ -175,7 +240,20 @@ scenes:
     coverage_review:
       audience_information_covered: false
       visualizable_action_covered: false
+      value_shift_visible: false
+      causal_turn_visible: false
       next_scene_connection_checked: false
+      cut_coverage_plan_complete: false
+    coverage_plan:
+      coverage_strategy: "3_cut|5_cut|7_cut|spectacle_ladder|custom"
+      min_cut_count: {by_importance: 3, by_duration: 3, selected: 3, exception_reason: ""}
+      function_sequence: []
+      scene_obligations:
+        audience_information_to_cover: []
+        withheld_information_to_preserve: []
+        visual_evidence_to_show: []
+        causal_turn_cut_selector: ""
+        handoff_cut_selector: ""
     timing:
       duration_seconds: 6
       timestamp: "00:00-00:06"
@@ -236,13 +314,39 @@ scenes:
       - cut_id: 1  # dotted numeric string も可: 2.1
         cut_blueprint:
           cut_role: "main|sub|transition|reaction|visual_payoff"
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           duration_intent: "short|standard|hold"
-          target_beat: "string"
+          target_duration_seconds: 8
+          target_beat: "この cut で観客に体験させる1つのこと"
+          screen_question: "この cut の間、観客が画面から読む問い"
+          dramatic_job: "scene全体のどこを担当するか"
+          visual_proof: "映像だけで target_beat が成立したと分かる証拠"
+          visual_beat: "画として何が見えるか"
+          first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+          motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+          motion_end_state: "次 cut へ渡す最後の状態"
+          narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
+          silence_reason: "silent cut の場合は必須"
           must_show: []
           must_avoid: []
           done_when: []
-          visual_beat: "string"
-          narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
+          cinematic_contract:
+            shot_size: "wide|medium|closeup|insert"
+            camera_intent: ""
+            foreground: ""
+            midground: ""
+            background: ""
+            screen_direction: ""
+          continuity_contract:
+            start_state: ""
+            end_state: ""
+            carry_forward_to_next_cut: []
+          downstream_handoff:
+            p500_asset: []
+            p600_image: []
+            p700_narration: []
+            p800_video: []
           asset_dependency_hint:
             character_ids: []
             object_ids: []

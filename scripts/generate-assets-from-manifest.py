@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +154,7 @@ class SceneSpec:
     cut_status: str | None = None
     deletion_reason: str | None = None
     manifest_cut_id: str | None = None
+    cut_contract: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -394,6 +395,45 @@ def _as_opt_bool(value: Any) -> bool | None:
     if s in {"false", "no", "0", "off"}:
         return False
     return None
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _node_cut_contract(node: dict[str, Any]) -> dict[str, Any]:
+    for key in ("cut_contract", "scene_contract", "cut_blueprint"):
+        value = node.get(key) if isinstance(node, dict) else None
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
+def _contract_value(contract: dict[str, Any], *paths: str) -> Any:
+    for path in paths:
+        cur: Any = contract
+        ok = True
+        for key in path.split("."):
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur[key]
+        if ok and cur not in (None, "", [], {}):
+            return cur
+    return None
+
+
+def _contract_text(contract: dict[str, Any], *paths: str) -> str:
+    value = _contract_value(contract, *paths)
+    return str(value).strip() if value is not None else ""
+
+
+def _contract_list(contract: dict[str, Any], *paths: str) -> list[str]:
+    for path in paths:
+        value = _contract_value(contract, path)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+    return []
 
 
 def _parse_reference_variants(raw_variants: Any) -> list[ReferenceVariantSpec]:
@@ -1071,6 +1111,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         cut_duration_seconds = None
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
+                cut_contract = _node_cut_contract(raw_cut)
                 cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
                 still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
                 still_image_generation_status = _normalize_generation_status(cut_still_plan.get("generation_status")) if isinstance(cut_still_plan, dict) else None
@@ -1199,6 +1240,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         cut_status=cut_status,
                         deletion_reason=deletion_reason,
                         manifest_cut_id=cut_id,
+                        cut_contract=cut_contract,
                     )
                 )
             continue
@@ -1213,6 +1255,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
+        cut_contract = _node_cut_contract(raw_scene)
         scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
         still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
         still_image_generation_status = _normalize_generation_status(scene_still_plan.get("generation_status")) if isinstance(scene_still_plan, dict) else None
@@ -1342,6 +1385,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 cut_status=cut_status,
                 deletion_reason=deletion_reason,
                 manifest_cut_id=None,
+                cut_contract=cut_contract,
             )
         )
 
@@ -3886,6 +3930,111 @@ def _derive_test_variant_output_path(base_dir: Path, source_output: str | None, 
     return target_dir / f"{stem}__test_v{variant_index:02d}{suffix}"
 
 
+def _sanitize_contract_prompt_text(text: str) -> str:
+    value = str(text or "").strip()
+    replacements = (
+        ("動画が動き出す直前に見えている初期状態。", ""),
+        ("動画が動き出す直前に見えている初期状態", ""),
+        ("動画が動き出す直前に見えている", ""),
+        ("動画が動き出す直前", ""),
+        ("最初の1フレーム", ""),
+        ("1フレーム目", ""),
+        ("first frame", ""),
+        ("First frame", ""),
+        ("prompt本文には制作メタを書かない", ""),
+        ("prompt 本文には制作メタを書かない", ""),
+        ("p600 image prompt authoring では参照しない", ""),
+        ("p600では参照しない", ""),
+        ("p800 motion prompt 専用。", ""),
+        ("p800 motion prompt 専用", ""),
+    )
+    for old, new in replacements:
+        value = value.replace(old, new)
+    value = re.sub(r"\s+", " ", value).strip(" 。\n\t")
+    return value.strip()
+
+
+def _cut_contract_image_prompt_block(contract: dict[str, Any]) -> str:
+    if not contract:
+        return ""
+    lines: list[str] = []
+    target_beat = _sanitize_contract_prompt_text(_contract_text(contract, "target_beat", "viewer_contract.target_beat"))
+    visual_proof = _sanitize_contract_prompt_text(_contract_text(contract, "visual_beat", "viewer_contract.visual_proof"))
+    first_frame = _sanitize_contract_prompt_text(_contract_text(contract, "first_frame_brief", "first_frame_contract.first_frame_brief"))
+    screen_question = _sanitize_contract_prompt_text(_contract_text(contract, "screen_question", "viewer_contract.screen_question"))
+    must_show = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_show", "viewer_contract.must_show")]
+    must_avoid = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_avoid", "viewer_contract.must_avoid", "first_frame_contract.must_avoid")]
+    geography = _dict_value(_contract_value(contract, "cinematic_contract.screen_geography"))
+    subject_priority = _dict_value(_contract_value(contract, "cinematic_contract.subject_priority"))
+    continuity = _dict_value(_contract_value(contract, "continuity_contract"))
+    if target_beat:
+        lines.append(f"場面の核: {target_beat}")
+    if screen_question:
+        lines.append(f"画面上の問い: {screen_question}")
+    if visual_proof:
+        lines.append(f"映像で成立させる証拠: {visual_proof}")
+    if first_frame:
+        lines.append(f"初期状態: {first_frame}")
+    if subject_priority:
+        for label, key in (("主役", "primary"), ("副要素", "secondary"), ("背景要素", "background")):
+            value = _sanitize_contract_prompt_text(str(subject_priority.get(key) or ""))
+            if value:
+                lines.append(f"{label}: {value}")
+    if geography:
+        for label, key in (("前景", "foreground"), ("中景", "midground"), ("背景", "background"), ("画面方向", "screen_direction")):
+            value = _sanitize_contract_prompt_text(str(geography.get(key) or ""))
+            if value:
+                lines.append(f"{label}: {value}")
+    carry_forward = continuity.get("carry_forward_to_next_cut") if isinstance(continuity, dict) else None
+    if isinstance(carry_forward, list) and carry_forward:
+        items = [_sanitize_contract_prompt_text(str(item)) for item in carry_forward if _sanitize_contract_prompt_text(str(item))]
+        if items:
+            lines.append("維持する連続性: " + " / ".join(items))
+    if must_show:
+        lines.append("必ず見せる: " + " / ".join(item for item in must_show if item))
+    if must_avoid:
+        lines.append("入れない: " + " / ".join(item for item in must_avoid if item))
+    if not lines:
+        return ""
+    return "[cut契約からの可視要件]\n" + "\n".join(lines)
+
+
+def _cut_contract_video_prompt_block(contract: dict[str, Any]) -> str:
+    if not contract:
+        return ""
+    lines: list[str] = []
+    cut_function = _contract_text(contract, "cut_function")
+    target_beat = _contract_text(contract, "target_beat", "viewer_contract.target_beat")
+    motion_brief = _contract_text(contract, "motion_brief", "motion_contract.motion_brief")
+    camera_motion = _contract_text(contract, "motion_contract.camera_motion")
+    subject_motion = _contract_text(contract, "motion_contract.subject_motion")
+    environment_motion = _contract_text(contract, "motion_contract.environment_motion")
+    emotional_change = _contract_text(contract, "motion_contract.emotional_change")
+    end_state = _contract_text(contract, "motion_contract.end_state", "motion_end_state")
+    must_not_add = _contract_list(contract, "motion_contract.must_not_add")
+    if cut_function:
+        lines.append(f"cut_function: {cut_function}")
+    if target_beat:
+        lines.append(f"target_beat: {target_beat}")
+    if motion_brief:
+        lines.append(f"motion_brief: {motion_brief}")
+    if camera_motion:
+        lines.append(f"camera_motion: {camera_motion}")
+    if subject_motion:
+        lines.append(f"subject_motion: {subject_motion}")
+    if environment_motion:
+        lines.append(f"environment_motion: {environment_motion}")
+    if emotional_change:
+        lines.append(f"emotional_change: {emotional_change}")
+    if end_state:
+        lines.append(f"end_state: {end_state}")
+    if must_not_add:
+        lines.append("must_not_add: " + " / ".join(must_not_add))
+    if not lines:
+        return ""
+    return "cut_contract:\n" + "\n".join(lines)
+
+
 def _compose_final_image_prompt(
     scene: SceneSpec,
     *,
@@ -3894,6 +4043,9 @@ def _compose_final_image_prompt(
     request_visual_beat: str | None = None,
 ) -> str:
     prompt = (scene.image_prompt or "").strip()
+    contract_block = _cut_contract_image_prompt_block(scene.cut_contract)
+    if contract_block:
+        prompt = f"{contract_block}\n\n{prompt}".strip() if prompt else contract_block
     visual_beat = (request_visual_beat or "").strip()
     if visual_beat and visual_beat not in prompt:
         prompt = f"[場面の核]\n{visual_beat}\n\n{prompt}".strip()
@@ -3906,6 +4058,9 @@ def _compose_final_image_prompt(
 
 def _compose_final_video_prompt(scene: SceneSpec, *, prefix: str, suffix: str) -> str:
     prompt_parts: list[str] = []
+    contract_block = _cut_contract_video_prompt_block(scene.cut_contract)
+    if contract_block:
+        prompt_parts.append(contract_block)
     if scene.video_motion_prompt:
         prompt_parts.append(scene.video_motion_prompt.strip())
     if scene.image_prompt:
@@ -3925,6 +4080,13 @@ def _compose_final_video_prompt_for_target(
     suffix: str,
 ) -> str:
     prompt_parts: list[str] = []
+    contract_blocks = [
+        block
+        for block in (_cut_contract_video_prompt_block(scene.cut_contract) for scene in target.source_scenes)
+        if block
+    ]
+    if contract_blocks:
+        prompt_parts.append("\n\n".join(contract_blocks))
     if target.video_motion_prompt:
         prompt_parts.append(target.video_motion_prompt.strip())
     image_prompts = _video_target_image_prompts(target)
