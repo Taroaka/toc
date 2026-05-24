@@ -240,6 +240,36 @@ scenes:
         "# Run Index\n\np650 まで到達した実作業済み run の索引です。現在位置、生成済み成果物、次に必要な確認を十分な本文量で記録します。asset request と scene image request が存在することを確認済みです。\n",
         encoding="utf-8",
     )
+    review_dir = run_dir / "logs" / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    (review_dir / "image_prompt.review_collection.md").write_text(
+        "# Image Prompt Judgment Review Collection\n\n件数: `3`\n\n## scene10_cut1\n\n## scene10_cut2\n\n## scene10_cut3\n",
+        encoding="utf-8",
+    )
+    (review_dir / "image_prompt.review_scope.json").write_text(
+        json.dumps(
+            {
+                "entry_count": 3,
+                "selectors": ["scene10_cut1", "scene10_cut2", "scene10_cut3"],
+                "artifacts": {
+                    "collection": "logs/review/image_prompt.review_collection.md",
+                    "prompt": "logs/review/image_prompt.judgment_prompt.md",
+                    "report": "logs/review/image_prompt.judgment.md",
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (review_dir / "image_prompt.judgment_prompt.md").write_text(
+        "contextless semantic review prompt\n",
+        encoding="utf-8",
+    )
+    (review_dir / "image_prompt.judgment.md").write_text(
+        "status: passed\nreviewed_entries: [scene10_cut1, scene10_cut2, scene10_cut3]\nblocked_entries: []\nfindings: []\nnotes: []\n",
+        encoding="utf-8",
+    )
     return run_dir
 
 
@@ -520,6 +550,19 @@ class ImageGenParserTests(unittest.TestCase):
 
             with patch("server.image_gen_app.ROOT", root):
                 with self.assertRaisesRegex(RuntimeError, "scene image generation incomplete"):
+                    _validate_frontend_create_run("桃太郎_20260509_1200")
+
+    def test_validate_frontend_create_run_requires_semantic_review_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+            (run_dir / "logs" / "review" / "image_prompt.judgment.md").write_text(
+                "# Image Prompt Judgment Review\n\n- status: `pending`\n\n## Findings\n\n- `...`\n",
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "semantic review incomplete"):
                     _validate_frontend_create_run("桃太郎_20260509_1200")
 
     def test_validate_frontend_create_run_rejects_missing_scene_output_field(self) -> None:

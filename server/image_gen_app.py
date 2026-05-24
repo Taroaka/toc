@@ -13,7 +13,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 try:
@@ -70,6 +70,13 @@ from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id,
 from toc.harness import append_state_snapshot, parse_state_file
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
+from toc.semantic_review import (
+    IMAGE_PROMPT_JUDGMENT_REPORT,
+    check_semantic_review,
+    check_image_prompt_judgment,
+    review_status_to_state,
+    semantic_review_relpaths,
+)
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
     IMAGE_SUFFIXES,
@@ -742,6 +749,7 @@ def _validate_p650_run(run_id: str) -> None:
     missing_scene_requests = sorted(required_scene_outputs - request_outputs)
     if missing_scene_requests:
         raise RuntimeError(f"ToC run did not reach p650: missing scene cut requests {', '.join(missing_scene_requests)}")
+    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
     missing_asset_outputs = [
         str(item.output)
         for item in asset_items
@@ -749,6 +757,7 @@ def _validate_p650_run(run_id: str) -> None:
     ]
     if missing_asset_outputs:
         raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
+    _validate_semantic_reviews(run_dir, ("asset_output",))
 
     state = parse_state_file(run_dir / "state.txt")
     if state.get("runtime.scaffold.content_status") == "placeholder":
@@ -779,6 +788,7 @@ def _validate_p650_run(run_id: str) -> None:
 def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
     _validate_p650_run(run_id)
     run_dir = safe_run_dir(run_id, ROOT)
+    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt", "scene_image"))
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
     if strict_visual_quality:
@@ -813,6 +823,22 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
     mismatches = [f"{key}={state.get(key)}" for key, value in expected.items() if state.get(key) != value]
     if mismatches:
         raise RuntimeError(f"frontend image review handoff incomplete: {', '.join(mismatches)}")
+
+
+def _validate_image_prompt_semantic_review(run_dir: Path) -> None:
+    result = check_image_prompt_judgment(run_dir)
+    if not result.passed:
+        raise RuntimeError("image prompt semantic review incomplete: " + "; ".join(result.errors))
+
+
+def _validate_semantic_reviews(run_dir: Path, stages: Iterable[str]) -> None:
+    errors: list[str] = []
+    for stage in stages:
+        result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+        if not result.passed:
+            errors.append(f"{stage}: {'; '.join(result.errors)}")
+    if errors:
+        raise RuntimeError("semantic review incomplete: " + " | ".join(errors))
 
 
 def _cleanup_unscaffolded_run(run_id: str) -> None:
@@ -3373,8 +3399,8 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
             "runtime.stage": "scene_images_ready_for_review",
             "slot.p660.status": "done",
             "slot.p660.note": "scene images generated",
-            "slot.p670.status": "skipped",
-            "slot.p670.note": "automated QA skipped; frontend human review is next",
+            "slot.p670.status": "done",
+            "slot.p670.note": "scene image semantic QA passed; frontend human review is next",
             "slot.p680.status": "awaiting_approval",
             "slot.p680.note": "scene image human review ready in frontend",
             "stage.scene_implementation.status": "awaiting_approval",
@@ -3403,6 +3429,9 @@ def _validate_image_review_ready(run_id: str) -> None:
 
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
+    await _set_create_job(job_id, {"message": "上流設計をsemantic QA中"})
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
+        await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
     asset_quality_passed = False
     last_asset_gate_error = ""
     for attempt in range(1, BOOTSTRAP_ASSET_MAX_ATTEMPTS + 1):
@@ -3463,10 +3492,101 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                 },
             )
             break
+    await _set_create_job(job_id, {"message": "素材出力をsemantic QA中"})
+    await _run_semantic_review(job_id, run_dir=run_dir, stage="asset_output")
+    await _set_create_job(job_id, {"message": "画像プロンプトをsemantic QA中"})
+    await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
     await _set_create_job(job_id, {"message": "シーン画像を生成中"})
     await _generate_request_outputs(run_dir=run_dir, kind="scene")
+    await _set_create_job(job_id, {"message": "シーン画像出力をsemantic QA中"})
+    await _run_semantic_review(job_id, run_dir=run_dir, stage="scene_image")
     _mark_image_generation_review_ready(run_id)
     return asset_quality_passed
+
+
+async def _run_image_prompt_semantic_review(job_id: str, *, run_dir: Path) -> None:
+    await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
+
+
+SEMANTIC_REVIEW_SLOT_BY_STAGE = {
+    "scene_set": "p410",
+    "scene_detail": "p410",
+    "cut_blueprint": "p420",
+    "asset_plan": "p540",
+    "asset_output": "p570",
+    "image_prompt": "p640",
+    "scene_image": "p670",
+    "narration": "p720",
+    "video_motion": "p820",
+    "video_clip": "p850",
+    "render": "p930",
+}
+
+
+async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "build-semantic-review-pack.py"),
+            "--run-dir",
+            str(run_dir),
+            "--stage",
+            stage,
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    relpaths = semantic_review_relpaths(stage)
+    prompt_path = run_dir / relpaths["prompt"]
+    report_path = run_dir / relpaths["report"]
+    prompt = prompt_path.read_text(encoding="utf-8")
+    client = CodexAppServerClient(cwd=ROOT)
+    try:
+        thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
+        await client.run_turn(
+            thread_id=thread_id,
+            text=prompt,
+            cwd=ROOT,
+            timeout_seconds=900,
+        )
+    finally:
+        await client.stop()
+    if stage == "image_prompt" and report_path.exists():
+        (run_dir / IMAGE_PROMPT_JUDGMENT_REPORT).write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
+    result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+    state_updates = review_status_to_state(stage, result)
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        state_updates[f"slot.{slot}.status"] = "done" if result.passed else "failed"
+        state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review {'passed' if result.passed else 'failed'}"
+    if stage == "image_prompt":
+        state_updates.update(
+            {
+                "review.image_prompt.judgment.status": result.status or "failed",
+                "review.image_prompt.judgment.error_count": str(len(result.errors)),
+            }
+        )
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+    if not result.passed:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="failed",
+            item_id=job_id,
+            request={"stage": stage, "prompt": str(prompt_path.relative_to(run_dir)), "report": str(report_path.relative_to(run_dir))},
+            error="; ".join(result.errors),
+        )
+        raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(result.errors))
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="semantic_review",
+        status="completed",
+        item_id=job_id,
+        request={"stage": stage, "prompt": str(prompt_path.relative_to(run_dir)), "report": str(report_path.relative_to(run_dir))},
+        response={"status": result.status, "entryCount": result.entry_count},
+    )
 
 
 def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:

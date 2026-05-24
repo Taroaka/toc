@@ -531,6 +531,7 @@ p400 の内部 slot:
 
 - `p410`: scene completion gate
   - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
+  - semantic QA: 各 scene は、単なる段落や雰囲気ではなく、上流 story のどの意味を受け取り、何を変化させ、次 scene に何を渡すかを説明できる必要がある
   - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、および `coverage_review` を持つ
   - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
   - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
@@ -547,6 +548,7 @@ p400 の内部 slot:
 - `p420`: cut blueprints
   - 各 scene を production 用 cut に分解する
   - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を持つ
+  - semantic QA: 各 cut は scene の意味を映像単位に翻訳する。場所移動、感情転換、証拠提示、reveal、reaction、handoff を件数合わせで混ぜず、1 cut の viewer-facing intent を明確にする
   - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
   - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
   - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は担当 `p400` L2 supervisor / bucket single writer が行う
@@ -860,10 +862,12 @@ p500 slot contract:
 - `p510`: asset grounding。`script.md` / `story.md` / `video_manifest.md` / asset stage docs / template の readset と audit を確定する。
 - `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
 - `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
+- `p530` semantic QA: asset id / asset_type / story_purpose / visual_spec / prompt は同じ意味を指す。人物 asset が場所画像になったり、location asset が人物ポートレートになったり、scene に不要な小道具を常時参照したりする設計は fail とする。
 - `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、担当 `p500` L2 supervisor が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
+- `p570` semantic QA: 生成済み asset の主対象が asset category と story purpose に一致するかを確認する。path が存在しても、人物 asset が背景だけ、object asset が読めない抽象形、location asset が人物中心なら continuity anchor として合格しない。
 
 `asset_inventory.md` の最低限:
 
@@ -1072,6 +1076,84 @@ location の例外ルール:
 
 画像生成前 gate の review 状態は `video_manifest.md` の各 renderable image node に直接保持する。派生の `prompt_collection` は正本ではない。
 
+### 5.0 Semantic QA contract
+
+semantic QA は p200 から p900 までの横断契約であり、schema / file existence / count の代替ではない。各 stage は、上流 artifact の意味が下流 artifact に正しく翻訳されていることを説明できる状態で handoff する。
+
+運用分担:
+
+- 構造、存在、schema、参照 path、count、必須 field は関数 verifier が判定する
+- subject / location / object / timeline / reveal order / cut function などの意味判定は contextless semantic review agent が判定する
+- verifier は semantic review agent の report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする
+- frontend create flow では、人間レビュー以外の全経路で semantic review agent report が `status: passed` になることを必須にする。p680 までの create では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, `scene_image` を省略しない
+
+Canonical semantic review stages:
+
+- `scene_set`
+- `scene_detail`
+- `cut_blueprint`
+- `asset_plan`
+- `asset_output`
+- `image_prompt`
+- `scene_image`
+- `narration`
+- `video_motion`
+- `video_clip`
+- `render`
+
+Canonical semantic review artifacts:
+
+- `logs/review/semantic/<stage>.collection.md`
+- `logs/review/semantic/<stage>.scope.json`
+- `logs/review/semantic/<stage>.prompt.md`
+- `logs/review/semantic/<stage>.report.md`
+- state keys: `review.semantic.<stage>.collection`, `review.semantic.<stage>.scope`, `review.semantic.<stage>.prompt`, `review.semantic.<stage>.report`, `review.semantic.<stage>.status`, `review.semantic.<stage>.entry_count`, `review.semantic.<stage>.error_count`
+
+Legacy-compatible p640 image prompt aliases remain available for existing tooling:
+
+- `logs/review/image_prompt.review_collection.md`
+- `logs/review/image_prompt.review_scope.json`
+- `logs/review/image_prompt.judgment_prompt.md`
+- `logs/review/image_prompt.judgment.md`
+- state keys: `review.image_prompt.judgment.collection`, `review.image_prompt.judgment.scope`, `review.image_prompt.judgment.prompt`, `review.image_prompt.judgment.report`, `review.image_prompt.judgment.status`, `review.image_prompt.judgment.entry_count`
+
+Pack / runner commands:
+
+- `python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>`
+- `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
+
+実装者の責務:
+
+- `story.md` の scene は、物語上の役割、因果、感情変化、見せるべき情報を持つ
+- `script.md` の scene / cut は、1 cut が担う意味、必ず見せるもの、避けるもの、完了条件を持つ
+- `asset_inventory.md` / `asset_plan.md` は、物語で使われる人物、物語固有アイテム、場所、舞台装置を意味単位で網羅し、asset 種別と prompt が一致する
+- `video_manifest.md` の scene/cut は、参照する character/object/location id が cut の意味に合っている。round-robin や件数合わせで場所・小道具・人物を割り当てない
+- 画像生成 request は、参照画像の path だけでなく、その参照が何の意味を固定するかを prompt / contract で読める
+- 生成済み画像、動画、音声、最終 render は、上流の意味契約を満たすかを確認してから次 stage に渡す
+
+レビュワーの責務:
+
+- artifact が存在するかだけでなく、成果物として意味が通るかを見る
+- scene/cut の設計段階で、因果、場所、人物、主役アイテム、reveal 順序、情報量、handoff が成立しているかを見る
+- asset 画像では、asset id / asset_type / story_purpose と実画像の主対象が一致するかを見る
+- scene 画像では、参照 asset が正しいだけでなく、cut の場所・時点・小道具・人物状態が正しいかを見る
+- video / narration では、motion や語りが上流の cut function を説明だけで代替していないかを見る
+
+Canonical semantic reason keys:
+
+- `semantic_scene_role_mismatch`
+- `semantic_cut_function_mismatch`
+- `semantic_asset_category_mismatch`
+- `semantic_subject_mismatch`
+- `semantic_location_mismatch`
+- `semantic_object_mismatch`
+- `semantic_reference_mismatch`
+- `semantic_timeline_mismatch`
+- `semantic_reveal_order_mismatch`
+- `semantic_narration_mismatch`
+- `semantic_motion_mismatch`
+- `semantic_render_meaning_loss`
+
 各 `scenes[].image_generation.review` または `scenes[].cuts[].image_generation.review` は、少なくとも次の review field を持つ。
 
 ```yaml
@@ -1132,6 +1214,11 @@ Canonical reason key:
 - `prompt_missing_expected_character_anchor`
 - `prompt_missing_expected_object_anchor`
 - `prompt_subject_drift`
+- `semantic_subject_mismatch`
+- `semantic_location_mismatch`
+- `semantic_object_mismatch`
+- `semantic_reference_mismatch`
+- `semantic_timeline_mismatch`
 - `blocking_drift`
 - `missing_required_prompt_block`
 - `prompt_not_self_contained`

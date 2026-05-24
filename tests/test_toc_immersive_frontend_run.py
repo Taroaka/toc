@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import re
+import json
 from pathlib import Path
 
 
@@ -56,6 +57,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "script.md",
                 "video_manifest.md",
                 "image_prompt_story_review.md",
+                "logs/review/image_prompt.review_collection.md",
+                "logs/review/image_prompt.review_scope.json",
+                "logs/review/image_prompt.judgment_prompt.md",
+                "logs/review/image_prompt.judgment.md",
+                "logs/review/semantic/scene_set.collection.md",
+                "logs/review/semantic/scene_detail.collection.md",
+                "logs/review/semantic/cut_blueprint.collection.md",
+                "logs/review/semantic/asset_plan.collection.md",
+                "logs/review/semantic/asset_output.collection.md",
+                "logs/review/semantic/image_prompt.collection.md",
+                "logs/review/semantic/scene_image.collection.md",
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
                 "image_generation_requests.md",
@@ -72,10 +84,21 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("slot.p680.status", state)
             self.assertEqual(state["review.image.status"], "pending")
             self.assertEqual(state["gate.image_review"], "required")
+            self.assertEqual(state["review.image_prompt.judgment.status"], "pending")
+            self.assertEqual(state["review.image_prompt.judgment.entry_count"], "24")
+            for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt", "scene_image"):
+                self.assertEqual(state[f"review.semantic.{stage}.status"], "pending")
+                self.assertIn(f"review.semantic.{stage}.entry_count", state)
+            scope = json.loads((run_dir / "logs/review/image_prompt.review_scope.json").read_text(encoding="utf-8"))
+            self.assertEqual(scope["entry_count"], 24)
+            generic_scope = json.loads((run_dir / "logs/review/semantic/image_prompt.scope.json").read_text(encoding="utf-8"))
+            self.assertEqual(generic_scope["entry_count"], 24)
 
             asset_request_text = (run_dir / "asset_generation_requests.md").read_text(encoding="utf-8")
-            self.assertGreaterEqual(len(re.findall(r"^##\s+", asset_request_text, flags=re.MULTILINE)), 6)
+            self.assertGreaterEqual(len(re.findall(r"^##\s+", asset_request_text, flags=re.MULTILINE)), 10)
             self.assertIn("location_reference", asset_request_text)
+            self.assertIn("人物なし、空の部屋、場所だけ", asset_request_text)
+            self.assertIn("主要人物、全身ポートレート", asset_request_text)
 
             scene_request_text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
             first_scene = scene_request_text.split("## scene10_cut02", 1)[0]
@@ -87,6 +110,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             transformation_scene = scene_request_text.split("## scene30_cut01", 1)[1].split("## scene30_cut02", 1)[0]
             self.assertIn("reference_count: `3`", transformation_scene)
             self.assertIn("glass_slipper", transformation_scene)
+
+            palace_stair_scene = scene_request_text.split("## scene50_cut01", 1)[1].split("## scene50_cut02", 1)[0]
+            self.assertIn("宮殿の階段", palace_stair_scene)
+            self.assertIn("location_05", palace_stair_scene)
+            self.assertNotIn("location_01", palace_stair_scene)
+
+            ballroom_scene = scene_request_text.split("## scene60_cut01", 1)[1].split("## scene60_cut02", 1)[0]
+            self.assertIn("舞踏会の大広間", ballroom_scene)
+            self.assertIn("location_06", ballroom_scene)
+            self.assertNotIn("location_02", ballroom_scene)
 
             prompt_text = (run_dir / "logs/eval/asset/round_01/prompts/critic_1.prompt.md").read_text(encoding="utf-8")
             self.assertIn("You are critic_1 in the ToC Asset Eval/Improve Loop", prompt_text)

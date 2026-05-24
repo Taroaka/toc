@@ -663,6 +663,21 @@ def _write_image_requests_from_manifest(run_dir: Path, *, reference: str = "asse
     (run_dir / "image_generation_requests.md").write_text("\n".join(sections), encoding="utf-8")
 
 
+def _write_semantic_judgment_pack(run_dir: Path, *, status: str = "passed", entry_count: int = 1, placeholder: bool = False) -> None:
+    review_dir = run_dir / "logs" / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    (review_dir / "image_prompt.review_collection.md").write_text("# Collection\n\n## scene10\n", encoding="utf-8")
+    (review_dir / "image_prompt.review_scope.json").write_text(
+        json.dumps({"entry_count": entry_count, "selectors": ["scene10"]}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (review_dir / "image_prompt.judgment_prompt.md").write_text("semantic prompt\n", encoding="utf-8")
+    report = f"status: {status}\nreviewed_entries: [scene10]\nblocked_entries: []\nfindings: []\nnotes: []\n"
+    if placeholder:
+        report = "# Image Prompt Judgment Review\n\n- status: `pending`\n\n## Findings\n\n- `...`\n"
+    (review_dir / "image_prompt.judgment.md").write_text(report, encoding="utf-8")
+
+
 def _write_p400_review_artifacts(run_dir: Path) -> None:
     reports = {
         "scene_set_review.md": "status: passed\n\nscene set approved.\n",
@@ -1254,6 +1269,38 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertTrue(checks["image.generation_provenance_app_server"])
             self.assertTrue(checks["image.request_lane_consistency"])
             self.assertNotIn("image_regeneration_plan", stage["details"])
+
+    def test_check_image_requires_semantic_judgment_for_p640(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0640"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir, target_slot="p640")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["image.semantic_review_subagent_passed"])
+            self.assertIn("missing semantic review artifact", "\n".join(stage["details"]["image_prompt_semantic_review_errors"]))
+
+    def test_check_image_accepts_semantic_judgment_for_p640(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_image_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0641"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_basic_image_stage_artifacts(run_dir)
+            _write_photo_like_test_png(run_dir / "assets" / "scenes" / "scene10.png")
+            _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
+            _write_semantic_judgment_pack(run_dir)
+
+            stage, _ = VERIFY_MODULE.check_image(run_dir, target_slot="p640")
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertTrue(checks["image.semantic_review_subagent_passed"])
 
     def test_check_image_rejects_local_raster_provenance_even_when_png_is_complex(self) -> None:
         import tempfile

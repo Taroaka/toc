@@ -25,6 +25,11 @@ REVIEW_CAUSAL_ANALYSIS_GUIDANCE = dedent(
       instead of inventing a patch.
     - Prefer causal chains over restating failed checks: "because X is absent,
       Y cannot be generated/reviewed safely, causing Z downstream".
+    - Apply semantic QA at every stage. A file that exists and matches schema can
+      still fail if its meaning is wrong: wrong subject, wrong location, wrong
+      object, wrong timeline, broken reveal order, or references assigned only
+      to satisfy counts. Reviewers must judge whether the artifact is a
+      meaningful downstream translation of its source artifacts.
     """
 ).strip()
 
@@ -322,6 +327,8 @@ def review_guidance_for_stage(stage: str) -> str:
             - For character_reference assets, require full-body front / side / back three-view planning. For character variants, verify they derive from the main character reference instead of becoming a new unrelated design.
             - Hard review: verify source_script_selectors[] are only usage locations, generation_plan.reference_inputs[] are only actual visual references, output paths are canonical, review/status fields are present, all image requests use tool=codex_builtin_image, and no-reference asset seeds stay on execution_lane=bootstrap_builtin while reference-driven or derived assets stay on execution_lane=standard.
             - Hard review: check p550 readiness for each planned request: materializable canonical output path, reference count/input consistency, generation/review status readiness, and enough metadata for a human to know what will be generated, with which references, and where it will be saved.
+            - Semantic QA: verify that asset_id, asset_type, story_purpose, visual_spec, request prompt, and generated output category all describe the same thing. Character assets must be people, object assets must be the intended object, and location assets must be places rather than character portraits.
+            - Semantic QA: verify that source_script_selectors[] list the cuts where the asset is meaningfully used. Do not approve round-robin location assignment or always-on object references that place a story-specific item into unrelated scenes.
             - Judgment review: check whether the planned visual identities are concrete enough to preserve continuity across later scenes, whether variants remain recognizably derived from their base asset, and whether fixed details / must_avoid constraints are useful for p600 prompt authors.
             - Judgment review: check p550 prompt readiness: each planned request must be writable as a concrete visible prompt, not production metadata such as `物語「<topic>」の scene10`, `scene10_cut01`, `この画像は物語「<topic>」の一場面`, or `後続 scene`.
             - If findings remain, return changes_requested with concrete missing assets or contract fixes so main can patch asset_plan.md and run the next review round.
@@ -338,6 +345,7 @@ def review_guidance_for_stage(stage: str) -> str:
             - Estimate the scene's needed duration from total scene count, scene importance, reveal weight, and emotional weight.
             - Treat one cut as roughly 4-15 seconds; explicitly flag that a one-cut scene can only carry about 4-15 seconds.
             - Check whether every piece of content that must be shown in this scene is represented by planned cuts.
+            - Semantic QA: verify that the scene's location, time, subject state, object visibility, and reveal order match the story/script meaning rather than merely using valid ids.
             - Review the next scene as context. Decide whether the current scene's final cut connects to the next scene.
             - If the final cut does not connect, recommend either adding one more cut or thickening the final cut.
             - Return concrete add/thicken/delete recommendations that main can auto-apply.
@@ -351,6 +359,7 @@ def review_guidance_for_stage(stage: str) -> str:
             - One cut must carry one intent only (one viewer-facing intent). If a cut contains location change, reveal, emotional reversal, explanation, reaction, and next-scene handoff together, return changes_requested.
             - Important beats such as transformation, discovery, confrontation, emotional reversal, and proof reveal must be split into setup / pressure or threshold / turn or payoff / reaction / handoff as appropriate.
             - Require a coverage plan that maps scene obligations to cuts: dramatic_question, value_shift.visible_evidence, causal_turn, reveal constraints, audience information, and handoff_to_next_scene.
+            - Semantic QA: every cut must preserve the scene meaning it claims to carry. Block cuts whose visual beat, asset dependency hint, narration role, or first-frame contract points to a different place, time, subject, or story object than the target beat.
             - first_frame_contract must describe a startable still just before motion begins; it must not be a completed action or production metadata.
             - motion_contract is p800-only. p600 image prompt authoring must not read it or summarize future motion into the still prompt.
             - p420 must still ensure motion_contract can start from first_frame_contract without inventing a new story event, but that compatibility check belongs to cut/video planning, not image prompt authoring.

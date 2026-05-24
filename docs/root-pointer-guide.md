@@ -4,6 +4,7 @@
 
 - ToC は spec-first repo。正本は `docs/`, `workflow/`, `scripts/` に置く。
 - 価値の中心は生成物の質にある。ハーネスは動画の中身ではなく、運用・評価・承認・回帰検証を強化するために使う。
+- semantic QA は全 stage の不変条件。実装者は artifact 作成時点で上流の意味・役割・因果・参照対象に合う状態にし、レビュワーは存在/形式だけでなく「意味のある成果物になっているか」を確認する。
 - 日常運用は Codex 主軸。Claude Code は backup / accelerator として扱う。
 - 回答は必要なことを端的に書く。長い説明は正本ドキュメントへ寄せる。
 
@@ -35,6 +36,8 @@
 `/image_gen` と `/api/*` は `TOC_SERVER_TOKEN` 必須で fail closed にする。ローカル検証で明示的に外す場合だけ `TOC_SERVER_AUTH_DISABLED=1` を使う。
 
 フロントから物語を1から作る Image generation app の create flow は、server 都合の最短 scaffold として実装しない。人間承認だけを frontend handoff にし、それ以外の grounding、deterministic verifier、review-loop prompt/report/aggregate materialization、story/image prompt consistency review、asset/scene request materialization、asset/scene image generation、p650/p680 validation は通常経路を通す。`server/image_gen_app.py` はこの orchestration を呼び出す入口に留め、品質 gate や artifact 契約を迂回する独自ショートカットを持たない。
+
+server 経由の生成でも semantic QA を短絡しない。scene/cut 設計、asset 計画、画像 prompt、生成画像、動画 motion、音声、最終 render は、それぞれ上流 artifact の意味契約を満たす必要がある。構造チェックは関数 verifier で通し、意味判定は contextless semantic review agent の report を verifier が読む。server はファイル数や schema 成功だけで run を成功扱いにせず、意味レビュー用 artifact と検証可能な参照関係を残す。canonical artifact は `logs/review/semantic/<stage>.collection.md`, `.scope.json`, `.prompt.md`, `.report.md` と `review.semantic.<stage>.*` state keys で、frontend create の p680 経路では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, `scene_image` を通す。
 
 ## Read Next
 
@@ -74,6 +77,10 @@
 - subagent audit prompt: `output/<topic>_<timestamp>/logs/grounding/<stage>.subagent_prompt.md`
 - story review subagent prompt: `output/<topic>_<timestamp>/logs/review/story.subagent_prompt.md`
 - image judgment subagent prompt: `output/<topic>_<timestamp>/logs/review/image_prompt.subagent_prompt.md`
+- semantic review pack: `output/<topic>_<timestamp>/logs/review/semantic/<stage>.collection.md`
+- semantic review scope: `output/<topic>_<timestamp>/logs/review/semantic/<stage>.scope.json`
+- semantic review prompt: `output/<topic>_<timestamp>/logs/review/semantic/<stage>.prompt.md`
+- semantic review report: `output/<topic>_<timestamp>/logs/review/semantic/<stage>.report.md`
 - L2 supervisor progress memo: `output/<topic>_<timestamp>/logs/orchestration/l2_supervisor_progress.md`
 - p-bucket supervisor result: `output/<topic>_<timestamp>/logs/orchestration/pXXX.supervisor_result.json`
 - eval outputs: `output/<topic>_<timestamp>/eval_report.json`, `output/<topic>_<timestamp>/run_report.md`

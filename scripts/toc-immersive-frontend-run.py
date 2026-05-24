@@ -125,6 +125,16 @@ def _story_profile(topic: str, source: str) -> dict[str, Any]:
             "artifact_visual": "透明なガラスの靴、月光反射、実物の質感",
             "artifact_fixed_prompt": "透明なガラス、繊細な靴、月光の反射、読める文字なし",
             "places": ["灰の台所", "月明かりの庭", "宮殿", "大階段"],
+            "scene_locations": [
+                "灰の台所",
+                "閉ざされた扉の前の暗い屋内",
+                "月明かりの庭",
+                "馬車が待つ門前の道",
+                "宮殿の階段",
+                "舞踏会の大広間",
+                "真夜中の大階段",
+                "靴合わせが行われる部屋",
+            ],
             "motifs": ["灰", "布", "月光", "ガラス", "階段"],
             "scene_titles": [
                 "灰の台所",
@@ -167,6 +177,7 @@ def _story_profile(topic: str, source: str) -> dict[str, Any]:
         "artifact_visual": f"{topic_label}の由来を感じさせる手に持てる象徴物、実物の質感、強い形状記憶",
         "artifact_fixed_prompt": f"{topic_label}の象徴物、実物の質量、触れられる素材、読める文字なし",
         "places": ["始まりの場所", "境界の場所", "試練の場所", "帰還の場所"],
+        "scene_locations": DEFAULT_SCENE_TITLES,
         "motifs": ["生活の痕跡", "光", "影", "手触り", "道"],
         "scene_titles": DEFAULT_SCENE_TITLES,
         "artifact_scene_indices": [4, 6, 8],
@@ -200,6 +211,7 @@ def _run_id_from_dir(run_dir: Path) -> str:
 
 
 def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    places = profile.get("scene_locations") or profile["places"]
     return [
         {
             "asset_id": _safe_asset_id("location", place, index),
@@ -209,13 +221,13 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
             "story_purpose": f"{place}の空間・光・質感を固定する",
             "reusable_reason": "同じ場所のcutで背景と空気感を保つ",
         }
-        for index, place in enumerate(profile["places"], start=1)
+        for index, place in enumerate(places, start=1)
     ]
 
 
 def _location_spec_for_scene(profile: dict[str, Any], scene_index: int) -> dict[str, Any]:
     specs = _location_asset_specs(profile)
-    return specs[(scene_index - 1) % len(specs)]
+    return specs[min(scene_index - 1, len(specs) - 1)]
 
 
 def _scene_uses_artifact(profile: dict[str, Any], scene_index: int) -> bool:
@@ -232,16 +244,16 @@ def _prompt_for_asset(entry: dict[str, Any], profile: dict[str, Any]) -> str:
                 "実写、シネマティック、全身、頭からつま先まで。自然な肌、同じ顔と髪型。画面内テキストなし、字幕なし、ロゴなし。",
                 "",
                 "[作成するもの]",
-                f"{profile['protagonist_name']}の全身参照画像。",
+                f"{profile['protagonist_name']}の全身参照画像。主対象は人物1人で、場所参照や空の部屋ではない。",
                 "",
                 "[人物固定]",
-                "穏やかな強さのある表情、自然な髪、自然な体格。後続画像で同じ顔、髪、体格を保つ。",
+                "穏やかな強さのある表情、自然な髪、自然な体格。後続画像で同じ顔、髪、体格を保つ。正面寄り、頭からつま先まで見える。",
                 "",
                 "[衣装]",
                 f"{profile['topic_label']}の世界に合う生活感のある衣装。後続画像で顔、髪、体格、衣装の主要形状を保つ。",
                 "",
                 "[禁止]",
-                "アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、途中クロップ、低情報量のポスター風。",
+                "人物なし、空の部屋、場所だけ、後ろ姿だけ、顔が読めない構図、アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、途中クロップ、低情報量のポスター風。",
             ]
         )
     if asset_type == "location_reference":
@@ -258,7 +270,7 @@ def _prompt_for_asset(entry: dict[str, Any], profile: dict[str, Any]) -> str:
                 "人物を主役にしない。床、壁、出入口、光源、質感が読み取れる。映画のロケーションスチルとして成立させる。",
                 "",
                 "[禁止]",
-                "アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、低情報量、抽象背景だけの画像。",
+                "主要人物、全身ポートレート、人物が画面の中心、アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、低情報量、抽象背景だけの画像。",
             ]
         )
     return "\n".join(
@@ -278,7 +290,7 @@ def _prompt_for_asset(entry: dict[str, Any], profile: dict[str, Any]) -> str:
     )
 
 
-def _scene_prompt(title: str, beat: str, target_beat: str, profile: dict[str, Any], *, include_artifact: bool) -> str:
+def _scene_prompt(title: str, beat: str, target_beat: str, location_name: str, profile: dict[str, Any], *, include_artifact: bool) -> str:
     active_motifs = [motif for motif in profile["motifs"] if include_artifact or motif != "ガラス"]
     motifs = "、".join(active_motifs)
     artifact_lines = [
@@ -287,9 +299,9 @@ def _scene_prompt(title: str, beat: str, target_beat: str, profile: dict[str, An
         "",
     ] if include_artifact else []
     scene_detail = (
-        f"{title}。{target_beat}。{beat} 中景に{profile['protagonist_name']}、前景か手元に{profile['artifact_name']}の気配、背景に次の場所へ続く導線。"
+        f"{title}。場所は{location_name}。{target_beat}。{beat} 中景に{profile['protagonist_name']}、前景か手元に{profile['artifact_name']}の気配、背景に次の場所へ続く導線。"
         if include_artifact
-        else f"{title}。{target_beat}。{beat} 中景に{profile['protagonist_name']}、背景に場所の質感と次の場所へ続く導線。証の小道具はまだ画面に出さない。"
+        else f"{title}。場所は{location_name}。{target_beat}。{beat} 中景に{profile['protagonist_name']}、背景に場所の質感と次の場所へ続く導線。証の小道具はまだ画面に出さない。"
     )
     continuity = (
         f"{profile['topic_label']}の始まりから試練、証明へつながる。人物と{profile['artifact_name']}の形状を変えない。"
@@ -436,6 +448,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             must_show = [profile["protagonist_name"], "光", profile["artifact_name"]] if include_artifact else [profile["protagonist_name"], "光", title]
             object_ids = [artifact_asset] if include_artifact else []
             references = [protagonist_ref, location_ref, *([artifact_ref] if include_artifact else [])]
+            location_name = str(location_spec["name"])
             cut_blueprint = {
                 "cut_role": "状況を前へ進める映画的断片",
                 "duration_intent": "12秒で感情と情報を同時に渡す",
@@ -448,7 +461,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "asset_dependency_hint": {"characters": [protagonist_asset], "objects": object_ids, "locations": [location_spec["asset_id"]]},
             }
             cuts.append({"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": 12, "estimated_duration_seconds": 12, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}})
-            prompt = _scene_prompt(title, visual_beat, beat, profile, include_artifact=include_artifact)
+            prompt = _scene_prompt(title, visual_beat, beat, location_name, profile, include_artifact=include_artifact)
             narration = f"{title}。奥に残った名前が、まだ消えていないことを光が知らせる。"
             manifest_cuts.append(
                 {
@@ -615,6 +628,33 @@ def _write_review_artifacts(run_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "build-image-prompt-judgment-review.py"),
+            "--run-dir",
+            str(run_dir),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for semantic_stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt", "scene_image"):
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
+                "--run-dir",
+                str(run_dir),
+                "--stage",
+                semantic_stage,
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     state_updates: dict[str, str] = {}
     for stage in AUTHORING_REVIEW_STAGES:
         materialize_review_loop_round(run_dir=run_dir, stage=stage, round_number=1)
@@ -912,7 +952,11 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
 
     run_id = _run_id_from_dir(run_dir)
     if stop_target == "p650":
+        for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
+            await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage=stage)
         await image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset")
+        await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage="asset_output")
+        await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage="image_prompt")
     else:
         await image_gen_app._generate_create_images("toc-immersive-frontend-run", run_id=run_id)
 

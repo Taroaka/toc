@@ -34,6 +34,7 @@ from toc.harness import (  # noqa: E402
     sync_run_status,
     write_json,
 )
+from toc.semantic_review import check_image_prompt_judgment, check_semantic_review  # noqa: E402
 from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
 from toc.stage_evaluator import check_visual_value  # noqa: E402
 
@@ -195,6 +196,30 @@ def append_grounding_checks(checks: list[dict[str, Any]], *, run_dir: Path, stag
         f"{stage}.audit_state",
         validation.get("state_audit_status") == "passed",
         f"state records stage audit as passed (got {validation.get('state_audit_status') or '(unset)'})",
+        kind="rubric",
+    )
+
+
+def append_semantic_review_check(
+    checks: list[dict[str, Any]],
+    details: dict[str, Any],
+    *,
+    run_dir: Path,
+    stage: str,
+    required: bool,
+    check_id: str | None = None,
+) -> None:
+    result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+    prefix = stage.replace("-", "_")
+    if result.errors:
+        details[f"{prefix}_semantic_review_errors"] = list(result.errors)
+    details[f"{prefix}_semantic_review_status"] = result.status or ""
+    details[f"{prefix}_semantic_review_entry_count"] = result.entry_count
+    add_check(
+        checks,
+        check_id or f"{prefix}.semantic_review_subagent_passed",
+        (not required) or result.passed,
+        f"contextless {stage} semantic review subagent report exists and passed",
         kind="rubric",
     )
 
@@ -388,10 +413,11 @@ def _script_text_quality_checks(checks: list[dict[str, Any]], text: str, data: d
         add_check(checks, "script.structured_scenes", len(scenes) >= 1, "structured script includes scene list", kind="rubric")
 
 
-def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
+def check_script_single(run_dir: Path, profile: str, *, target_slot: str = "p450") -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "script.md"
     checks: list[dict[str, Any]] = []
     updates: dict[str, str] = {}
+    target_number = _slot_number(target_slot, default=450)
 
     add_check(checks, "script.file_exists", path.exists(), f"{path.name} exists")
     if not path.exists():
@@ -400,12 +426,18 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
     text, data = load_structured_document(path)
     append_grounding_checks(checks, run_dir=run_dir, stage="script")
     _script_text_quality_checks(checks, text, data, profile)
+    details: dict[str, Any] = {}
+    require_scene_semantic = target_number in {410, 420} or target_number >= 500
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_detail", required=require_scene_semantic)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="cut_blueprint", required=target_number == 420 or target_number >= 500)
     updates["eval.script.score"] = f"{score_from_checks(checks):.4f}"
-    return make_stage("script", path.name, checks), updates
+    return make_stage("script", path.name, checks, details=details), updates
 
 
-def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
+def check_script_scene_series(run_dir: Path, profile: str, *, target_slot: str = "p450") -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
+    target_number = _slot_number(target_slot, default=450)
     scene_dirs = sorted((run_dir / "scenes").glob("scene*"))
     script_paths = [scene_dir / "script.md" for scene_dir in scene_dirs]
 
@@ -424,8 +456,13 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
     if profile == "standard":
         add_check(checks, "script.scene_no_todo", all_no_todo, "scene scripts do not contain TODO/TBD markers", kind="rubric")
 
+    details: dict[str, Any] = {"scene_count": len(scene_dirs)}
+    require_scene_semantic = target_number in {410, 420} or target_number >= 500
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_detail", required=require_scene_semantic)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="cut_blueprint", required=target_number == 420 or target_number >= 500)
     updates = {"eval.script.score": f"{score_from_checks(checks):.4f}"}
-    return make_stage("script", "scenes/*/script.md", checks, details={"scene_count": len(scene_dirs)}), updates
+    return make_stage("script", "scenes/*/script.md", checks, details=details), updates
 
 
 def _iter_manifest_nodes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1252,6 +1289,14 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         "all planned asset entries are review approved before generation",
         kind="rubric",
     )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="asset_plan",
+        required=target_number >= 540,
+        check_id="asset.plan_semantic_review_subagent_passed",
+    )
 
     output_failures: list[str] = []
     planned_outputs: list[str] = []
@@ -1303,6 +1348,14 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         target_number < 560 or (bool(entries) and not visual_quality_issues),
         "generated p500 asset images are photorealistic/live-action candidates and not vector-like/low-detail",
         kind="rubric",
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="asset_output",
+        required=target_number >= 570,
+        check_id="asset.output_semantic_review_subagent_passed",
     )
 
     request_text = requests.read_text(encoding="utf-8") if requests.exists() else ""
@@ -1382,10 +1435,11 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
     return make_stage("asset", "asset_inventory.md / asset_plan.md / asset_generation_requests.md", checks, details=details), updates
 
 
-def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
     details: dict[str, Any] = {}
     updates: dict[str, str] = {}
+    target_number = _slot_number(target_slot, default=680)
     requests = run_dir / "image_generation_requests.md"
     expected_outputs = _node_output_paths(run_dir, field_path=["image_generation", "output"])
     missing_outputs = [path for path in expected_outputs if not path.exists()]
@@ -1520,6 +1574,22 @@ def check_image(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
         "p600 reference images are photorealistic/live-action candidates; vector-like references route regeneration back to p500",
         kind="rubric",
     )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="image_prompt",
+        required=target_number >= 640,
+        check_id="image.semantic_review_subagent_passed",
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="scene_image",
+        required=target_number >= 680,
+        check_id="image.scene_image_semantic_review_subagent_passed",
+    )
 
     updates["eval.image.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("image", "image_generation_requests.md / assets/scenes/**", checks, details=details), updates
@@ -1551,6 +1621,14 @@ def check_narration(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
         duration_status in {"passed", "skipped"},
         f"duration-fit gate is passed/skipped before video generation (got {duration_status or '(unset)'})",
         kind="rubric",
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="narration",
+        required=True,
+        check_id="narration.semantic_review_subagent_passed",
     )
     details["declared_audio_outputs"] = len(expected_outputs)
     if missing_outputs:
@@ -1618,22 +1696,53 @@ def _video_checks(checks: list[dict[str, Any]], *, video_path: Path, state: dict
         add_check(checks, "video.duration", video_duration > 0.0, f"video duration is positive ({video_duration:.2f}s)", kind="rubric")
 
 
-def check_video_single(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+def check_video_single(run_dir: Path, *, target_slot: str = "p930") -> tuple[dict[str, Any], dict[str, str]]:
     state = parse_state_file(run_dir / "state.txt")
     checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {}
+    target_number = _slot_number(target_slot, default=930)
     append_grounding_checks(checks, run_dir=run_dir, stage="video")
     _video_checks(checks, video_path=run_dir / "video.mp4", state=state, run_dir=run_dir)
-    return make_stage("video", "video.mp4", checks), {}
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="video_motion",
+        required=target_number >= 820,
+        check_id="video.motion_semantic_review_subagent_passed",
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="video_clip",
+        required=target_number >= 850,
+        check_id="video.clip_semantic_review_subagent_passed",
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="render",
+        required=target_number >= 930,
+        check_id="video.render_semantic_review_subagent_passed",
+    )
+    return make_stage("video", "video.mp4", checks, details=details), {}
 
 
-def check_video_scene_series(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
+def check_video_scene_series(run_dir: Path, *, target_slot: str = "p930") -> tuple[dict[str, Any], dict[str, str]]:
     scene_dirs = sorted((run_dir / "scenes").glob("scene*"))
     checks: list[dict[str, Any]] = []
+    details: dict[str, Any] = {"scene_count": len(scene_dirs)}
+    target_number = _slot_number(target_slot, default=930)
     add_check(checks, "video.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
     video_paths = [scene_dir / "video.mp4" for scene_dir in scene_dirs]
     add_check(checks, "video.scene_files", all(path.exists() for path in video_paths), "each scene has video.mp4")
     append_grounding_checks(checks, run_dir=run_dir, stage="video")
-    return make_stage("video", "scenes/*/video.mp4", checks, details={"scene_count": len(scene_dirs)}), {}
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="video_motion", required=target_number >= 820)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="video_clip", required=target_number >= 850)
+    append_semantic_review_check(checks, details, run_dir=run_dir, stage="render", required=target_number >= 930)
+    return make_stage("video", "scenes/*/video.mp4", checks, details=details), {}
 
 
 def _required_orchestration_buckets(stage_target: str) -> list[str]:
@@ -1937,9 +2046,9 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
 
     if "script" in enabled_stages:
         if flow == "scene-series":
-            script_stage, updates = check_script_scene_series(run_dir, profile)
+            script_stage, updates = check_script_scene_series(run_dir, profile, target_slot=target)
         else:
-            script_stage, updates = check_script_single(run_dir, profile)
+            script_stage, updates = check_script_single(run_dir, profile, target_slot=target)
         stages.append(script_stage)
         stage_updates.update(updates)
 
@@ -1957,7 +2066,7 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
         stage_updates.update(updates)
 
     if "image" in enabled_stages:
-        image_stage, updates = check_image(run_dir)
+        image_stage, updates = check_image(run_dir, target_slot=target)
         stages.append(image_stage)
         stage_updates.update(updates)
 
@@ -1968,9 +2077,9 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
 
     if "video" in enabled_stages:
         if flow == "scene-series":
-            video_stage, updates = check_video_scene_series(run_dir)
+            video_stage, updates = check_video_scene_series(run_dir, target_slot=target)
         else:
-            video_stage, updates = check_video_single(run_dir)
+            video_stage, updates = check_video_single(run_dir, target_slot=target)
         stages.append(video_stage)
         stage_updates.update(updates)
 

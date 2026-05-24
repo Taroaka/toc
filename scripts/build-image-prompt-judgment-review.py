@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, now_iso  # noqa: E402
+from toc.semantic_review import semantic_review_relpaths, semantic_state_updates  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,15 @@ def load_manifest_yaml(path: Path) -> dict:
     return yaml.safe_load(extract_yaml_block(path.read_text(encoding="utf-8"))) or {}
 
 
-def _get_selector(scene_id: int, cut_id: int) -> str:
-    return f"scene{scene_id:02d}_cut{cut_id:02d}"
+def _get_selector(scene_id: object, cut_id: object) -> str:
+    scene_raw = str(scene_id).strip()
+    cut_raw = str(cut_id).strip()
+    scene_digits = re.sub(r"\D+", "", scene_raw)
+    cut_token = cut_raw.split("-")[-1] if "-" in cut_raw else cut_raw
+    cut_digits = re.sub(r"\D+", "", cut_token)
+    if not scene_digits or not cut_digits:
+        return ""
+    return f"scene{int(scene_digits):02d}_cut{int(cut_digits):02d}"
 
 
 def _review_block(review: dict[str, object] | None) -> dict[str, object]:
@@ -101,19 +109,22 @@ def collect_review_entries(*, manifest: dict, mode_filter: str = "generate_still
         if not isinstance(scene, dict):
             continue
         scene_id = scene.get("scene_id")
-        if not isinstance(scene_id, int) or scene_id <= 0:
+        if scene_id in {None, ""}:
             continue
         for cut in scene.get("cuts", []) or []:
             if not isinstance(cut, dict):
                 continue
             cut_id = cut.get("cut_id")
-            if not isinstance(cut_id, int) or cut_id <= 0:
+            if cut_id in {None, ""}:
                 continue
             plan = cut.get("still_image_plan")
-            if not isinstance(plan, dict) or _as_str(plan.get("mode")) != mode_filter:
+            if isinstance(plan, dict) and _as_str(plan.get("mode")) and _as_str(plan.get("mode")) != mode_filter:
                 continue
             image_generation = cut.get("image_generation")
             if not isinstance(image_generation, dict):
+                continue
+            selector = _as_str(cut.get("selector")) or _get_selector(scene_id, cut_id)
+            if not selector:
                 continue
             review = _review_block(image_generation.get("review"))
             contract = _review_block(review.get("contract")) or _review_block(image_generation.get("contract"))
@@ -123,12 +134,12 @@ def collect_review_entries(*, manifest: dict, mode_filter: str = "generate_still
                 narration_text = _as_str(narration.get("text"))
             entries.append(
                 ReviewEntry(
-                    selector=_get_selector(scene_id, cut_id),
-                    scene_id=scene_id,
-                    cut_id=cut_id,
+                    selector=selector,
+                    scene_id=int(re.sub(r"\D+", "", str(scene_id)) or "0"),
+                    cut_id=int(re.sub(r"\D+", "", str(cut_id).split("-")[-1]) or "0"),
                     output=_as_str(image_generation.get("output")),
                     narration=narration_text,
-                    rationale=_as_str(plan.get("rationale")),
+                    rationale=_as_str(plan.get("rationale")) if isinstance(plan, dict) else "",
                     agent_review_ok=_as_bool(review.get("agent_review_ok"), True),
                     human_review_ok=_as_bool(review.get("human_review_ok"), False),
                     agent_review_reason_keys=_as_str_list(review.get("agent_review_reason_keys") or review.get("agent_review_reason_codes")),
@@ -270,7 +281,10 @@ def build_judgment_prompt(
         f"4. `{report_path}`",
         "",
         "Use the frozen review collection as the review target.",
+        f"Write the final judgment report to `{report_path}`. Do not leave the template unchanged.",
         "For each entry, judge prompt clarity, self-containment, continuity readiness, first-frame readiness, and production readiness.",
+        "Apply semantic QA: verify that each prompt preserves the source story/script meaning, the expected subject, the correct location, the correct object/setpiece visibility, timeline, and reveal order.",
+        "Flag references that look structurally valid but semantically wrong, such as round-robin location assignment, always-on story-specific objects in unrelated scenes, or a character asset used where a location is intended.",
         "Treat every scene still as the candidate first frame for its later video clip, but do not require the prompt body to say `first frame`.",
         "Flag authoring-only first-frame metadata such as `最初の1フレーム`, `1フレーム目`, or `first frame`; the prompt body should describe only the visible initial state.",
         "Flag prompts that read like mid-action or completed action instead of a stable initial image that can start moving naturally.",
@@ -282,6 +296,7 @@ def build_judgment_prompt(
         "reviewed_entries: [...]",
         "blocked_entries: [...]",
         "findings: [...]",
+        "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|...]",
         "notes: [...]",
     ]
     return dedent("\n".join(lines)).strip()
@@ -341,6 +356,15 @@ def main() -> int:
         scope_path=scope_path,
         collection_path=collection_path,
     ) + "\n")
+    generic_paths = semantic_review_relpaths("image_prompt")
+    generic_collection = run_dir / generic_paths["collection"]
+    generic_scope = run_dir / generic_paths["scope"]
+    generic_prompt = run_dir / generic_paths["prompt"]
+    generic_report = run_dir / generic_paths["report"]
+    write_text(generic_collection, collection_path.read_text(encoding="utf-8"))
+    write_text(generic_scope, scope_path.read_text(encoding="utf-8"))
+    write_text(generic_prompt, prompt_path.read_text(encoding="utf-8"))
+    write_text(generic_report, report_path.read_text(encoding="utf-8"))
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -351,6 +375,7 @@ def main() -> int:
             "review.image_prompt.judgment.status": "pending",
             "review.image_prompt.judgment.generated_at": now_iso(),
             "review.image_prompt.judgment.entry_count": str(len(entries)),
+            **semantic_state_updates("image_prompt", status="pending", entry_count=len(entries), generated_at=now_iso()),
         },
     )
     print(prompt)

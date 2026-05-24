@@ -52,6 +52,21 @@ consistency review, asset request materialization, asset generation, scene
 request materialization, scene generation, and p650/p680 validation. The only
 thing deferred to the frontend is the human approval decision itself.
 
+Semantic QA is mandatory on this route. Do not treat file existence, schema
+validity, or image count as sufficient. Scene and cut design must preserve the
+story meaning; asset inventory/plan/request/output must match the intended
+character/object/location category; scene image requests must reference the
+correct assets for that cut; video, narration, and final render must remain a
+meaningful downstream translation of the approved upstream artifacts.
+Structural checks stay in deterministic verifier code. Semantic judgment must be
+performed by a contextless semantic review agent, and the verifier must consume
+that agent's canonical `logs/review/semantic/<stage>.report.md` report instead
+of inventing a semantic pass from schema/count success. For frontend create
+flows through `p680`, run at least `scene_set`, `scene_detail`,
+`cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, and
+`scene_image`; the legacy `logs/review/image_prompt.judgment.md` path is only a
+compatibility alias for the `image_prompt` stage.
+
 For app-server Image Gen create flows, the normal stop target is `p680`. The
 skill strengthens image prompts, retries bootstrap asset generation up to 10
 times when the visual gate fails, generates scene images, and creates the
@@ -117,6 +132,18 @@ Review artifacts must explain the essential cause of each finding, not only the
 failed check. When the cause and fix are clear, include the target
 artifact/section, concrete fix direction, downstream impact, and acceptance
 condition for the next review round.
+
+Semantic review packs are built with:
+
+```bash
+python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>
+```
+
+To run the contextless reviewer and hard-gate the report:
+
+```bash
+python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>
+```
 
 ## ToC Run Contract
 
