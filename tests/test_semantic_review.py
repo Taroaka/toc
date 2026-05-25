@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from toc.semantic_review import check_image_prompt_judgment, check_semantic_review, parse_judgment_report_status, semantic_review_relpaths
+from toc.semantic_review import SEMANTIC_REVIEW_STAGES, check_image_prompt_judgment, check_semantic_review, parse_judgment_report_status, semantic_review_relpaths
+from toc.semantic_review_loop import SEMANTIC_REVIEW_PRODUCER_TARGETS, semantic_repair_relpaths, write_semantic_repair_prompt
 
 
 def write_review_pack(run_dir: Path, *, status: str = "passed", entry_count: int = 1, placeholder: bool = False) -> None:
@@ -108,6 +109,28 @@ class TestSemanticReview(unittest.TestCase):
 
             self.assertTrue(result.passed)
             self.assertEqual(result.status, "passed")
+
+    def test_all_semantic_stages_have_producer_repair_targets(self) -> None:
+        self.assertEqual(SEMANTIC_REVIEW_STAGES, set(SEMANTIC_REVIEW_PRODUCER_TARGETS))
+
+    def test_write_semantic_repair_prompt_materializes_prompt_and_report(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "narration", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "narration",
+                round_number=1,
+                max_attempts=3,
+                errors=("semantic review status must be passed, got failed",),
+            )
+            relpaths = semantic_repair_relpaths("narration", 1)
+
+            self.assertEqual(paths["prompt"], run_dir / relpaths["prompt"])
+            self.assertEqual(paths["report"], run_dir / relpaths["report"])
+            self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
+            self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

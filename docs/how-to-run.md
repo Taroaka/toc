@@ -52,6 +52,31 @@ YouTube サムネイル用の prompt だけ作る場合:
 
 既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合:
 
+### Frontend Create Routeをヘッドレスで検証する
+
+フロントUIを介さず、フロントの作成ボタンと同じ backend endpoint `/api/image-gen/runs/create` から新規runを作る場合:
+
+```bash
+python scripts/toc-create-run-headless.py \
+  --title "シンデレラ" \
+  --source "シンデレラ" \
+  --no-images
+```
+
+画像生成はデフォルトで有効。設計・manifest・requestだけを高速に確認したい場合だけ `--no-images` を付ける。
+
+既にbackend serverを起動している場合は、in-processではなく実サーバーへ投げられる。
+
+```bash
+python scripts/toc-create-run-headless.py \
+  --title "シンデレラ" \
+  --source "シンデレラ" \
+  --base-url "http://127.0.0.1:8000" \
+  --no-images
+```
+
+結果は作成run配下の `logs/regression/headless_regression_report.md` に保存される。
+
 ```text
 /toc-youtube-thumbnail "浦島太郎" --run-dir output/浦島太郎_<timestamp>
 ```

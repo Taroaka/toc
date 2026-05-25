@@ -166,6 +166,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                     (run_dir / "video_manifest.md").read_text(encoding="utf-8"),
                 ]
             )
+            self.assertIn("cut_contract:", request_text)
+            self.assertIn("first_frame_contract:", request_text)
+            self.assertIn("motion_contract:", request_text)
             self.assertIn("桃太郎", request_text)
             self.assertNotIn("cinderella_fullbody", request_text)
             self.assertNotIn("glass_slipper", request_text)

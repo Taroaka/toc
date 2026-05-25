@@ -1086,6 +1086,7 @@ semantic QA は p200 から p900 までの横断契約であり、schema / file 
 - subject / location / object / timeline / reveal order / cut function などの意味判定は contextless semantic review agent が判定する
 - verifier は semantic review agent の report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする
 - frontend create flow では、人間レビュー以外の全経路で semantic review agent report が `status: passed` になることを必須にする。p680 までの create では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, `scene_image` を省略しない
+- semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
 
 Canonical semantic review stages:
 
@@ -1108,6 +1109,8 @@ Canonical semantic review artifacts:
 - `logs/review/semantic/<stage>.prompt.md`
 - `logs/review/semantic/<stage>.report.md`
 - state keys: `review.semantic.<stage>.collection`, `review.semantic.<stage>.scope`, `review.semantic.<stage>.prompt`, `review.semantic.<stage>.report`, `review.semantic.<stage>.status`, `review.semantic.<stage>.entry_count`, `review.semantic.<stage>.error_count`
+- repair-loop artifacts: `logs/review/semantic/<stage>.repair_round_<NN>.prompt.md`, `logs/review/semantic/<stage>.repair_round_<NN>.producer_report.md`
+- repair-loop state keys: `review.semantic.<stage>.loop.status`, `review.semantic.<stage>.loop.attempt`, `review.semantic.<stage>.loop.max_attempts`, `review.semantic.<stage>.repair.status`, `review.semantic.<stage>.repair.round`, `review.semantic.<stage>.repair.prompt`, `review.semantic.<stage>.repair.report`
 
 Legacy-compatible p640 image prompt aliases remain available for existing tooling:
 
@@ -1121,6 +1124,8 @@ Pack / runner commands:
 
 - `python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>`
 - `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
+
+`scripts/run-semantic-review.py` は既定で repair loop を有効にする。単発レビューだけを実行したい検証用途では `--no-repair-loop` を使う。最大試行回数は `--max-attempts` または `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` で指定できる。
 
 実装者の責務:
 

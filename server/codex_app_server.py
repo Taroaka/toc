@@ -14,7 +14,16 @@ from typing import Any
 
 
 class CodexAppServerError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        transcript: list[dict[str, Any]] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.transcript = transcript or []
+        self.diagnostics = diagnostics or {}
 
 
 _claimed_generated_images: set[str] = set()
@@ -174,6 +183,19 @@ class CodexAppServerClient:
         tail = "\n".join(line for line in self._stderr_tail if line)
         return tail.strip()
 
+    def diagnostics(self) -> dict[str, Any]:
+        proc = self.proc
+        return {
+            "codexBin": self.codex_bin,
+            "cwd": str(self.cwd),
+            "pid": proc.pid if proc is not None else None,
+            "returncode": proc.returncode if proc is not None else None,
+            "codexHome": str(self._resolve_codex_home()),
+            "generatedImagesRoot": str(self.generated_images_root()),
+            "pendingRequestIds": sorted(self._pending.keys()),
+            "stderrTail": list(self._stderr_tail),
+        }
+
     def _format_process_error(self, prefix: str) -> str:
         proc = self.proc
         returncode = proc.returncode if proc is not None else None
@@ -267,19 +289,27 @@ class CodexAppServerClient:
             try:
                 notification = await asyncio.wait_for(self._notifications.get(), timeout=timeout_seconds)
             except asyncio.TimeoutError as exc:
-                raise CodexAppServerError("turn timed out") from exc
+                raise CodexAppServerError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
             transcript.append(notification)
             params = notification.get("params") or {}
             if turn_id and params.get("turnId") not in {None, turn_id}:
                 continue
             method = str(notification.get("method") or "").lower()
             if "approval" in method:
-                raise CodexAppServerError(f"turn requested interactive approval: {notification.get('method')}")
+                raise CodexAppServerError(
+                    f"turn requested interactive approval: {notification.get('method')}",
+                    transcript=transcript,
+                    diagnostics=self.diagnostics(),
+                )
             if notification.get("method") == "turn/completed":
                 turn = params.get("turn") or {}
                 if (turn.get("status") or "").lower() == "failed":
                     error = turn.get("error") or {}
-                    raise CodexAppServerError(str(error.get("message") or "turn failed"))
+                    raise CodexAppServerError(
+                        str(error.get("message") or "turn failed"),
+                        transcript=transcript,
+                        diagnostics=self.diagnostics(),
+                    )
                 return transcript
 
     async def run_slash_command(

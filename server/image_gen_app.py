@@ -72,10 +72,19 @@ from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.semantic_review import (
     IMAGE_PROMPT_JUDGMENT_REPORT,
+    SemanticReviewStatus,
     check_semantic_review,
     check_image_prompt_judgment,
     review_status_to_state,
+    semantic_state_updates,
     semantic_review_relpaths,
+)
+from toc.semantic_review_loop import (
+    semantic_loop_state_updates,
+    semantic_repair_state_updates,
+    semantic_repair_timeout_seconds,
+    semantic_review_max_attempts,
+    write_semantic_repair_prompt,
 )
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
@@ -185,6 +194,25 @@ TRANSIENT_CODEX_IMAGE_ERRORS = (
 )
 
 
+def _codex_failure_context(exc: Exception, *, client: CodexAppServerClient | None = None) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "errorType": type(exc).__name__,
+        "errorMessage": str(exc),
+    }
+    transcript = getattr(exc, "transcript", None)
+    if isinstance(transcript, list):
+        context["transcriptTail"] = transcript[-20:]
+        context["transcriptCount"] = len(transcript)
+    diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(diagnostics, dict) and diagnostics:
+        context["codexDiagnostics"] = diagnostics
+    elif client is not None:
+        context["codexDiagnostics"] = client.diagnostics()
+    if "stream disconnected" in str(exc).lower() or "backend-api/codex/responses" in str(exc).lower():
+        context["probableCause"] = "Codex app-server turn failed while calling chatgpt.com backend-api/codex/responses; likely external app-server/network/backend stream interruption rather than ToC artifact validation."
+    return context
+
+
 def _continue_generation_after_item_error(kind: str) -> bool:
     configured = os.environ.get("TOC_IMAGE_GEN_CONTINUE_ON_ITEM_ERROR", "").strip().lower()
     if configured in {"1", "true", "yes", "on"}:
@@ -247,6 +275,7 @@ class RegeneratePromptsRequest(BaseModel):
 class CreateRunRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     source: str | None = Field(default=None, max_length=4000)
+    generate_images: bool = True
 
 
 class FrontendReviewItem(BaseModel):
@@ -878,8 +907,9 @@ async def _run_toc_immersive_frontend_cli_helper(
     source: str | None = None,
     run_id: str,
     stop_target: str = "p680",
+    materialize_only: bool = False,
 ) -> str:
-    proc = await asyncio.create_subprocess_exec(
+    cmd = [
         sys.executable,
         str(ROOT / "scripts" / "toc-immersive-frontend-run.py"),
         "--topic",
@@ -890,6 +920,11 @@ async def _run_toc_immersive_frontend_cli_helper(
         f"output/{run_id}",
         "--stop-target",
         stop_target,
+    ]
+    if materialize_only:
+        cmd.append("--materialize-only")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         cwd=str(ROOT),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -3081,6 +3116,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                     status="retrying",
                     item_id=str(item.id),
                     request={"kind": kind, "output": str(item.output), "attempt": attempt},
+                    response=_codex_failure_context(exc, client=client),
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 await client.stop()
@@ -3132,7 +3168,10 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             status="failed",
             item_id=str(item.id),
             request={"kind": kind, "output": str(item.output), "referenceCount": len(references)},
-            response={"elapsedMs": int((time.monotonic() - started) * 1000)},
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                "failureContext": _codex_failure_context(exc, client=client),
+            },
             error=f"{type(exc).__name__}: {exc}",
         )
         raise
@@ -3429,9 +3468,14 @@ def _validate_image_review_ready(run_id: str) -> None:
 
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
+    semantic_failures: list[str] = []
+    failed_semantic_stages: set[str] = set()
     await _set_create_job(job_id, {"message": "上流設計をsemantic QA中"})
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
-        await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
+        failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage=stage)
+        if failure:
+            semantic_failures.append(failure)
+            failed_semantic_stages.add(stage)
     asset_quality_passed = False
     last_asset_gate_error = ""
     for attempt in range(1, BOOTSTRAP_ASSET_MAX_ATTEMPTS + 1):
@@ -3493,19 +3537,81 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
             )
             break
     await _set_create_job(job_id, {"message": "素材出力をsemantic QA中"})
-    await _run_semantic_review(job_id, run_dir=run_dir, stage="asset_output")
+    failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="asset_output")
+    if failure:
+        semantic_failures.append(failure)
+        failed_semantic_stages.add("asset_output")
     await _set_create_job(job_id, {"message": "画像プロンプトをsemantic QA中"})
-    await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
+    failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="image_prompt")
+    if failure:
+        semantic_failures.append(failure)
+        failed_semantic_stages.add("image_prompt")
     await _set_create_job(job_id, {"message": "シーン画像を生成中"})
     await _generate_request_outputs(run_dir=run_dir, kind="scene")
     await _set_create_job(job_id, {"message": "シーン画像出力をsemantic QA中"})
-    await _run_semantic_review(job_id, run_dir=run_dir, stage="scene_image")
+    failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="scene_image")
+    if failure:
+        semantic_failures.append(failure)
+        failed_semantic_stages.add("scene_image")
+    if semantic_failures:
+        failure_updates = {
+            "runtime.stage": "semantic_review_failed_after_media_generation",
+            "slot.p660.status": "done",
+            "slot.p660.note": "scene images generated; semantic gate still failed",
+            "slot.p670.status": "failed",
+            "slot.p670.note": "scene image semantic QA or upstream semantic QA failed",
+            "slot.p680.status": "pending",
+            "review.image.status": "needs_semantic_review",
+            "review.semantic.create_media_generated": "true",
+            "review.semantic.create_failure_count": str(len(semantic_failures)),
+            "review.semantic.create_failures": " | ".join(semantic_failures)[:2000],
+        }
+        for stage in sorted(failed_semantic_stages):
+            slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+            if slot:
+                failure_updates[f"slot.{slot}.status"] = "failed"
+                failure_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed; media generated but p680 is blocked"
+        append_state_snapshot(
+            run_dir / "state.txt",
+            failure_updates,
+        )
+        raise RuntimeError("semantic review failed after media generation: " + " | ".join(semantic_failures))
     _mark_image_generation_review_ready(run_id)
     return asset_quality_passed
 
 
 async def _run_image_prompt_semantic_review(job_id: str, *, run_dir: Path) -> None:
     await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
+
+
+async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Path, stage: str) -> str | None:
+    try:
+        await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
+        return None
+    except Exception as exc:
+        message = f"{stage}: {type(exc).__name__}: {exc}"
+        state_updates = semantic_state_updates(
+            stage,
+            status="failed",
+            entry_count=None,
+            error_count=1,
+        )
+        slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+        if slot:
+            state_updates[f"slot.{slot}.status"] = "failed"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed; media generation continued"
+        state_updates[f"review.semantic.{stage}.last_error"] = str(exc)[:2000]
+        append_state_snapshot(run_dir / "state.txt", state_updates)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="failed_nonblocking_for_media_generation",
+            item_id=job_id,
+            request={"stage": stage},
+            response={"failureContext": _codex_failure_context(exc)},
+            error=message,
+        )
+        return message
 
 
 SEMANTIC_REVIEW_SLOT_BY_STAGE = {
@@ -3523,7 +3629,56 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
 }
 
 
-async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_attempts: int | None = None) -> None:
+    attempts = max(1, max_attempts or semantic_review_max_attempts())
+    last_result: SemanticReviewStatus | None = None
+    for attempt in range(1, attempts + 1):
+        append_state_snapshot(
+            run_dir / "state.txt",
+            semantic_loop_state_updates(stage, status="reviewing", attempt=attempt, max_attempts=attempts),
+        )
+        result = await _run_semantic_review_once(
+            job_id,
+            run_dir=run_dir,
+            stage=stage,
+            attempt=attempt,
+            max_attempts=attempts,
+            final_attempt=attempt >= attempts,
+        )
+        last_result = result
+        if result.passed:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                semantic_loop_state_updates(stage, status="passed", attempt=attempt, max_attempts=attempts, error_count=0),
+            )
+            return
+        if attempt >= attempts:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                semantic_loop_state_updates(stage, status="failed", attempt=attempt, max_attempts=attempts, error_count=len(result.errors)),
+            )
+            raise RuntimeError(f"{stage} semantic review failed after {attempts} attempt(s): " + "; ".join(result.errors))
+        await _run_semantic_review_producer_repair(
+            job_id,
+            run_dir=run_dir,
+            stage=stage,
+            round_number=attempt,
+            max_attempts=attempts,
+            errors=result.errors,
+        )
+    if last_result is not None and not last_result.passed:
+        raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(last_result.errors))
+
+
+async def _run_semantic_review_once(
+    job_id: str,
+    *,
+    run_dir: Path,
+    stage: str,
+    attempt: int,
+    max_attempts: int,
+    final_attempt: bool,
+) -> SemanticReviewStatus:
     subprocess.run(
         [
             sys.executable,
@@ -3543,14 +3698,33 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> Non
     report_path = run_dir / relpaths["report"]
     prompt = prompt_path.read_text(encoding="utf-8")
     client = CodexAppServerClient(cwd=ROOT)
+    transcript: list[dict[str, Any]] = []
     try:
         thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
-        await client.run_turn(
+        transcript = await client.run_turn(
             thread_id=thread_id,
             text=prompt,
             cwd=ROOT,
             timeout_seconds=900,
         )
+    except Exception as exc:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="app_server_failed",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "prompt": str(prompt_path.relative_to(run_dir)),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            response={"failureContext": _codex_failure_context(exc, client=client)},
+            transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     finally:
         await client.stop()
     if stage == "image_prompt" and report_path.exists():
@@ -3559,8 +3733,15 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> Non
     state_updates = review_status_to_state(stage, result)
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
-        state_updates[f"slot.{slot}.status"] = "done" if result.passed else "failed"
-        state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review {'passed' if result.passed else 'failed'}"
+        if result.passed:
+            state_updates[f"slot.{slot}.status"] = "done"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review passed"
+        elif final_attempt:
+            state_updates[f"slot.{slot}.status"] = "failed"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed after repair loop"
+        else:
+            state_updates[f"slot.{slot}.status"] = "in_progress"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review requested producer repair"
     if stage == "image_prompt":
         state_updates.update(
             {
@@ -3573,19 +3754,159 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> Non
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="semantic_review",
-            status="failed",
+            status="failed" if final_attempt else "changes_requested",
             item_id=job_id,
-            request={"stage": stage, "prompt": str(prompt_path.relative_to(run_dir)), "report": str(report_path.relative_to(run_dir))},
+            request={
+                "stage": stage,
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "prompt": str(prompt_path.relative_to(run_dir)),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            transcript=transcript,
             error="; ".join(result.errors),
         )
-        raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(result.errors))
+        return result
     write_app_server_debug_log(
         run_dir=run_dir,
         operation="semantic_review",
         status="completed",
         item_id=job_id,
-        request={"stage": stage, "prompt": str(prompt_path.relative_to(run_dir)), "report": str(report_path.relative_to(run_dir))},
+        request={
+            "stage": stage,
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "prompt": str(prompt_path.relative_to(run_dir)),
+            "report": str(report_path.relative_to(run_dir)),
+        },
         response={"status": result.status, "entryCount": result.entry_count},
+        transcript=transcript,
+    )
+    return result
+
+
+async def _run_semantic_review_producer_repair(
+    job_id: str,
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+    max_attempts: int,
+    errors: tuple[str, ...],
+) -> None:
+    paths = write_semantic_repair_prompt(
+        run_dir,
+        stage,
+        round_number=round_number,
+        max_attempts=max_attempts,
+        errors=errors,
+    )
+    state_updates = {}
+    state_updates.update(
+        semantic_loop_state_updates(
+            stage,
+            status="repairing",
+            attempt=round_number,
+            max_attempts=max_attempts,
+            error_count=len(errors),
+        )
+    )
+    state_updates.update(
+        semantic_repair_state_updates(
+            stage,
+            status="in_progress",
+            round_number=round_number,
+            max_attempts=max_attempts,
+            error_count=len(errors),
+        )
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        state_updates[f"slot.{slot}.status"] = "in_progress"
+        state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair round {round_number} in progress"
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+
+    prompt = paths["prompt"].read_text(encoding="utf-8")
+    client = CodexAppServerClient(cwd=ROOT)
+    transcript: list[dict[str, Any]] = []
+    try:
+        thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
+        transcript = await client.run_turn(
+            thread_id=thread_id,
+            text=prompt,
+            cwd=ROOT,
+            timeout_seconds=semantic_repair_timeout_seconds(),
+        )
+    except Exception as exc:
+        failed_updates = {}
+        failed_updates.update(
+            semantic_loop_state_updates(
+                stage,
+                status="failed",
+                attempt=round_number,
+                max_attempts=max_attempts,
+                error_count=len(errors),
+            )
+        )
+        failed_updates.update(
+            semantic_repair_state_updates(
+                stage,
+                status="failed",
+                round_number=round_number,
+                max_attempts=max_attempts,
+                error_count=len(errors),
+            )
+        )
+        if slot:
+            failed_updates[f"slot.{slot}.status"] = "failed"
+            failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair failed"
+        failed_updates[f"review.semantic.{stage}.repair.last_error"] = str(exc)[:2000]
+        append_state_snapshot(run_dir / "state.txt", failed_updates)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review_producer_repair",
+            status="app_server_failed",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "round": round_number,
+                "maxAttempts": max_attempts,
+                "prompt": str(paths["prompt"].relative_to(run_dir)),
+                "report": str(paths["report"].relative_to(run_dir)),
+            },
+            response={"failureContext": _codex_failure_context(exc, client=client)},
+            transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    finally:
+        await client.stop()
+
+    done_updates = semantic_repair_state_updates(
+        stage,
+        status="done",
+        round_number=round_number,
+        max_attempts=max_attempts,
+        error_count=len(errors),
+    )
+    if slot:
+        done_updates[f"slot.{slot}.status"] = "in_progress"
+        done_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair round {round_number} completed; rereview pending"
+    append_state_snapshot(run_dir / "state.txt", done_updates)
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="semantic_review_producer_repair",
+        status="completed",
+        item_id=job_id,
+        request={
+            "stage": stage,
+            "round": round_number,
+            "maxAttempts": max_attempts,
+            "prompt": str(paths["prompt"].relative_to(run_dir)),
+            "report": str(paths["report"].relative_to(run_dir)),
+        },
+        response={"errorCount": len(errors)},
+        transcript=transcript,
     )
 
 
@@ -3599,6 +3920,10 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
         prefix = "Codex app-server の画像生成認証が不足しています"
     elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeouterror" in normalized_lower:
         prefix = "Codex app-server の画像生成がタイムアウトしました"
+    elif "semantic review failed after media generation" in normalized_lower:
+        prefix = "semantic QA に失敗しました。asset/scene 画像生成は実行済みですが p680 承認には進めません"
+    elif "semantic review failed" in normalized_lower:
+        prefix = "semantic QA に失敗しました"
     elif "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
         prefix = "Codex app-server の状態DBを初期化できませんでした"
     elif "stream disconnected" in normalized or "backend-api/codex/responses" in normalized:
@@ -3615,7 +3940,7 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
     return message
 
 
-async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) -> None:
+async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str, generate_images: bool = True) -> None:
     run_dir_for_log = safe_run_dir(run_id, ROOT)
     job_started = time.monotonic()
     try:
@@ -3626,8 +3951,18 @@ async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) 
             item_id=job_id,
             request={"step": "toc_skill", "title": title, "sourceLength": len(source), "runId": run_id},
         )
-        await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
-        await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p680")
+        if generate_images:
+            await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
+            await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p680")
+        else:
+            await _set_create_job(job_id, {"message": "本家ToC工程を画像生成なしで実行中"})
+            await _run_toc_immersive_frontend_cli_helper(
+                topic=title,
+                source=source,
+                run_id=run_id,
+                stop_target="p680",
+                materialize_only=True,
+            )
         write_app_server_debug_log(
             run_dir=run_dir_for_log,
             operation="create_job_step",
@@ -3644,9 +3979,12 @@ async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str) 
             item_id=job_id,
             request={"step": "p680_validation", "runId": run_id},
         )
-        await _set_create_job(job_id, {"message": "p680成果物を検証中"})
+        await _set_create_job(job_id, {"message": "p680成果物を検証中" if generate_images else "画像生成なし成果物を検証中"})
         _validate_created_run(run_id)
-        _validate_frontend_create_run(run_id, strict_visual_quality=True)
+        if generate_images:
+            _validate_frontend_create_run(run_id, strict_visual_quality=True)
+        else:
+            _validate_p650_run(run_id)
         write_app_server_debug_log(
             run_dir=run_dir_for_log,
             operation="create_job_step",
@@ -3752,10 +4090,11 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "sourceLength": len(source),
             "runId": run_id,
             "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
+            "generateImages": bool(req.generate_images),
         },
         response={"path": f"output/{run_id}"},
     )
-    asyncio.create_task(_run_create_job(job_id, title=title, source=source, run_id=run_id))
+    asyncio.create_task(_run_create_job(job_id, title=title, source=source, run_id=run_id, generate_images=bool(req.generate_images)))
     return job
 
 
