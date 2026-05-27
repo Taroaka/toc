@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from server.codex_app_server import CodexAppServerClient  # noqa: E402
+from server.codex_app_server import create_codex_app_server_client, classify_codex_transport_error, is_codex_transport_error  # noqa: E402
 from toc.harness import append_state_snapshot  # noqa: E402
 from toc.semantic_review import (  # noqa: E402
     IMAGE_PROMPT_JUDGMENT_REPORT,
@@ -61,10 +61,22 @@ async def _run_review_once(run_dir: Path, stage: str, *, timeout_seconds: int, a
 
     paths = semantic_review_relpaths(stage)
     prompt = (run_dir / paths["prompt"]).read_text(encoding="utf-8")
-    client = CodexAppServerClient(cwd=REPO_ROOT)
+    client = create_codex_app_server_client(cwd=REPO_ROOT)
     try:
         thread_id = await client.start_thread(cwd=REPO_ROOT, approval_policy="never")
         await client.run_turn(thread_id=thread_id, text=prompt, cwd=REPO_ROOT, timeout_seconds=timeout_seconds)
+    except Exception as exc:
+        if is_codex_transport_error(exc):
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.transport.status": "failed",
+                    f"review.semantic.{stage}.transport.error_kind": classify_codex_transport_error(str(exc)) or "unknown",
+                    f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                    f"review.semantic.{stage}.loop.status": "blocked_transport",
+                },
+            )
+        raise
     finally:
         await client.stop()
 
@@ -113,10 +125,22 @@ async def _run_producer_repair(
         updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair round {round_number} in progress"
     append_state_snapshot(run_dir / "state.txt", updates)
 
-    client = CodexAppServerClient(cwd=REPO_ROOT)
+    client = create_codex_app_server_client(cwd=REPO_ROOT)
     try:
         thread_id = await client.start_thread(cwd=REPO_ROOT, approval_policy="never")
         await client.run_turn(thread_id=thread_id, text=paths["prompt"].read_text(encoding="utf-8"), cwd=REPO_ROOT, timeout_seconds=repair_timeout_seconds)
+    except Exception as exc:
+        if is_codex_transport_error(exc):
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.repair.transport.status": "failed",
+                    f"review.semantic.{stage}.repair.transport.error_kind": classify_codex_transport_error(str(exc)) or "unknown",
+                    f"review.semantic.{stage}.repair.transport.error": str(exc)[:2000],
+                    f"review.semantic.{stage}.repair.status": "blocked_transport",
+                },
+            )
+        raise
     finally:
         await client.stop()
 
@@ -163,7 +187,13 @@ async def run_review(
     last_result: SemanticReviewStatus | None = None
     for attempt in range(1, attempts + 1):
         append_state_snapshot(run_dir / "state.txt", semantic_loop_state_updates(stage, status="reviewing", attempt=attempt, max_attempts=attempts))
-        result_or_code = await _run_review_once(run_dir, stage, timeout_seconds=timeout_seconds, attempt=attempt, max_attempts=attempts, final_attempt=attempt >= attempts)
+        try:
+            result_or_code = await _run_review_once(run_dir, stage, timeout_seconds=timeout_seconds, attempt=attempt, max_attempts=attempts, final_attempt=attempt >= attempts)
+        except Exception as exc:
+            if is_codex_transport_error(exc):
+                sys.stderr.write(f"semantic review blocked by Codex app-server transport failure for {stage}: {exc}\n")
+                return 2
+            raise
         if isinstance(result_or_code, int):
             return result_or_code
         result = result_or_code

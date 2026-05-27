@@ -23,6 +23,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
 | Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible inside the owning p-bucket supervisor |
+| Codex app-server runtime | All server/CLI app-server callers use the shared runtime contract and transport preflight | Prevent DNS/WebSocket/HTTP fallback failures from being mistaken for artifact or semantic QA failures |
 
 ## Component diagram
 
@@ -78,6 +79,14 @@ graph TD
 - In-process queue with worker pool.
 - Tasks are stage-scoped (RESEARCH, STORY, SCRIPT, NARRATION, ASSET, SCENE_IMPLEMENTATION, VIDEO, RENDER, QA).
 - Retry logic is handled at the LangGraph edge level (future task).
+
+## Codex app-server runtime boundary
+
+- `server/codex_app_server.py` is the single runtime boundary for Codex app-server usage.
+- Callers do not instantiate per-feature app-server behavior directly; they use the shared client factory so `TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, proxy env, and diagnostics are resolved the same way for frontend create, semantic QA, prompt repair, image generation, and chat.
+- Startup preflight checks the Codex binary, writable effective `CODEX_HOME`, `chatgpt.com` DNS, and HTTPS reachability for `backend-api/codex/responses`. The local server restart helper additionally runs a short no-op turn, because `thread/start` can pass while the later turn transport still fails.
+- Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
+- Transport failure is a runtime block, not a semantic review result. A missing semantic report caused by app-server transport failure records `review.semantic.<stage>.transport.status=failed` and must not invoke the producer repair loop.
 
 ## Task granularity (MVP)
 

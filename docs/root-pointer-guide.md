@@ -39,6 +39,8 @@
 
 server 経由の生成でも semantic QA を短絡しない。scene/cut 設計、asset 計画、画像 prompt、生成画像、動画 motion、音声、最終 render は、それぞれ上流 artifact の意味契約を満たす必要がある。構造チェックは関数 verifier で通し、意味判定は contextless semantic review agent の report を verifier が読む。server はファイル数や schema 成功だけで run を成功扱いにせず、意味レビュー用 artifact と検証可能な参照関係を残す。canonical artifact は `logs/review/semantic/<stage>.collection.md`, `.scope.json`, `.prompt.md`, `.report.md` と `review.semantic.<stage>.*` state keys で、frontend create の p680 経路では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, `scene_image` を通す。semantic QA が通らない場合は、その stage の production-side agent に改善点を渡して修正し、同じ contextless reviewer が再レビューする repair loop を使う。修正中は次の process slot へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。
 
+server 経由で Codex app-server を使う箇所は、必ず `server/codex_app_server.py` の runtime contract / preflight を通す。`TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, network/proxy env, fallback 使用有無を共通 diagnostics に残し、`chatgpt.com/backend-api/codex/responses` へ到達できない transport failure を semantic QA の意味判定 failure と混ぜない。semantic report が作られていない transport failure では production-side repair loop に入らず、`review.semantic.<stage>.transport.status=failed` として blocked にする。理由は、通信断を意味品質の失敗として扱うと、今回のように存在しない review 指摘を制作エージェントへ渡し、asset/scene 生成や p680 gate の判断を誤るため。
+
 ## Read Next
 
 - 用語集: `docs/data-contracts.md` の "Core Terms / Glossary"

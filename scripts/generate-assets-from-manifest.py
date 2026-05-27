@@ -62,7 +62,7 @@ from toc.run_index import write_run_index
 from toc.stage_evaluator import check_manifest_single
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from server.codex_app_server import (
-    CodexAppServerClient,
+    create_codex_app_server_client,
     app_server_disabled,
     latest_generated_image_mtime_ns,
     reject_local_raster_image_result,
@@ -3244,7 +3244,7 @@ def generate_codex_builtin_image(
         raise SystemExit("Codex app-server is disabled; enable it to use codex_builtin_image / gpt-image-2 image generation.")
 
     async def _run_generation() -> None:
-        client = CodexAppServerClient(cwd=REPO_ROOT)
+        client = create_codex_app_server_client(cwd=REPO_ROOT)
         result = None
         try:
             await client.start()
@@ -4746,7 +4746,7 @@ def main() -> None:
     early_experience = str(early_metadata.get("experience") or "").strip().lower()
     is_asset_stage_manifest = early_experience.startswith("asset_stage")
     canonical_manifest_path = (base_dir / "video_manifest.md").resolve()
-    if manifest_path.resolve() != canonical_manifest_path:
+    if manifest_path.resolve() != canonical_manifest_path and not is_asset_stage_manifest:
         raise SystemExit(
             "p400 readiness gate must evaluate the same manifest passed to generation.\n"
             f"  expected: {canonical_manifest_path}\n"
@@ -4768,7 +4768,7 @@ def main() -> None:
     if not p400_override_is_read_only_diagnostic and not is_asset_stage_manifest:
         _stage_result, p400_updates = check_manifest_single(base_dir, "standard", "immersive")
         append_state_snapshot(state_path, p400_updates)
-    if not p400_override_is_read_only_diagnostic:
+    if not p400_override_is_read_only_diagnostic and not is_asset_stage_manifest:
         state = parse_state_file(state_path) if state_path.exists() else {}
         if state.get("eval.p400_readiness.status", "").strip().lower() != "approved":
             raise SystemExit(

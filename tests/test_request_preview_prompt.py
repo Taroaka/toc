@@ -1087,6 +1087,55 @@ scenes:
             self.assertIn("  - `back`", request_text)
             self.assertIn("- output: `assets/characters/urashima_seed.png`", request_text)
 
+    def test_asset_stage_manifest_can_use_noncanonical_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "asset_stage_manifest.md"
+            manifest_path.write_text(
+                """# Asset Stage Manifest
+
+```yaml
+video_metadata:
+  topic: "Asset Stage"
+  experience: "asset_stage"
+scenes:
+  - scene_id: 1
+    still_assets:
+      - asset_id: "seed_asset"
+        asset_type: "object_reference"
+        output: "assets/objects/seed_asset.png"
+        creation_status: "planned"
+        image_generation:
+          tool: "codex_builtin_image"
+          execution_lane: "bootstrap_builtin"
+          bootstrap_allowed: true
+          prompt: "seed object"
+          output: "assets/objects/seed_asset.png"
+          references: []
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-videos",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            request_text = (tmp_path / "asset_generation_requests.md").read_text(encoding="utf-8")
+            self.assertIn("- asset_id: `seed_asset`", request_text)
+            self.assertIn("- authoring_role: `reusable_asset_candidate`", request_text)
+
     def test_image_generation_requests_include_lane_and_reference_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

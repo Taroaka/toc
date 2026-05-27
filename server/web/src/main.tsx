@@ -1249,6 +1249,15 @@ const PromptCard = React.memo(function PromptCard({
             />
           </Stack>
 
+          <Button
+            variant="contained"
+            startIcon={<AutoAwesomeIcon />}
+            disabled={item.generating || item.promptGenerating || !item.draftPrompt.trim()}
+            onClick={handleGenerate}
+          >
+            {item.promptGenerating ? 'プロンプト作成中' : '画像生成'}
+          </Button>
+
           <TextField
             label="プロンプト"
             className="promptEditor"
@@ -1282,14 +1291,6 @@ const PromptCard = React.memo(function PromptCard({
             )}
           </Box>
 
-          <Button
-            variant="contained"
-            startIcon={<AutoAwesomeIcon />}
-            disabled={item.generating || item.promptGenerating || !item.draftPrompt.trim()}
-            onClick={handleGenerate}
-          >
-            {item.promptGenerating ? 'プロンプト作成中' : '画像生成'}
-          </Button>
           </Stack>
 
           <Box className="comparisonWall">
@@ -1653,6 +1654,7 @@ function App() {
   const [candidateCountDraft, setCandidateCountDraft] = useState(2);
   const [videoCandidateCount, setVideoCandidateCount] = useState(3);
   const [videoCandidateCountDraft, setVideoCandidateCountDraft] = useState(3);
+  const [activeImageSceneKey, setActiveImageSceneKey] = useState('');
   const [activeVideoSceneKey, setActiveVideoSceneKey] = useState('');
   const [items, setItems] = useState<EditableItem[]>([]);
   const [references, setReferences] = useState<ReferenceOption[]>([]);
@@ -1722,7 +1724,7 @@ function App() {
   const [addAssetTitle, setAddAssetTitle] = useState('');
   const [addAssetBusy, setAddAssetBusy] = useState(false);
   const [addAssetError, setAddAssetError] = useState<string | null>(null);
-  const mobileChatButtonRef = useRef<HTMLButtonElement | null>(null);
+  const chatToggleButtonRef = useRef<HTMLButtonElement | null>(null);
   const chatInputRef = useRef<HTMLInputElement | null>(null);
   const selectedRun = useMemo(() => runs.find((run) => run.id === runId), [runId, runs]);
   const requestKind = workspaceMode === 'image' ? viewKind : 'scene';
@@ -1746,12 +1748,31 @@ function App() {
     }
     return Array.from(groups.values());
   }, [visibleItems]);
+  const imageSceneGroups = useMemo(() => {
+    if (workspaceMode !== 'image' || viewKind !== 'scene') return [];
+    const groups = new Map<string, { key: string; label: string; items: EditableItem[] }>();
+    for (const item of visibleItems) {
+      const key = item.sceneKey || 'scene';
+      const existing = groups.get(key);
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        groups.set(key, { key, label: item.sceneLabel || sceneLabelFromKey(key), items: [item] });
+      }
+    }
+    return Array.from(groups.values());
+  }, [viewKind, visibleItems, workspaceMode]);
+  const activeImageScene = useMemo(
+    () => imageSceneGroups.find((group) => group.key === activeImageSceneKey) ?? imageSceneGroups[0] ?? null,
+    [activeImageSceneKey, imageSceneGroups],
+  );
   const activeVideoScene = useMemo(
     () => videoSceneGroups.find((group) => group.key === activeVideoSceneKey) ?? videoSceneGroups[0] ?? null,
     [activeVideoSceneKey, videoSceneGroups],
   );
+  const imageDisplayItems = workspaceMode === 'image' && viewKind === 'scene' ? activeImageScene?.items ?? [] : visibleItems;
   const videoDisplayItems = workspaceMode === 'video' ? activeVideoScene?.items ?? [] : visibleItems;
-  const displayedItemCount = workspaceMode === 'video' ? videoDisplayItems.length : visibleItems.length;
+  const displayedItemCount = workspaceMode === 'image' ? imageDisplayItems.length : workspaceMode === 'video' ? videoDisplayItems.length : visibleItems.length;
   const imageGenerationActive = bulkGenerating || regenerateBusy || addAssetBusy || items.some((item) => item.generating || item.promptGenerating);
   const narrationGenerationActive = narrationBusy || items.some((item) => item.narrationGenerating);
   const videoGenerationActive = videoPromptBusy || items.some((item) => item.videoGenerating);
@@ -1873,6 +1894,14 @@ function App() {
   }, [videoSceneGroups, workspaceMode]);
 
   useEffect(() => {
+    if (workspaceMode !== 'image' || viewKind !== 'scene') return;
+    setActiveImageSceneKey((current) => {
+      if (current && imageSceneGroups.some((group) => group.key === current)) return current;
+      return imageSceneGroups[0]?.key || '';
+    });
+  }, [imageSceneGroups, viewKind, workspaceMode]);
+
+  useEffect(() => {
     const media = window.matchMedia('(max-width: 1100px)');
     const update = () => setIsNarrowViewport(media.matches);
     update();
@@ -1881,9 +1910,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isNarrowViewport || !chatOpen) return;
+    if (!chatOpen) return;
     window.setTimeout(() => chatInputRef.current?.focus(), 0);
-  }, [chatOpen, isNarrowViewport]);
+  }, [chatOpen]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -1916,10 +1945,8 @@ function App() {
 
   const closeChat = useCallback(() => {
     setChatOpen(false);
-    if (isNarrowViewport) {
-      window.setTimeout(() => mobileChatButtonRef.current?.focus(), 0);
-    }
-  }, [isNarrowViewport]);
+    window.setTimeout(() => chatToggleButtonRef.current?.focus(), 0);
+  }, []);
 
   const setActiveItemIdStable = useCallback((itemId: string) => setActiveItemId(itemId), []);
   const openEnlargedImage = useCallback((image: EnlargedImage) => setEnlargedImage(image), []);
@@ -2902,8 +2929,7 @@ function App() {
             </GlassSurface>
 
             <GlassSurface variant="solid" density="compact" slot="controls" className="controlStation targetStation">
-              <Typography variant="caption" className="stationLabel">画面</Typography>
-              <Tabs value={workspaceMode} onChange={(_, value) => switchWorkspaceMode(value as WorkspaceMode)} className="tabs workspaceTabs">
+              <Tabs value={workspaceMode} onChange={(_, value) => switchWorkspaceMode(value as WorkspaceMode)} className="tabs workspaceTabs compactTabs">
                 <Tab value="image" label="画像" />
                 <Tab value="narration" label="音声" />
                 <Tab value="video" label="動画" />
@@ -2912,19 +2938,10 @@ function App() {
 
               {workspaceMode === 'image' ? (
                 <>
-                  <Tabs value={viewKind} onChange={(_, value) => setViewKind(value)} className="tabs">
+                  <Tabs value={viewKind} onChange={(_, value) => setViewKind(value)} className="tabs viewTabs compactTabs">
                     <Tab value="asset" label="素材" />
                     <Tab value="scene" label="シーン" />
                   </Tabs>
-
-                  {viewKind === 'asset' && (
-                    <Tabs value={assetFilter} onChange={(_, value) => setAssetFilter(value)} className="tabs assetSubTabs">
-                      <Tab value="chara" label="キャラクター" />
-                      <Tab value="obj" label="アイテム" />
-                      <Tab value="location" label="場所" />
-                      <Tab value="asset" label="全素材" />
-                    </Tabs>
-                  )}
                 </>
               ) : (
                 <Box className="videoModeSummary">
@@ -3052,6 +3069,39 @@ function App() {
           <Box className="gridScroll">
             {workspaceMode === 'image' ? (
               <Box className="promptGrid">
+                {viewKind === 'asset' && (
+                  <Box className="sceneCutTabsBar assetFilterTabsBar">
+                    <Tabs
+                      value={assetFilter}
+                      onChange={(_, value) => setAssetFilter(value as AssetFilter)}
+                      className="tabs sceneCutTabs"
+                      variant="scrollable"
+                      scrollButtons="auto"
+                    >
+                      <Tab value="asset" label="全素材" />
+                      <Tab value="chara" label="キャラクター" />
+                      <Tab value="obj" label="アイテム" />
+                      <Tab value="location" label="場所" />
+                    </Tabs>
+                    <Chip size="small" color="primary" label={`${visibleItems.length}件`} />
+                  </Box>
+                )}
+                {viewKind === 'scene' && imageSceneGroups.length > 0 && (
+                  <Box className="sceneCutTabsBar imageSceneTabsBar">
+                    <Tabs
+                      value={activeImageScene?.key || ''}
+                      onChange={(_, value) => setActiveImageSceneKey(value as string)}
+                      className="tabs sceneCutTabs"
+                      variant="scrollable"
+                      scrollButtons="auto"
+                    >
+                      {imageSceneGroups.map((group) => (
+                        <Tab key={group.key} value={group.key} label={`${group.label} / ${group.items.length}`} />
+                      ))}
+                    </Tabs>
+                    <Chip size="small" color="primary" label={`${imageDisplayItems.length}/${visibleItems.length} cut`} />
+                  </Box>
+                )}
                 {!busy && !items.length && (
                   <GlassPanel variant="frosted" density="spacious" className="emptyGallery">
                     <Typography fontWeight={900}>画像生成データはまだありません</Typography>
@@ -3069,7 +3119,7 @@ function App() {
                     </Typography>
                   </GlassPanel>
                 )}
-                {visibleItems.map((item) => (
+                {imageDisplayItems.map((item) => (
                   <PromptCard
                     key={item.id}
                     item={item}
@@ -3250,11 +3300,12 @@ function App() {
               )}
               <Tooltip title="制作相談を開く">
                 <IconButton
-                  ref={mobileChatButtonRef}
-                  className="mobileChatButton"
+                  ref={chatToggleButtonRef}
+                  className="chatToggleButton"
                   color="secondary"
                   onClick={() => setChatOpen(true)}
                   aria-label="制作相談を開く"
+                  aria-expanded={chatOpen}
                 >
                   <ChatIcon />
                 </IconButton>
@@ -3629,8 +3680,8 @@ function App() {
           density="compact"
           slot="chat"
           className={`chatPane ${chatOpen ? 'is-open' : ''}`}
-          aria-hidden={isNarrowViewport && !chatOpen ? true : undefined}
-          inert={isNarrowViewport && !chatOpen ? true : undefined}
+          aria-hidden={!chatOpen ? true : undefined}
+          inert={!chatOpen ? true : undefined}
         >
           <GlassSurface variant="frosted" tone="secondary" density="compact" slot="chat" className="chatHead">
             <Stack direction="row" alignItems="center" spacing={1}>

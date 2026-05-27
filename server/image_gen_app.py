@@ -61,6 +61,9 @@ from .codex_app_server import (
     CodexAppServerClient,
     CodexAppServerError,
     app_server_disabled,
+    classify_codex_transport_error,
+    create_codex_app_server_client,
+    is_codex_transport_error,
     latest_generated_image_mtime_ns,
     reject_local_raster_image_result,
 )
@@ -206,9 +209,15 @@ def _codex_failure_context(exc: Exception, *, client: CodexAppServerClient | Non
     diagnostics = getattr(exc, "diagnostics", None)
     if isinstance(diagnostics, dict) and diagnostics:
         context["codexDiagnostics"] = diagnostics
-    elif client is not None:
-        context["codexDiagnostics"] = client.diagnostics()
-    if "stream disconnected" in str(exc).lower() or "backend-api/codex/responses" in str(exc).lower():
+    elif client is not None and hasattr(client, "diagnostics"):
+        try:
+            context["codexDiagnostics"] = client.diagnostics()
+        except Exception as diagnostics_exc:
+            context["codexDiagnosticsError"] = str(diagnostics_exc)
+    transport_kind = classify_codex_transport_error(str(exc))
+    if transport_kind:
+        context["transportErrorKind"] = transport_kind
+    if is_codex_transport_error(exc):
         context["probableCause"] = "Codex app-server turn failed while calling chatgpt.com backend-api/codex/responses; likely external app-server/network/backend stream interruption rather than ToC artifact validation."
     return context
 
@@ -444,7 +453,7 @@ async def get_codex_client() -> CodexAppServerClient:
         raise HTTPException(status_code=503, detail="Codex app-server is disabled")
     async with _client_lock:
         if _codex_client is None:
-            _codex_client = CodexAppServerClient(cwd=ROOT)
+            _codex_client = create_codex_app_server_client(cwd=ROOT)
             await _codex_client.start()
         return _codex_client
 
@@ -726,7 +735,12 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3)
     return issues, required_outputs
 
 
-def _validate_p650_run(run_id: str) -> None:
+def _validate_p650_run_core(
+    run_id: str,
+    *,
+    require_semantic_reviews: bool,
+    require_generated_asset_outputs: bool,
+) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     required = [
         "state.txt",
@@ -778,15 +792,18 @@ def _validate_p650_run(run_id: str) -> None:
     missing_scene_requests = sorted(required_scene_outputs - request_outputs)
     if missing_scene_requests:
         raise RuntimeError(f"ToC run did not reach p650: missing scene cut requests {', '.join(missing_scene_requests)}")
-    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
-    missing_asset_outputs = [
-        str(item.output)
-        for item in asset_items
-        if item.output and not resolve_run_relative(run_dir, item.output).is_file()
-    ]
-    if missing_asset_outputs:
-        raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
-    _validate_semantic_reviews(run_dir, ("asset_output",))
+    if require_semantic_reviews:
+        _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
+    if require_generated_asset_outputs:
+        missing_asset_outputs = [
+            str(item.output)
+            for item in asset_items
+            if item.output and not resolve_run_relative(run_dir, item.output).is_file()
+        ]
+        if missing_asset_outputs:
+            raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
+    if require_semantic_reviews:
+        _validate_semantic_reviews(run_dir, ("asset_output",))
 
     state = parse_state_file(run_dir / "state.txt")
     if state.get("runtime.scaffold.content_status") == "placeholder":
@@ -812,6 +829,14 @@ def _validate_p650_run(run_id: str) -> None:
     ]
     if invalid_approval_slots:
         raise RuntimeError(f"ToC run did not reach p650: invalid awaiting_approval fixed slots {', '.join(invalid_approval_slots)}")
+
+
+def _validate_p650_run(run_id: str) -> None:
+    _validate_p650_run_core(run_id, require_semantic_reviews=True, require_generated_asset_outputs=True)
+
+
+def _validate_materialized_p650_run(run_id: str) -> None:
+    _validate_p650_run_core(run_id, require_semantic_reviews=False, require_generated_asset_outputs=False)
 
 
 def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
@@ -969,7 +994,7 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
     if not skill_path.is_file():
         raise RuntimeError(f"Codex skill not found: {skill_path}")
     run_dir = safe_run_dir(run_id, ROOT)
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     skill_text = _toc_immersive_command(topic=topic, source=source, run_id=run_id, stop_target=stop_target)
     try:
         await client.start()
@@ -2855,7 +2880,7 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
     if app_server_disabled():
         return
     await _set_create_job(job_id, {"message": "画像生成プロンプトを高密度化中"})
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     try:
         await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_upgrade", item_id="create_flow")
         for kind in ("asset", "scene"):
@@ -3084,7 +3109,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             "maxAttempts": IMAGE_GENERATION_ITEM_MAX_ATTEMPTS,
         },
     )
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     result = None
     debug_log = None
     try:
@@ -3106,6 +3131,8 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                     ),
                     timeout=IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS,
                 )
+                if result.saved_path is None:
+                    raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
                 break
             except Exception as exc:
                 if attempt >= IMAGE_GENERATION_ITEM_MAX_ATTEMPTS or not _is_transient_codex_image_error(exc):
@@ -3120,7 +3147,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 await client.stop()
-                client = CodexAppServerClient(cwd=ROOT)
+                client = create_codex_app_server_client(cwd=ROOT)
                 await client.start()
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
@@ -3390,7 +3417,7 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
     if not items or app_server_disabled():
         return
     await _set_create_job(job_id, {"message": "素材画像を生成中"})
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     try:
         await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_repair", item_id="asset_visual_gate")
         prompts: dict[str, str] = {}
@@ -3589,6 +3616,21 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
         await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
         return None
     except Exception as exc:
+        if is_codex_transport_error(exc):
+            transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.transport.status": "failed",
+                    f"review.semantic.{stage}.transport.error_kind": transport_kind,
+                    f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                    f"review.semantic.{stage}.loop.status": "blocked_transport",
+                    "runtime.stage": "app_server_transport_failed",
+                    "runtime.app_server.transport.status": "failed",
+                    "runtime.app_server.transport.error_kind": transport_kind,
+                },
+            )
+            raise RuntimeError(f"{stage} semantic review blocked by Codex app-server transport failure: {exc}") from exc
         message = f"{stage}: {type(exc).__name__}: {exc}"
         state_updates = semantic_state_updates(
             stage,
@@ -3697,7 +3739,7 @@ async def _run_semantic_review_once(
     prompt_path = run_dir / relpaths["prompt"]
     report_path = run_dir / relpaths["report"]
     prompt = prompt_path.read_text(encoding="utf-8")
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     transcript: list[dict[str, Any]] = []
     try:
         thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
@@ -3708,6 +3750,17 @@ async def _run_semantic_review_once(
             timeout_seconds=900,
         )
     except Exception as exc:
+        transport_kind = classify_codex_transport_error(str(exc))
+        if is_codex_transport_error(exc):
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.transport.status": "failed",
+                    f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
+                    f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                    f"review.semantic.{stage}.loop.status": "blocked_transport",
+                },
+            )
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="semantic_review",
@@ -3827,7 +3880,7 @@ async def _run_semantic_review_producer_repair(
     append_state_snapshot(run_dir / "state.txt", state_updates)
 
     prompt = paths["prompt"].read_text(encoding="utf-8")
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     transcript: list[dict[str, Any]] = []
     try:
         thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
@@ -3924,6 +3977,8 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
         prefix = "semantic QA に失敗しました。asset/scene 画像生成は実行済みですが p680 承認には進めません"
     elif "semantic review failed" in normalized_lower:
         prefix = "semantic QA に失敗しました"
+    elif "transport failure" in normalized_lower or "blocked by codex app-server transport" in normalized_lower:
+        prefix = "Codex app-server の通信確認に失敗したため semantic QA を実行できませんでした"
     elif "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
         prefix = "Codex app-server の状態DBを初期化できませんでした"
     elif "stream disconnected" in normalized or "backend-api/codex/responses" in normalized:
@@ -3984,7 +4039,7 @@ async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str, 
         if generate_images:
             _validate_frontend_create_run(run_id, strict_visual_quality=True)
         else:
-            _validate_p650_run(run_id)
+            _validate_materialized_p650_run(run_id)
         write_app_server_debug_log(
             run_dir=run_dir_for_log,
             operation="create_job_step",
@@ -4169,7 +4224,7 @@ async def api_create_asset(req: AssetCreateRequest) -> dict[str, Any]:
         "executionLane": "bootstrap_builtin",
         "title": req.title.strip(),
     }
-    client = CodexAppServerClient(cwd=ROOT)
+    client = create_codex_app_server_client(cwd=ROOT)
     try:
         await _start_app_server_with_log(client, run_dir=run_dir, operation="asset_create_prompt", item_id=item_id)
         prompt = await _regenerate_prompt_with_log(
@@ -4571,7 +4626,7 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
     async with _generated_images_cutoff_lock:
         fallback_cutoff_ns = latest_generated_image_mtime_ns()
     async with _generation_semaphore:
-        client = CodexAppServerClient(cwd=ROOT)
+        client = create_codex_app_server_client(cwd=ROOT)
         result = None
         debug_log = None
         try:
@@ -4736,7 +4791,7 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
 
     async def regenerate_one(item: Any) -> dict[str, Any]:
         async with semaphore:
-            client = CodexAppServerClient(cwd=ROOT)
+            client = create_codex_app_server_client(cwd=ROOT)
             try:
                 await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_regeneration", item_id=item.id)
                 prompt = await _regenerate_prompt_with_log(

@@ -36,7 +36,7 @@ body {
 .shell {
   height: 100vh;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 390px;
+  grid-template-columns: minmax(0, 1fr);
   background:
     radial-gradient(circle at 12% -10%, rgba(255, 224, 138, 0.13), transparent 28%),
     radial-gradient(circle at 72% 0%, rgba(255, 122, 26, 0.1), transparent 27%),
@@ -215,7 +215,7 @@ body {
     linear-gradient(112deg, transparent 16%, rgba(255, 224, 138, 0.075) 38%, rgba(255, 122, 26, 0.06) 50%, transparent 72%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 42%);
   --lg-inner-border: rgba(255, 255, 255, 0.09);
-  padding: 14px 18px 10px;
+  padding: 10px 16px 8px;
   flex-shrink: 0;
   border-width: 0 0 1px !important;
   border-radius: 0 !important;
@@ -256,7 +256,12 @@ body {
 }
 
 .targetStation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(52px, 1fr) 34px;
   gap: 6px;
+  align-items: stretch;
+  padding: 7px 10px !important;
 }
 
 .repoStation {
@@ -264,33 +269,60 @@ body {
 }
 
 .tabs {
-  min-height: 40px;
+  min-height: 32px;
 }
 
-.assetSubTabs {
+.compactTabs {
+  min-height: 34px !important;
+  height: 34px;
+}
+
+.compactTabs .MuiTabs-scroller,
+.compactTabs .MuiTabs-list,
+.compactTabs .MuiTabs-flexContainer {
   min-height: 34px;
+  height: 34px;
+}
+
+.compactTabs .MuiTab-root {
+  min-height: 28px;
+  height: 28px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    color 140ms ease;
+}
+
+.compactTabs .MuiTabs-indicator {
+  display: none;
+}
+
+.compactTabs .Mui-selected {
+  color: rgba(255, 236, 184, 0.98) !important;
+  border-color: rgba(255, 224, 138, 0.42);
+  background:
+    radial-gradient(120% 160% at 18% -20%, rgba(255, 245, 214, 0.28), transparent 34%),
+    radial-gradient(110% 140% at 92% 120%, rgba(255, 122, 26, 0.18), transparent 42%),
+    linear-gradient(180deg, rgba(255, 224, 138, 0.17), rgba(255, 122, 26, 0.09)),
+    rgba(24, 18, 12, 0.68);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.2),
+    0 0 0 1px rgba(255, 190, 74, 0.18),
+    0 0 18px rgba(255, 190, 74, 0.13),
+    0 0 28px rgba(255, 122, 26, 0.1);
+}
+
+.viewTabs {
   padding: 3px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent),
     rgba(16, 20, 23, 0.76);
-}
-
-.assetSubTabs .MuiTab-root {
-  min-height: 28px;
-  padding: 4px 12px;
-  border-radius: 6px;
-}
-
-.assetSubTabs .Mui-selected {
-  background:
-    radial-gradient(120% 120% at 18% 0%, rgba(255, 245, 214, 0.14), transparent 40%),
-    linear-gradient(180deg, rgba(255, 224, 138, 0.15), rgba(255, 122, 26, 0.09));
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 190, 74, 0.34),
-    inset 0 -1px 0 rgba(255, 122, 26, 0.18),
-    0 4px 12px rgba(255, 122, 26, 0.1);
 }
 
 .workspaceTabs {
@@ -301,17 +333,38 @@ body {
 }
 
 .workspaceTabs .MuiTab-root {
-  min-height: 32px;
+  min-height: 28px;
   border-radius: 6px;
 }
 
+.targetStation .workspaceTabs {
+  min-height: 52px !important;
+  height: 52px;
+}
+
+.targetStation .workspaceTabs .MuiTabs-scroller,
+.targetStation .workspaceTabs .MuiTabs-list,
+.targetStation .workspaceTabs .MuiTabs-flexContainer {
+  min-height: 52px;
+  height: 52px;
+}
+
+.targetStation .workspaceTabs .MuiTab-root {
+  min-height: 46px;
+  height: 46px;
+}
+
+.targetStation .viewTabs {
+  width: 100%;
+}
+
 .videoModeSummary {
-  min-height: 42px;
+  min-height: 34px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 5px 8px;
   border: 1px solid rgba(83, 221, 255, 0.14);
   border-radius: 8px;
   background:
@@ -320,13 +373,32 @@ body {
 }
 
 .countPanel {
-  padding: 12px 14px 4px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 8px 10px 4px !important;
   border-color: rgba(255, 255, 255, 0.12) !important;
   background:
     radial-gradient(120% 120% at 94% 0%, rgba(255, 122, 26, 0.09), transparent 44%),
     linear-gradient(180deg, rgba(255, 190, 74, 0.07), transparent 44%),
     var(--museum-surface-solid) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.countPanel > .stationLabel {
+  display: none;
+}
+
+.countPanel .MuiStack-root {
+  min-width: 0;
+}
+
+.countPanel .countSlider {
+  padding-block: 8px 10px;
+}
+
+.countPanel .MuiSlider-markLabel {
+  display: none;
 }
 
 .controls .MuiSlider-root {
@@ -414,7 +486,7 @@ body {
 
 .promptGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -907,7 +979,7 @@ body {
 
 .candidateGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   min-height: 150px;
 }
@@ -1320,6 +1392,18 @@ body {
     radial-gradient(110% 130% at 100% 6%, rgba(255, 122, 26, 0.08), transparent 42%),
     linear-gradient(90deg, rgba(255, 224, 138, 0.18), rgba(255, 122, 26, 0.06) 14%, transparent 38%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.055), transparent 46%);
+  position: fixed !important;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  width: min(390px, calc(100vw - 28px));
+  display: flex;
+  visibility: hidden;
+  transform: translateX(calc(100% + 18px));
+  transition:
+    transform 180ms ease,
+    visibility 0s linear 180ms;
   background:
     radial-gradient(120% 140% at -20% 12%, rgba(255, 255, 255, 0.055), transparent 40%),
     radial-gradient(100% 120% at 100% 6%, rgba(255, 122, 26, 0.065), transparent 44%),
@@ -1332,6 +1416,14 @@ body {
     inset 1px 0 0 rgba(255, 255, 255, 0.14),
     inset -1px 0 0 rgba(0, 0, 0, 0.24),
     -12px 0 34px rgba(0, 0, 0, 0.24) !important;
+}
+
+.chatPane.is-open {
+  visibility: visible;
+  transform: translateX(0);
+  transition:
+    transform 180ms ease,
+    visibility 0s;
 }
 
 .chatPane::before,
@@ -1435,13 +1527,20 @@ body {
   gap: 10px;
 }
 
-.chatClose,
-.mobileChatButton {
-  display: none !important;
+.chatClose {
+  display: inline-flex !important;
+}
+
+.chatToggleButton {
+  display: inline-flex !important;
 }
 
 .chatBackdrop {
-  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 19;
+  display: block;
+  background: rgba(0, 0, 0, 0.48);
 }
 
 @property --prompt-rainbow-angle {
@@ -1547,41 +1646,20 @@ body {
   }
 
   .chatPane {
-    position: fixed !important;
-    right: 0;
     bottom: 0;
     left: 0;
-    z-index: 20;
+    top: auto;
+    width: auto;
     height: min(78vh, 680px);
-    display: flex;
     border-width: 1px 0 0 !important;
-    visibility: hidden;
-    transform: none;
-    transition: none;
+    transform: translateY(calc(100% + 18px));
   }
 
   .chatPane.is-open {
-    visibility: visible;
+    transform: translateY(0);
   }
 
   .settingsSplit {
-    grid-template-columns: 1fr;
-  }
-
-  .chatBackdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 19;
-    display: block;
-    background: rgba(0, 0, 0, 0.48);
-  }
-
-  .chatClose,
-  .mobileChatButton {
-    display: inline-flex !important;
-  }
-
-  .promptGrid {
     grid-template-columns: 1fr;
   }
 

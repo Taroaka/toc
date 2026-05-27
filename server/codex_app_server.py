@@ -6,7 +6,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,8 +30,14 @@ class CodexAppServerError(RuntimeError):
         self.diagnostics = diagnostics or {}
 
 
+class CodexAppServerTransportError(CodexAppServerError):
+    """Raised when the Codex app-server cannot reach the ChatGPT backend."""
+
+
 _claimed_generated_images: set[str] = set()
 _claimed_generated_images_lock = asyncio.Lock()
+_NETWORK_PREFLIGHT_CACHE_SECONDS = 60.0
+_network_preflight_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _CODEX_HOME_FALLBACK_FILES = {
     ".codex-global-state.json",
     "auth.json",
@@ -51,6 +61,34 @@ class ImageGenerationResult:
     source: str = "app_server"
 
 
+@dataclass(frozen=True)
+class CodexAppServerRuntimeContract:
+    codex_bin: str
+    cwd: Path
+    requested_codex_home: Path
+    codex_home: Path
+    codex_home_source: str
+    fallback_used: bool
+    fallback_allowed: bool
+    generated_images_root: Path
+    proxy_env: dict[str, str]
+    network_preflight: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "codexBin": self.codex_bin,
+            "cwd": str(self.cwd),
+            "requestedCodexHome": str(self.requested_codex_home),
+            "codexHome": str(self.codex_home),
+            "codexHomeSource": self.codex_home_source,
+            "fallbackUsed": self.fallback_used,
+            "fallbackAllowed": self.fallback_allowed,
+            "generatedImagesRoot": str(self.generated_images_root),
+            "proxyEnv": self.proxy_env,
+            "networkPreflight": self.network_preflight,
+        }
+
+
 def reject_local_raster_image_result(result: ImageGenerationResult, *, item_id: str) -> None:
     source = str(getattr(result, "source", "") or "").strip().lower()
     if source.startswith("local_raster") or "local_raster" in source:
@@ -58,6 +96,13 @@ def reject_local_raster_image_result(result: ImageGenerationResult, *, item_id: 
             f"unsupported local raster fallback for {item_id}: {result.source}; "
             "retry with Codex built-in image generation instead"
         )
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    if task.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        task.exception()
 
 
 class CodexAppServerClient:
@@ -73,21 +118,35 @@ class CodexAppServerClient:
         self._write_lock = asyncio.Lock()
         self._stderr_tail: deque[str] = deque(maxlen=80)
         self._codex_home: Path | None = None
+        self._requested_codex_home: Path | None = None
+        self._codex_home_source = ""
+        self._codex_home_fallback_used = False
+        self._runtime_contract: CodexAppServerRuntimeContract | None = None
+        self._network_preflight: dict[str, Any] = {}
 
     def _resolve_codex_home(self, env: dict[str, str] | None = None) -> Path:
         if self._codex_home is not None:
             return self._codex_home
         env = env or os.environ
         raw_codex_home = env.get("CODEX_HOME", "").strip()
-        codex_home = Path(raw_codex_home) if raw_codex_home else None
-        if codex_home is None or not _is_writable_directory(codex_home):
-            source_home = codex_home or (Path.home() / ".codex")
+        codex_home = Path(raw_codex_home) if raw_codex_home else Path.home() / ".codex"
+        self._requested_codex_home = codex_home
+        self._codex_home_source = "env" if raw_codex_home else "default"
+        if not _is_writable_directory(codex_home):
+            if not app_server_codex_home_fallback_allowed():
+                raise CodexAppServerError(
+                    "Codex app-server CODEX_HOME is not writable; refusing silent fallback. "
+                    f"Set CODEX_HOME to a writable Codex home or set TOC_CODEX_HOME_FALLBACK_ALLOWED=1 explicitly: {codex_home}"
+                )
+            source_home = codex_home
             fallback_home = Path(tempfile.gettempdir()) / "toc-codex-home"
             fallback_home.mkdir(parents=True, exist_ok=True)
             with contextlib.suppress(OSError):
                 fallback_home.chmod(0o700)
             _copy_codex_home_portable_files(source_home, fallback_home)
             codex_home = fallback_home
+            self._codex_home_source = "fallback"
+            self._codex_home_fallback_used = True
         self._codex_home = codex_home
         return codex_home
 
@@ -96,14 +155,53 @@ class CodexAppServerClient:
         env["CODEX_HOME"] = str(self._resolve_codex_home(env))
         return env
 
+    def runtime_contract(self) -> CodexAppServerRuntimeContract:
+        if self._runtime_contract is not None:
+            return self._runtime_contract
+        codex_home = self._resolve_codex_home()
+        requested = self._requested_codex_home or codex_home
+        self._runtime_contract = CodexAppServerRuntimeContract(
+            codex_bin=self.codex_bin,
+            cwd=self.cwd,
+            requested_codex_home=requested,
+            codex_home=codex_home,
+            codex_home_source=self._codex_home_source or "resolved",
+            fallback_used=self._codex_home_fallback_used,
+            fallback_allowed=app_server_codex_home_fallback_allowed(),
+            generated_images_root=codex_home / "generated_images",
+            proxy_env=_proxy_env_snapshot(),
+            network_preflight=self._network_preflight,
+        )
+        return self._runtime_contract
+
+    def preflight_runtime(self, *, require_network: bool | None = None) -> dict[str, Any]:
+        codex_bin_path = shutil.which(self.codex_bin)
+        if codex_bin_path is None:
+            raise CodexAppServerError("codex executable not found")
+        codex_home = self._resolve_codex_home()
+        checks: dict[str, Any] = {
+            "status": "passed",
+            "codexBinPath": codex_bin_path,
+            "codexHomeWritable": True,
+            "network": {"status": "skipped"},
+        }
+        should_check_network = app_server_network_preflight_enabled() if require_network is None else require_network
+        if should_check_network:
+            checks["network"] = preflight_codex_backend_network()
+        self._network_preflight = checks
+        self._runtime_contract = None
+        self.runtime_contract()
+        if not codex_home.is_dir():
+            raise CodexAppServerError(f"Codex app-server CODEX_HOME does not exist after resolution: {codex_home}")
+        return checks
+
     def generated_images_root(self) -> Path:
         return self._resolve_codex_home() / "generated_images"
 
     async def start(self) -> None:
         if self.proc is not None:
             return
-        if shutil.which(self.codex_bin) is None:
-            raise CodexAppServerError("codex executable not found")
+        self.preflight_runtime()
         self.proc = await asyncio.create_subprocess_exec(
             self.codex_bin,
             "app-server",
@@ -185,7 +283,9 @@ class CodexAppServerClient:
 
     def diagnostics(self) -> dict[str, Any]:
         proc = self.proc
+        contract = self.runtime_contract().as_dict()
         return {
+            **contract,
             "codexBin": self.codex_bin,
             "cwd": str(self.cwd),
             "pid": proc.pid if proc is not None else None,
@@ -194,6 +294,7 @@ class CodexAppServerClient:
             "generatedImagesRoot": str(self.generated_images_root()),
             "pendingRequestIds": sorted(self._pending.keys()),
             "stderrTail": list(self._stderr_tail),
+            "transportErrorKind": classify_codex_transport_error(self._stderr_summary()),
         }
 
     def _format_process_error(self, prefix: str) -> str:
@@ -224,14 +325,20 @@ class CodexAppServerClient:
                 await self.proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError) as exc:
                 self._pending.pop(request_id, None)
-                raise CodexAppServerError(self._format_process_error(f"Codex app-server pipe closed during {method}")) from exc
+                message = self._format_process_error(f"Codex app-server pipe closed during {method}")
+                error_cls = CodexAppServerTransportError if classify_codex_transport_error(message) else CodexAppServerError
+                raise error_cls(message, diagnostics=self.diagnostics()) from exc
         try:
             response = await asyncio.wait_for(future, timeout=120)
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
-            raise CodexAppServerError(self._format_process_error(f"Codex app-server timed out during {method}")) from exc
+            message = self._format_process_error(f"Codex app-server timed out during {method}")
+            error_cls = CodexAppServerTransportError if method.startswith("turn/") else CodexAppServerError
+            raise error_cls(message, diagnostics=self.diagnostics()) from exc
         if response.get("error"):
-            raise CodexAppServerError(str(response["error"]))
+            message = str(response["error"])
+            error_cls = CodexAppServerTransportError if classify_codex_transport_error(message) else CodexAppServerError
+            raise error_cls(message, diagnostics=self.diagnostics())
         return response.get("result") or {}
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -289,7 +396,7 @@ class CodexAppServerClient:
             try:
                 notification = await asyncio.wait_for(self._notifications.get(), timeout=timeout_seconds)
             except asyncio.TimeoutError as exc:
-                raise CodexAppServerError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
+                raise CodexAppServerTransportError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
             transcript.append(notification)
             params = notification.get("params") or {}
             if turn_id and params.get("turnId") not in {None, turn_id}:
@@ -305,8 +412,10 @@ class CodexAppServerClient:
                 turn = params.get("turn") or {}
                 if (turn.get("status") or "").lower() == "failed":
                     error = turn.get("error") or {}
-                    raise CodexAppServerError(
-                        str(error.get("message") or "turn failed"),
+                    message = str(error.get("message") or "turn failed")
+                    error_cls = CodexAppServerTransportError if classify_codex_transport_error(message) else CodexAppServerError
+                    raise error_cls(
+                        message,
                         transcript=transcript,
                         diagnostics=self.diagnostics(),
                     )
@@ -391,13 +500,14 @@ Rules:
                 timeout_seconds=timeout_seconds,
             )
         )
+        turn_task.add_done_callback(_consume_task_exception)
         fallback_task = asyncio.create_task(wait_for_unclaimed_generated_image_after(cutoff_ns, root=generated_root))
         done, _pending = await asyncio.wait({turn_task, fallback_task}, return_when=asyncio.FIRST_COMPLETED)
         if fallback_task in done:
             fallback = fallback_task.result()
             if fallback:
                 turn_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                with contextlib.suppress(asyncio.CancelledError, CodexAppServerError, asyncio.TimeoutError):
                     await turn_task
                 return ImageGenerationResult(
                     saved_path=fallback,
@@ -468,12 +578,116 @@ Rules:
         return _extract_prompt_from_agent_text(response_text)
 
 
+def create_codex_app_server_client(*, cwd: Path, codex_bin: str = "codex") -> CodexAppServerClient:
+    return CodexAppServerClient(cwd=cwd, codex_bin=codex_bin)
+
+
 def app_server_disabled() -> bool:
     return os.environ.get("TOC_IMAGE_GEN_DISABLE_CODEX_APP_SERVER", "").lower() in {"1", "true", "yes"}
 
 
+def app_server_codex_home_fallback_allowed() -> bool:
+    return os.environ.get("TOC_CODEX_HOME_FALLBACK_ALLOWED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def app_server_network_preflight_enabled() -> bool:
+    return os.environ.get("TOC_CODEX_APP_SERVER_PREFLIGHT_NETWORK", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def default_app_server_model() -> str:
     return os.environ.get("TOC_CODEX_APP_SERVER_MODEL", "").strip()
+
+
+def classify_codex_transport_error(message: str) -> str:
+    normalized = " ".join(str(message or "").lower().split())
+    if not normalized:
+        return ""
+    if any(marker in normalized for marker in ("failed to lookup", "nodename nor servname", "name or service not known", "dns")):
+        return "dns_resolution_failed"
+    if any(marker in normalized for marker in ("stream disconnected", "backend-api/codex/responses")):
+        return "backend_stream_disconnected"
+    if any(marker in normalized for marker in ("connection reset", "broken pipe", "pipe closed")):
+        return "connection_reset"
+    if "timed out" in normalized or "timeout" in normalized:
+        return "timeout"
+    return ""
+
+
+def is_codex_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, CodexAppServerTransportError):
+        return True
+    diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(diagnostics, dict) and diagnostics.get("transportErrorKind"):
+        return True
+    return bool(classify_codex_transport_error(str(exc)))
+
+
+def _proxy_env_snapshot() -> dict[str, str]:
+    keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+    return {key: os.environ[key] for key in keys if os.environ.get(key)}
+
+
+def preflight_codex_backend_network(*, timeout_seconds: float = 10.0) -> dict[str, Any]:
+    cache_key = json.dumps({"proxy": _proxy_env_snapshot(), "timeout": timeout_seconds}, sort_keys=True)
+    cached = _network_preflight_cache.get(cache_key)
+    now = time.monotonic()
+    if cached and now - cached[0] <= _NETWORK_PREFLIGHT_CACHE_SECONDS:
+        return {**cached[1], "cached": True}
+
+    result: dict[str, Any] = {
+        "status": "passed",
+        "host": "chatgpt.com",
+        "url": "https://chatgpt.com/backend-api/codex/responses",
+        "dns": {"status": "pending"},
+        "https": {"status": "pending"},
+        "cached": False,
+    }
+    try:
+        addresses = socket.getaddrinfo("chatgpt.com", 443, type=socket.SOCK_STREAM)
+        result["dns"] = {
+            "status": "passed",
+            "addressCount": len(addresses),
+            "sample": sorted({str(entry[4][0]) for entry in addresses})[:3],
+        }
+    except OSError as exc:
+        result["status"] = "failed"
+        result["dns"] = {"status": "failed", "error": str(exc)}
+        _network_preflight_cache[cache_key] = (now, result)
+        raise CodexAppServerTransportError(
+            "Codex app-server network preflight failed during chatgpt.com DNS resolution",
+            diagnostics={"networkPreflight": result, "transportErrorKind": "dns_resolution_failed"},
+        ) from exc
+
+    request = urllib.request.Request(
+        result["url"],
+        method="HEAD",
+        headers={"User-Agent": "toc-codex-app-server-preflight/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            result["https"] = {"status": "passed", "statusCode": int(response.status)}
+    except urllib.error.HTTPError as exc:
+        if exc.code in {400, 401, 403, 404, 405}:
+            result["https"] = {"status": "passed", "statusCode": int(exc.code), "reachableWithHttpError": True}
+        else:
+            result["status"] = "failed"
+            result["https"] = {"status": "failed", "statusCode": int(exc.code), "error": str(exc)}
+            _network_preflight_cache[cache_key] = (now, result)
+            raise CodexAppServerTransportError(
+                "Codex app-server network preflight failed during chatgpt.com HTTPS reachability",
+                diagnostics={"networkPreflight": result, "transportErrorKind": "backend_http_failed"},
+            ) from exc
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        result["status"] = "failed"
+        result["https"] = {"status": "failed", "error": str(exc)}
+        _network_preflight_cache[cache_key] = (now, result)
+        raise CodexAppServerTransportError(
+            "Codex app-server network preflight failed during chatgpt.com HTTPS reachability",
+            diagnostics={"networkPreflight": result, "transportErrorKind": classify_codex_transport_error(str(exc)) or "backend_http_failed"},
+        ) from exc
+
+    _network_preflight_cache[cache_key] = (now, result)
+    return result
 
 
 def _is_writable_directory(path: Path) -> bool:

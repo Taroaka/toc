@@ -25,17 +25,29 @@ from server.app import app
 from server.codex_app_server import (
     CodexAppServerClient,
     CodexAppServerError,
+    CodexAppServerTransportError,
     ImageGenerationResult,
     _extract_prompt_from_agent_text,
+    classify_codex_transport_error,
+    create_codex_app_server_client,
     default_app_server_model,
     find_agent_message_texts,
     find_image_generation_items,
     image_generation_saved_path,
+    is_codex_transport_error,
+    preflight_codex_backend_network,
     reject_local_raster_image_result,
     wait_for_generated_image_after,
     wait_for_unclaimed_generated_image_after,
 )
-from server.image_gen_app import _toc_immersive_command, _toc_run_command, _validate_created_run, _validate_frontend_create_run, _validate_p650_run
+from server.image_gen_app import (
+    _toc_immersive_command,
+    _toc_run_command,
+    _validate_created_run,
+    _validate_frontend_create_run,
+    _validate_materialized_p650_run,
+    _validate_p650_run,
+)
 from toc.semantic_review_loop import semantic_repair_relpaths
 
 
@@ -461,6 +473,16 @@ class ImageGenParserTests(unittest.TestCase):
             with patch("server.image_gen_app.ROOT", root):
                 _validate_p650_run("桃太郎_20260509_1200")
 
+    def test_validate_materialized_p650_run_allows_no_generated_assets_or_semantic_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            shutil.rmtree(run_dir / "assets")
+            shutil.rmtree(run_dir / "logs" / "review")
+
+            with patch("server.image_gen_app.ROOT", root):
+                _validate_materialized_p650_run("桃太郎_20260509_1200")
+
     def test_validate_p650_run_rejects_single_cut_scenes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -660,7 +682,7 @@ class ImageGenParserTests(unittest.TestCase):
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "path mismatch"):
                         asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="資料", run_id=run_id))
@@ -701,7 +723,7 @@ class ImageGenParserTests(unittest.TestCase):
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
                     patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                 ):
@@ -934,16 +956,43 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(result.saved_path.name, "generated.png")
         self.assertEqual(result.source, "generated_images_early_fallback")
 
-    def test_codex_app_server_uses_writable_fallback_home_when_env_missing(self) -> None:
+    def test_codex_app_server_uses_default_home_when_env_missing_and_writable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"TMPDIR": tmp}, clear=False):
+            with patch.dict(os.environ, {"TMPDIR": tmp}, clear=False), patch("server.codex_app_server._is_writable_directory", return_value=True):
                 os.environ.pop("CODEX_HOME", None)
                 client = CodexAppServerClient(cwd=Path(tmp))
                 env = client._subprocess_env()
 
         self.assertIn("CODEX_HOME", env)
         self.assertTrue(Path(env["CODEX_HOME"]).is_dir())
-        self.assertNotEqual(env["CODEX_HOME"], str(Path.home() / ".codex"))
+        self.assertEqual(env["CODEX_HOME"], str(Path.home() / ".codex"))
+
+    def test_codex_app_server_rejects_silent_fallback_home_when_default_home_unwritable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"TMPDIR": tmp}, clear=False),
+                patch("server.codex_app_server.tempfile.gettempdir", return_value=tmp),
+                patch("server.codex_app_server._is_writable_directory", return_value=False),
+            ):
+                os.environ.pop("CODEX_HOME", None)
+                client = CodexAppServerClient(cwd=Path(tmp))
+                with self.assertRaisesRegex(CodexAppServerError, "refusing silent fallback"):
+                    client._subprocess_env()
+
+    def test_codex_app_server_uses_writable_fallback_home_when_explicitly_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"TMPDIR": tmp, "TOC_CODEX_HOME_FALLBACK_ALLOWED": "1"}, clear=False),
+                patch("server.codex_app_server.tempfile.gettempdir", return_value=tmp),
+                patch("server.codex_app_server._is_writable_directory", return_value=False),
+            ):
+                os.environ.pop("CODEX_HOME", None)
+                client = CodexAppServerClient(cwd=Path(tmp))
+                env = client._subprocess_env()
+
+        self.assertIn("CODEX_HOME", env)
+        self.assertEqual(env["CODEX_HOME"], str(Path(tmp) / "toc-codex-home"))
+        self.assertTrue(client.runtime_contract().fallback_used)
 
     def test_codex_app_server_fallback_home_preserves_portable_auth_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -959,7 +1008,7 @@ class ImageGenParserTests(unittest.TestCase):
             (source_home / "generated_images" / "old.png").write_bytes(PNG_BYTES)
 
             with (
-                patch.dict(os.environ, {"CODEX_HOME": str(source_home)}, clear=False),
+                patch.dict(os.environ, {"CODEX_HOME": str(source_home), "TOC_CODEX_HOME_FALLBACK_ALLOWED": "1"}, clear=False),
                 patch("server.codex_app_server.tempfile.gettempdir", return_value=str(root)),
                 patch("server.codex_app_server._is_writable_directory", return_value=False),
             ):
@@ -994,10 +1043,7 @@ class ImageGenParserTests(unittest.TestCase):
             client.start_thread = fake_start_thread  # type: ignore[method-assign]
             client.run_turn = fake_run_turn  # type: ignore[method-assign]
 
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch("server.codex_app_server.tempfile.gettempdir", return_value=str(root)),
-            ):
+            with patch.dict(os.environ, {"CODEX_HOME": str(root / "toc-codex-home")}, clear=True):
                 result = asyncio.run(
                     client.generate_image(
                         prompt="prompt",
@@ -1011,6 +1057,58 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIsNotNone(result.saved_path)
         self.assertEqual(result.saved_path, generated_dir / "generated.png")
         self.assertEqual(result.source, "generated_images_fallback")
+
+    def test_codex_transport_error_classification(self) -> None:
+        self.assertEqual(
+            classify_codex_transport_error("failed to lookup address information: nodename nor servname provided"),
+            "dns_resolution_failed",
+        )
+        self.assertEqual(
+            classify_codex_transport_error("stream disconnected before completion: https://chatgpt.com/backend-api/codex/responses"),
+            "backend_stream_disconnected",
+        )
+        self.assertTrue(is_codex_transport_error(CodexAppServerTransportError("turn timed out")))
+
+    def test_codex_backend_network_preflight_dns_failure_is_transport_error(self) -> None:
+        with (
+            patch("server.codex_app_server._network_preflight_cache", {}),
+            patch("server.codex_app_server.socket.getaddrinfo", side_effect=OSError("nodename nor servname provided")),
+        ):
+            with self.assertRaises(CodexAppServerTransportError) as raised:
+                preflight_codex_backend_network(timeout_seconds=0.1)
+
+        self.assertEqual(raised.exception.diagnostics["transportErrorKind"], "dns_resolution_failed")
+        self.assertEqual(raised.exception.diagnostics["networkPreflight"]["dns"]["status"], "failed")
+
+    def test_codex_backend_network_preflight_accepts_reachable_http_error(self) -> None:
+        class FakeResponse:
+            status = 405
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with (
+            patch("server.codex_app_server._network_preflight_cache", {}),
+            patch("server.codex_app_server.socket.getaddrinfo", return_value=[(None, None, None, "", ("127.0.0.1", 443))]),
+            patch("server.codex_app_server.urllib.request.urlopen", return_value=FakeResponse()),
+        ):
+            result = preflight_codex_backend_network(timeout_seconds=0.1)
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["dns"]["status"], "passed")
+        self.assertEqual(result["https"]["status"], "passed")
+
+    def test_codex_app_server_direct_instantiation_guard_for_runtime_callers(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        checked_files = [root / "server" / "image_gen_app.py", root / "scripts" / "run-semantic-review.py", root / "scripts" / "generate-assets-from-manifest.py"]
+        offenders = []
+        for path in checked_files:
+            if "CodexAppServerClient(" in path.read_text(encoding="utf-8"):
+                offenders.append(path.relative_to(root).as_posix())
+        self.assertEqual(offenders, [])
 
     def test_wait_for_generated_image_after_returns_stable_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1702,7 +1800,7 @@ class ImageGenApiTests(unittest.TestCase):
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", validate_asset_gate),
                     patch("server.image_gen_app._run_semantic_review", AsyncMock()),
                 ):
@@ -2026,7 +2124,7 @@ base b prompt
             with (
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app.subprocess.run", fake_build_pack),
-                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
             ):
                 asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
 
@@ -2045,6 +2143,57 @@ base b prompt
         self.assertIn("review.semantic.scene_set.repair.status=in_progress", raw_state)
         self.assertTrue(repair_prompt_exists)
         self.assertTrue(repair_report_exists)
+
+    def test_semantic_review_transport_failure_does_not_invoke_producer_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal review_turns
+                    review_turns += 1
+                    raise CodexAppServerTransportError(
+                        "stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"
+                    )
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                with self.assertRaisesRegex(CodexAppServerTransportError, "stream disconnected"):
+                    asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            repair_paths = semantic_repair_relpaths(stage, 1)
+            repair_prompt_exists = (run_dir / repair_paths["prompt"]).exists()
+
+        self.assertEqual(review_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
+        self.assertFalse(repair_prompt_exists)
 
     def test_generate_create_images_fails_when_scene_generation_has_no_saved_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2075,7 +2224,7 @@ base b prompt
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
                     patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", AsyncMock()),
                 ):
@@ -2195,7 +2344,7 @@ base b prompt
                     return FakeResult()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/generate",
@@ -2247,7 +2396,7 @@ base b prompt
                     return FakeResult()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/generate",
@@ -2306,7 +2455,7 @@ base b prompt
                     return FakeResult()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", Path(tmp)), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/generate",
@@ -2381,7 +2530,7 @@ base b prompt
 
             with (
                 patch("server.image_gen_app.ROOT", Path(tmp)),
-                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
             ):
                 with self.assertRaisesRegex(CodexAppServerError, "unsupported local raster fallback"):
                     asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
@@ -2446,7 +2595,7 @@ base b prompt
 
             with (
                 patch("server.image_gen_app.ROOT", Path(tmp)),
-                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
             ):
                 asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
 
@@ -2493,7 +2642,7 @@ base b prompt
 
             with (
                 patch("server.image_gen_app.ROOT", Path(tmp)),
-                patch("server.image_gen_app.CodexAppServerClient", SlowClient),
+                patch("server.image_gen_app.create_codex_app_server_client", SlowClient),
                 patch("server.image_gen_app.IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS", 0.01),
                 patch("server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS", 1),
             ):
@@ -2573,7 +2722,7 @@ base b prompt
 
             with (
                 patch("server.image_gen_app.ROOT", Path(tmp)),
-                patch("server.image_gen_app.CodexAppServerClient", FakeClient),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
             ):
                 asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
 
@@ -2627,7 +2776,7 @@ base b prompt
 
             with (
                 patch("server.image_gen_app.ROOT", Path(tmp)),
-                patch("server.image_gen_app.CodexAppServerClient", FailingClient),
+                patch("server.image_gen_app.create_codex_app_server_client", FailingClient),
             ):
                 asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
 
@@ -2921,7 +3070,7 @@ good prompt
                     raise AssertionError("client should not start for invalid references")
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/generate",
@@ -3618,7 +3767,7 @@ scenes:
                     return f"rewritten {kwargs['item']['id']}"
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/regenerate-prompts",
@@ -3665,7 +3814,7 @@ scenes:
                     return f"rewritten {kwargs['item']['id']}"
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/regenerate-prompts",
@@ -3722,7 +3871,7 @@ scene two prompt
                     return f"rewritten {kwargs['item']['id']}"
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/regenerate-prompts",
@@ -3756,7 +3905,7 @@ scene two prompt
                 pass
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/regenerate-prompts",
@@ -3878,7 +4027,7 @@ scene two prompt
                     return FakeResult()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.CodexAppServerClient", FakeClient):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client", FakeClient):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/generate-bulk",

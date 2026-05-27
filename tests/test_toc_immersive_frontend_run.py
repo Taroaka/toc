@@ -71,9 +71,14 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
                 "image_generation_requests.md",
+                "video_generation_requests.md",
                 "p000_index.md",
             ):
                 self.assertGreater((run_dir / name).stat().st_size, 80, name)
+            self.assertIn(
+                "除外対象はありません。",
+                (run_dir / "generation_exclusion_report.md").read_text(encoding="utf-8"),
+            )
 
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
@@ -101,25 +106,32 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("主要人物、全身ポートレート", asset_request_text)
 
             scene_request_text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
-            first_scene = scene_request_text.split("## scene10_cut02", 1)[0]
+            self.assertIn("[cut契約からの可視要件]", scene_request_text)
+            self.assertIn("初期状態:", scene_request_text)
+            self.assertNotIn("motion_brief:", scene_request_text)
+            first_scene = scene_request_text.split("## scene10_cut2", 1)[0]
             self.assertIn("assets/characters/cinderella_fullbody.png", first_scene)
             self.assertIn("assets/locations/", first_scene)
             self.assertNotIn("glass_slipper", first_scene)
             self.assertNotIn("ガラスの靴", first_scene)
 
-            transformation_scene = scene_request_text.split("## scene30_cut01", 1)[1].split("## scene30_cut02", 1)[0]
+            transformation_scene = scene_request_text.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
             self.assertIn("reference_count: `3`", transformation_scene)
             self.assertIn("glass_slipper", transformation_scene)
 
-            palace_stair_scene = scene_request_text.split("## scene50_cut01", 1)[1].split("## scene50_cut02", 1)[0]
+            palace_stair_scene = scene_request_text.split("## scene50_cut1", 1)[1].split("## scene50_cut2", 1)[0]
             self.assertIn("宮殿の階段", palace_stair_scene)
             self.assertIn("location_05", palace_stair_scene)
             self.assertNotIn("location_01", palace_stair_scene)
 
-            ballroom_scene = scene_request_text.split("## scene60_cut01", 1)[1].split("## scene60_cut02", 1)[0]
+            ballroom_scene = scene_request_text.split("## scene60_cut1", 1)[1].split("## scene60_cut2", 1)[0]
             self.assertIn("舞踏会の大広間", ballroom_scene)
             self.assertIn("location_06", ballroom_scene)
             self.assertNotIn("location_02", ballroom_scene)
+
+            video_request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
+            self.assertIn("cut_contract:", video_request_text)
+            self.assertIn("motion_brief:", video_request_text)
 
             prompt_text = (run_dir / "logs/eval/asset/round_01/prompts/critic_1.prompt.md").read_text(encoding="utf-8")
             self.assertIn("You are critic_1 in the ToC Asset Eval/Improve Loop", prompt_text)
@@ -128,7 +140,14 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("Root Cause Review", aggregate_text)
 
             forbidden = ("TODO", "TBD", "REPLACE_ME", "placeholder")
-            for name in ("research.md", "story.md", "script.md", "asset_generation_requests.md", "image_generation_requests.md"):
+            for name in (
+                "research.md",
+                "story.md",
+                "script.md",
+                "asset_generation_requests.md",
+                "image_generation_requests.md",
+                "video_generation_requests.md",
+            ):
                 text = (run_dir / name).read_text(encoding="utf-8")
                 self.assertFalse(any(marker in text for marker in forbidden), name)
 
@@ -163,6 +182,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 [
                     (run_dir / "asset_generation_requests.md").read_text(encoding="utf-8"),
                     (run_dir / "image_generation_requests.md").read_text(encoding="utf-8"),
+                    (run_dir / "video_generation_requests.md").read_text(encoding="utf-8"),
                     (run_dir / "video_manifest.md").read_text(encoding="utf-8"),
                 ]
             )

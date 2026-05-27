@@ -92,6 +92,7 @@ audit:
 - **user-triggered subagent audit**: stage 完了後に `scripts/build-subagent-audit-prompt.py` を使って貼り付け用 prompt を生成し、ユーザーが contextless audit subagent を起動して独立検証してもよい。script は `logs/grounding/<stage>.subagent_prompt.md` も保存し、subagent は content artifact を編集しない
 - **user-triggered image judgment subagent**: image prompt の意味評価は `scripts/build-subagent-image-review-prompt.py` で貼り付け用 prompt を生成し、ユーザーが contextless subagent に渡してよい。script は `logs/review/image_prompt.subagent_prompt.md` を保存し、subagent は hard schema 判定ではなく story/script/manifest の意味整合と revision 優先度を見る
 - **review policy**: run 開始時に `review.policy.story|image|narration=required|optional` を固定し、grounding はこの policy に従って承認 gate を有効/無効化する
+- **Codex app-server transport gate**: semantic QA / prompt repair / image generation / chat で app-server を使う前に shared runtime contract の preflight を通す。DNS、WebSocket、HTTP fallback、`backend-api/codex/responses` の stream failure は `runtime.app_server.transport.status=failed` または `review.semantic.<stage>.transport.status=failed` として扱い、semantic QA の意味判定 failure とは分離する。semantic report が存在しない transport failure では production-side repair loop を起動しない。
 
 ### 1.4.1 canonical state の書き分け
 

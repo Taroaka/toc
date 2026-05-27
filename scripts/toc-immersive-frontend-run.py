@@ -554,59 +554,106 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
     return script, manifest, selectors
 
 
-def _write_request_files(run_dir: Path, asset_plan: dict[str, Any], manifest: dict[str, Any], profile: dict[str, Any]) -> None:
-    asset_lines = ["# Asset Generation Requests", ""]
+def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profile: dict[str, Any]) -> None:
     manifest_items = []
-    for entry in asset_plan["assets"]:
+    asset_stage_scenes = []
+    for index, entry in enumerate(asset_plan["assets"], start=1):
         asset_id = entry["asset_id"]
         output = entry["generation_plan"]["output"]
-        asset_lines.extend(
-            [
-                f"## {asset_id}",
-                "",
-                "- tool: `codex_builtin_image`",
-                f"- asset_type: `{entry['asset_type']}`",
-                "- execution_lane: `bootstrap_builtin`",
-                "- reference_count: `0`",
-                "- review_status: `approved`",
-                f"- output: `{output}`",
-                "- references: `[]`",
-                "",
-                "```text",
-                _prompt_for_asset(entry, profile),
-                "```",
-                "",
-            ]
+        generation_plan = entry.get("generation_plan") if isinstance(entry.get("generation_plan"), dict) else {}
+        asset_stage_scenes.append(
+            {
+                "scene_id": index,
+                "still_assets": [
+                    {
+                        "asset_id": asset_id,
+                        "asset_type": entry["asset_type"],
+                        "source_script_selectors": entry.get("source_script_selectors") or [],
+                        "output": output,
+                        "creation_status": "planned",
+                        "generation_plan": {
+                            "required_views": generation_plan.get("required_views") or [],
+                        },
+                        "review": {"status": "approved"},
+                        "image_generation": {
+                            "tool": "codex_builtin_image",
+                            "execution_lane": "bootstrap_builtin",
+                            "bootstrap_allowed": True,
+                            "bootstrap_reason": "frontend_review_asset_stage",
+                            "prompt": _prompt_for_asset(entry, profile),
+                            "output": output,
+                            "references": [],
+                        },
+                    }
+                ],
+            }
         )
         manifest_items.append({"asset_id": asset_id, "selector": asset_id, "output": output, "asset_type": entry["asset_type"], "status": "requested"})
-    (run_dir / "asset_generation_requests.md").write_text("\n".join(asset_lines), encoding="utf-8")
+    asset_stage_manifest = {
+        "video_metadata": {
+            "topic": profile["topic_label"],
+            "experience": "asset_stage",
+        },
+        "scenes": asset_stage_scenes,
+    }
+    (run_dir / "asset_stage_manifest.md").write_text(_md_yaml("Asset Stage Manifest", asset_stage_manifest), encoding="utf-8")
     (run_dir / "asset_generation_manifest.md").write_text(_md_yaml("Asset Generation Manifest", {"asset_generation_manifest": {"items": manifest_items}}), encoding="utf-8")
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "generate-assets-from-manifest.py"),
+            "--manifest",
+            str(run_dir / "asset_stage_manifest.md"),
+            "--materialize-request-files-only",
+            "--skip-videos",
+            "--skip-audio",
+            "--skip-image-prompt-review",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
-    scene_lines = ["# Image Generation Requests", ""]
-    for scene in manifest["scenes"]:
-        for cut in scene["cuts"]:
-            ig = cut["image_generation"]
-            scene_lines.extend(
-                [
-                    f"## {cut['selector']}",
-                    "",
-                    "- tool: `codex_builtin_image`",
-                    "- still_mode: `generate_still`",
-                    "- generation_status: `requested`",
-                    "- execution_lane: `standard`",
-                    f"- reference_count: `{len(ig.get('references', []))}`",
-                    "- review_status: `approved`",
-                    f"- output: `{ig['output']}`",
-                    "- references:",
-                    *[f"  - `{ref}`" for ref in ig.get("references", [])],
-                    "",
-                    "```text",
-                    ig["prompt"],
-                    "```",
-                    "",
-                ]
-            )
-    (run_dir / "image_generation_requests.md").write_text("\n".join(scene_lines), encoding="utf-8")
+
+def _materialize_standard_request_files(run_dir: Path) -> None:
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "eval.p400_readiness.status": "approved",
+            "eval.p400_readiness.reason_keys": "",
+        },
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "generate-assets-from-manifest.py"),
+            "--manifest",
+            str(run_dir / "video_manifest.md"),
+            "--materialize-request-files-only",
+            "--skip-audio",
+            "--skip-image-prompt-review",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for semantic_stage in ("image_prompt", "scene_image", "video_motion"):
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
+                "--run-dir",
+                str(run_dir),
+                "--stage",
+                semantic_stage,
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 def _review_status_line(stage: str) -> str:
@@ -937,8 +984,9 @@ def materialize_run(topic: str, source: str, run_dir: Path, stop_target: str) ->
     asset_inventory, asset_plan = _build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
     (run_dir / "asset_inventory.md").write_text(_md_yaml("Asset Inventory", asset_inventory), encoding="utf-8")
     (run_dir / "asset_plan.md").write_text(_md_yaml("Asset Plan", asset_plan), encoding="utf-8")
-    _write_request_files(run_dir, asset_plan, manifest, profile)
+    _write_asset_request_files(run_dir, asset_plan, profile)
     _write_review_artifacts(run_dir)
+    _materialize_standard_request_files(run_dir)
     state_updates = _write_orchestration(run_dir, stop_target)
     slots = P650_SLOTS if stop_target == "p680" else P650_SLOTS
     for slot in slots:
