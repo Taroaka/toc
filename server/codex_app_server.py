@@ -392,9 +392,13 @@ class CodexAppServerClient:
         )
         turn_id = str((result.get("turn") or {}).get("id") or "")
         transcript: list[dict[str, Any]] = []
+        deadline = time.monotonic() + max(1, timeout_seconds)
         while True:
             try:
-                notification = await asyncio.wait_for(self._notifications.get(), timeout=timeout_seconds)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                notification = await asyncio.wait_for(self._notifications.get(), timeout=remaining)
             except asyncio.TimeoutError as exc:
                 raise CodexAppServerTransportError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
             transcript.append(notification)
@@ -501,7 +505,13 @@ Rules:
             )
         )
         turn_task.add_done_callback(_consume_task_exception)
-        fallback_task = asyncio.create_task(wait_for_unclaimed_generated_image_after(cutoff_ns, root=generated_root))
+        fallback_task = asyncio.create_task(
+            wait_for_unclaimed_generated_image_after(
+                cutoff_ns,
+                root=generated_root,
+                timeout_seconds=timeout_seconds,
+            )
+        )
         done, _pending = await asyncio.wait({turn_task, fallback_task}, return_when=asyncio.FIRST_COMPLETED)
         if fallback_task in done:
             fallback = fallback_task.result()
@@ -602,6 +612,16 @@ def classify_codex_transport_error(message: str) -> str:
     normalized = " ".join(str(message or "").lower().split())
     if not normalized:
         return ""
+    if any(
+        marker in normalized
+        for marker in (
+            "codex_home is not writable",
+            "codex home is not writable",
+            "refusing silent fallback",
+            "effective codex_home is not writable",
+        )
+    ):
+        return "runtime_environment_failed"
     if any(marker in normalized for marker in ("failed to lookup", "nodename nor servname", "name or service not known", "dns")):
         return "dns_resolution_failed"
     if any(marker in normalized for marker in ("stream disconnected", "backend-api/codex/responses")):

@@ -15,6 +15,18 @@ def write_manifest(run_dir: Path) -> None:
                 "```yaml",
                 "scenes:",
                 "  - scene_id: 10",
+                "    scene_cut_coverage_plan:",
+                "      minimum_cut_count: 2",
+                "      selected_cut_count: 2",
+                "      scene_obligations:",
+                "        - source: dramatic_question",
+                "          evidence: 灰の台所で何が始まるか",
+                "      cut_assignments:",
+                "        - cut_index: 1",
+                "          obligation_id: scene_pressure",
+                "          cut_function: pressure",
+                "          source: dramatic_question",
+                "          target_beat: 灰の台所の導入",
                 "    cuts:",
                 "      - cut_id: '01'",
                 "        selector: scene10_cut01",
@@ -100,7 +112,7 @@ class TestSemanticPackImage(unittest.TestCase):
 
             entries = collect_entries("image_prompt", run_dir)
 
-            self.assertEqual(len(entries), 1)
+            self.assertEqual(len(entries), 2)
             entry = entries[0]
             self.assertEqual(entry["stage"], "image_prompt")
             self.assertEqual(entry["review_scope"], "all_entries")
@@ -137,6 +149,13 @@ class TestSemanticPackImage(unittest.TestCase):
             )
             self.assertTrue(entry["review"]["agent_review_ok"])
             self.assertEqual(entry["review"]["overall_score"], 0.9)
+            composite = entries[1]
+            self.assertEqual(composite["review_scope"], "scene_composite")
+            self.assertEqual(composite["stage"], "image_prompt")
+            self.assertEqual(composite["cut_count"], 2)
+            self.assertEqual(composite["scene_cut_coverage_plan"]["selected_cut_count"], 2)
+            self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("scene_cut_coverage_plan", composite["scene_composite_gate"]["must_judge"][0])
 
     def test_collect_scene_image_entries_includes_outputs_logs_and_contact_sheet(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
@@ -166,7 +185,7 @@ class TestSemanticPackImage(unittest.TestCase):
 
             entries = collect_entries("scene_image", run_dir)
 
-            self.assertEqual(len(entries), 2)
+            self.assertEqual(len(entries), 3)
             first = entries[0]
             self.assertEqual(first["stage"], "scene_image")
             self.assertEqual(first["review_scope"], "all_entries")
@@ -198,6 +217,12 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(second["review_scope"], "all_entries")
             self.assertTrue(second["semantic_contract_missing"])
             self.assertEqual(second["contract_required_fields_missing"], ["target_focus", "must_include", "done_when"])
+            composite = entries[2]
+            self.assertEqual(composite["review_scope"], "scene_composite")
+            self.assertEqual(composite["stage"], "scene_image")
+            self.assertIn("scene_cut_coverage_plan", composite)
+            self.assertEqual(composite["cut_entries"][0]["image_output_exists"], True)
+            self.assertEqual(composite["cut_entries"][1]["image_output_exists"], False)
 
     def test_collect_scene_image_entries_marks_missing_contact_sheet(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:

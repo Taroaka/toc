@@ -78,6 +78,7 @@ from toc.semantic_review import (
     SemanticReviewStatus,
     check_semantic_review,
     check_image_prompt_judgment,
+    parse_judgment_report_status,
     review_status_to_state,
     semantic_state_updates,
     semantic_review_relpaths,
@@ -87,6 +88,7 @@ from toc.semantic_review_loop import (
     semantic_repair_state_updates,
     semantic_repair_timeout_seconds,
     semantic_review_max_attempts,
+    semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
 )
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
@@ -165,11 +167,18 @@ P650_FIXED_SLOTS = (
 )
 P680_FIXED_SLOTS = (*P650_FIXED_SLOTS, "p660", "p670", "p680")
 BOOTSTRAP_ASSET_MAX_ATTEMPTS = 10
-IMAGE_GENERATION_PARALLELISM = max(1, int(os.environ.get("TOC_IMAGE_GEN_PARALLELISM", "4") or "4"))
+# Codex app-server image generation can complete via generated_images fallback before
+# turn/completed. That fallback is order-based, so production generation must be
+# serialized to avoid assigning a generated image to the wrong request.
+IMAGE_GENERATION_PARALLELISM = 1
 IMAGE_GENERATION_ITEM_MAX_ATTEMPTS = max(1, int(os.environ.get("TOC_IMAGE_GEN_ITEM_MAX_ATTEMPTS", "3") or "3"))
 IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS = max(
     1.0,
-    float(os.environ.get("TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS", "300") or "300"),
+    float(os.environ.get("TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS", "900") or "900"),
+)
+FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("TOC_FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS", "14400") or "14400"),
 )
 PROMPT_REPAIR_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("TOC_PROMPT_REPAIR_TIMEOUT_SECONDS", "120") or "120"))
 CREATE_SKILL_STOP_POLL_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_STOP_POLL_SECONDS", "10") or "10"))
@@ -948,13 +957,16 @@ async def _run_toc_immersive_frontend_cli_helper(
     ]
     if materialize_only:
         cmd.append("--materialize-only")
+    env = dict(os.environ)
+    env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(ROOT),
+        env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=7200)
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"toc-immersive-frontend-run exited with status {proc.returncode}")
@@ -1041,7 +1053,7 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             text=skill_text,
             skill_path=skill_path,
             cwd=ROOT,
-            timeout_seconds=7200,
+            timeout_seconds=int(FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS),
         )
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -3743,41 +3755,83 @@ async def _run_semantic_review_once(
     transcript: list[dict[str, Any]] = []
     try:
         thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
-        transcript = await client.run_turn(
+        transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
+            client,
             thread_id=thread_id,
             text=prompt,
             cwd=ROOT,
-            timeout_seconds=900,
+            timeout_seconds=semantic_review_timeout_seconds(),
+            report_path=report_path,
+            is_completed=_semantic_review_report_completed,
         )
+        if completed_from_report:
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="completed_after_report_before_turn_completed",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(prompt_path.relative_to(run_dir)),
+                    "report": str(report_path.relative_to(run_dir)),
+                },
+                response={
+                    "note": "semantic report reached a terminal status before app-server turn/completed notification arrived",
+                },
+                transcript=transcript,
+            )
     except Exception as exc:
         transport_kind = classify_codex_transport_error(str(exc))
-        if is_codex_transport_error(exc):
-            append_state_snapshot(
-                run_dir / "state.txt",
-                {
-                    f"review.semantic.{stage}.transport.status": "failed",
-                    f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
-                    f"review.semantic.{stage}.transport.error": str(exc)[:2000],
-                    f"review.semantic.{stage}.loop.status": "blocked_transport",
+        if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
+            transcript = getattr(exc, "transcript", transcript)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="completed_after_transport_timeout",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(prompt_path.relative_to(run_dir)),
+                    "report": str(report_path.relative_to(run_dir)),
                 },
+                response={
+                    "transportErrorKind": transport_kind or "unknown",
+                    "note": "semantic report was completed before app-server turn completion notification timed out",
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
             )
-        write_app_server_debug_log(
-            run_dir=run_dir,
-            operation="semantic_review",
-            status="app_server_failed",
-            item_id=job_id,
-            request={
-                "stage": stage,
-                "attempt": attempt,
-                "maxAttempts": max_attempts,
-                "prompt": str(prompt_path.relative_to(run_dir)),
-                "report": str(report_path.relative_to(run_dir)),
-            },
-            response={"failureContext": _codex_failure_context(exc, client=client)},
-            transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        raise
+        else:
+            if is_codex_transport_error(exc):
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.transport.status": "failed",
+                        f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
+                        f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                        f"review.semantic.{stage}.loop.status": "blocked_transport",
+                    },
+                )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="app_server_failed",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(prompt_path.relative_to(run_dir)),
+                    "report": str(report_path.relative_to(run_dir)),
+                },
+                response={"failureContext": _codex_failure_context(exc, client=client)},
+                transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
     finally:
         await client.stop()
     if stage == "image_prompt" and report_path.exists():
@@ -3838,6 +3892,75 @@ async def _run_semantic_review_once(
     return result
 
 
+def _semantic_repair_report_completed(report_path: Path) -> bool:
+    if not report_path.exists():
+        return False
+    for raw in report_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip().lower()
+        if line.startswith("status:"):
+            return line.split(":", 1)[1].strip(" `\"'") == "done"
+    return False
+
+
+def _semantic_review_report_completed(report_path: Path) -> bool:
+    if not report_path.exists():
+        return False
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    if "`...`" in report_text or "- `...`" in report_text:
+        return False
+    status = parse_judgment_report_status(report_text)
+    return bool(status and status != "pending")
+
+
+SEMANTIC_TURN_ARTIFACT_POLL_SECONDS = 2.0
+SEMANTIC_TURN_COMPLETION_GRACE_SECONDS = 15.0
+
+
+async def _run_turn_until_semantic_artifact_completed(
+    client: CodexAppServerClient,
+    *,
+    thread_id: str,
+    text: str,
+    cwd: Path,
+    timeout_seconds: int,
+    report_path: Path,
+    is_completed,
+) -> tuple[list[dict[str, Any]], bool]:
+    turn_task = asyncio.create_task(
+        client.run_turn(
+            thread_id=thread_id,
+            text=text,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    try:
+        while True:
+            done, _ = await asyncio.wait({turn_task}, timeout=SEMANTIC_TURN_ARTIFACT_POLL_SECONDS)
+            if turn_task in done:
+                return await turn_task, False
+            if is_completed(report_path):
+                try:
+                    transcript = await asyncio.wait_for(turn_task, timeout=SEMANTIC_TURN_COMPLETION_GRACE_SECONDS)
+                    return transcript, False
+                except asyncio.TimeoutError:
+                    turn_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await turn_task
+                    return [], True
+                except Exception as exc:
+                    if is_codex_transport_error(exc):
+                        transcript = getattr(exc, "transcript", [])
+                        return transcript if isinstance(transcript, list) else [], True
+                    raise
+    except Exception:
+        if not turn_task.done():
+            turn_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await turn_task
+        raise
+
+
 async def _run_semantic_review_producer_repair(
     job_id: str,
     *,
@@ -3884,54 +4007,131 @@ async def _run_semantic_review_producer_repair(
     transcript: list[dict[str, Any]] = []
     try:
         thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
-        transcript = await client.run_turn(
+        transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
+            client,
             thread_id=thread_id,
             text=prompt,
             cwd=ROOT,
             timeout_seconds=semantic_repair_timeout_seconds(),
+            report_path=paths["report"],
+            is_completed=_semantic_repair_report_completed,
         )
+        if completed_from_report:
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review_producer_repair",
+                status="completed_after_report_before_turn_completed",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "round": round_number,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(paths["prompt"].relative_to(run_dir)),
+                    "report": str(paths["report"].relative_to(run_dir)),
+                },
+                response={"errorCount": len(errors)},
+                transcript=transcript,
+            )
     except Exception as exc:
-        failed_updates = {}
-        failed_updates.update(
-            semantic_loop_state_updates(
-                stage,
-                status="failed",
-                attempt=round_number,
-                max_attempts=max_attempts,
-                error_count=len(errors),
+        if is_codex_transport_error(exc) and _semantic_repair_report_completed(paths["report"]):
+            transcript = getattr(exc, "transcript", transcript)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review_producer_repair",
+                status="completed_after_transport_timeout",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "round": round_number,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(paths["prompt"].relative_to(run_dir)),
+                    "report": str(paths["report"].relative_to(run_dir)),
+                },
+                response={
+                    "errorCount": len(errors),
+                    "transportErrorKind": classify_codex_transport_error(str(exc)) or "unknown",
+                    "note": "producer report was completed before app-server turn completion notification timed out",
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
             )
-        )
-        failed_updates.update(
-            semantic_repair_state_updates(
-                stage,
-                status="failed",
-                round_number=round_number,
-                max_attempts=max_attempts,
-                error_count=len(errors),
+        else:
+            failed_updates = {}
+            transport_kind = classify_codex_transport_error(str(exc))
+            if is_codex_transport_error(exc):
+                failed_updates.update(
+                    semantic_loop_state_updates(
+                        stage,
+                        status="blocked_transport",
+                        attempt=round_number,
+                        max_attempts=max_attempts,
+                        error_count=len(errors),
+                    )
+                )
+                failed_updates.update(
+                    semantic_repair_state_updates(
+                        stage,
+                        status="blocked_transport",
+                        round_number=round_number,
+                        max_attempts=max_attempts,
+                        error_count=len(errors),
+                    )
+                )
+                failed_updates.update(
+                    {
+                        f"review.semantic.{stage}.transport.status": "failed",
+                        f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
+                        f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                        f"review.semantic.{stage}.repair.transport.status": "failed",
+                        f"review.semantic.{stage}.repair.transport.error_kind": transport_kind or "unknown",
+                        "runtime.stage": "app_server_transport_failed",
+                        "runtime.app_server.transport.status": "failed",
+                        "runtime.app_server.transport.error_kind": transport_kind or "unknown",
+                    }
+                )
+            else:
+                failed_updates.update(
+                    semantic_loop_state_updates(
+                        stage,
+                        status="failed",
+                        attempt=round_number,
+                        max_attempts=max_attempts,
+                        error_count=len(errors),
+                    )
+                )
+                failed_updates.update(
+                    semantic_repair_state_updates(
+                        stage,
+                        status="failed",
+                        round_number=round_number,
+                        max_attempts=max_attempts,
+                        error_count=len(errors),
+                    )
+                )
+            if slot:
+                failed_updates[f"slot.{slot}.status"] = "failed"
+                if is_codex_transport_error(exc):
+                    failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by app-server transport"
+                else:
+                    failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair failed"
+            failed_updates[f"review.semantic.{stage}.repair.last_error"] = str(exc)[:2000]
+            append_state_snapshot(run_dir / "state.txt", failed_updates)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review_producer_repair",
+                status="app_server_transport_failed" if is_codex_transport_error(exc) else "app_server_failed",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "round": round_number,
+                    "maxAttempts": max_attempts,
+                    "prompt": str(paths["prompt"].relative_to(run_dir)),
+                    "report": str(paths["report"].relative_to(run_dir)),
+                },
+                response={"failureContext": _codex_failure_context(exc, client=client)},
+                transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
+                error=f"{type(exc).__name__}: {exc}",
             )
-        )
-        if slot:
-            failed_updates[f"slot.{slot}.status"] = "failed"
-            failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair failed"
-        failed_updates[f"review.semantic.{stage}.repair.last_error"] = str(exc)[:2000]
-        append_state_snapshot(run_dir / "state.txt", failed_updates)
-        write_app_server_debug_log(
-            run_dir=run_dir,
-            operation="semantic_review_producer_repair",
-            status="app_server_failed",
-            item_id=job_id,
-            request={
-                "stage": stage,
-                "round": round_number,
-                "maxAttempts": max_attempts,
-                "prompt": str(paths["prompt"].relative_to(run_dir)),
-                "report": str(paths["report"].relative_to(run_dir)),
-            },
-            response={"failureContext": _codex_failure_context(exc, client=client)},
-            transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        raise
+            raise
     finally:
         await client.stop()
 
@@ -4004,11 +4204,16 @@ async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str, 
             operation="create_job_step",
             status="started",
             item_id=job_id,
-            request={"step": "toc_skill", "title": title, "sourceLength": len(source), "runId": run_id},
+            request={"step": "frontend_create_cli", "title": title, "sourceLength": len(source), "runId": run_id},
         )
         if generate_images:
             await _set_create_job(job_id, {"message": "本家ToC工程をp680まで実行中"})
-            await _run_toc_skill_helper_until_stop_target(topic=title, source=source, run_id=run_id, stop_target="p680")
+            await _run_toc_immersive_frontend_cli_helper(
+                topic=title,
+                source=source,
+                run_id=run_id,
+                stop_target="p680",
+            )
         else:
             await _set_create_job(job_id, {"message": "本家ToC工程を画像生成なしで実行中"})
             await _run_toc_immersive_frontend_cli_helper(
@@ -4023,7 +4228,7 @@ async def _run_create_job(job_id: str, *, title: str, source: str, run_id: str, 
             operation="create_job_step",
             status="completed",
             item_id=job_id,
-            request={"step": "toc_skill", "runId": run_id},
+            request={"step": "frontend_create_cli", "runId": run_id},
             response={"elapsedMs": int((time.monotonic() - job_started) * 1000)},
         )
         validation_started = time.monotonic()

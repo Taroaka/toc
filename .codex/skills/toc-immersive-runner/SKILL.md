@@ -172,6 +172,14 @@ For this skill, the normal bucket range is:
 - `stop_target=p650`: supported only as an explicit early-stop override before
   scene image generation, after reusable asset generation required by `p650`.
 
+Server frontend create does not invoke this skill as its main orchestration
+path. `/api/image-gen/runs/create` must run
+`scripts/toc-immersive-frontend-run.py` directly from the backend process so the
+effective `CODEX_HOME`, generated image root, network preflight, and app-server
+diagnostics are all resolved by one runtime contract. Do not call this skill
+from an app-server turn and then start another app-server-backed semantic/image
+generation flow inside it.
+
 ## Execution Rules
 
 - For `review_policy=frontend` app-server create flows, use the repo CLI as the

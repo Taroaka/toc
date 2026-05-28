@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import unittest
 import sys
 import os
 from pathlib import Path
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -956,6 +958,52 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(result.saved_path.name, "generated.png")
         self.assertEqual(result.source, "generated_images_early_fallback")
 
+    def test_generate_image_keeps_fallback_watcher_for_item_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            codex_home = root / "codex_home"
+            generated = codex_home / "generated_images" / "session" / "generated.png"
+            generated.parent.mkdir(parents=True)
+            generated.write_bytes(PNG_BYTES)
+            client = CodexAppServerClient(cwd=root)
+            seen_timeout: list[int] = []
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**_kwargs):
+                await asyncio.sleep(10)
+                return [{"method": "turn/completed", "params": {"turnId": "turn-1"}}]
+
+            async def fake_wait_for_unclaimed(_cutoff_ns, *, root=None, timeout_seconds=300, poll_seconds=1.0):
+                seen_timeout.append(timeout_seconds)
+                return generated
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+                patch("server.codex_app_server.wait_for_unclaimed_generated_image_after", fake_wait_for_unclaimed),
+            ):
+                result = asyncio.run(
+                    client.generate_image(
+                        prompt="prompt",
+                        output_path=run_dir / "candidate.png",
+                        reference_images=[],
+                        item_id="scene1",
+                        run_dir=run_dir,
+                        timeout_seconds=777,
+                    )
+                )
+
+        self.assertEqual(seen_timeout, [777])
+        self.assertIsNotNone(result.saved_path)
+        self.assertEqual(result.saved_path.name, "generated.png")
+        self.assertEqual(result.source, "generated_images_early_fallback")
+
     def test_codex_app_server_uses_default_home_when_env_missing_and_writable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"TMPDIR": tmp}, clear=False), patch("server.codex_app_server._is_writable_directory", return_value=True):
@@ -1067,6 +1115,10 @@ class ImageGenParserTests(unittest.TestCase):
             classify_codex_transport_error("stream disconnected before completion: https://chatgpt.com/backend-api/codex/responses"),
             "backend_stream_disconnected",
         )
+        self.assertEqual(
+            classify_codex_transport_error("Codex app-server CODEX_HOME is not writable; refusing silent fallback"),
+            "runtime_environment_failed",
+        )
         self.assertTrue(is_codex_transport_error(CodexAppServerTransportError("turn timed out")))
 
     def test_codex_backend_network_preflight_dns_failure_is_transport_error(self) -> None:
@@ -1101,6 +1153,32 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(result["dns"]["status"], "passed")
         self.assertEqual(result["https"]["status"], "passed")
 
+    def test_codex_run_turn_timeout_is_total_deadline_not_idle_deadline(self) -> None:
+        async def run_case() -> float:
+            client = CodexAppServerClient(cwd=Path.cwd())
+
+            async def fake_request(method, _params):
+                self.assertEqual(method, "turn/start")
+                return {"turn": {"id": "turn-1"}}
+
+            async def feed_notifications():
+                for _ in range(20):
+                    await client._notifications.put({"method": "item/agentMessage/delta", "params": {"turnId": "turn-1"}})
+                    await asyncio.sleep(0.1)
+
+            client.request = fake_request  # type: ignore[method-assign]
+            feeder = asyncio.create_task(feed_notifications())
+            started = time.monotonic()
+            with self.assertRaises(CodexAppServerTransportError):
+                await client.run_turn(thread_id="thread-1", text="hello", timeout_seconds=1)
+            feeder.cancel()
+            with suppress(asyncio.CancelledError):
+                await feeder
+            return time.monotonic() - started
+
+        elapsed = asyncio.run(run_case())
+        self.assertLess(elapsed, 2.5)
+
     def test_codex_app_server_direct_instantiation_guard_for_runtime_callers(self) -> None:
         root = Path(__file__).resolve().parents[1]
         checked_files = [root / "server" / "image_gen_app.py", root / "scripts" / "run-semantic-review.py", root / "scripts" / "generate-assets-from-manifest.py"]
@@ -1109,6 +1187,11 @@ class ImageGenParserTests(unittest.TestCase):
             if "CodexAppServerClient(" in path.read_text(encoding="utf-8"):
                 offenders.append(path.relative_to(root).as_posix())
         self.assertEqual(offenders, [])
+
+    def test_frontend_create_job_does_not_use_nested_app_server_skill(self) -> None:
+        source = inspect.getsource(image_gen_app._run_create_job)
+        self.assertIn("_run_toc_immersive_frontend_cli_helper", source)
+        self.assertNotIn("_run_toc_skill_helper_until_stop_target", source)
 
     def test_wait_for_generated_image_after_returns_stable_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1619,13 +1702,14 @@ class ImageGenApiTests(unittest.TestCase):
     def test_create_run_endpoint_uses_title_as_blank_source_and_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            calls: list[tuple[str, str, str | None, str]] = []
+            calls: list[dict[str, object]] = []
             events: list[tuple[str, str | None]] = []
 
-            async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
-                calls.append((topic, run_id, source, stop_target))
-                events.append(("skill", stop_target))
-                write_valid_p680_artifacts(root, run_id)
+            async def fake_frontend_cli_helper(**kwargs):
+                calls.append(kwargs)
+                events.append(("cli", str(kwargs["stop_target"])))
+                write_valid_p680_artifacts(root, str(kwargs["run_id"]))
+                return "created with images"
 
             async def fake_upgrade_prompts(_job_id, *, run_id):
                 events.append(("upgrade", run_id))
@@ -1643,7 +1727,7 @@ class ImageGenApiTests(unittest.TestCase):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen.time.strftime", return_value="20260509_1200"),
-                    patch("server.image_gen_app._run_toc_skill_helper", fake_toc_run_helper),
+                    patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
                     patch("server.image_gen_app._validate_image_review_ready", validate_review),
@@ -1663,8 +1747,18 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["path"], "output/桃太郎_20260509_1200")
         self.assertNotIn("source", create_payload)
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "桃太郎", "p680")])
-        self.assertEqual(events, [("skill", "p680")])
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "topic": "桃太郎",
+                    "source": "桃太郎",
+                    "run_id": "桃太郎_20260509_1200",
+                    "stop_target": "p680",
+                }
+            ],
+        )
+        self.assertEqual(events, [("cli", "p680")])
         generate_images.assert_not_awaited()
         upgrade_prompts.assert_not_awaited()
         validate_review.assert_not_called()
@@ -1717,13 +1811,14 @@ class ImageGenApiTests(unittest.TestCase):
     def test_create_run_endpoint_passes_title_and_nonblank_source_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            calls: list[tuple[str, str, str | None, str]] = []
+            calls: list[dict[str, object]] = []
             events: list[tuple[str, str | None]] = []
 
-            async def fake_toc_run_helper(*, topic, source=None, run_id, stop_target="p680"):
-                calls.append((topic, run_id, source, stop_target))
-                events.append(("skill", stop_target))
-                write_valid_p680_artifacts(root, run_id)
+            async def fake_frontend_cli_helper(**kwargs):
+                calls.append(kwargs)
+                events.append(("cli", str(kwargs["stop_target"])))
+                write_valid_p680_artifacts(root, str(kwargs["run_id"]))
+                return "created with images"
 
             async def fake_upgrade_prompts(_job_id, *, run_id):
                 events.append(("upgrade", run_id))
@@ -1741,7 +1836,7 @@ class ImageGenApiTests(unittest.TestCase):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen.time.strftime", return_value="20260509_1200"),
-                    patch("server.image_gen_app._run_toc_skill_helper", fake_toc_run_helper),
+                    patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
                     patch("server.image_gen_app._validate_image_review_ready", validate_review),
@@ -1759,8 +1854,18 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_response.status_code, 200)
         self.assertEqual(create_payload["runId"], "桃太郎_20260509_1200")
         self.assertEqual(final_payload["status"], "completed")
-        self.assertEqual(calls, [("桃太郎", "桃太郎_20260509_1200", "鬼ヶ島の資料", "p680")])
-        self.assertEqual(events, [("skill", "p680")])
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "topic": "桃太郎",
+                    "source": "鬼ヶ島の資料",
+                    "run_id": "桃太郎_20260509_1200",
+                    "stop_target": "p680",
+                }
+            ],
+        )
+        self.assertEqual(events, [("cli", "p680")])
         generate_images.assert_not_awaited()
         upgrade_prompts.assert_not_awaited()
         validate_review.assert_not_called()
@@ -2144,6 +2249,70 @@ base b prompt
         self.assertTrue(repair_prompt_exists)
         self.assertTrue(repair_report_exists)
 
+    def test_semantic_review_repeats_repair_until_later_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+            repair_rounds: list[int] = []
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns
+                    if "Semantic QA Producer Repair" in text:
+                        round_number = 1 if "Repair round: `1`" in text else 2
+                        repair_rounds.append(round_number)
+                        repair_paths = semantic_repair_relpaths(stage, round_number)
+                        (run_dir / repair_paths["report"]).write_text(
+                            "status: done\nchanged_artifacts: [script.md, video_manifest.md]\nreviewer_findings_addressed: [remaining semantic drift]\n",
+                            encoding="utf-8",
+                        )
+                        return None
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    status = "passed" if review_turns == 3 else "failed"
+                    findings = "[]" if status == "passed" else "[remaining semantic drift]"
+                    (run_dir / paths["report"]).write_text(
+                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\nfindings: {findings}\n",
+                        encoding="utf-8",
+                    )
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=5))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 3)
+        self.assertEqual(repair_rounds, [1, 2])
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertEqual(state["slot.p410.status"], "done")
+
     def test_semantic_review_transport_failure_does_not_invoke_producer_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2194,6 +2363,247 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertFalse(repair_prompt_exists)
+
+    def test_semantic_review_repair_transport_failure_blocks_without_semantic_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+            repair_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns, repair_turns
+                    if "Semantic QA Producer Repair" in text:
+                        repair_turns += 1
+                        raise CodexAppServerTransportError("turn timed out")
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    (run_dir / paths["report"]).write_text(
+                        "status: failed\nreviewed_entries: [scene_1]\nblocked_entries: [scene_1]\nfindings:\n  - wrong meaning\n",
+                        encoding="utf-8",
+                    )
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                with self.assertRaisesRegex(CodexAppServerTransportError, "turn timed out"):
+                    asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 1)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "blocked_transport")
+        self.assertEqual(state["review.semantic.scene_set.repair.transport.status"], "failed")
+        self.assertEqual(state["runtime.app_server.transport.status"], "failed")
+
+    def test_semantic_review_accepts_completed_repair_report_after_turn_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+            repair_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns, repair_turns
+                    if "Semantic QA Producer Repair" in text:
+                        repair_turns += 1
+                        repair_paths = semantic_repair_relpaths(stage, 1)
+                        (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
+                        raise CodexAppServerTransportError("turn timed out")
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    status = "failed" if review_turns == 1 else "passed"
+                    (run_dir / paths["report"]).write_text(
+                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\nfindings: []\n",
+                        encoding="utf-8",
+                    )
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertNotIn("runtime.app_server.transport.status", state)
+
+    def test_semantic_review_accepts_completed_failed_review_report_after_turn_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+            repair_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns, repair_turns
+                    if "Semantic QA Producer Repair" in text:
+                        repair_turns += 1
+                        repair_paths = semantic_repair_relpaths(stage, 1)
+                        (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
+                        return None
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    status = "failed" if review_turns == 1 else "passed"
+                    (run_dir / paths["report"]).write_text(
+                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\nfindings: [semantic drift]\n",
+                        encoding="utf-8",
+                    )
+                    if review_turns == 1:
+                        raise CodexAppServerTransportError("turn timed out")
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertNotIn("review.semantic.scene_set.transport.status", state)
+
+    def test_semantic_review_advances_when_report_finishes_before_turn_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            review_turns = 0
+            repair_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns, repair_turns
+                    if "Semantic QA Producer Repair" in text:
+                        repair_turns += 1
+                        repair_paths = semantic_repair_relpaths(stage, 1)
+                        (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
+                        await asyncio.Event().wait()
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    status = "failed" if review_turns == 1 else "passed"
+                    (run_dir / paths["report"]).write_text(
+                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\nfindings: [semantic drift]\n",
+                        encoding="utf-8",
+                    )
+                    if review_turns == 1:
+                        await asyncio.Event().wait()
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.01),
+                patch("server.image_gen_app.SEMANTIC_TURN_COMPLETION_GRACE_SECONDS", 0.01),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertNotIn("review.semantic.scene_set.transport.status", state)
 
     def test_generate_create_images_fails_when_scene_generation_has_no_saved_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2863,6 +3273,7 @@ slow prompt
 
             with (
                 patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.IMAGE_GENERATION_PARALLELISM", 2),
                 patch("server.image_gen_app._generate_request_item_output", fake_generate_item),
                 patch.dict(os.environ, {"TOC_IMAGE_GEN_DISABLE_CODEX_APP_SERVER": ""}, clear=False),
             ):

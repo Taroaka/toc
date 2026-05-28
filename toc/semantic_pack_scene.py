@@ -206,7 +206,7 @@ def _scene_semantic_contract(scene: dict[str, Any]) -> Any:
 
     intent = _dict_value(scene.get("scene_intent"))
     contract: dict[str, Any] = {}
-    for key in ("dramatic_question", "value_shift", "causal_turn"):
+    for key in ("dramatic_question", "value_shift", "causal_turn", "done_when"):
         if intent.get(key):
             contract[key] = intent[key]
     for key in ("handoff_to_next_scene", "terminal_resolution"):
@@ -226,7 +226,7 @@ def _normalize_scene_contract(scene: dict[str, Any], semantic_contract: Any) -> 
             or intent.get("dramatic_question"),
             "value_shift": contract.get("value_shift") or scene_contract.get("value_shift") or intent.get("value_shift"),
             "causal_turn": contract.get("causal_turn") or scene_contract.get("causal_turn") or intent.get("causal_turn"),
-            "done_when": contract.get("done_when") or scene_contract.get("done_when") or scene.get("done_when"),
+            "done_when": contract.get("done_when") or scene_contract.get("done_when") or scene.get("done_when") or intent.get("done_when"),
         }
     )
 

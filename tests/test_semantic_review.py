@@ -2,9 +2,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from toc.semantic_review import SEMANTIC_REVIEW_STAGES, check_image_prompt_judgment, check_semantic_review, parse_judgment_report_status, semantic_review_relpaths
-from toc.semantic_review_loop import SEMANTIC_REVIEW_PRODUCER_TARGETS, semantic_repair_relpaths, write_semantic_repair_prompt
+from toc.semantic_review_loop import (
+    SEMANTIC_REVIEW_PRODUCER_TARGETS,
+    _semantic_collection_excerpt,
+    semantic_repair_relpaths,
+    semantic_review_max_attempts,
+    semantic_review_timeout_seconds,
+    write_semantic_repair_prompt,
+)
 
 
 def write_review_pack(run_dir: Path, *, status: str = "passed", entry_count: int = 1, placeholder: bool = False) -> None:
@@ -131,6 +139,68 @@ class TestSemanticReview(unittest.TestCase):
             self.assertEqual(paths["report"], run_dir / relpaths["report"])
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
+
+    def test_semantic_repair_defaults_to_five_review_attempts(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
+            self.assertEqual(semantic_review_max_attempts(), 5)
+
+    def test_semantic_review_timeout_default_allows_long_contextless_reviews(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS": ""}):
+            self.assertEqual(semantic_review_timeout_seconds(), 1800)
+
+    def test_semantic_repair_prompt_forbids_editing_review_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "scene_set", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "scene_set",
+                round_number=2,
+                max_attempts=5,
+                errors=("semantic review status must be passed, got failed",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+            self.assertIn("This is a real semantic repair, not a bypass", prompt)
+            self.assertIn("Do not edit `state.txt`, `run_status.json`, or `p000_index.md`", prompt)
+            self.assertIn("Do not edit any `logs/review/semantic/*` files except the producer repair report", prompt)
+            self.assertIn("Non-editable state/navigation artifacts", prompt)
+            self.assertIn("Treat every `blocked_entries`, `failed_selectors`, `findings`, and `reason_keys` item", prompt)
+            self.assertIn("remove contradictory language", prompt)
+            self.assertIn("Do not run repo-wide searches", prompt)
+            self.assertIn("do not print full artifact files to stdout", prompt)
+            self.assertIn("Do not edit passed selectors or unrelated scenes/cuts", prompt)
+            self.assertIn("never use broad search-and-replace", prompt)
+            self.assertIn("Anchor every edit to the failed selector id", prompt)
+
+    def test_semantic_repair_prompt_targets_failed_collection_sections(self) -> None:
+        collection = """# Semantic Review Collection: scene_set
+
+## scene:10
+
+passed scene text
+
+## scene:40
+
+failed scene forty text
+
+## scene:50
+
+failed scene fifty text
+"""
+        report = """status: failed
+failed_selectors:
+  - scene40
+blocked_entries:
+  - scene:50
+"""
+
+        excerpt = _semantic_collection_excerpt(collection, report)
+
+        self.assertIn("failed scene forty text", excerpt)
+        self.assertIn("failed scene fifty text", excerpt)
+        self.assertNotIn("passed scene text", excerpt)
 
 
 if __name__ == "__main__":

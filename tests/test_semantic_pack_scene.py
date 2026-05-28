@@ -108,6 +108,30 @@ class TestSemanticPackScene(unittest.TestCase):
         self.assertNotIn("contract_required_fields_missing", entries[0])
         self.assertEqual(entries[1]["semantic_contract"]["must_preserve"], ["時間制限", "ガラスの靴の意味"])
 
+    def test_scene_intent_done_when_satisfies_scene_contract(self) -> None:
+        fixture = """# Script
+
+```yaml
+scenes:
+  - scene_id: 10
+    scene_intent:
+      dramatic_question: "問い"
+      value_shift: "変化"
+      causal_turn: "因果"
+      done_when: ["scene全体の完了条件"]
+    cuts: []
+```
+"""
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(fixture, encoding="utf-8")
+
+            entries = collect_entries("scene_set", run_dir)
+
+        self.assertFalse(entries[0]["semantic_contract_missing"])
+        self.assertEqual(entries[0]["semantic_contract"]["done_when"], ["scene全体の完了条件"])
+        self.assertEqual(entries[0]["normalized_semantic_contract"]["done_when"], ["scene全体の完了条件"])
+
     def test_collects_scene_detail_with_cut_summaries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
             run_dir = Path(td)

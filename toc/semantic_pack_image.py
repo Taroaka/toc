@@ -39,8 +39,10 @@ def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None =
     data = manifest if isinstance(manifest, dict) else load_manifest(resolved_run_dir / "video_manifest.md")
     asset_context = asset_context_by_id(resolved_run_dir)
     if stage == "image_prompt":
-        return collect_image_prompt_entries(data, asset_context=asset_context)
-    return collect_scene_image_entries(resolved_run_dir, data, asset_context=asset_context)
+        entries = collect_image_prompt_entries(data, asset_context=asset_context)
+        return entries + collect_scene_composite_entries(data, stage=stage)
+    entries = collect_scene_image_entries(resolved_run_dir, data, asset_context=asset_context)
+    return entries + collect_scene_composite_entries(data, stage=stage, run_dir=resolved_run_dir)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -73,7 +75,7 @@ def collect_image_prompt_entries(
         if plan_mode and plan_mode != mode_filter:
             continue
         review = _dict(image_generation.get("review"))
-        contract = _dict(review.get("contract")) or _dict(image_generation.get("contract")) or _dict(cut.get("scene_contract"))
+        contract = _cut_semantic_contract(cut, image_generation=image_generation, review=review)
         semantic_contract = semantic_contract_payload(contract)
         ids = {
             "character_ids": _as_str_list(image_generation.get("character_ids")),
@@ -142,9 +144,7 @@ def collect_scene_image_entries(
             "object_ids": _as_str_list(image_generation.get("object_ids")),
             "location_ids": _as_str_list(image_generation.get("location_ids")),
         }
-        semantic_contract = semantic_contract_payload(
-            _dict(image_generation.get("contract")) or _dict(cut.get("scene_contract"))
-        )
+        semantic_contract = semantic_contract_payload(_cut_semantic_contract(cut, image_generation=image_generation))
         entries.append(
             {
                 "stage": "scene_image",
@@ -171,6 +171,93 @@ def collect_scene_image_entries(
                 "contact_sheet_required": True,
                 "contact_sheet_missing": contact_sheet_missing,
                 "contact_sheet_refs": contact_sheet_refs,
+            }
+        )
+    return entries
+
+
+def collect_scene_composite_entries(
+    manifest: dict[str, Any],
+    *,
+    stage: str,
+    run_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    scenes = manifest.get("scenes")
+    if not isinstance(scenes, list):
+        return entries
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        cuts = [cut for cut in _list(scene.get("cuts")) if isinstance(cut, dict)]
+        if not cuts:
+            continue
+        cut_entries: list[dict[str, Any]] = []
+        for cut in cuts:
+            image_generation = _dict(cut.get("image_generation"))
+            video_generation = _dict(cut.get("video_generation"))
+            contract = _cut_semantic_contract(cut, image_generation=image_generation)
+            semantic_contract = semantic_contract_payload(contract)
+            output = _as_str(image_generation.get("output"))
+            output_exists = None
+            if run_dir is not None and output:
+                output_exists = resolve_run_path(run_dir, output).exists()
+            cut_entries.append(
+                {
+                    "selector": cut_selector(scene, cut),
+                    "cut_function": _as_str(contract.get("cut_function")),
+                    "target_focus": semantic_contract.get("target_focus", ""),
+                    "screen_question": _as_str(contract.get("screen_question")),
+                    "dramatic_job": _as_str(contract.get("dramatic_job")),
+                    "visual_proof": _as_str(contract.get("visual_beat") or contract.get("visual_proof")),
+                    "first_frame_brief": _as_str(contract.get("first_frame_brief")),
+                    "prompt": _as_str(image_generation.get("prompt")),
+                    "image_output": output,
+                    "image_output_exists": output_exists,
+                    "video_motion_prompt": _as_str(video_generation.get("motion_prompt")),
+                    "motion_brief": _as_str(contract.get("motion_brief")),
+                    "narration": narration_text(cut),
+                    "semantic_contract": semantic_contract,
+                }
+            )
+        scene_contract = {
+            "scene_id": scene.get("scene_id"),
+            "scene_intent": _dict(scene.get("scene_intent")),
+            "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
+            "handoff_to_next_scene": _as_str(scene.get("handoff_to_next_scene")),
+            "terminal_resolution": _as_str(scene.get("terminal_resolution")),
+            "target_duration_seconds": scene.get("target_duration_seconds"),
+            "estimated_duration_seconds": scene.get("estimated_duration_seconds"),
+            "cut_count": len(cut_entries),
+        }
+        entries.append(
+            {
+                "stage": stage,
+                "review_scope": "scene_composite",
+                "selector": f"scene{scene.get('scene_id')}",
+                "scene_id": scene.get("scene_id"),
+                "scene_contract": scene_contract,
+                "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
+                "cut_count": len(cut_entries),
+                "cut_entries": cut_entries,
+                "scene_composite_gate": {
+                    "required": True,
+                    "minimum_cut_count": _as_int(_dict(scene.get("scene_cut_coverage_plan")).get("minimum_cut_count")) or 2,
+                    "must_judge": [
+                        "scene_cut_coverage_plan の scene_obligations が cut_entries に割り当てられているか",
+                        "cutごとの差異が番号差分や同義反復ではなく、sceneを再現するために必要な視覚要件の分担になっているか",
+                        "各cutの画像promptが、動画として接続した時にscene設計の問い、価値変化、因果転換、handoffを伝えられるか",
+                        "不足時は scene_requires_more_cuts、絵の具体性不足は cut_prompt_requires_reinforcement、重複過多は scene_cut_prompt_too_similar として判定する",
+                    ],
+                    "failure_reason_keys": [
+                        "scene_cut_coverage_insufficient",
+                        "scene_cut_prompt_too_similar",
+                        "scene_meaning_not_visualized_across_cuts",
+                        "scene_video_handoff_weak",
+                        "scene_requires_more_cuts",
+                        "cut_prompt_requires_reinforcement",
+                    ],
+                },
             }
         )
     return entries
@@ -324,6 +411,46 @@ def narration_text(cut: dict[str, Any]) -> str:
     audio = _dict(cut.get("audio"))
     narration = _dict(audio.get("narration"))
     return _as_str(narration.get("text") or narration.get("tts_text"))
+
+
+def _cut_semantic_contract(
+    cut: dict[str, Any],
+    *,
+    image_generation: dict[str, Any] | None = None,
+    review: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    image_generation = image_generation or _dict(cut.get("image_generation"))
+    review = review or _dict(image_generation.get("review"))
+    explicit = _dict(review.get("contract")) or _dict(image_generation.get("contract"))
+    if explicit:
+        return explicit
+    cut_contract = _dict(cut.get("cut_contract"))
+    if cut_contract:
+        viewer = _dict(cut_contract.get("viewer_contract"))
+        first_frame = _dict(cut_contract.get("first_frame_contract"))
+        motion = _dict(cut_contract.get("motion_contract"))
+        cinematic = _dict(cut_contract.get("cinematic_contract"))
+        geography = _dict(cinematic.get("screen_geography"))
+        continuity = _dict(cut_contract.get("continuity_contract"))
+        location_ids = _as_str_list(continuity.get("location_ids"))
+        start_state = _dict(continuity.get("start_state"))
+        return {
+            "cut_function": _as_str(cut_contract.get("cut_function")),
+            "target_focus": _as_str(viewer.get("target_beat") or cut_contract.get("target_beat")),
+            "target_beat": _as_str(viewer.get("target_beat") or cut_contract.get("target_beat")),
+            "screen_question": _as_str(viewer.get("screen_question")),
+            "dramatic_job": _as_str(viewer.get("dramatic_job")),
+            "visual_beat": _as_str(viewer.get("visual_proof") or cut_contract.get("visual_beat")),
+            "must_include": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
+            "must_show": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
+            "must_avoid": _as_str_list(viewer.get("must_avoid") or first_frame.get("must_avoid")),
+            "done_when": _as_str_list(viewer.get("done_when")),
+            "first_frame_brief": _as_str(first_frame.get("first_frame_brief")),
+            "motion_brief": _as_str(motion.get("motion_brief")),
+            "primary_location": _as_str(geography.get("background") or (location_ids[0] if location_ids else "")),
+            "continuity_from_previous": _as_str(start_state.get("spatial_state") or start_state.get("character_state")),
+        }
+    return _dict(cut.get("scene_contract"))
 
 
 def semantic_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:

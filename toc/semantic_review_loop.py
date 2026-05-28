@@ -7,7 +7,8 @@ from toc.harness import now_iso
 from toc.semantic_review import semantic_review_relpaths
 
 
-DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 3
+DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 5
+DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS = 1800
 DEFAULT_SEMANTIC_REPAIR_TIMEOUT_SECONDS = 900
 
 
@@ -101,12 +102,65 @@ def semantic_repair_timeout_seconds() -> int:
         return DEFAULT_SEMANTIC_REPAIR_TIMEOUT_SECONDS
 
 
+def semantic_review_timeout_seconds() -> int:
+    raw = os.environ.get("TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS
+
+
 def semantic_repair_relpaths(stage: str, round_number: int) -> dict[str, Path]:
     base = Path("logs/review/semantic")
     return {
         "prompt": base / f"{stage}.repair_round_{round_number:02d}.prompt.md",
         "report": base / f"{stage}.repair_round_{round_number:02d}.producer_report.md",
     }
+
+
+def _semantic_review_failed_selectors(review_report: str) -> set[str]:
+    selectors: set[str] = set()
+    in_failed_list = False
+    for raw in review_report.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("failed_selectors:") or stripped.startswith("blocked_entries:"):
+            in_failed_list = True
+            continue
+        if in_failed_list and stripped and not stripped.startswith("-"):
+            in_failed_list = False
+        if in_failed_list and stripped.startswith("-"):
+            value = stripped[1:].strip().strip("`\"'")
+            if value:
+                selectors.add(value)
+                if value.startswith("scene:"):
+                    selectors.add("scene" + value.split(":", 1)[1])
+                elif value.startswith("scene") and value[5:].isdigit():
+                    selectors.add("scene:" + value[5:])
+    return selectors
+
+
+def _semantic_collection_excerpt(collection_text: str, review_report: str, *, max_chars: int = 14000) -> str:
+    failed_selectors = _semantic_review_failed_selectors(review_report)
+    if not failed_selectors:
+        return collection_text[:max_chars]
+
+    selected_sections: list[str] = []
+    chunks = collection_text.split("\n## ")
+    preamble = chunks[0].strip()
+    for chunk in chunks[1:]:
+        heading = chunk.splitlines()[0].strip().strip("`")
+        if heading in failed_selectors:
+            selected_sections.append("## " + chunk.strip())
+
+    if not selected_sections:
+        return collection_text[:max_chars]
+
+    excerpt = "\n\n".join(section[:5000] for section in selected_sections)
+    if preamble:
+        excerpt = preamble + "\n\n" + excerpt
+    return excerpt[:max_chars]
 
 
 def semantic_loop_state_updates(
@@ -169,7 +223,8 @@ def write_semantic_repair_prompt(
     collection_path = run_dir / review_paths["collection"]
     scope_path = run_dir / review_paths["scope"]
     review_report = review_report_path.read_text(encoding="utf-8", errors="replace") if review_report_path.exists() else "(missing semantic report)"
-    collection_excerpt = collection_path.read_text(encoding="utf-8", errors="replace")[:12000] if collection_path.exists() else "(missing collection)"
+    collection_text = collection_path.read_text(encoding="utf-8", errors="replace") if collection_path.exists() else "(missing collection)"
+    collection_excerpt = _semantic_collection_excerpt(collection_text, review_report)
     target = SEMANTIC_REVIEW_PRODUCER_TARGETS.get(stage, {})
     owner = str(target.get("owner") or f"{stage} producer")
     slot = str(target.get("slot") or "")
@@ -181,7 +236,9 @@ def write_semantic_repair_prompt(
 
 You are the original production-side agent for `{stage}` in this ToC run.
 
-The contextless semantic review agent rejected the current artifact. Use the review findings as improvement instructions, repair the production artifacts, and leave the process in semantic-QA repair state. Do not advance the process slot to the next stage. Do not edit the semantic review report to fake a pass; the orchestrator will rebuild the pack and call the semantic reviewer again.
+The contextless semantic review agent rejected the current artifact. Use the review findings as improvement instructions, repair the production artifacts, and leave the process in semantic-QA repair state.
+
+This is a real semantic repair, not a bypass. Do not advance the process slot to the next stage. Do not edit `state.txt`, `run_status.json`, or `p000_index.md`; the orchestrator is the only writer for process state. Do not edit any `logs/review/semantic/*` files except the producer repair report named below. In particular, do not edit the semantic review report, collection, scope, or prompt to fake a pass; the orchestrator will rebuild the pack and call the semantic reviewer again from the production artifacts.
 
 - Run directory: `{run_dir}`
 - Current semantic stage: `{stage}`
@@ -190,6 +247,8 @@ The contextless semantic review agent rejected the current artifact. Use the rev
 - Producing owner: `{owner}`
 - Repair focus: {focus}
 - Primary editable artifacts: {", ".join(artifacts) if artifacts else "(stage-owned artifacts)"}
+- Non-editable state/navigation artifacts: `state.txt`, `run_status.json`, `p000_index.md`
+- Non-editable review artifacts: `logs/review/semantic/{stage}.collection.md`, `logs/review/semantic/{stage}.scope.json`, `logs/review/semantic/{stage}.prompt.md`, `logs/review/semantic/{stage}.report.md`
 - Producer repair report to write: `{relpaths["report"].as_posix()}`
 
 ## Reviewer Findings / Gate Errors
@@ -216,15 +275,21 @@ The contextless semantic review agent rejected the current artifact. Use the rev
 
 ## Required Work
 
-1. Repair the production artifact(s) so the reviewed meaning is genuinely correct.
-2. Preserve existing structure and paths unless a reviewer finding requires a targeted change.
-3. If this stage owns generated media, update prompts/contracts and regenerate the affected media through the repository's canonical tooling when needed.
-4. Keep the stage visible as semantic-QA repair, not as approved or advanced.
-5. Write `{relpaths["report"].as_posix()}` with:
+1. Treat every `blocked_entries`, `failed_selectors`, `findings`, and `reason_keys` item in the failed semantic report as a required fix.
+2. Repair the production artifact(s) so the reviewed meaning is genuinely correct. If a previous repair only partially fixed the stage, focus on the remaining failed selectors rather than rewriting already-passed entries.
+3. Preserve existing structure and paths unless a reviewer finding requires a targeted change.
+4. If this stage owns generated media, update prompts/contracts and regenerate the affected media through the repository's canonical tooling when needed.
+5. Before writing your report, inspect the edited production artifacts for the rejected meaning and remove contradictory language such as stale withheld/reveal/order/object continuity instructions.
+6. Keep the stage visible as semantic-QA repair, not as approved or advanced.
+7. Stay narrowly scoped: read only the listed run artifacts and the failed selectors unless a direct dependency is missing. Do not run repo-wide searches, do not print full artifact files to stdout, and do not run commands that can emit thousands of lines.
+8. Do not edit passed selectors or unrelated scenes/cuts. For repeated generic wording, never use broad search-and-replace or a patch that can match the same phrase in multiple selectors. Anchor every edit to the failed selector id, scene id, cut id, asset id, or exact artifact section.
+9. After editing, inspect the failed selectors and a small sample of neighboring passed selectors to ensure the repair did not move later-stage meaning into earlier scenes, change reveal order, or mutate unrelated semantic contracts.
+10. Write `{relpaths["report"].as_posix()}` immediately after the targeted repair with:
    - `status: done`
    - changed artifacts
    - reviewer findings addressed
    - remaining risks, if any
+   Do not include `state.txt`, `run_status.json`, `p000_index.md`, `logs/review/semantic/{stage}.collection.md`, `.scope.json`, `.prompt.md`, or `.report.md` as changed artifacts.
 
 The next action after your repair will be a fresh contextless semantic review. Passing requires the reviewer report to say `status: passed`.
 """
