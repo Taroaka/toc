@@ -60,6 +60,7 @@ from pydantic import BaseModel, Field
 from .codex_app_server import (
     CodexAppServerClient,
     CodexAppServerError,
+    CodexAppServerTransportError,
     app_server_disabled,
     classify_codex_transport_error,
     create_codex_app_server_client,
@@ -178,7 +179,11 @@ IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS = max(
 )
 FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS = max(
     1.0,
-    float(os.environ.get("TOC_FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS", "14400") or "14400"),
+    float(os.environ.get("TOC_FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS", "28800") or "28800"),
+)
+CODEX_APP_SERVER_START_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("TOC_CODEX_APP_SERVER_START_TIMEOUT_SECONDS", "180") or "180"),
 )
 PROMPT_REPAIR_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("TOC_PROMPT_REPAIR_TIMEOUT_SECONDS", "120") or "120"))
 CREATE_SKILL_STOP_POLL_SECONDS = max(1.0, float(os.environ.get("TOC_CREATE_SKILL_STOP_POLL_SECONDS", "10") or "10"))
@@ -3125,7 +3130,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
     result = None
     debug_log = None
     try:
-        await client.start()
+        await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         generated_root = client.generated_images_root() if hasattr(client, "generated_images_root") else None
         async with _generated_images_cutoff_lock:
             fallback_cutoff_ns = latest_generated_image_mtime_ns(generated_root)
@@ -3160,7 +3165,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                 )
                 await client.stop()
                 client = create_codex_app_server_client(cwd=ROOT)
-                await client.start()
+                await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -3685,20 +3690,47 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
 
 async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_attempts: int | None = None) -> None:
     attempts = max(1, max_attempts or semantic_review_max_attempts())
+    reusable_result = _reusable_passed_semantic_review(run_dir, stage)
+    if reusable_result is not None:
+        _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="reused_passed_report",
+            item_id=job_id,
+            request={"stage": stage, "maxAttempts": attempts},
+            response={"status": reusable_result.status, "entryCount": reusable_result.entry_count},
+        )
+        return
     last_result: SemanticReviewStatus | None = None
     for attempt in range(1, attempts + 1):
         append_state_snapshot(
             run_dir / "state.txt",
             semantic_loop_state_updates(stage, status="reviewing", attempt=attempt, max_attempts=attempts),
         )
-        result = await _run_semantic_review_once(
-            job_id,
-            run_dir=run_dir,
-            stage=stage,
-            attempt=attempt,
-            max_attempts=attempts,
-            final_attempt=attempt >= attempts,
-        )
+        try:
+            result = await asyncio.wait_for(
+                _run_semantic_review_once(
+                    job_id,
+                    run_dir=run_dir,
+                    stage=stage,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    final_attempt=attempt >= attempts,
+                ),
+                timeout=_semantic_review_once_hard_timeout_seconds(),
+            )
+        except asyncio.TimeoutError as exc:
+            _record_semantic_review_hard_timeout(
+                run_dir,
+                stage,
+                attempt=attempt,
+                max_attempts=attempts,
+                timeout_seconds=_semantic_review_once_hard_timeout_seconds(),
+            )
+            raise CodexAppServerTransportError(
+                f"{stage} semantic review timed out before report reached a terminal status"
+            ) from exc
         last_result = result
         if result.passed:
             append_state_snapshot(
@@ -3712,16 +3744,184 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 semantic_loop_state_updates(stage, status="failed", attempt=attempt, max_attempts=attempts, error_count=len(result.errors)),
             )
             raise RuntimeError(f"{stage} semantic review failed after {attempts} attempt(s): " + "; ".join(result.errors))
-        await _run_semantic_review_producer_repair(
-            job_id,
-            run_dir=run_dir,
-            stage=stage,
-            round_number=attempt,
-            max_attempts=attempts,
-            errors=result.errors,
-        )
+        try:
+            await asyncio.wait_for(
+                _run_semantic_review_producer_repair(
+                    job_id,
+                    run_dir=run_dir,
+                    stage=stage,
+                    round_number=attempt,
+                    max_attempts=attempts,
+                    errors=result.errors,
+                ),
+                timeout=_semantic_repair_once_hard_timeout_seconds(),
+            )
+        except asyncio.TimeoutError as exc:
+            _record_semantic_repair_hard_timeout(
+                run_dir,
+                stage,
+                round_number=attempt,
+                max_attempts=attempts,
+                error_count=len(result.errors),
+                timeout_seconds=_semantic_repair_once_hard_timeout_seconds(),
+            )
+            raise CodexAppServerTransportError(
+                f"{stage} semantic producer repair timed out before report reached a terminal status"
+            ) from exc
     if last_result is not None and not last_result.passed:
         raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(last_result.errors))
+
+
+def _reusable_passed_semantic_review(run_dir: Path, stage: str) -> SemanticReviewStatus | None:
+    if os.environ.get("TOC_SEMANTIC_REVIEW_REUSE_PASSED", "1").strip().lower() in {"0", "false", "no"}:
+        return None
+    result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+    if not result.passed:
+        return None
+    if not _semantic_review_report_sources_are_current(run_dir, stage):
+        return None
+    return result
+
+
+def _semantic_review_report_sources_are_current(run_dir: Path, stage: str) -> bool:
+    relpaths = semantic_review_relpaths(stage)
+    scope_path = run_dir / relpaths["scope"]
+    report_path = run_dir / relpaths["report"]
+    if not scope_path.exists() or not report_path.exists():
+        return False
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    source_artifacts = scope.get("source_artifacts")
+    if not isinstance(source_artifacts, list) or not source_artifacts:
+        return False
+    report_mtime_ns = report_path.stat().st_mtime_ns
+    for raw_rel in source_artifacts:
+        if not isinstance(raw_rel, str) or not raw_rel.strip():
+            return False
+        source_path = run_dir / raw_rel
+        if not source_path.exists():
+            return False
+        if source_path.stat().st_mtime_ns > report_mtime_ns:
+            return False
+    return True
+
+
+def _record_reused_semantic_review(
+    run_dir: Path,
+    stage: str,
+    result: SemanticReviewStatus,
+    *,
+    max_attempts: int,
+) -> None:
+    state_updates = review_status_to_state(stage, result)
+    state_updates.update(
+        semantic_loop_state_updates(stage, status="passed", attempt=0, max_attempts=max_attempts, error_count=0)
+    )
+    state_updates.update(
+        {
+            f"review.semantic.{stage}.reuse.status": "reused_passed_report",
+            f"review.semantic.{stage}.transport.status": "passed",
+            f"review.semantic.{stage}.repair.active": "false",
+        }
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        state_updates[f"slot.{slot}.status"] = "done"
+        state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review reused non-stale passed report"
+    if stage == "image_prompt":
+        state_updates.update(
+            {
+                "review.image_prompt.judgment.status": result.status or "failed",
+                "review.image_prompt.judgment.error_count": str(len(result.errors)),
+            }
+        )
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+
+
+def _semantic_review_once_hard_timeout_seconds() -> float:
+    return float(semantic_review_timeout_seconds()) + CODEX_APP_SERVER_START_TIMEOUT_SECONDS + SEMANTIC_TURN_COMPLETION_GRACE_SECONDS + 30.0
+
+
+def _semantic_repair_once_hard_timeout_seconds() -> float:
+    return float(semantic_repair_timeout_seconds()) + CODEX_APP_SERVER_START_TIMEOUT_SECONDS + SEMANTIC_TURN_COMPLETION_GRACE_SECONDS + 30.0
+
+
+def _record_semantic_review_hard_timeout(
+    run_dir: Path,
+    stage: str,
+    *,
+    attempt: int,
+    max_attempts: int,
+    timeout_seconds: float,
+) -> None:
+    updates = semantic_loop_state_updates(
+        stage,
+        status="blocked_transport",
+        attempt=attempt,
+        max_attempts=max_attempts,
+        error_count=1,
+    )
+    updates.update(
+        {
+            f"review.semantic.{stage}.transport.status": "failed",
+            f"review.semantic.{stage}.transport.error_kind": "timeout",
+            f"review.semantic.{stage}.transport.error": f"semantic review hard timeout after {timeout_seconds:.0f}s",
+            "runtime.stage": "app_server_transport_failed",
+            "runtime.app_server.transport.status": "failed",
+            "runtime.app_server.transport.error_kind": "timeout",
+        }
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        updates[f"slot.{slot}.status"] = "failed"
+        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review blocked by app-server timeout"
+    append_state_snapshot(run_dir / "state.txt", updates)
+
+
+def _record_semantic_repair_hard_timeout(
+    run_dir: Path,
+    stage: str,
+    *,
+    round_number: int,
+    max_attempts: int,
+    error_count: int,
+    timeout_seconds: float,
+) -> None:
+    updates = semantic_loop_state_updates(
+        stage,
+        status="blocked_transport",
+        attempt=round_number,
+        max_attempts=max_attempts,
+        error_count=error_count,
+    )
+    updates.update(
+        semantic_repair_state_updates(
+            stage,
+            status="blocked_transport",
+            round_number=round_number,
+            max_attempts=max_attempts,
+            error_count=error_count,
+        )
+    )
+    updates.update(
+        {
+            f"review.semantic.{stage}.transport.status": "failed",
+            f"review.semantic.{stage}.transport.error_kind": "timeout",
+            f"review.semantic.{stage}.transport.error": f"semantic producer repair hard timeout after {timeout_seconds:.0f}s",
+            f"review.semantic.{stage}.repair.transport.status": "failed",
+            f"review.semantic.{stage}.repair.transport.error_kind": "timeout",
+            "runtime.stage": "app_server_transport_failed",
+            "runtime.app_server.transport.status": "failed",
+            "runtime.app_server.transport.error_kind": "timeout",
+        }
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        updates[f"slot.{slot}.status"] = "failed"
+        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by app-server timeout"
+    append_state_snapshot(run_dir / "state.txt", updates)
 
 
 async def _run_semantic_review_once(
@@ -3754,7 +3954,10 @@ async def _run_semantic_review_once(
     client = create_codex_app_server_client(cwd=ROOT)
     transcript: list[dict[str, Any]] = []
     try:
-        thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
+        thread_id = await asyncio.wait_for(
+            client.start_thread(cwd=ROOT, approval_policy="never"),
+            timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
+        )
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
@@ -3843,6 +4046,8 @@ async def _run_semantic_review_once(
         if result.passed:
             state_updates[f"slot.{slot}.status"] = "done"
             state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review passed"
+            state_updates[f"review.semantic.{stage}.transport.status"] = "passed"
+            state_updates[f"review.semantic.{stage}.repair.active"] = "false"
         elif final_attempt:
             state_updates[f"slot.{slot}.status"] = "failed"
             state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed after repair loop"
@@ -4006,7 +4211,10 @@ async def _run_semantic_review_producer_repair(
     client = create_codex_app_server_client(cwd=ROOT)
     transcript: list[dict[str, Any]] = []
     try:
-        thread_id = await client.start_thread(cwd=ROOT, approval_policy="never")
+        thread_id = await asyncio.wait_for(
+            client.start_thread(cwd=ROOT, approval_policy="never"),
+            timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
+        )
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,

@@ -168,6 +168,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("階段に残るガラスの靴", pre_loss_scene70)
             self.assertIn("階段に残るガラスの靴", loss_scene70)
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
+            self.assertIn("このsceneの前半6cutまでは舞踏会ドレス姿", pre_loss_scene70)
+            self.assertIn("質素な服、普段着、魔法が解けた後の服を出さない", pre_loss_scene70)
+            self.assertIn("後半の反応cut以降だけ、魔法が解けた後の質素な服へ変わる", post_loss_scene70)
 
             transformation_scene = scene_request_text.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
             self.assertIn("reference_count: `2`", transformation_scene)
@@ -221,6 +224,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("背景に次の場所へ続く導線", final_scene_requests)
             self.assertIn("落ち着いた室内光", final_scene_requests)
             self.assertIn("椅子と床", final_scene_requests)
+            self.assertIn("靴合わせの部屋では魔法が解けた後の質素な服", final_scene_requests)
             self.assertNotIn("月光、ガラス、階段", final_scene_requests)
 
             video_request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")

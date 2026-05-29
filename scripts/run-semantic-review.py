@@ -172,6 +172,8 @@ async def _run_review_once(run_dir: Path, stage: str, *, timeout_seconds: int, a
         if result.passed:
             updates[f"slot.{slot}.status"] = "done"
             updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review passed"
+            updates[f"review.semantic.{stage}.transport.status"] = "passed"
+            updates[f"review.semantic.{stage}.repair.active"] = "false"
         elif final_attempt:
             updates[f"slot.{slot}.status"] = "failed"
             updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed after repair loop"

@@ -537,6 +537,17 @@ def _scene_prompt(
         if include_artifact
         else f"{profile['topic_label']}の始まりから試練、証明へつながる。人物の顔、髪、体格、衣装の主要形状を変えない。"
     )
+    character_state_gate = ""
+    if profile.get("slug") == "cinderella":
+        if scene_index == 7:
+            character_state_gate = (
+                "このsceneの前半6cutまでは舞踏会ドレス姿の逃走状態を維持する。"
+                "質素な服、普段着、魔法が解けた後の服を出さない。"
+                "後半の反応cut以降だけ、魔法が解けた後の質素な服へ変わる。"
+            )
+        elif terminal_resolution:
+            character_state_gate = "靴合わせの部屋では魔法が解けた後の質素な服。舞踏会ドレス、夜の階段、月光の逃走状態に戻さない。"
+    character_state_lines = ["", "[人物状態ゲート]", character_state_gate] if character_state_gate else []
     return "\n".join(
         [
             "[全体 / 不変条件]",
@@ -544,6 +555,7 @@ def _scene_prompt(
             "",
             "[登場人物]",
             f"{profile['protagonist_name']}は参照画像と同じ人物。顔立ち、髪、体格、衣装の主要形状を保つ。",
+            *character_state_lines,
             "",
             *artifact_lines,
             "[シーン]",
@@ -1899,12 +1911,13 @@ def _write_orchestration(run_dir: Path, stop_target: str) -> dict[str, str]:
         state_updates[f"{key}.status"] = "done"
         state_updates[f"{key}.finished_at"] = now
         status_key = f"slot.{bucket_slots[bucket][-1]}.status"
+        expected_status = "done" if bucket == "p500" and stop_target == "p680" else ("awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done")
         result = {
             "bucket": bucket,
             "status": "done",
             "completed_slots": list(bucket_slots[bucket]),
             "required_artifacts": [{"path": path, "exists": True} for path in bucket_artifacts[bucket]],
-            "state_keys": {status_key: "awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done"},
+            "state_keys": {status_key: expected_status},
             "review_outputs": [],
             "next_bucket": None if bucket == "p600" else "next",
         }
@@ -1960,9 +1973,11 @@ def _build_asset_artifacts_from_manifest(
             continue
         role = str((entry.get("cinematic") or {}).get("role") or "登場人物の一貫性を固定する")
         subject = str((entry.get("cinematic") or {}).get("visual_subject") or f"{profile['protagonist_name']}の全身、自然な映画俳優の顔立ち、生活感のある衣装")
+        reference_inputs = _asset_reference_inputs_for_plan(profile, asset_id)
+        execution_lane = "standard" if reference_inputs else "bootstrap_builtin"
         coverage["characters"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "characters", "source_script_selectors": selectors, "story_purpose": role, "reusable_reason": "登場cutで人物同一性を保つ", "recommended_asset_type": "character_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["front", "side", "back"], "reference_inputs": _asset_reference_inputs_for_plan(profile, asset_id), "output": output}, "review": {"status": "approved", "reason": "登場cutで人物同一性を保つため必須"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": execution_lane, "bootstrap_allowed": not reference_inputs, "required_views": ["front", "side", "back"], "reference_inputs": reference_inputs, "output": output}, "review": {"status": "approved", "reason": "登場cutで人物同一性を保つため必須"}})
 
     for entry in assets.get("object_bible", []) or []:
         if not isinstance(entry, dict):

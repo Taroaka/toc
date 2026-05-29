@@ -2249,6 +2249,110 @@ base b prompt
         self.assertTrue(repair_prompt_exists)
         self.assertTrue(repair_report_exists)
 
+    def test_semantic_review_reuses_non_stale_passed_report_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "asset_plan"
+            source_path = run_dir / "asset_plan.md"
+            source_path.write_text("# asset plan\n\nmeaningful source\n", encoding="utf-8")
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / paths["collection"]).write_text("# collection\n", encoding="utf-8")
+            (run_dir / paths["scope"]).write_text(
+                json.dumps({"entry_count": 1, "source_artifacts": ["asset_plan.md"]}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
+            (run_dir / paths["report"]).write_text(
+                "status: passed\nreviewed_entries: [asset_1]\nblocked_entries: []\nfindings: []\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run") as build_pack,
+                patch("server.image_gen_app.create_codex_app_server_client") as create_client,
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        build_pack.assert_not_called()
+        create_client.assert_not_called()
+        self.assertEqual(state["review.semantic.asset_plan.status"], "passed")
+        self.assertEqual(state["review.semantic.asset_plan.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.asset_plan.loop.attempt"], "0")
+        self.assertEqual(state["review.semantic.asset_plan.reuse.status"], "reused_passed_report")
+        self.assertEqual(state["slot.p540.status"], "done")
+
+    def test_semantic_review_does_not_reuse_stale_passed_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "asset_plan"
+            source_path = run_dir / "asset_plan.md"
+            source_path.write_text("# asset plan\n\nold source\n", encoding="utf-8")
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / paths["collection"]).write_text("# collection\n", encoding="utf-8")
+            (run_dir / paths["scope"]).write_text(
+                json.dumps({"entry_count": 1, "source_artifacts": ["asset_plan.md"]}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
+            (run_dir / paths["report"]).write_text(
+                "status: passed\nreviewed_entries: [asset_1]\nblocked_entries: []\nfindings: []\n",
+                encoding="utf-8",
+            )
+            time.sleep(0.01)
+            source_path.write_text("# asset plan\n\nupdated source\n", encoding="utf-8")
+            review_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                (run_dir / paths["collection"]).write_text("# rebuilt collection\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps({"entry_count": 1, "source_artifacts": ["asset_plan.md"]}, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text("# rebuilt prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal review_turns
+                    review_turns += 1
+                    (run_dir / paths["report"]).write_text(
+                        "status: passed\nreviewed_entries: [asset_1]\nblocked_entries: []\nfindings: []\n",
+                        encoding="utf-8",
+                    )
+                    return []
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 1)
+        self.assertEqual(state["review.semantic.asset_plan.status"], "passed")
+        self.assertNotIn("review.semantic.asset_plan.reuse.status", state)
+
     def test_semantic_review_repeats_repair_until_later_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2363,6 +2467,29 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertFalse(repair_prompt_exists)
+
+    def test_semantic_review_hard_timeout_blocks_as_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+
+            async def never_finishes(*_args, **_kwargs):
+                await asyncio.Event().wait()
+
+            with (
+                patch("server.image_gen_app._run_semantic_review_once", never_finishes),
+                patch("server.image_gen_app._semantic_review_once_hard_timeout_seconds", lambda: 0.01),
+            ):
+                with self.assertRaisesRegex(CodexAppServerTransportError, "timed out"):
+                    asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
+        self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_set.transport.error_kind"], "timeout")
+        self.assertEqual(state["runtime.app_server.transport.status"], "failed")
 
     def test_semantic_review_repair_transport_failure_blocks_without_semantic_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2479,6 +2606,7 @@ base b prompt
         self.assertEqual(repair_turns, 1)
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
         self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertEqual(state["review.semantic.scene_set.transport.status"], "passed")
         self.assertNotIn("runtime.app_server.transport.status", state)
 
     def test_semantic_review_accepts_completed_failed_review_report_after_turn_timeout(self) -> None:
@@ -2540,7 +2668,7 @@ base b prompt
         self.assertEqual(repair_turns, 1)
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
         self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
-        self.assertNotIn("review.semantic.scene_set.transport.status", state)
+        self.assertEqual(state["review.semantic.scene_set.transport.status"], "passed")
 
     def test_semantic_review_advances_when_report_finishes_before_turn_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2603,7 +2731,7 @@ base b prompt
         self.assertEqual(repair_turns, 1)
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
         self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
-        self.assertNotIn("review.semantic.scene_set.transport.status", state)
+        self.assertEqual(state["review.semantic.scene_set.transport.status"], "passed")
 
     def test_generate_create_images_fails_when_scene_generation_has_no_saved_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3054,6 +3182,49 @@ base b prompt
                 patch("server.image_gen_app.ROOT", Path(tmp)),
                 patch("server.image_gen_app.create_codex_app_server_client", SlowClient),
                 patch("server.image_gen_app.IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS", 0.01),
+                patch("server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS", 1),
+            ):
+                with self.assertRaises(TimeoutError):
+                    asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="scene", item=item))
+
+            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertIn('"operation": "request_item_generation"', event_payload)
+        self.assertIn('"status": "failed"', event_payload)
+
+    def test_image_generation_app_server_start_timeout_fails_without_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+
+            class SlowStartClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    await asyncio.sleep(5)
+
+                async def stop(self):
+                    return None
+
+            item = image_gen.ImageRequestItem(
+                id="slow_start_scene",
+                kind="scene",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/scenes/slow_start_scene.png",
+                prompt="実写映画風。",
+                references=[],
+                reference_count=0,
+                execution_lane="standard",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.create_codex_app_server_client", SlowStartClient),
+                patch("server.image_gen_app.CODEX_APP_SERVER_START_TIMEOUT_SECONDS", 0.01),
                 patch("server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS", 1),
             ):
                 with self.assertRaises(TimeoutError):
