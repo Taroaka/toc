@@ -9,6 +9,7 @@ from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
     _semantic_collection_excerpt,
     semantic_repair_relpaths,
+    semantic_repair_timeout_seconds,
     semantic_review_max_attempts,
     semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
@@ -147,6 +148,10 @@ class TestSemanticReview(unittest.TestCase):
     def test_semantic_review_timeout_default_allows_long_contextless_reviews(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS": ""}):
             self.assertEqual(semantic_review_timeout_seconds(), 1800)
+
+    def test_semantic_repair_timeout_default_allows_long_producer_repairs(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REPAIR_TIMEOUT_SECONDS": ""}):
+            self.assertEqual(semantic_repair_timeout_seconds(), 1800)
 
     def test_semantic_repair_prompt_forbids_editing_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:

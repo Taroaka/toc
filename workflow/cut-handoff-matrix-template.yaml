@@ -7,12 +7,27 @@ scene_obligations:
   dramatic_question: ""
   value_shift_visible_evidence: []
   causal_turn: ""
+  story_event_obligations:
+    - event_id: ""
+      source_events: []
+      audience_knowledge_delta: ""
+      causal_proof: ""
+      visual_evidence: []
+      required_roles: []
+  reveal_constraints: []
   handoff_to_next_scene: ""
 
 cuts:
   - selector: "scene1_cut1"
     cut_function: "setup"
     target_beat: ""
+    assigned_story_event_ids: []
+    audience_knowledge_delta: ""
+    causal_proof: ""
+    visual_evidence: []
+    required_roles: []
+    anti_redundancy_key: ""
+    static_first_frame_rule: ""
     receives_from_previous:
       visual: ""
       audio: ""
@@ -51,6 +66,11 @@ cuts:
 
 scene_level_review:
   all_scene_obligations_covered: false
+  story_event_obligation_coverage: false
+  causal_proof_coverage: false
+  role_coverage: false
+  audience_knowledge_delta_coverage: false
+  anti_redundancy_gate: false
   no_overloaded_cuts: false
   no_missing_thresholds: false
   no_missing_reactions: false
@@ -59,4 +79,3 @@ scene_level_review:
   ready_for_p600: false
   ready_for_p700: false
   ready_for_p800: false
-

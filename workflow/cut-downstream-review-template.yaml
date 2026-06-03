@@ -5,8 +5,15 @@ selector: "scene1_cut1"
 source_cut_contract:
   cut_function: ""
   target_beat: ""
+  audience_knowledge_delta: ""
+  causal_proof: ""
+  visual_evidence: []
+  required_roles: []
+  assigned_story_event_ids: []
+  anti_redundancy_key: ""
   visual_proof: ""
   first_frame_brief: ""
+  static_first_frame_rule: ""
   motion_brief: ""
   narration_role: ""
   handoff: ""
@@ -15,7 +22,11 @@ p600_image_review:
   prompt_uses_first_frame_only: false
   prompt_contains_no_authoring_metadata: false
   still_does_not_finish_action: false
+  static_first_frame_rule_visible: false
+  audience_knowledge_delta_visible: false
+  causal_proof_visible: false
   visual_proof_visible: false
+  required_roles_visible: false
   continuity_anchors_present: false
   reveal_constraints_preserved: false
   findings: []
@@ -38,6 +49,8 @@ p800_video_review:
 
 overall:
   same_target_beat: false
+  scene_obligation_covered_by_cut_group: false
+  no_duplicate_story_fact_without_new_evidence: false
   image_supports_motion_start: false
   motion_reaches_declared_end_state: false
   narration_not_captioning_image: false
@@ -46,4 +59,3 @@ overall:
   handoff_visible_or_audible: false
   status: "pending|passed|changes_requested|waived"
   blocking_reason_keys: []
-

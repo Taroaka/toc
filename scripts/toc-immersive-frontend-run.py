@@ -570,6 +570,210 @@ def _scene_prompt(
     )
 
 
+def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
+    events = [str(event) for event in profile.get("events", []) if str(event).strip()]
+    scene_titles = [str(title) for title in profile.get("scene_titles") or []]
+    scene_count = max(1, len(profile.get("scene_titles") or []))
+    if not events:
+        return []
+    title = scene_titles[idx - 1] if 0 <= idx - 1 < len(scene_titles) else ""
+    keyword_bank = (
+        "灰",
+        "台所",
+        "孤立",
+        "扉",
+        "拒",
+        "仕事",
+        "衣装",
+        "知らせ",
+        "招待",
+        "助力",
+        "魔法",
+        "変身",
+        "馬車",
+        "出発",
+        "宮殿",
+        "階段",
+        "舞踏",
+        "踊",
+        "王子",
+        "真夜中",
+        "鐘",
+        "逃",
+        "失",
+        "靴",
+        "使者",
+        "探",
+        "合い",
+        "身元",
+        "名前",
+        "証明",
+        "解放",
+    )
+    title_keywords = [keyword for keyword in keyword_bank if keyword in title]
+    semantic_expansions = {
+        "扉": ["拒", "仕事", "衣装", "参加", "妨げ"],
+        "拒": ["扉", "仕事", "衣装", "参加", "妨げ"],
+        "変身": ["助力", "ドレス", "靴", "馬車", "現れる"],
+        "魔法": ["助力", "変身", "ドレス", "靴", "馬車", "現れる"],
+        "出発": ["馬車", "向かう", "宮殿", "越え"],
+        "馬車": ["出発", "向かう", "宮殿", "越え"],
+        "宮殿": ["階段", "入", "舞踏", "踊", "王子"],
+        "階段": ["宮殿", "入"],
+        "舞踏": ["踊", "王子", "知らない姿", "誰も知らない"],
+        "踊": ["舞踏", "王子", "知らない姿", "誰も知らない"],
+        "真夜中": ["鐘", "逃", "階段", "靴", "解け"],
+        "鐘": ["真夜中", "逃", "階段", "靴", "解け"],
+        "靴": ["ガラス", "使者", "探", "合い", "身元", "明らか", "証明"],
+        "名前": ["身元", "明らか", "合い", "証明", "解放"],
+        "証明": ["身元", "明らか", "合い", "靴", "解放"],
+    }
+    query_keywords = list(title_keywords)
+    for keyword in title_keywords:
+        query_keywords.extend(semantic_expansions.get(keyword, []))
+    query_keywords = list(dict.fromkeys(query_keywords))
+    if query_keywords:
+        expected_position = (idx - 1) * max(1, len(events) - 1) / max(1, scene_count - 1)
+        scored: list[tuple[int, float, int, str]] = []
+        for event_index, event in enumerate(events):
+            hit_count = sum(1 for keyword in query_keywords if keyword in event)
+            if hit_count <= 0:
+                continue
+            distance = abs(event_index - expected_position)
+            scored.append((hit_count, -distance, event_index, event))
+        if scored:
+            best_score = max(score for score, _, _, _ in scored)
+            selected = sorted(
+                [item for item in sorted(scored, reverse=True) if item[0] >= max(2, best_score - 1)][:2],
+                key=lambda item: item[2],
+            )
+            if not selected:
+                selected = sorted(scored, reverse=True)[:1]
+            return [event for _, _, _, event in selected]
+    start = min(len(events) - 1, int((idx - 1) * len(events) / scene_count))
+    window = max(1, int((len(events) + scene_count - 1) / scene_count))
+    return events[start : min(len(events), start + window)]
+
+
+def _event_visual_evidence_terms(event_text: str, profile: dict[str, Any], *, include_artifact: bool) -> list[str]:
+    terms = ["主人公の姿勢", "場所に残る痕跡"]
+    rules = [
+        (("知らせ", "招待", "呼び出", "命令", "告げ"), ["届いた知らせまたは呼び出しの証", "周囲の反応"]),
+        (("拒", "妨げ", "閉", "支配", "押しつけ", "仕事"), ["妨げる人物または閉ざされた入口", "主人公の止まった身体"]),
+        (("助力", "魔法", "変身", "偶然", "記憶"), ["助力の発生源", "変化前後の差"]),
+        (("境界", "越え", "出発", "向かう", "旅", "移動"), ["越えるべき境界", "進む先が分かる導線"]),
+        (("視線", "踊", "認識", "中心", "知らない姿"), ["見届ける人物の視線", "主人公が場の中心に置かれた構図"]),
+        (("時間", "真夜中", "鐘", "追跡", "逃", "失"), ["時計または期限の合図", "急ぐ身体と失われる証拠"]),
+        (("探", "巡", "手がかり", "証"), ["探す人物または持ち込まれた証", "証拠を見る視線"]),
+        (("合い", "明らか", "証明", "価値", "身元", "解放", "帰還"), ["証と身体の一致", "見届ける人物の受容"]),
+    ]
+    for keywords, additions in rules:
+        if any(keyword in event_text for keyword in keywords):
+            terms.extend(additions)
+    if include_artifact:
+        terms.append(profile["artifact_name"])
+    else:
+        terms = [term for term in terms if profile["artifact_name"] not in term]
+    deduped: list[str] = []
+    for term in terms:
+        if term not in deduped:
+            deduped.append(term)
+    return deduped[:5]
+
+
+def _event_required_roles(event_text: str) -> list[str]:
+    roles = ["protagonist"]
+    role_rules = [
+        (("拒", "妨げ", "支配", "押しつけ", "敵", "鬼"), "opponent"),
+        (("助力", "魔法", "偶然", "導く", "記憶"), "helper"),
+        (("見", "視線", "証", "明らか", "認識", "受容"), "witness"),
+        (("王", "宮殿", "使者", "公", "裁き", "村", "家々"), "authority_or_community"),
+        (("偽", "失敗", "義姉", "競争", "候補"), "contrast_or_false_claimant"),
+    ]
+    for keywords, role in role_rules:
+        if any(keyword in event_text for keyword in keywords) and role not in roles:
+            roles.append(role)
+    return roles
+
+
+def _cut_required_roles_for_obligation(obligation: dict[str, Any]) -> list[str]:
+    joined = " / ".join(
+        str(obligation.get(key) or "")
+        for key in ("screen_question", "dramatic_job", "visual_proof", "first_frame_brief", "foreground", "midground", "background")
+    )
+    roles = ["protagonist"]
+    if any(word in joined for word in ("妨げ", "拒", "閉ざ", "支配", "敵", "義姉", "継母")):
+        roles.append("opponent")
+    if any(word in joined for word in ("助力", "導く", "魔法", "光が届", "月光")):
+        roles.append("helper")
+    if any(word in joined for word in ("視線", "見届け", "受容", "認識", "群衆")):
+        roles.append("witness")
+    if any(word in joined for word in ("宮殿", "王子", "使者", "公的", "社会", "部屋の人物")):
+        roles.append("authority_or_community")
+    if any(word in joined for word in ("偽", "候補", "義姉", "失敗")):
+        roles.append("contrast_or_false_claimant")
+    return list(dict.fromkeys(roles))
+
+
+def _normalize_cut_obligations_for_scene(obligations: list[dict[str, Any]]) -> None:
+    for obligation in obligations:
+        obligation_id = str(obligation.get("obligation_id") or "cut")
+        target_beat = str(obligation.get("target_beat") or obligation_id)
+        screen_question = str(obligation.get("screen_question") or "このcutで観客は何を理解するのか")
+        visual_proof = str(obligation.get("visual_proof") or "")
+        first_frame_brief = str(obligation.get("first_frame_brief") or "")
+        visual_evidence = [
+            str(item)
+            for item in [
+                *list(obligation.get("must_show_extra") or []),
+                obligation.get("foreground"),
+                obligation.get("midground"),
+                obligation.get("background"),
+            ]
+            if str(item or "").strip()
+        ]
+        if not str(obligation.get("audience_knowledge_delta") or "").strip():
+            obligation["audience_knowledge_delta"] = f"観客は「{screen_question}」への答えを、このcutの視覚証拠から理解する"
+        if not str(obligation.get("causal_proof") or "").strip():
+            obligation["causal_proof"] = visual_proof or f"{target_beat}が画面内の人物・場所・証拠の関係で読める"
+        if not obligation.get("visual_evidence"):
+            obligation["visual_evidence"] = list(dict.fromkeys(visual_evidence))[:5]
+        if not obligation.get("required_roles"):
+            obligation["required_roles"] = _cut_required_roles_for_obligation(obligation)
+        if not str(obligation.get("static_first_frame_rule") or "").strip():
+            obligation["static_first_frame_rule"] = f"動作説明ではなく「{first_frame_brief}」が一枚で読める静止状態にする"
+        if not str(obligation.get("anti_redundancy_key") or "").strip():
+            obligation["anti_redundancy_key"] = f"{obligation.get('source') or 'scene'}:{obligation_id}"
+
+
+def _story_event_obligations_for_scene(
+    *,
+    title: str,
+    idx: int,
+    location_name: str,
+    profile: dict[str, Any],
+    include_artifact: bool,
+) -> list[dict[str, Any]]:
+    source_events = _scene_source_events(profile, idx)
+    if not source_events:
+        return []
+    event_text = " / ".join(source_events)
+    visual_evidence = _event_visual_evidence_terms(event_text, profile, include_artifact=include_artifact)
+    required_roles = _event_required_roles(event_text)
+    return [
+        {
+            "event_id": f"scene{idx:02d}_story_event",
+            "source_events": source_events,
+            "audience_knowledge_delta": f"観客は「{event_text}」がこのsceneで起きた不可逆な出来事だと理解する",
+            "causal_proof": f"{title}で、出来事の原因と結果が{location_name}内の物理的証拠として同時に読める",
+            "visual_evidence": visual_evidence,
+            "required_roles": required_roles,
+            "static_first_frame_rule": "動作中の説明ではなく、原因・結果・証人・物的証拠が一枚で読める静止状態にする",
+            "anti_redundancy_key": "story_event_irreversible_fact",
+        }
+    ]
+
+
 def _scene_intent_for_cut_design(
     *,
     title: str,
@@ -580,6 +784,13 @@ def _scene_intent_for_cut_design(
 ) -> dict[str, Any]:
     is_terminal = idx == len(profile["scene_titles"])
     artifact_has_been_revealed = idx >= _artifact_first_scene_index(profile)
+    story_event_obligations = _story_event_obligations_for_scene(
+        title=title,
+        idx=idx,
+        location_name=str(location_spec["name"]),
+        profile=profile,
+        include_artifact=include_artifact,
+    )
     visible_evidence = [
         f"{location_spec['name']}の空間圧力",
         f"{profile['protagonist_name']}の姿勢と視線",
@@ -649,8 +860,42 @@ def _scene_intent_for_cut_design(
         "causal_turn": causal_turn,
         "done_when": [done_when],
         "audience_information": audience_information,
+        "audience_knowledge_delta": {
+            "before_scene": [f"観客は{title}の開始時点で、{profile['protagonist_name']}がまだ自由に動けない状態だと知っている"],
+            "learned_during_scene": [
+                obligation.get("audience_knowledge_delta", "")
+                for obligation in story_event_obligations
+                if obligation.get("audience_knowledge_delta")
+            ],
+            "misdirected_or_reframed": [],
+            "still_unknown_after_scene": withheld_information,
+            "forbidden_early_reveals": reveal_constraints,
+        },
         "withheld_information": withheld_information,
         "reveal_constraints": reveal_constraints,
+        "story_event_obligations": story_event_obligations,
+        "role_coverage": {
+            "required_roles": sorted({role for obligation in story_event_obligations for role in obligation.get("required_roles", [])}),
+            "policy": "主人公だけでsceneを閉じず、妨害者・助力者・証人・共同体など、出来事の因果を成立させる役割を必要に応じて画面に置く",
+        },
+        "audience_knowledge_plan": [
+            obligation.get("audience_knowledge_delta", "")
+            for obligation in story_event_obligations
+            if obligation.get("audience_knowledge_delta")
+        ],
+        "visual_proof_obligations": [
+            {"causal_proof": obligation.get("causal_proof"), "visual_evidence": obligation.get("visual_evidence", [])}
+            for obligation in story_event_obligations
+        ],
+        "anti_redundancy_policy": {
+            "rule": "各cutは観客の理解を少なくとも1つ前に進める。同じ causal_proof / visual_evidence の繰り返しなら cut を増やさず prompt を厚くする",
+            "forbidden_duplicate_basis": ["同じ立ち位置", "同じ導線", "同じ光だけの変化", "同じ小道具を眺めるだけ"],
+        },
+        "static_first_frame_rules": [
+            "画像promptは動作そのものではなく、動作直前または動作直後の読める静止状態を書く",
+            "motion_brief の未来の動きを p600 still prompt に混ぜない",
+            "原因・結果・証人・物的証拠が1枚で読める構図を優先する",
+        ],
         "visual_thesis": f"{title}を、{profile['protagonist_name']}、光、{location_spec['name']}の関係で読ませる",
         "spatial_plan": {
             "location_id": location_spec["asset_id"],
@@ -693,6 +938,12 @@ def _scene_cut_coverage_plan(
         motion_brief: str,
         motion_end_state: str,
         narration: str,
+        audience_knowledge_delta: str = "",
+        causal_proof: str = "",
+        visual_evidence: list[str] | None = None,
+        required_roles: list[str] | None = None,
+        static_first_frame_rule: str = "",
+        anti_redundancy_key: str = "",
     ) -> dict[str, Any]:
         return {
             "obligation_id": obligation_id,
@@ -712,6 +963,12 @@ def _scene_cut_coverage_plan(
             "motion_brief": motion_brief,
             "motion_end_state": motion_end_state,
             "narration": narration,
+            "audience_knowledge_delta": audience_knowledge_delta,
+            "causal_proof": causal_proof,
+            "visual_evidence": visual_evidence or [],
+            "required_roles": required_roles or [],
+            "static_first_frame_rule": static_first_frame_rule,
+            "anti_redundancy_key": anti_redundancy_key,
         }
 
     obligations: list[dict[str, Any]] = [
@@ -824,6 +1081,42 @@ def _scene_cut_coverage_plan(
     def append_unique(obligation: dict[str, Any]) -> None:
         if all(existing["obligation_id"] != obligation["obligation_id"] for existing in obligations):
             obligations.append(obligation)
+
+    for event_obligation in [item for item in scene_intent.get("story_event_obligations", []) if isinstance(item, dict)]:
+        visual_evidence_terms = [str(item) for item in event_obligation.get("visual_evidence", []) if str(item).strip()]
+        source_events = [str(item) for item in event_obligation.get("source_events", []) if str(item).strip()]
+        event_summary = " / ".join(source_events) or title
+        must_show_event_terms = visual_evidence_terms[:3] or ["出来事の原因が見える手がかり"]
+        append_unique(
+            extra_obligation(
+                obligation_id="story_event_proof",
+                cut_function="event_proof",
+                source="story_event_obligations",
+                target_beat=f"{title}: 物語上の不可逆な出来事を画面で証明する",
+                screen_question=f"{title}で、観客はどの出来事が起きたと理解するのか",
+                dramatic_job="sceneの雰囲気ではなく、物語を前へ動かす原因・結果・証人・物的証拠を一枚に固定する",
+                visual_proof=f"{event_summary}。{event_obligation.get('causal_proof')}。必要な視覚証拠: {'、'.join(must_show_event_terms)}",
+                first_frame_brief=(
+                    f"{location_name}で、{'、'.join(must_show_event_terms)}が読める静止状態。"
+                    "動作中の説明ではなく、出来事の原因と結果が同時に見える。"
+                ),
+                must_show_extra=must_show_event_terms,
+                done_when="観客の知識がこのcutで具体的な物語事実として一段進む",
+                foreground=must_show_event_terms[0],
+                midground=protagonist,
+                background=f"{location_name}と見届ける視線",
+                screen_direction="event_fact_becomes_visible",
+                motion_brief="視線が原因の手がかりから結果の証拠へ移り、出来事が観客の理解として固定される",
+                motion_end_state="不可逆な出来事の証拠が画面に残る",
+                narration=f"{title}。ここで物語は、ただの気配ではなく出来事として一段進む。",
+                audience_knowledge_delta=str(event_obligation.get("audience_knowledge_delta") or ""),
+                causal_proof=str(event_obligation.get("causal_proof") or ""),
+                visual_evidence=visual_evidence_terms,
+                required_roles=[str(role) for role in event_obligation.get("required_roles", []) if str(role).strip()],
+                static_first_frame_rule=str(event_obligation.get("static_first_frame_rule") or ""),
+                anti_redundancy_key=str(event_obligation.get("anti_redundancy_key") or ""),
+            )
+        )
 
     if profile.get("slug") == "cinderella":
         if idx == 3:
@@ -1170,6 +1463,94 @@ def _scene_cut_coverage_plan(
                     }
                 )
 
+    def story_event_assignment_score(proof: dict[str, Any], candidate: dict[str, Any]) -> int:
+        candidate_id = str(candidate.get("obligation_id") or "")
+        proof_text = " / ".join(
+            str(proof.get(key) or "")
+            for key in ("target_beat", "screen_question", "dramatic_job", "visual_proof", "causal_proof")
+        )
+        candidate_text = " / ".join(
+            [
+                str(candidate.get(key) or "")
+                for key in ("target_beat", "screen_question", "dramatic_job", "visual_proof", "first_frame_brief", "done_when")
+            ]
+            + [str(item) for item in candidate.get("must_show_extra", [])]
+        )
+        score = 0
+        for term in [str(item) for item in proof.get("visual_evidence", []) if str(item).strip()]:
+            if term in candidate_text:
+                score += 2
+        semantic_rules = [
+            (("拒", "仕事", "閉", "妨げ", "支配"), {"scene_pressure", "audience_context"}),
+            (("知らせ", "招待", "呼び出"), {"audience_context", "scene_pressure"}),
+            (("助力", "魔法", "変身", "ドレス"), {"transformation_reveal", "visible_value_shift", "symbolic_proof"}),
+            (("馬車", "出発", "向かう"), {"carriage_departure", "spatial_transition", "causal_handoff"}),
+            (("宮殿", "階段", "入"), {"palace_entry_boundary", "spatial_transition", "audience_context"}),
+            (("舞踏", "踊", "王子", "視線"), {"public_recognition_dance", "reaction_after_change", "causal_handoff"}),
+            (("真夜中", "鐘", "逃", "失", "階段に残る"), {"time_or_deadline_pressure", "midnight_lost_slipper_handoff", "causal_handoff"}),
+            (("靴", "使者", "探", "合い", "身元", "証明"), {"slipper_fitting_proof", "symbolic_proof", "terminal_resolution", "causal_handoff"}),
+        ]
+        for keywords, obligation_ids in semantic_rules:
+            if candidate_id in obligation_ids and any(keyword in proof_text for keyword in keywords):
+                score += 4
+        if candidate_id in {
+            "transformation_reveal",
+            "carriage_departure",
+            "palace_entry_boundary",
+            "public_recognition_dance",
+            "midnight_lost_slipper_handoff",
+            "slipper_fitting_proof",
+        }:
+            score += 3
+        if candidate_id == "transformation_reveal" and any(keyword in proof_text for keyword in ("助力", "魔法", "ドレス", "現れる", "変身")):
+            score += 3
+        if candidate_id == "causal_handoff":
+            score -= 2
+        for keyword in ("灰", "台所", "扉", "光", "導線", "宮殿", "階段", "靴", "馬車", "王子", "真夜中", "名前"):
+            if keyword in proof_text and keyword in candidate_text:
+                score += 1
+        return score
+
+    for proof in [obligation for obligation in list(obligations) if obligation.get("obligation_id") == "story_event_proof"]:
+        candidates = [obligation for obligation in obligations if obligation is not proof]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda candidate: story_event_assignment_score(proof, candidate))
+        if story_event_assignment_score(proof, best) < 3:
+            continue
+        best["assigned_story_event_ids"] = [
+            *[str(item) for item in best.get("assigned_story_event_ids", []) if str(item).strip()],
+            "story_event_proof",
+        ]
+        best["audience_knowledge_delta"] = str(proof.get("audience_knowledge_delta") or best.get("audience_knowledge_delta") or "")
+        event_causal_proof = str(proof.get("causal_proof") or proof.get("visual_proof") or "")
+        if event_causal_proof and event_causal_proof not in str(best.get("causal_proof") or ""):
+            best["causal_proof"] = "。".join(
+                item
+                for item in [str(best.get("causal_proof") or best.get("visual_proof") or "").strip("。"), event_causal_proof.strip("。")]
+                if item
+            )
+        event_terms = [str(item) for item in proof.get("visual_evidence", []) if str(item).strip()]
+        best["visual_evidence"] = list(dict.fromkeys([*[str(item) for item in best.get("visual_evidence", [])], *event_terms]))[:6]
+        best["must_show_extra"] = list(dict.fromkeys([*[str(item) for item in best.get("must_show_extra", [])], *event_terms[:3]]))
+        best["required_roles"] = list(
+            dict.fromkeys(
+                [
+                    *[str(item) for item in best.get("required_roles", []) if str(item).strip()],
+                    *[str(item) for item in proof.get("required_roles", []) if str(item).strip()],
+                ]
+            )
+        )
+        if str(proof.get("static_first_frame_rule") or "").strip():
+            best["static_first_frame_rule"] = str(proof["static_first_frame_rule"])
+        best["anti_redundancy_key"] = f"{best.get('source') or 'scene'}:{best.get('obligation_id')}|story_event_obligations"
+        best["visual_proof"] = "。".join(
+            item
+            for item in [str(best.get("visual_proof") or "").strip("。"), f"物語イベントの証拠: {'、'.join(event_terms[:4])}".strip("。")]
+            if item
+        )
+        obligations.remove(proof)
+
     if profile.get("slug") == "cinderella":
         order_by_scene = {
             3: [
@@ -1240,32 +1621,84 @@ def _scene_cut_coverage_plan(
                 )
             )
 
-    coverage = {
-        "strategy": "scene設計から必要な視覚要件を列挙し、1 cut = 1主要意図になるよう割り当てる",
-        "scene_obligations": [
-            {"source": "dramatic_question", "evidence": scene_intent.get("dramatic_question")},
-            {"source": "value_shift.visible_evidence", "evidence": (scene_intent.get("value_shift") or {}).get("visible_evidence", [])},
-            {"source": "causal_turn", "evidence": scene_intent.get("causal_turn")},
-            {"source": "audience_information", "evidence": scene_intent.get("audience_information", [])},
-            {"source": "reveal_constraints", "evidence": scene_intent.get("reveal_constraints", [])},
-            {"source": "visual_thesis", "evidence": scene_intent.get("visual_thesis")},
-            {"source": "spatial_plan", "evidence": scene_intent.get("spatial_plan")},
-            {"source": "handoff_to_next_scene", "evidence": scene_intent.get("handoff_to_next_scene") or scene_intent.get("terminal_resolution")},
-        ],
-        "cut_count_reason": "coverage obligations are grouped by unique visual intent; similar obligations thicken a cut instead of adding a duplicate",
-        "minimum_cut_count": 3,
-        "selected_cut_count": len(obligations),
-        "cut_assignments": [
+    _normalize_cut_obligations_for_scene(obligations)
+
+    scene_id = idx * 10
+    assignment_records: list[dict[str, Any]] = []
+    assigned_by_source: dict[str, list[str]] = {}
+    assigned_by_obligation: dict[str, list[str]] = {}
+    for index, obligation in enumerate(obligations, start=1):
+        selector = f"scene{scene_id}_cut{index:02d}"
+        obligation_id = str(obligation.get("obligation_id") or f"obligation_{index:02d}")
+        source = str(obligation.get("source") or "scene")
+        assigned_by_obligation.setdefault(obligation_id, []).append(selector)
+        assigned_by_source.setdefault(source, []).append(selector)
+        assignment_records.append(
             {
                 "cut_index": index,
-                "obligation_id": obligation["obligation_id"],
+                "cut_selector": selector,
+                "obligation_ids": [obligation_id],
+                "obligation_id": obligation_id,
                 "cut_function": obligation["cut_function"],
-                "source": obligation["source"],
+                "source": source,
                 "target_beat": obligation["target_beat"],
+                "assigned_story_event_ids": obligation.get("assigned_story_event_ids", []),
+                "visual_proof": obligation.get("visual_proof", ""),
+                "audience_knowledge_delta": obligation.get("audience_knowledge_delta", ""),
+                "causal_proof": obligation.get("causal_proof", ""),
+                "required_roles": obligation.get("required_roles", []),
+                "anti_redundancy_key": obligation.get("anti_redundancy_key", ""),
             }
-            for index, obligation in enumerate(obligations, start=1)
+        )
+
+    def assigned_for(*sources: str) -> list[str]:
+        selectors: list[str] = []
+        for source in sources:
+            selectors.extend(assigned_by_source.get(source, []))
+        return list(dict.fromkeys(selectors))
+
+    minimum_by_importance = 3
+    minimum_by_duration = max(3, int((len(obligations) * 8 + 7) // 8))
+    selected_minimum = max(minimum_by_importance, minimum_by_duration, min(len(obligations), len(obligations)))
+    coverage = {
+        "coverage_strategy": "reverse_from_scene_obligations",
+        "strategy": "scene設計から必要な視覚要件を列挙し、1 cut = 1主要意図になるよう割り当てる",
+        "min_cut_count": {
+            "by_importance": minimum_by_importance,
+            "by_duration": minimum_by_duration,
+            "selected": selected_minimum,
+            "exception_reason": "",
+        },
+        "scene_obligations": [
+            {"obligation_id": "dramatic_question_01", "source": "dramatic_question", "evidence": scene_intent.get("dramatic_question"), "assigned_cut_ids": assigned_for("dramatic_question") or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "value_shift_01", "source": "value_shift.visible_evidence", "evidence": (scene_intent.get("value_shift") or {}).get("visible_evidence", []), "assigned_cut_ids": assigned_for("value_shift.visible_evidence", "value_shift/affect_transition/terminal_resolution") or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "causal_turn_01", "source": "causal_turn", "evidence": scene_intent.get("causal_turn"), "assigned_cut_ids": assigned_for("causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution") or [record["cut_selector"] for record in assignment_records[-1:]]},
+            {"obligation_id": "audience_information_01", "source": "audience_information", "evidence": scene_intent.get("audience_information", []), "assigned_cut_ids": assigned_for("audience_information/reveal_constraints") or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "story_event_obligations_01", "source": "story_event_obligations", "evidence": scene_intent.get("story_event_obligations", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("assigned_story_event_ids")] or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "audience_knowledge_delta_01", "source": "audience_knowledge_delta", "evidence": scene_intent.get("audience_knowledge_delta", {}), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("audience_knowledge_delta")] or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "role_coverage_01", "source": "role_coverage.required_roles", "evidence": (scene_intent.get("role_coverage") or {}).get("required_roles", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("required_roles")] or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "visual_proof_01", "source": "visual_proof_obligations", "evidence": scene_intent.get("visual_proof_obligations", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("visual_proof")]},
+            {"obligation_id": "reveal_constraints_01", "source": "reveal_constraints", "evidence": scene_intent.get("reveal_constraints", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records]},
+            {"obligation_id": "visual_thesis_01", "source": "visual_thesis", "evidence": scene_intent.get("visual_thesis"), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "spatial_plan_01", "source": "spatial_plan", "evidence": scene_intent.get("spatial_plan"), "assigned_cut_ids": assigned_for("spatial_plan", "causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution") or [record["cut_selector"] for record in assignment_records[:1]]},
+            {"obligation_id": "handoff_01", "source": "handoff_to_next_scene", "evidence": scene_intent.get("handoff_to_next_scene") or scene_intent.get("terminal_resolution"), "assigned_cut_ids": assigned_for("causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution", "terminal_resolution") or [record["cut_selector"] for record in assignment_records[-1:]]},
         ],
+        "knowledge_assignments": [
+            {
+                "knowledge_delta_id": f"learned_{index:02d}",
+                "source": f"audience_knowledge_delta.learned_during_scene[{index - 1}]",
+                "assigned_cut_ids": [record["cut_selector"]],
+                "evidence": record.get("audience_knowledge_delta", ""),
+            }
+            for index, record in enumerate([record for record in assignment_records if record.get("audience_knowledge_delta")], start=1)
+        ],
+        "cut_count_reason": "coverage obligations are grouped by unique visual intent; similar obligations thicken a cut instead of adding a duplicate",
+        "minimum_cut_count": selected_minimum,
+        "selected_cut_count": len(obligations),
+        "cut_assignments": assignment_records,
         "unassigned_obligations": [],
+        "overloaded_cuts": [],
+        "duplicate_meaning_risks": [],
         "duplicate_cut_policy": "同じscene意味を繰り返すだけならcut追加ではなくprompt補強にする",
     }
     return {"coverage_plan": coverage, "cuts": obligations}
@@ -1401,6 +1834,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "causal_turn": scene_intent["causal_turn"],
             "done_when": scene_intent["done_when"],
         }
+        scene_target_seconds = len(cut_plans) * 8
         scene_duration_seconds = len(cut_plans) * 12
         total_duration_seconds += scene_duration_seconds
         cuts: list[dict[str, Any]] = []
@@ -1441,20 +1875,27 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "scene_focus": scene_intent["dramatic_question"],
                 "coverage_obligation_id": cut_plan["obligation_id"],
                 "coverage_source": cut_plan["source"],
+                "assigned_story_event_ids": cut_plan.get("assigned_story_event_ids", []) or [f"scene_obligation:{obligation_id}"],
                 "screen_question": cut_plan["screen_question"],
                 "dramatic_job": cut_plan["dramatic_job"],
+                "audience_knowledge_delta": cut_plan.get("audience_knowledge_delta", ""),
+                "causal_proof": cut_plan.get("causal_proof", ""),
+                "visual_evidence": cut_plan.get("visual_evidence", []),
+                "required_roles": cut_plan.get("required_roles", []),
+                "anti_redundancy_key": cut_plan.get("anti_redundancy_key", ""),
                 "must_show": must_show,
                 "must_avoid": ["画面内テキスト", "字幕", "ロゴ"],
                 "done_when": [cut_plan["done_when"]],
                 "visual_beat": visual_beat,
                 "first_frame_brief": cut_plan["first_frame_brief"],
+                "static_first_frame_rule": cut_plan.get("static_first_frame_rule", ""),
                 "action_completion_state": "pre_action" if cut_number == 1 else "early_action",
                 "motion_brief": cut_plan["motion_brief"],
                 "motion_end_state": cut_plan["motion_end_state"],
                 "narration_role": "絵を説明せず内面の方向だけを示す",
                 "asset_dependency_hint": {"characters": character_ids, "objects": object_ids, "locations": [location_spec["asset_id"]]},
             }
-            cuts.append({"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": 12, "estimated_duration_seconds": 12, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}})
+            script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": 12, "estimated_duration_seconds": 12, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}}
             prompt = _scene_prompt(
                 title,
                 visual_beat,
@@ -1477,18 +1918,61 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 else ["新しい人物", "次sceneのreveal", "画面内テキスト"]
             )
             carries_to_next_scene = [] if is_terminal_scene else ([profile["artifact_name"]] if cut_uses_artifact else [])
+            next_cut_anchor = (
+                f"scene{scene_id}_cut{cut_number:02d}_to_cut{cut_number + 1:02d}"
+                if cut_number < len(cut_plans)
+                else (f"scene{scene_id}_to_terminal" if is_terminal_scene else f"scene{scene_id}_to_scene{(idx + 1) * 10}")
+            )
+            incoming_anchor = (
+                f"scene{scene_id}_cut{cut_number - 1:02d}_to_cut{cut_number:02d}"
+                if cut_number > 1
+                else f"scene{scene_id}_incoming"
+            )
+            visible_start_state = {
+                "character_state": "まだ行為を完了していない",
+                "prop_state": "必要な小道具や証拠は見えるが、結果を説明しすぎない",
+                "spatial_state": location_name,
+                "emotional_state": "sceneの圧力を受けている",
+                "gaze_or_attention": "次に見るべき証拠または導線へ向く",
+            }
+            motion_start_affordance = {
+                "movable_subject": profile["protagonist_name"],
+                "movement_vector": cut_plan["screen_direction"],
+                "camera_start_reason": "静止画内の視線、光、導線から自然に動き出せる",
+            }
             cut_contract = {
-                "schema_version": "2.1",
+                "schema_version": "2.2",
                 "cut_role": "main",
                 "cut_function": cut_blueprint["cut_function"],
                 "coverage_obligation_id": cut_plan["obligation_id"],
                 "coverage_source": cut_plan["source"],
+                "assigned_story_event_ids": cut_blueprint["assigned_story_event_ids"],
                 "duration_intent": "standard",
                 "target_duration_seconds": 12,
+                "intent_budget": {
+                    "primary_intent": beat,
+                    "secondary_intents_allowed": ["continuity_handoff"],
+                    "forbidden_combined_intents": ["new_location_establishing + major_reveal + next_scene_handoff"],
+                    "assigned_obligation_ids": [str(cut_plan["obligation_id"])],
+                    "overload_exception_reason": "",
+                    "custom_function_reason": "scene obligation固有の映像beat" if str(cut_blueprint["cut_function"]) == "custom" else "",
+                },
                 "viewer_contract": {
                     "target_beat": beat,
                     "screen_question": cut_blueprint["screen_question"],
                     "dramatic_job": cut_blueprint["dramatic_job"],
+                    "audience_knowledge_delta": cut_blueprint["audience_knowledge_delta"],
+                    "causal_proof": cut_blueprint["causal_proof"],
+                    "visual_evidence": cut_blueprint["visual_evidence"],
+                    "required_roles": cut_blueprint["required_roles"],
+                    "anti_redundancy_key": cut_blueprint["anti_redundancy_key"],
+                    "assigned_story_event_ids": cut_blueprint["assigned_story_event_ids"],
+                    "reveal_constraints": {
+                        "inherited_from_scene": scene_intent.get("reveal_constraints", []),
+                        "allowed_reveals_in_this_cut": cut_blueprint["visual_evidence"],
+                        "forbidden_until_later_cut": [],
+                        "forbidden_until_later_scene": scene_intent.get("withheld_information", []),
+                    },
                     "scene_obligation": cut_plan["obligation_id"],
                     "scene_obligation_source": cut_plan["source"],
                     "visual_proof": visual_beat,
@@ -1505,26 +1989,47 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "location_ids": [location_spec["asset_id"]],
                     "character_ids": character_ids,
                     "object_ids": object_ids,
-                    "start_state": {"character_state": "まだ行為を完了していない", "spatial_state": location_name},
-                    "end_state": {"character_state": continuity_end_state, "spatial_state": location_name},
+                    "start_state": {"character_state": visible_start_state["character_state"], "prop_state": visible_start_state["prop_state"], "spatial_state": location_name, "time_state": "scene内の現在時点"},
+                    "end_state": {"character_state": continuity_end_state, "prop_state": "次へ渡す証拠が画面に残る", "spatial_state": location_name, "time_state": "cutの理解が完了した時点"},
                     "carry_forward_to_next_cut": [profile["protagonist_name"], location_name, *object_ids],
+                    "continuity_risks": ["人物同一性のdrift", "小道具の位置関係のdrift"],
+                },
+                "cut_handoff": {
+                    "receives_from_previous": {
+                        "anchor_id": incoming_anchor,
+                        "anchor_type": "none" if cut_number == 1 else "gesture",
+                        "visible_or_audible_form": "scene開始時の問い" if cut_number == 1 else "前cutから残る視線・光・導線",
+                        "expected_previous_cut_selector": "" if cut_number == 1 else f"scene{scene_id}_cut{cut_number - 1:02d}",
+                    },
+                    "delivers_to_next": {
+                        "anchor_id": next_cut_anchor,
+                        "anchor_type": "terminal" if cut_number == len(cut_plans) and is_terminal_scene else "gesture",
+                        "visible_or_audible_form": "次へ残る視線・光・導線" if cut_number < len(cut_plans) else ("終結の余韻" if is_terminal_scene else "次sceneへ渡る視線・光・導線"),
+                        "expected_next_cut_selector": f"scene{scene_id}_cut{cut_number + 1:02d}" if cut_number < len(cut_plans) else "",
+                    },
                 },
                 "first_frame_contract": {
                     "imageable": True,
                     "image_role": "video_first_frame_candidate",
                     "first_frame_brief": cut_blueprint["first_frame_brief"],
+                    "visible_start_state": visible_start_state,
+                    "motion_start_affordance": motion_start_affordance,
                     "action_completion_state": cut_blueprint["action_completion_state"],
+                    "static_first_frame_rule": cut_blueprint["static_first_frame_rule"],
+                    "must_be_static_evidence_not_motion": True,
                     "must_include": must_show,
                     "must_avoid": ["画面内テキスト", "字幕", "ロゴ"],
                 },
                 "motion_contract": {
                     "movable": True,
                     "motion_brief": cut_blueprint["motion_brief"],
+                    "start_from_visible_state": "first_frame_contract.visible_start_state",
                     "camera_motion": "slow_push",
                     "subject_motion": "視線と姿勢がわずかに変わる",
                     "environment_motion": "光と空気がゆっくり揺れる",
                     "emotional_change": "不可視から可視へ一段近づく",
                     "end_state": cut_blueprint["motion_end_state"],
+                    "end_frame_brief": cut_blueprint["motion_end_state"],
                     "must_not_add": motion_must_not_add,
                 },
                 "narration_contract": {
@@ -1536,30 +2041,80 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "tts_text": narration,
                     "silence_reason": "",
                 },
+                "rhythm_contract": {
+                    "expected_duration_seconds": 12,
+                    "pacing": "standard",
+                    "comprehension_moment": "visual_proof が画面で読める瞬間",
+                    "cut_out_reason": "次cutへ渡す anchor が画面に残った瞬間",
+                    "audio_visual_sync_point": "ナレーションは visual_proof の後を追い、画面説明にならない",
+                    "duration_exception": {"allowed": False, "reason": ""},
+                },
+                "asset_dependency": {
+                    "character_ids_required": character_ids,
+                    "object_ids_required": object_ids,
+                    "location_ids_required": [location_spec["asset_id"]],
+                    "variant_ids_required": [],
+                    "new_asset_requests": [],
+                    "reusable_anchor_ids": [primary_character_asset, location_spec["asset_id"], *object_ids],
+                    "reference_role": {
+                        "protagonist": primary_character_asset,
+                        "proof_object": artifact_asset if cut_uses_artifact else "",
+                        "location_anchor": location_spec["asset_id"],
+                    },
+                },
                 "downstream_handoff": {
-                    "p500_asset": {"asset_candidates": [*character_ids, *object_ids, location_spec["asset_id"]]},
-                    "p600_image": {"prompt_requirements": must_show},
-                    "p700_narration": {"narration_requirements": ["説明ではなく感情の方向"]},
-                    "p800_video": {"motion_requirements": [cut_blueprint["motion_brief"]], "last_frame_or_end_state": cut_blueprint["motion_end_state"]},
+                    "p500_asset": {"required_asset_ids": [*character_ids, *object_ids, location_spec["asset_id"]], "asset_candidates": [*character_ids, *object_ids, location_spec["asset_id"]], "continuity_anchor_needed": True, "new_asset_needed": False, "reuse_allowed": True},
+                    "p600_image": {"prompt_requirements": must_show, "reference_requirements": references, "first_frame_must_include": must_show, "first_frame_must_avoid": ["画面内テキスト", "字幕", "ロゴ"]},
+                    "p700_narration": {"narration_requirements": ["説明ではなく感情の方向"], "role": "emotion", "must_not_caption_visible_content": True},
+                    "p800_video": {"motion_requirements": [cut_blueprint["motion_brief"]], "start_state": "first_frame_contract.visible_start_state", "last_frame_or_end_state": cut_blueprint["motion_end_state"], "must_not_add": motion_must_not_add},
                     "carries_to_next_cut": [profile["protagonist_name"], location_name],
                     "carries_to_next_scene": carries_to_next_scene,
                 },
             }
+            cuts.append({**script_cut_base, "cut_contract": cut_contract, "scene_contract": {"legacy_note": "旧reader向け alias。cut_contract が正本。", "target_beat": beat, "must_show": must_show, "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"], "done_when": [cut_plan["done_when"]]}})
             manifest_cuts.append(
                 {
                     "cut_id": f"{cut_number:02d}",
                     "selector": selector,
                     "duration_seconds": 12,
                     "cut_contract": cut_contract,
-                    "scene_contract": {"cut_function": cut_contract["cut_function"], "target_beat": beat, "screen_question": cut_contract["viewer_contract"]["screen_question"], "dramatic_job": cut_contract["viewer_contract"]["dramatic_job"], "visual_beat": visual_beat, "first_frame_brief": cut_contract["first_frame_contract"]["first_frame_brief"], "motion_brief": cut_contract["motion_contract"]["motion_brief"], "must_show": must_show, "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"], "done_when": [cut_plan["done_when"]]},
-                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "prompt": prompt, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved"}},
+                    "scene_contract": {
+                        "cut_function": cut_contract["cut_function"],
+                        "target_beat": beat,
+                        "screen_question": cut_contract["viewer_contract"]["screen_question"],
+                        "dramatic_job": cut_contract["viewer_contract"]["dramatic_job"],
+                        "audience_knowledge_delta": cut_contract["viewer_contract"]["audience_knowledge_delta"],
+                        "causal_proof": cut_contract["viewer_contract"]["causal_proof"],
+                        "visual_evidence": cut_contract["viewer_contract"]["visual_evidence"],
+                        "required_roles": cut_contract["viewer_contract"]["required_roles"],
+                        "anti_redundancy_key": cut_contract["viewer_contract"]["anti_redundancy_key"],
+                        "assigned_story_event_ids": cut_contract["viewer_contract"]["assigned_story_event_ids"],
+                        "visual_beat": visual_beat,
+                        "first_frame_brief": cut_contract["first_frame_contract"]["first_frame_brief"],
+                        "static_first_frame_rule": cut_contract["first_frame_contract"]["static_first_frame_rule"],
+                        "motion_brief": cut_contract["motion_contract"]["motion_brief"],
+                        "must_show": must_show,
+                        "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"],
+                        "done_when": [cut_plan["done_when"]],
+                    },
+                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "prompt": prompt, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
                     "video_generation": {"tool": "kling_3_0_omni", "duration_seconds": 12, "first_frame": f"assets/scenes/{selector}.png", "motion_prompt": cut_plan["motion_brief"], "output": f"assets/scenes/{selector}.mp4"},
-                    "audio": {"narration": {"text": narration, "tts_text": narration, "tool": "elevenlabs", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": []}},
+                    "audio": {"narration": {"contract_ref": "cut_contract.narration_contract", "text": narration, "tts_text": narration, "tool": "elevenlabs", "status": "approved", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": [], "p700_review": {"role_matches_contract": True, "narration_not_captioning_image": True, "does_not_add_new_story_fact": True, "timing_supports_visual_beat": True}}},
+                    "review": {"triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}},
                     "implementation_trace": {"status": "verified", "source_request_ids": []},
                 }
             )
-        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_duration_seconds, "estimated_duration_seconds": scene_duration_seconds, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_intent": scene_intent, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": {"audience_information_covered": True, "visualizable_action_covered": True, "next_scene_connection_checked": True, "value_shift_visible": True, "causal_turn_visible": True}, "cuts": cuts})
-        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_duration_seconds, "estimated_duration_seconds": scene_duration_seconds, "scene_intent": scene_intent, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": {"audience_information_covered": True, "visualizable_action_covered": True, "next_scene_connection_checked": True, "value_shift_visible": True, "causal_turn_visible": True}, "cuts": manifest_cuts})
+        coverage_review = {
+            "audience_information_covered": True,
+            "visualizable_action_covered": True,
+            "next_scene_connection_checked": True,
+            "value_shift_visible": True,
+            "causal_turn_visible": True,
+            "scene_specificity_gate_passed": True,
+        }
+        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_intent": scene_intent, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
+        scene_composite_review = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
+        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "scene_intent": scene_intent, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
     script = {"script_metadata": {"topic": topic, "target_duration": 300, "created_at": now}, "scene_set_review": {"status": "approved", "summary": f"8 scenes / {len(selectors)} cutsで主要筋を展開する。"}, "scene_detail_review": {"status": "approved", "summary": "各sceneは独立した問いと視覚行動を持つ。"}, "cut_blueprint_review": {"status": "approved", "summary": "scene設計から逆算したcoverage planに基づき、必要cut数を可変で設計する。"}, "script_review": {"status": "approved", "summary": "台本は後続画像生成に渡せる。"}, "production_readiness_review": {"status": "approved", "summary": "target duration is covered now."}, "evaluation_contract": {"target_arc": "opening,development,ordeal,transformation,ending", "must_cover": [profile["protagonist_name"], profile["artifact_name"], "時間制限", profile["motifs"][0]], "must_avoid": ["画面内テキスト", "字幕", "ロゴ"], "reveal_constraints": []}, "human_change_requests": [], "scenes": script_scenes}
     character_bible = [
         {

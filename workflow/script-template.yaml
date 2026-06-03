@@ -74,6 +74,21 @@ scene_set_review:
       - "独立 scene 化すべき願望の発生、拒絶、選択、変身、対決、証拠 reveal、照合、帰結が既存 scene に埋もれていないか"
       - "次に追加できる scene は何か"
       - "その候補を scene 追加ではなく cut 増厚へ回す理由は何か"
+  scene_specificity_gate:
+    non_compressible_beat_inventory: "pending|passed|changes_requested"
+    scene_promotion_rule: "pending|passed|changes_requested"
+    unique_scene_responsibility: "pending|passed|changes_requested"
+    actor_force_coverage: "pending|passed|changes_requested"
+    object_meaning_ladder: "pending|passed|changes_requested"
+    concrete_handoff_chain: "pending|passed|changes_requested"
+    anti_template_language: "pending|passed|changes_requested"
+    banned_generic_scene_phrases:
+      - "主人公は前進できるか"
+      - "次へ進む理由が生まれる"
+      - "光が次の場面へ運ぶ"
+      - "価値変化の兆し"
+      - "場所の圧力"
+      - "主人公の姿勢と視線"
   critic_assignment:
     critic_1: "scene_count_coverage"
     critic_2: "dramatic_structure + reveal_order"
@@ -82,7 +97,7 @@ scene_set_review:
     critic_5: "handoff_integrity"
   reviewer_roles:
     - role: "scene_count_coverage"
-      responsibility: "承認済み story の主要 beat が scene として最大限展開されているかを評価する"
+      responsibility: "承認済み story の主要 beat が scene として最大限展開され、非圧縮 beat と scene 昇格理由が明示されているかを評価する"
       blocking_if: "独立 scene 化すべき beat が既存 scene 内に埋もれている"
     - role: "dramatic_structure"
       responsibility: "各 scene が独立した dramatic_question / value_shift / causal_turn を持つかを評価する"
@@ -94,10 +109,10 @@ scene_set_review:
       responsibility: "目標尺、scene 重要度、cut 数から scene 追加と cut 増厚のどちらが品質に効くかを評価する"
       blocking_if: "scene を増やすべき範囲で cut 増厚に逃げている、またはその逆"
     - role: "visual_production"
-      responsibility: "追加 scene が p500/p600/p800 へ渡せる visible evidence と visual thesis を持つかを評価する"
+      responsibility: "追加 scene が p500/p600/p800 へ渡せる visible evidence、actor forces、道具/舞台装置の意味段階、visual thesis を持つかを評価する"
       blocking_if: "scene が説明だけで、画面上の人物・場所・道具・行為に翻訳できない"
     - role: "handoff_integrity"
-      responsibility: "scene 間の因果、問い、視線・音・道具などの handoff が途切れていないかを評価する"
+      responsibility: "scene 間の因果、問い、視線・音・道具などの concrete handoff が途切れていないかを評価する"
       blocking_if: "scene 間の接続が narration 依存で、次 scene を発生させる因果が弱い"
   review_policy:
     agent_review: "required"
@@ -129,6 +144,7 @@ scene_detail_review:
       - "つながらない場合は cut 追加または最終 cut の増厚を要求する"
       - "この scene が最大化された scene set の中で独立した問い・価値変化・因果 turn を持つか確認する"
       - "この scene をさらに分割すべきか、または cut 設計を厚くすべきか判断する"
+      - "この scene の非圧縮 beat、scene 昇格理由、固有責務、actor forces、道具/舞台装置の意味段階、concrete handoff、anti-template language を確認する"
   reviewer_roles:
     - role: "scene_detail_structure"
       responsibility: "単一 scene の必要性、内部整合、独立した劇的変化を評価する"
@@ -162,16 +178,21 @@ cut_blueprint_review:
     beat_ladder_coverage: "pending|passed|changes_requested"
     first_frame_motion_readiness: "pending|passed|changes_requested"
     multimodal_contract_coverage: "pending|passed|changes_requested"
+    story_event_obligation_coverage: "pending|passed|changes_requested"
+    causal_proof_coverage: "pending|passed|changes_requested"
+    role_coverage: "pending|passed|changes_requested"
+    audience_knowledge_delta_coverage: "pending|passed|changes_requested"
+    anti_redundancy_gate: "pending|passed|changes_requested"
     duration_density_and_handoff: "pending|passed|changes_requested"
   reviewer_roles:
     - role: "cut_intent_isolation"
       responsibility: "1 cut が 1 intent に限定され、場所移動/reveal/感情反転/説明/反応を同時に背負っていないかを評価する"
     - role: "beat_ladder_coverage"
-      responsibility: "cut_function 列が scene_spine を進め、重要 beat が必要な段階へ分解されているかを評価する"
+      responsibility: "固定順ではなく scene obligation から逆算され、story event / 因果 / reveal / handoff が必要 cut に割り当てられているかを評価する"
     - role: "first_frame_motion_readiness"
       responsibility: "first_frame_brief が p600 still の入力として完結し、motion_brief は p800 専用入力として分離されているかを評価する"
     - role: "multimodal_contract_coverage"
-      responsibility: "target_beat / must_show / must_avoid / done_when が image / narration / motion に渡せるかを評価する"
+      responsibility: "target_beat / audience_knowledge_delta / causal_proof / required_roles / must_show / done_when が image / narration / motion に渡せるかを評価する"
     - role: "duration_density_and_handoff"
       responsibility: "重要度・尺・cut数・最終cutのhandoffが十分かを評価する"
   review_policy:
@@ -242,18 +263,53 @@ scenes:
       visualizable_action_covered: false
       value_shift_visible: false
       causal_turn_visible: false
+      scene_specificity_gate_passed: false
       next_scene_connection_checked: false
       cut_coverage_plan_complete: false
-    coverage_plan:
-      coverage_strategy: "3_cut|5_cut|7_cut|spectacle_ladder|custom"
+    scene_cut_coverage_plan:
+      coverage_strategy: "reverse_from_scene_obligations"
       min_cut_count: {by_importance: 3, by_duration: 3, selected: 3, exception_reason: ""}
-      function_sequence: []
+      candidate_function_labels: ["setup", "pressure", "threshold", "turn", "payoff", "reaction", "handoff", "custom"]
       scene_obligations:
-        audience_information_to_cover: []
-        withheld_information_to_preserve: []
-        visual_evidence_to_show: []
-        causal_turn_cut_selector: ""
-        handoff_cut_selector: ""
+        - obligation_id: "dramatic_question_01"
+          source: dramatic_question
+          evidence: ""
+          assigned_cut_ids: []
+        - obligation_id: "story_event_obligations_01"
+          source: story_event_obligations
+          evidence: []
+          assigned_cut_ids: []
+        - obligation_id: "value_shift_01"
+          source: value_shift.visible_evidence
+          evidence: []
+          assigned_cut_ids: []
+        - obligation_id: "causal_turn_01"
+          source: causal_turn
+          evidence: ""
+          assigned_cut_ids: []
+        - obligation_id: "reveal_constraints_01"
+          source: reveal_constraints
+          evidence: []
+          assigned_cut_ids: []
+        - obligation_id: "handoff_01"
+          source: handoff_to_next_scene
+          evidence: ""
+          assigned_cut_ids: []
+      cut_assignments:
+        - cut_index: 1
+          cut_selector: "scene1_cut1"
+          obligation_ids: []
+          cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+          assigned_story_event_ids: []
+          target_beat: ""
+          visual_proof: ""
+          audience_knowledge_delta: ""
+          causal_proof: ""
+          required_roles: []
+          anti_redundancy_key: ""
+      unassigned_obligations: []
+      overloaded_cuts: []
+      duplicate_meaning_risks: []
     timing:
       duration_seconds: 6
       timestamp: "00:00-00:06"
@@ -297,12 +353,94 @@ scenes:
       narration_policy: "spoken|silent"
     scene_intent:
       story_purpose: "string"
+      dramatic_question: "この scene の間、観客が追う問い"
+      scene_spine: "setup -> pressure -> turn -> payoff -> handoff の1文要約"
+      value_shift:
+        from: "scene開始時の状態"
+        to: "scene終了時の状態"
+        visible_evidence: []
+      causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
       audience_information: []
       withheld_information: []
       reveal_constraints: []
       affect_transition: "string"
+      character_state:
+        start: "scene開始時の人物/関係/身体状態"
+        end: "scene終了時の人物/関係/身体状態"
+        visible_behavior: []
       visual_value_source: ""
+      visual_thesis: "この scene を代表する映画的な一枚絵"
+      story_event_obligations:
+        - event_id: ""
+          source_events: []
+          audience_knowledge_delta: ""
+          causal_proof: ""
+          visual_evidence: []
+          required_roles: []
+      role_coverage:
+        required_roles: []
+        must_not_collapse_to_protagonist_only: true
+      visual_proof_obligations: []
+      anti_redundancy_policy: "同じ story fact を別 cut で繰り返すだけなら cut 追加ではなく既存 cut を補強する"
+      static_first_frame_rules:
+        - "motion を説明せず、動画開始前後の静止状態で cut の証拠を見せる"
       production_risks: []
+      story_beat_coverage:
+        beat_ids: []
+        promotion_decision: "scene|cut|narration|omitted"
+        risk_if_compressed: ""
+      scene_conflict_engine:
+        desire: "この scene で主体が欲しているもの"
+        obstacle: "それを妨げる力"
+        stakes: "失敗すると何を失うか"
+        escalation: "scene内で圧力がどう上がるか"
+        no_return_point: "後戻りできなくなる瞬間"
+        visible_pressure: []
+      audience_knowledge_delta:
+        before_scene: []
+        learned_during_scene: []
+        misdirected_or_reframed: []
+        still_unknown_after_scene: []
+        forbidden_early_reveals: []
+      handoff_chain:
+        incoming:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|none"
+          visible_or_audible_form: ""
+        outgoing:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
+          next_scene_selector: ""
+          required_next_scene_start_pressure: ""
+      object_arc:
+        - object_id: ""
+          first_meaning: ""
+          current_scene_meaning: ""
+          later_meaning: ""
+          visible_state_in_this_scene: ""
+          must_not_show_yet: []
+      story_specificity:
+        non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
+        scene_promotion_reason: "独立した問い/価値変化/因果 turn を持つため scene に昇格させる理由"
+        unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
+        actor_forces:
+          protagonist: ""
+          opposing: []
+          helping: []
+          observing: []
+          pressure_method: ""
+        meaning_ladder:
+          protagonist_stage: ""
+          relationship_stage: ""
+          object_or_setpiece_stage: ""
+        concrete_handoff:
+          incoming_trigger: ""
+          outgoing_anchor: ""
+          outgoing_pressure: ""
+        anti_template_language:
+          banned_generic_phrases_absent: false
+          story_specific_terms: []
+          specificity_note: ""
       handoff_notes:
         p500_asset: []
         p600_image: []
@@ -312,7 +450,66 @@ scenes:
       generation_prompt: "string"
     cuts:
       - cut_id: 1  # dotted numeric string も可: 2.1
+        cut_contract:
+          schema_version: "2.1"
+          cut_role: "main|sub|transition|reaction|visual_payoff"
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          duration_intent: "short|standard|hold"
+          target_duration_seconds: 8
+          viewer_contract:
+            target_beat: "この cut で観客に体験させる1つのこと"
+            screen_question: "この cut の間、観客が画面から読む問い"
+            dramatic_job: "scene全体のどこを担当するか"
+            audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
+            causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+            visual_evidence: []
+            required_roles: []
+            assigned_story_event_ids: []
+            anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
+            visual_proof: "映像だけで target_beat が成立したと分かる証拠"
+            must_show: []
+            must_avoid: []
+            done_when: []
+          first_frame_contract:
+            imageable: true
+            first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+            action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+            static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
+            must_be_static_evidence_not_motion: true
+          motion_contract:
+            movable: true
+            motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+            end_state: "次 cut へ渡す最後の状態"
+            must_not_add: []
+          narration_contract:
+            speakable_or_silent: true
+            role: "setup|fact|emotion|contrast|aftertaste|silent"
+            target_function: ""
+            must_cover: []
+            must_avoid:
+              - "映像のキャプション化"
+            timing_intent: ""
+            silence_reason: ""
+          downstream_handoff:
+            p500_asset: []
+            p600_image: []
+            p700_narration: []
+            p800_video: []
+            carries_to_next_cut: []
+            carries_to_next_scene: []
+        legacy_scene_contract_alias:
+          target_beat: "<cut_contract.viewer_contract.target_beat>"
+          audience_knowledge_delta: "<cut_contract.viewer_contract.audience_knowledge_delta>"
+          causal_proof: "<cut_contract.viewer_contract.causal_proof>"
+          visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
+          required_roles: "<cut_contract.viewer_contract.required_roles>"
+          assigned_story_event_ids: "<cut_contract.viewer_contract.assigned_story_event_ids>"
+          anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
+          must_show: "<cut_contract.viewer_contract.must_show>"
+          must_avoid: "<cut_contract.viewer_contract.must_avoid>"
+          done_when: "<cut_contract.viewer_contract.done_when>"
         cut_blueprint:
+          legacy_note: "互換用。cut_contract が cut-level の正本。"
           cut_role: "main|sub|transition|reaction|visual_payoff"
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           duration_intent: "short|standard|hold"
@@ -320,9 +517,16 @@ scenes:
           target_beat: "この cut で観客に体験させる1つのこと"
           screen_question: "この cut の間、観客が画面から読む問い"
           dramatic_job: "scene全体のどこを担当するか"
+          audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
+          causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+          visual_evidence: []
+          required_roles: []
+          assigned_story_event_ids: []
+          anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
           visual_proof: "映像だけで target_beat が成立したと分かる証拠"
           visual_beat: "画として何が見えるか"
           first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
           action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
           motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
           motion_end_state: "次 cut へ渡す最後の状態"
@@ -352,8 +556,18 @@ scenes:
             object_ids: []
             location_ids: []
             reusable_still_candidates: []
-        narration: "string"
-        tts_text: "string"
+        narration_contract:
+          role: "setup|fact|emotion|contrast|aftertaste|silent"
+          must_cover: []
+          must_avoid:
+            - "映像のキャプション化"
+          timing_intent: ""
+          silence_reason: ""
+        narration_draft:
+          text: ""
+          status: "optional_draft|approved_by_human|superseded_by_p700"
+        narration: "legacy_optional_draft"
+        tts_text: "legacy_optional_draft"
         elevenlabs_prompt:
           spoken_context: "string"
           voice_tags: ["excited", "laughs harder"]

@@ -15,6 +15,23 @@ def write_manifest(run_dir: Path) -> None:
                 "```yaml",
                 "scenes:",
                 "  - scene_id: 10",
+                "    scene_intent:",
+                "      story_event_obligations:",
+                "        - event_id: scene01_story_event",
+                "          source_events: [灰の台所で名前を奪われる]",
+                "          audience_knowledge_delta: 観客は名前を奪われた事実を理解する",
+                "          causal_proof: 灰と台所の配置で原因と結果が読める",
+                "          visual_evidence: [灰, 台所, 姿勢]",
+                "          required_roles: [protagonist, opponent]",
+                "      role_coverage:",
+                "        required_roles: [protagonist, opponent]",
+                "      audience_knowledge_plan: [観客は名前を奪われた事実を理解する]",
+                "      visual_proof_obligations:",
+                "        - causal_proof: 灰と台所の配置で原因と結果が読める",
+                "          visual_evidence: [灰, 台所, 姿勢]",
+                "      anti_redundancy_policy:",
+                "        rule: 同じ意味を繰り返さない",
+                "      static_first_frame_rules: [静止画で証拠を見せる]",
                 "    scene_cut_coverage_plan:",
                 "      minimum_cut_count: 2",
                 "      selected_cut_count: 2",
@@ -35,6 +52,13 @@ def write_manifest(run_dir: Path) -> None:
                 "          rationale: 導入の静止画",
                 "        scene_contract:",
                 "          target_beat: 灰の台所の導入",
+                "          audience_knowledge_delta: 観客は灰の台所で名前を奪われたことを理解する",
+                "          causal_proof: 灰、台所、人物の姿勢で原因と結果が読める",
+                "          visual_evidence: [灰, 台所, 姿勢]",
+                "          required_roles: [protagonist, opponent]",
+                "          anti_redundancy_key: dramatic_question:scene_pressure",
+                "          assigned_story_event_ids: [scene01_story_event]",
+                "          static_first_frame_rule: 動作ではなく静止した証拠として見せる",
                 "          must_show: [シンデレラ, 灰の台所]",
                 "          must_avoid: [ロゴ]",
                 "          done_when: [人物と場所が一枚で読める]",
@@ -131,6 +155,12 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["semantic_contract"]["primary_location"], "灰の台所")
             self.assertEqual(entry["semantic_contract"]["emotional_state"], "孤独だが希望を失っていない")
             self.assertEqual(entry["semantic_contract"]["continuity_from_previous"], "前のカットから灰の台所の光を維持する")
+            self.assertEqual(entry["semantic_contract"]["audience_knowledge_delta"], "観客は灰の台所で名前を奪われたことを理解する")
+            self.assertEqual(entry["semantic_contract"]["causal_proof"], "灰、台所、人物の姿勢で原因と結果が読める")
+            self.assertEqual(entry["semantic_contract"]["visual_evidence"], ["灰", "台所", "姿勢"])
+            self.assertEqual(entry["semantic_contract"]["required_roles"], ["protagonist", "opponent"])
+            self.assertEqual(entry["semantic_contract"]["assigned_story_event_ids"], ["scene01_story_event"])
+            self.assertEqual(entry["semantic_contract"]["static_first_frame_rule"], "動作ではなく静止した証拠として見せる")
             self.assertFalse(entry["semantic_contract_missing"])
             self.assertEqual(entry["contract_required_fields_missing"], [])
             character_context = entry["asset_reference_context"]["character_ids"]["cinderella"]
@@ -154,7 +184,13 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(composite["stage"], "image_prompt")
             self.assertEqual(composite["cut_count"], 2)
             self.assertEqual(composite["scene_cut_coverage_plan"]["selected_cut_count"], 2)
+            self.assertEqual(composite["story_event_obligations"][0]["event_id"], "scene01_story_event")
+            self.assertEqual(composite["role_coverage"]["required_roles"], ["protagonist", "opponent"])
+            self.assertEqual(composite["cut_entries"][0]["assigned_story_event_ids"], ["scene01_story_event"])
             self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("story_event_obligation_unassigned", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("audience_knowledge_delta_missing", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("role_coverage_missing", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_cut_coverage_plan", composite["scene_composite_gate"]["must_judge"][0])
 
     def test_collect_scene_image_entries_includes_outputs_logs_and_contact_sheet(self) -> None:

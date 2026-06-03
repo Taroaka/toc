@@ -1,7 +1,8 @@
 # 動画マニフェスト: テンプレート（改善版）
 
 `docs/video-generation.md` の出力スキーマに準拠した作業テンプレートです。
-改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `scene_contract` → `image_generation.prompt` → `video_generation.motion_prompt` のつながりを明示します。
+改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `cut_contract` → `image_generation.prompt` → `video_generation.motion_prompt` のつながりを明示します。
+このテンプレートは skeleton 作成にも使うため TODO を含む。`manifest_phase: production` へ昇格する時点では TODO / TBD / pending を残さない。
 
 - 出力先: `output/videos/<topic>_<timestamp>_manifest.md`
   - 1物語1フォルダ運用の場合: `output/<topic>_<timestamp>/video_manifest.md`
@@ -9,7 +10,7 @@
 - 原則: p400 では完成 image prompt を書かず、p600 で 6 block prompt を作る
 
 ```yaml
-manifest_phase: "skeleton|production"
+manifest_phase: "skeleton"
 
 # === メタ情報 ===
 video_metadata:
@@ -18,9 +19,19 @@ video_metadata:
   source_script: "output/<topic>_<timestamp>/script.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "<ISO8601>"
-  duration_seconds: 60
+  target_duration_seconds: 300
+  estimated_duration_seconds: 300
+  duration_seconds: 300  # compatibility alias
+  experience: "cinematic_story"
   aspect_ratio: "9:16"
   resolution: "1080x1920"
+
+promotion_requirements:
+  no_todo_or_tbd: true
+  all_cut_contracts_complete: true
+  all_image_prompts_approved: true
+  all_narration_text_finalized_or_silent: true
+  all_video_motion_prompts_complete: true
 
 subagent_trace:
   - subagent_id: "image-prompt-judgment-001"
@@ -104,6 +115,11 @@ human_change_requests: []
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
     timestamp: "00:00-00:24"
+    importance: "medium"
+    target_duration_seconds: 24
+    estimated_duration_seconds: 24
+    handoff_to_next_scene: "次sceneへの視覚/音/因果アンカー。最終sceneはterminal_resolution"
+    terminal_resolution: ""
     scene_intent:
       importance: "medium"  # low|medium|high|critical
       target_duration_seconds: 24
@@ -127,6 +143,51 @@ scenes:
         visible_behavior: []
       visual_value_source: ""
       visual_thesis: "この scene を代表する映画的な一枚絵"
+      story_specificity:
+        non_compressible_beat: ""
+        scene_promotion_reason: ""
+        unique_scene_responsibility: ""
+        actor_forces:
+          protagonist: ""
+          opposing: []
+          helping: []
+          observing: []
+          pressure_method: ""
+        meaning_ladder:
+          protagonist_stage: ""
+          relationship_stage: ""
+          object_or_setpiece_stage: ""
+        concrete_handoff:
+          incoming_trigger: ""
+          outgoing_anchor: ""
+          outgoing_pressure: ""
+        anti_template_language:
+          banned_generic_phrases_absent: false
+          story_specific_terms: []
+          specificity_note: ""
+      scene_conflict_engine:
+        desire: ""
+        obstacle: ""
+        stakes: ""
+        escalation: ""
+        no_return_point: ""
+        visible_pressure: []
+      audience_knowledge_delta:
+        before_scene: []
+        learned_during_scene: []
+        still_unknown_after_scene: []
+        forbidden_early_reveals: []
+      handoff_chain:
+        incoming:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|none"
+          visible_or_audible_form: ""
+        outgoing:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
+          next_scene_selector: ""
+          required_next_scene_start_pressure: ""
+      object_arc: []
       spatial_plan:
         location_id: ""
         screen_geography: "前景/中景/背景、入口/出口、進行方向"
@@ -138,6 +199,7 @@ scenes:
         visualizable_action_covered: false
         value_shift_visible: false
         causal_turn_visible: false
+        scene_specificity_gate_passed: false
         next_scene_connection_checked: false
       handoff_notes:
         p500_asset: []
@@ -153,9 +215,31 @@ scenes:
     # カット設計ルール:
     # - 1カット = 1意図。
     # - 1カット = 1ナレーション、または明示された silent cut。
-    # - cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
-    # - target_duration_seconds / 8 を切り上げたカット数も下回らない。
+    # - cut 数は固定テンプレートではなく scene_cut_coverage_plan で scene obligation から逆算する。
+    # - low/medium/high/critical の重要度 floor と target_duration_seconds / 8 の duration floor を下回らない。
+    # - 同じ story fact の繰り返しなら cut 追加ではなく既存 cut の prompt/contract を厚くする。
     # - cut_contract が正本。scene_contract は既存 reader 向け互換 alias。
+    scene_cut_coverage_plan:
+      coverage_strategy: "reverse_from_scene_obligations"
+      min_cut_count:
+        by_importance: 3
+        by_duration: 3
+        selected: 3
+        exception_reason: ""
+      scene_obligations:
+        - source: "dramatic_question|story_event_obligations|value_shift.visible_evidence|causal_turn|reveal_constraints|handoff_to_next_scene"
+          evidence: []
+      cut_assignments:
+        - cut_index: 1
+          obligation_id: ""
+          cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+          assigned_story_event_ids: []
+          target_beat: ""
+          visual_proof: ""
+          audience_knowledge_delta: ""
+          causal_proof: ""
+          required_roles: []
+          anti_redundancy_key: ""
     cuts:
       - cut_id: 1
         cut_role: "main"  # main|sub|transition|reaction|visual_payoff
@@ -166,12 +250,30 @@ scenes:
           status: "implemented|verified|waived"
           notes: ""
         cut_contract:
-          schema_version: "2.1"
+          schema_version: "2.2"
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          intent_budget:
+            primary_intent: ""
+            secondary_intents_allowed: []
+            forbidden_combined_intents:
+              - "new_location_establishing + major_reveal + next_scene_handoff"
+            assigned_obligation_ids: []
+            overload_exception_reason: ""
           viewer_contract:
             target_beat: "この cut で観客に体験させる1つのこと"
             screen_question: "この cut の間、観客が画面から読む問い"
             dramatic_job: "scene全体のどこを担当するか"
+            audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
+            causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+            visual_evidence: []
+            required_roles: []
+            assigned_story_event_ids: []
+            anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
+            reveal_constraints:
+              inherited_from_scene: []
+              allowed_reveals_in_this_cut: []
+              forbidden_until_later_cut: []
+              forbidden_until_later_scene: []
             emotional_micro_shift: {from: "", to: ""}
             visual_proof: "映像だけで target_beat が成立したと分かる証拠"
             must_show: []
@@ -185,36 +287,108 @@ scenes:
             start_state: {}
             end_state: {}
             carry_forward_to_next_cut: []
+            continuity_risks: []
+          cut_handoff:
+            receives_from_previous:
+              anchor_id: ""
+              anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|none"
+              visible_or_audible_form: ""
+              expected_previous_cut_selector: ""
+            delivers_to_next:
+              anchor_id: ""
+              anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
+              visible_or_audible_form: ""
+              expected_next_cut_selector: ""
           first_frame_contract:
             imageable: true
             first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+            visible_start_state:
+              character_state: ""
+              prop_state: ""
+              spatial_state: ""
+              emotional_state: ""
+              gaze_or_attention: ""
+            motion_start_affordance:
+              movable_subject: ""
+              movement_vector: ""
+              camera_start_reason: ""
             action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+            static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
+            must_be_static_evidence_not_motion: true
           motion_contract:
             movable: true
             motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+            start_from_visible_state: ""
             end_state: "次 cut へ渡す最後の状態"
+            end_frame_brief: ""
             must_not_add: []
           narration_contract:
             speakable_or_silent: true
             role: "setup|fact|emotion|contrast|aftertaste|silent"
             target_function: "この声が cut で果たす役割"
-            text: ""
-            tts_text: ""
+            must_cover: []
+            must_avoid:
+              - "映像のキャプション化"
+            timing_intent: ""
             silence_reason: ""
+            draft:
+              text: ""
+              status: "optional_draft|approved_by_human|superseded_by_p700"
+          rhythm_contract:
+            expected_duration_seconds: 8
+            pacing: "quick|standard|slow_hold|spectacle_hold"
+            comprehension_moment: ""
+            cut_out_reason: ""
+            audio_visual_sync_point: ""
+            duration_exception:
+              allowed: false
+              reason: ""
+          asset_dependency:
+            character_ids_required: []
+            object_ids_required: []
+            location_ids_required: []
+            variant_ids_required: []
+            new_asset_requests: []
+            reusable_anchor_ids: []
+            reference_role: {}
           downstream_handoff:
-            p500_asset: {}
-            p600_image: {}
-            p700_narration: {}
-            p800_video: {}
+            p500_asset:
+              required_asset_ids: []
+              asset_candidates: []
+              continuity_anchor_needed: false
+              new_asset_needed: false
+              reuse_allowed: false
+            p600_image:
+              prompt_requirements: []
+              reference_requirements: []
+              first_frame_must_include: []
+              first_frame_must_avoid: []
+            p700_narration:
+              narration_requirements: []
+              role: "setup|fact|emotion|contrast|aftertaste|silent"
+              must_not_caption_visible_content: true
+            p800_video:
+              motion_requirements: []
+              start_state: ""
+              last_frame_or_end_state: ""
+              must_not_add: []
             carries_to_next_cut: []
             carries_to_next_scene: []
         scene_contract:
+          legacy_note: "旧runtime向け cut-level alias。新規設計では cut_contract を正本とする。"
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           target_beat: "この cut で伝える1つのこと"
           screen_question: "この cut の間、観客が画面から読む問い"
           dramatic_job: "scene全体の pressure / turn / payoff のどこを担当するか"
+          audience_knowledge_delta: "<cut_contract.viewer_contract.audience_knowledge_delta>"
+          causal_proof: "<cut_contract.viewer_contract.causal_proof>"
+          visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
+          required_roles: "<cut_contract.viewer_contract.required_roles>"
+          assigned_story_event_ids: "<cut_contract.viewer_contract.assigned_story_event_ids>"
+          anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
           visual_beat: "画として何が見えるか"
           first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          static_first_frame_rule: "<cut_contract.first_frame_contract.static_first_frame_rule>"
           motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
           must_show:
             - "image prompt / motion / narration のどこかで必ず見せる"
@@ -330,7 +504,7 @@ scenes:
           continuity_notes: []
           applied_request_ids: []
           motion_prompt: |
-            cut_function: <scene_contract.cut_function>
+            cut_function: <cut_contract.cut_function>
             camera: 静止画の構図を保ち、ゆっくり奥へ進む。過剰なズームはしない。
             subject_motion: 主人公はまだ大きく動かず、視線とわずかな体重移動だけで次の行動を予感させる。
             environment_motion: 朝霧が低く流れ、草が小さく揺れる。

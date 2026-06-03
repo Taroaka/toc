@@ -2549,6 +2549,115 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.repair.transport.status"], "failed")
         self.assertEqual(state["runtime.app_server.transport.status"], "failed")
 
+    def test_semantic_review_rereviews_after_repair_timeout_when_source_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            (run_dir / "script.md").write_text("# Script\n\nold scene meaning\n", encoding="utf-8")
+            review_turns = 0
+            repair_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps({"entry_count": 1, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal review_turns, repair_turns
+                    if "Semantic QA Producer Repair" in text:
+                        repair_turns += 1
+                        (run_dir / "script.md").write_text("# Script\n\nrepaired scene meaning\n", encoding="utf-8")
+                        raise CodexAppServerTransportError("turn timed out")
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    status = "passed" if "repaired scene meaning" in (run_dir / "script.md").read_text(encoding="utf-8") else "failed"
+                    (run_dir / paths["report"]).write_text(
+                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\nfindings: []\n",
+                        encoding="utf-8",
+                    )
+                    return None
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertEqual(state["review.semantic.scene_set.repair.transport.status"], "salvaged_after_source_artifact_change")
+        self.assertEqual(state["review.semantic.scene_set.repair.changed_artifacts_detected"], "script.md")
+        self.assertNotIn("runtime.app_server.transport.status", state)
+
+    def test_semantic_review_rereviews_after_repair_hard_timeout_when_source_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            (run_dir / paths["scope"]).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / paths["scope"]).write_text(
+                json.dumps({"entry_count": 1, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text("# Script\n\nold scene meaning\n", encoding="utf-8")
+            review_turns = 0
+            repair_turns = 0
+
+            async def fake_run_once(*_args, **_kwargs):
+                nonlocal review_turns
+                review_turns += 1
+                if review_turns == 1:
+                    return image_gen_app.SemanticReviewStatus(status="failed", entry_count=1, errors=("wrong meaning",))
+                return image_gen_app.SemanticReviewStatus(status="passed", entry_count=1, errors=())
+
+            async def slow_repair(*_args, **_kwargs):
+                nonlocal repair_turns
+                repair_turns += 1
+                (run_dir / "script.md").write_text("# Script\n\nrepaired scene meaning\n", encoding="utf-8")
+                await asyncio.Event().wait()
+
+            with (
+                patch("server.image_gen_app._run_semantic_review_once", fake_run_once),
+                patch("server.image_gen_app._run_semantic_review_producer_repair", slow_repair),
+                patch("server.image_gen_app._semantic_repair_once_hard_timeout_seconds", lambda: 0.01),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(repair_turns, 1)
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
+        self.assertEqual(state["review.semantic.scene_set.repair.transport.status"], "salvaged_after_source_artifact_change")
+        self.assertEqual(state["review.semantic.scene_set.repair.changed_artifacts_detected"], "script.md")
+        self.assertNotIn("runtime.app_server.transport.status", state)
+
     def test_semantic_review_accepts_completed_repair_report_after_turn_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

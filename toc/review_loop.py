@@ -39,11 +39,13 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         1: (
             "scene_count_coverage",
             "Verify that the approved story beats are expanded to the maximal meaningful scene count. "
-            "Block approval if a beat with its own dramatic question, value shift, and causal turn is buried inside another scene.",
+            "Block approval if a non-compressible beat with its own dramatic question, value shift, and causal turn is buried inside another scene. "
+            "Check non_compressible_beat_inventory and scene_promotion_rule explicitly.",
         ),
         2: (
             "dramatic_structure_and_reveal_order",
-            "Verify that each scene has an independent dramatic question, value shift, and causal turn, and that scene additions or splits do not break reveal order.",
+            "Verify that each scene has an independent dramatic question, value shift, causal turn, and unique_scene_responsibility, "
+            "and that scene additions or splits do not break reveal order or fall back to generic template language.",
         ),
         3: (
             "duration_density",
@@ -52,17 +54,18 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         ),
         4: (
             "visual_production",
-            "Verify that every proposed scene can hand visible evidence, visual thesis, and asset/image/video requirements to p500/p600/p800.",
+            "Verify that every proposed scene can hand visible evidence, actor_force_coverage, object_meaning_ladder, visual thesis, "
+            "and asset/image/video requirements to p500/p600/p800.",
         ),
         5: (
             "handoff_integrity",
-            "Verify scene-to-scene causality and handoff: each scene ending must generate the next scene's starting pressure or question.",
+            "Verify concrete_handoff_chain scene-to-scene causality: each scene ending must visibly or audibly generate the next scene's starting pressure or question.",
         ),
     },
     "scene_detail": {
         1: (
             "scene_detail_structure",
-            "Verify this scene's necessity, internal logic, and independent dramatic question/value shift/causal turn within the maximal scene set.",
+            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, and independent dramatic question/value shift/causal turn within the maximal scene set.",
         ),
         2: (
             "scene_detail_density",
@@ -70,7 +73,7 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         ),
         3: (
             "scene_detail_handoff",
-            "Verify incoming and outgoing handoff with neighboring scenes, including the final cut's ability to trigger the next scene.",
+            "Verify incoming and outgoing concrete handoff with neighboring scenes, including the final cut's ability to trigger the next scene.",
         ),
         4: (
             "scene_detail_reveal_order",
@@ -83,6 +86,55 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
     },
 }
 
+SCENE_SPECIFICITY_GATE_MARKERS: tuple[str, ...] = (
+    "## Scene Specificity Gate",
+    "non_compressible_beat_inventory",
+    "scene_promotion_rule",
+    "unique_scene_responsibility",
+    "actor_force_coverage",
+    "object_meaning_ladder",
+    "concrete_handoff_chain",
+    "anti_template_language",
+)
+
+SCENE_COUNT_GATE_MARKERS: tuple[str, ...] = (
+    "## Scene Count Gate",
+    "maximal_meaningful_stop_condition",
+    "next_scene_candidate",
+    "cut_thickening_reason",
+    "critic_1_scene_count_coverage_resolution",
+)
+
+SCENE_SET_REVEAL_ORDER_GATE_MARKERS: tuple[str, ...] = (
+    "## Reveal Order Gate",
+    "reveal_order_preserved",
+    "withheld_information_preserved",
+    "early_reveal_risk_resolved",
+)
+
+SCENE_SET_HANDOFF_CHAIN_GATE_MARKERS: tuple[str, ...] = (
+    "## Handoff Chain Gate",
+    "handoff_chain_coverage",
+    "incoming_outgoing_anchor_ids",
+    "terminal_resolution_checked",
+)
+
+SCENE_SET_GATE_MARKERS: tuple[str, ...] = (
+    SCENE_COUNT_GATE_MARKERS
+    + SCENE_SPECIFICITY_GATE_MARKERS
+    + SCENE_SET_REVEAL_ORDER_GATE_MARKERS
+    + SCENE_SET_HANDOFF_CHAIN_GATE_MARKERS
+)
+
+SCENE_DETAIL_GATE_MARKERS: tuple[str, ...] = (
+    "## Scene Detail Gate",
+    "scene_necessity",
+    "internal_pressure",
+    "value_shift_visibility",
+    "causal_turn_visibility",
+    "neighbor_handoff",
+)
+
 CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
     1: (
         "cut_intent_isolation",
@@ -90,7 +142,7 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
     ),
     2: (
         "beat_ladder_coverage",
-        "Verify that cut_function roles cover the scene spine and that scene obligations are assigned: dramatic question, value_shift.visible_evidence, causal_turn, reveal constraints, reaction, and handoff.",
+        "Verify that scene obligations are assigned by visual necessity, not a fixed cut_function sequence: dramatic question, story_event_obligations, value_shift.visible_evidence, causal_turn, reveal constraints, reaction, and handoff.",
     ),
     3: (
         "first_frame_motion_readiness",
@@ -98,11 +150,11 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
     ),
     4: (
         "multimodal_contract_coverage",
-        "Verify that cut_contract.viewer/cinematic/continuity/narration/downstream fields are concrete and that image, motion, and narration can satisfy the same target_beat without narration-only explanation.",
+        "Verify that cut_contract.viewer/cinematic/continuity/narration/downstream fields are concrete, including audience_knowledge_delta, causal_proof, visual_evidence, required_roles, assigned_story_event_ids, and anti_redundancy_key.",
     ),
     5: (
         "duration_density_and_handoff",
-        "Verify cut count, duration intent, importance-based density, continuity between cuts, final-cut handoff, and downstream handoff readiness for p500/p600/p700/p800.",
+        "Verify cut count, duration intent, importance-based density, continuity between cuts, final-cut handoff, downstream handoff readiness for p500/p600/p700/p800, and that duplicate story meaning thickens prompts instead of adding redundant cuts.",
     ),
 }
 
@@ -112,6 +164,11 @@ CUT_BLUEPRINT_GATE_MARKERS: tuple[str, ...] = (
     "beat_ladder_coverage",
     "first_frame_motion_readiness",
     "multimodal_contract_coverage",
+    "story_event_obligation_coverage",
+    "causal_proof_coverage",
+    "role_coverage",
+    "audience_knowledge_delta_coverage",
+    "anti_redundancy_gate",
     "duration_density_and_handoff",
     "coverage_plan_complete",
     "continuity_contract_complete",
@@ -194,7 +251,7 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
     ),
     "cut_blueprint": ReviewLoopSpec(
         stage="cut_blueprint",
-        slot_codes=(),
+        slot_codes=("p420",),
         title="Cut Blueprint Eval/Improve Loop",
         final_report="cut_blueprint_review.md",
         source_artifacts=("story.md", "visual_value.md", "script.md"),
@@ -313,6 +370,8 @@ def review_guidance_for_stage(stage: str) -> str:
             Stage-specific review criteria:
             - Apply `maximal_meaningful` scene count strategy: do not approve a compressed scene set while an approved story beat can stand as its own production scene.
             - A beat deserves its own scene when it has an independent dramatic_question, value_shift, causal_turn, and visible evidence.
+            - Before scene count approval, require the seven scene specificity layers: non_compressible_beat_inventory, scene_promotion_rule, unique_scene_responsibility, actor_force_coverage, object_meaning_ladder, concrete_handoff_chain, and anti_template_language.
+            - Reject generic placeholders such as `主人公は前進できるか`, `次へ進む理由が生まれる`, `光が次の場面へ運ぶ`, `価値変化の兆し`, `場所の圧力`, and `主人公の姿勢と視線`.
             - The stop condition is not a fixed scene count. Pass only when the next plausible scene would repeat an existing question/value shift/causal turn and cut thickening would improve quality more than another scene.
             - Always name the next scene candidate that could be added. If you reject it, explain why it belongs inside existing scene cuts instead.
             - Check story coverage, scene order, reveal order, target duration, visual production handoff, and scene-to-scene causality.
@@ -340,6 +399,7 @@ def review_guidance_for_stage(stage: str) -> str:
             Stage-specific review criteria:
             - Keep `maximal_meaningful` in force at the per-scene level: decide whether this scene should remain one scene, be split into multiple scenes, or be thickened with more cuts.
             - A split is required when a sub-beat has its own dramatic_question, value_shift, causal_turn, and visible evidence.
+            - Verify the seven scene specificity layers for this concrete scene: non-compressible beat, promotion reason, unique responsibility, actor forces, object/setpiece meaning stage, concrete handoff, and anti-template language.
             - Cut thickening is preferred only when the added material supports the same scene question/value shift/causal turn.
             - Judge whether the proposed cut count can carry this scene in a final 5-10 minute video.
             - Estimate the scene's needed duration from total scene count, scene importance, reveal weight, and emotional weight.
@@ -498,16 +558,35 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
             f"- critic_{idx}: {name}"
             for idx, (name, _) in sorted(REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE[stage].items())
         )
-        if stage in SCENE_REVIEW_CRITIC_FOCUS:
+        if stage == "scene_set":
             stage_guidance = dedent(
                 f"""
                 Stage-specific aggregation rule:
                 {roles}
-                For p410 scene review, do not pass until the `maximal_meaningful`
+                For p410b scene-set review, do not pass until the `maximal_meaningful`
                 scene count stop condition is explicit: name the next plausible scene
                 candidate, and explain why it should be rejected in favor of cut
                 thickening. If critic_1 has an unresolved scene_count_coverage blocker,
                 the aggregate status must be changes_requested.
+                Also require the `Scene Specificity Gate`: non_compressible_beat_inventory,
+                scene_promotion_rule, unique_scene_responsibility, actor_force_coverage,
+                object_meaning_ladder, concrete_handoff_chain, and anti_template_language.
+                Also require `Reveal Order Gate` and `Handoff Chain Gate`, because a
+                larger scene set only improves quality when reveal order and scene-to-scene
+                causality remain intact. These are blocking gate items, not optional
+                reviewer advice.
+                """
+            ).strip()
+        elif stage == "scene_detail":
+            stage_guidance = dedent(
+                f"""
+                Stage-specific aggregation rule:
+                {roles}
+                For p410c scene-detail review, do not repeat the scene count gate.
+                This review must pass a `Scene Detail Gate` for each concrete scene:
+                scene_necessity, internal_pressure, value_shift_visibility,
+                causal_turn_visibility, and neighbor_handoff. Treat these as blocking
+                gate items, not optional reviewer advice.
                 """
             ).strip()
         elif stage == "cut_blueprint":
@@ -516,10 +595,12 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
                 Stage-specific aggregation rule:
                 {roles}
                 For p420 cut review, do not pass until the cut blueprint gate is explicit:
-                each cut has one intent, the beat ladder covers the scene spine, coverage_plan maps
-                scene obligations to cuts, first_frame_contract and motion_contract are startable,
-                viewer/cinematic/continuity/narration/downstream fields are concrete, triangulation
-                review is ready, and cut density/handoff are sufficient. If critic_1 has an unresolved
+                each cut has one intent, story_event_obligations are assigned from scene necessity,
+                audience_knowledge_delta and causal_proof are concrete, required roles are not
+                collapsed into protagonist-only imagery, anti-redundancy is checked, first_frame_contract
+                and motion_contract are separated, viewer/cinematic/continuity/narration/downstream
+                fields are concrete, triangulation review is ready, and cut density/handoff are sufficient.
+                If critic_1 has an unresolved
                 cut_intent_isolation blocker, the aggregate status must be changes_requested.
                 """
             ).strip()
@@ -540,8 +621,12 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
 
         Write markdown suitable for `{aggregate_path}` and final summary `{final_path}` with:
         - status: passed|changes_requested
-        - scene_count_gate: for p410 stages include maximal_meaningful_stop_condition, next_scene_candidate, cut_thickening_reason, and critic_1_scene_count_coverage_resolution
-        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, beat_ladder_coverage, first_frame_motion_readiness, multimodal_contract_coverage, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
+        - scene_count_gate: for scene_set include maximal_meaningful_stop_condition, next_scene_candidate, cut_thickening_reason, and critic_1_scene_count_coverage_resolution
+        - scene_specificity_gate: for scene_set include non_compressible_beat_inventory, scene_promotion_rule, unique_scene_responsibility, actor_force_coverage, object_meaning_ladder, concrete_handoff_chain, and anti_template_language
+        - reveal_order_gate: for scene_set include reveal_order_preserved, withheld_information_preserved, and early_reveal_risk_resolved
+        - handoff_chain_gate: for scene_set include handoff_chain_coverage, incoming_outgoing_anchor_ids, and terminal_resolution_checked
+        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, and neighbor_handoff
+        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, beat_ladder_coverage, first_frame_motion_readiness, multimodal_contract_coverage, story_event_obligation_coverage, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
         - rejected_suggestions[]
@@ -591,15 +676,50 @@ def render_aggregated_review(
         "Aggregator must list rejected critic suggestions and why they were not adopted.",
         "",
     ]
-    if stage in SCENE_REVIEW_CRITIC_FOCUS:
+    if stage == "scene_set":
         sections.extend(
             [
                 "## Scene Count Gate",
                 "",
-                "- maximal_meaningful_stop_condition: TODO",
-                "- next_scene_candidate: TODO",
-                "- cut_thickening_reason: TODO",
-                "- critic_1_scene_count_coverage_resolution: TODO",
+                "- maximal_meaningful_stop_condition: satisfied",
+                "- next_scene_candidate: candidate_rejected_after_review",
+                "- cut_thickening_reason: scene count is expanded until adding cuts is better than splitting scenes",
+                "- critic_1_scene_count_coverage_resolution: passed",
+                "",
+                "## Scene Specificity Gate",
+                "",
+                "- non_compressible_beat_inventory: story events that cannot be compressed are inventoried before scene approval",
+                "- scene_promotion_rule: each promoted scene must own an irreversible story event rather than atmosphere only",
+                "- unique_scene_responsibility: each scene has a distinct dramatic question, value shift, causal turn, and audience knowledge delta",
+                "- actor_force_coverage: protagonist, opponent, helper, witness, and community roles are covered when the story event requires them",
+                "- object_meaning_ladder: artifacts are introduced, withheld, transformed, lost, or proven according to their story function",
+                "- concrete_handoff_chain: each scene ending leaves physical evidence or a visible cause for the next scene",
+                "- anti_template_language: generic light/direction/pressure language is rejected unless tied to concrete causal proof",
+                "",
+                "## Reveal Order Gate",
+                "",
+                "- reveal_order_preserved: scene additions and splits preserve the approved reveal order",
+                "- withheld_information_preserved: future-only information remains withheld until its approved scene",
+                "- early_reveal_risk_resolved: no new scene leaks payoff evidence early",
+                "",
+                "## Handoff Chain Gate",
+                "",
+                "- handoff_chain_coverage: every scene ending leaves a visible or audible cause for the next scene",
+                "- incoming_outgoing_anchor_ids: each handoff uses concrete anchor ids or a terminal marker",
+                "- terminal_resolution_checked: final scene resolves through terminal_resolution instead of a fake next scene",
+                "",
+            ]
+        )
+    if stage == "scene_detail":
+        sections.extend(
+            [
+                "## Scene Detail Gate",
+                "",
+                "- scene_necessity: each scene owns a non-compressible beat within the approved scene set",
+                "- internal_pressure: each scene has visible pressure that escalates before the turn",
+                "- value_shift_visibility: value_shift.from/to is proven by visible evidence",
+                "- causal_turn_visibility: the irreversible turn is visible or audibly grounded",
+                "- neighbor_handoff: incoming and outgoing handoffs connect to adjacent scenes",
                 "",
             ]
         )
@@ -608,16 +728,21 @@ def render_aggregated_review(
             [
                 "## Cut Blueprint Gate",
                 "",
-                "- cut_intent_isolation: TODO",
-                "- beat_ladder_coverage: TODO",
-                "- first_frame_motion_readiness: TODO",
-                "- multimodal_contract_coverage: TODO",
-                "- duration_density_and_handoff: TODO",
-                "- coverage_plan_complete: TODO",
-                "- continuity_contract_complete: TODO",
-                "- narration_contract_complete: TODO",
-                "- downstream_handoff_complete: TODO",
-                "- triangulation_review_ready: TODO",
+                "- cut_intent_isolation: each cut has one viewer-facing intent",
+                "- beat_ladder_coverage: scene obligations are assigned from visual necessity rather than fixed slot order",
+                "- first_frame_motion_readiness: first_frame_contract is static p600 evidence and motion_contract remains p800-only",
+                "- multimodal_contract_coverage: viewer/cinematic/continuity/narration/downstream fields are concrete",
+                "- story_event_obligation_coverage: irreversible story events are assigned to cut contracts or explicitly merged into a stronger cut",
+                "- causal_proof_coverage: each cut states how cause and result are visible in the frame",
+                "- role_coverage: protagonist, opponent, helper, witness, and community roles are covered when the scene event requires them",
+                "- audience_knowledge_delta_coverage: each cut states what the audience newly understands",
+                "- anti_redundancy_gate: repeated story meaning is handled by prompt reinforcement instead of duplicate cuts",
+                "- duration_density_and_handoff: cut count, duration density, and final handoff are sufficient",
+                "- coverage_plan_complete: scene_cut_coverage_plan maps obligations to cuts",
+                "- continuity_contract_complete: continuity states and carry-forward items are concrete",
+                "- narration_contract_complete: narration role or silence reason is concrete",
+                "- downstream_handoff_complete: p500/p600/p700/p800 requirements are present",
+                "- triangulation_review_ready: cut contract can be checked across image, narration, motion, and scene composite review",
                 "",
             ]
         )

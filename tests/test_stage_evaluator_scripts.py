@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, parse_state_file
 from toc import stage_evaluator as STAGE_EVALUATOR
-from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
+from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
 
 
 def _good_research_yaml() -> str:
@@ -223,14 +223,47 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
         patch_heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
         scene_count_gate = []
         if stage_focus:
-            if stage in SCENE_REVIEW_CRITIC_FOCUS:
+            if stage == "scene_set":
                 scene_count_gate = [
                     "## Scene Count Gate",
                     "",
                     "- maximal_meaningful_stop_condition: no additional independent scene remains",
-                    "- next_scene_candidate: none",
+                    "- next_scene_candidate: no additional independent scene candidate remains",
                     "- cut_thickening_reason: additional material repeats the same scene turn",
                     "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed",
+                    "",
+                    "## Scene Specificity Gate",
+                    "",
+                    "- non_compressible_beat_inventory: approved story beats are inventoried",
+                    "- scene_promotion_rule: every promoted scene has its own question, value shift, and causal turn",
+                    "- unique_scene_responsibility: each scene owns a distinct story obligation",
+                    "- actor_force_coverage: protagonist, opposing/helper, and witness forces are covered where story-relevant",
+                    "- object_meaning_ladder: story objects and setpieces have staged meaning",
+                    "- concrete_handoff_chain: handoff is visible or audible, not narration-only",
+                    "- anti_template_language: banned generic placeholders are absent",
+                    "",
+                    "## Reveal Order Gate",
+                    "",
+                    "- reveal_order_preserved: approved reveal order is preserved",
+                    "- withheld_information_preserved: future-only information remains withheld",
+                    "- early_reveal_risk_resolved: no payoff evidence leaks early",
+                    "",
+                    "## Handoff Chain Gate",
+                    "",
+                    "- handoff_chain_coverage: each scene ending causes the next scene",
+                    "- incoming_outgoing_anchor_ids: concrete anchor ids are present",
+                    "- terminal_resolution_checked: final scene uses terminal_resolution",
+                    "",
+                ]
+            elif stage == "scene_detail":
+                scene_count_gate = [
+                    "## Scene Detail Gate",
+                    "",
+                    "- scene_necessity: each scene owns a non-compressible beat",
+                    "- internal_pressure: pressure escalates before the turn",
+                    "- value_shift_visibility: value shift is visible",
+                    "- causal_turn_visibility: causal turn is visible",
+                    "- neighbor_handoff: neighboring handoffs are checked",
                     "",
                 ]
             else:
@@ -241,6 +274,11 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- beat_ladder_coverage: passed",
                     "- first_frame_motion_readiness: passed",
                     "- multimodal_contract_coverage: passed",
+                    "- story_event_obligation_coverage: passed",
+                    "- causal_proof_coverage: passed",
+                    "- role_coverage: passed",
+                    "- audience_knowledge_delta_coverage: passed",
+                    "- anti_redundancy_gate: passed",
                     "- duration_density_and_handoff: passed",
                     "- coverage_plan_complete: passed",
                     "- continuity_contract_complete: passed",
@@ -281,6 +319,85 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
         )
 
 
+def _valid_scene_intent_lines(topic: str, scene_idx: int, *, terminal: bool, indent: str = "      ") -> list[str]:
+    next_selector = f"scene{scene_idx + 1}" if not terminal else ""
+    outgoing_anchor_type = "terminal" if terminal else "question"
+    return [
+        f"{indent}scene_intent:",
+        f"{indent}  story_purpose: \"{topic}の不可逆な一歩を映画的に見せる\"",
+        f"{indent}  dramatic_question: \"{topic}は目の前の圧力を受けて次の責務を選べるか\"",
+        f"{indent}  scene_spine: \"村道の静けさから圧力が増し、{topic}が具体的な選択をして痕跡を残す\"",
+        f"{indent}  value_shift:",
+        f"{indent}    from: \"ためらいが残る状態\"",
+        f"{indent}    to: \"次の責務へ踏み出した状態\"",
+        f"{indent}    visible_evidence: [\"足跡\", \"握られたきびだんご袋\"]",
+        f"{indent}  causal_turn: \"{topic}が村道で袋を握り直し、後戻りせず進む決断を見せる\"",
+        f"{indent}  audience_information: [\"{topic}が旅の責務を受け入れる\"]",
+        f"{indent}  withheld_information: [\"結末の勝敗\"]",
+        f"{indent}  reveal_constraints: [\"鬼との決着はまだ見せない\"]",
+        f"{indent}  affect_transition: \"静かな不安から決意へ移る\"",
+        f"{indent}  character_state:",
+        f"{indent}    start: \"村道で迷いが残る\"",
+        f"{indent}    end: \"袋を握り、視線が前に固定される\"",
+        f"{indent}    visible_behavior: [\"袋を握る\", \"足を前へ出す\"]",
+        f"{indent}  visual_thesis: \"朝霧の村道で、{topic}の足跡ときびだんご袋が決意の証拠になる\"",
+        f"{indent}  visual_value_source: \"none\"",
+        f"{indent}  production_risks: []",
+        f"{indent}  scene_conflict_engine:",
+        f"{indent}    desire: \"責務を果たすため前へ進む\"",
+        f"{indent}    obstacle: \"村を離れる不安と見えない敵の圧力\"",
+        f"{indent}    stakes: \"踏み出せなければ村を守る約束が宙に浮く\"",
+        f"{indent}    escalation: \"朝霧の奥から村人の視線と沈黙が重くなる\"",
+        f"{indent}    no_return_point: \"{topic}が袋を握り直して村道を越える\"",
+        f"{indent}    visible_pressure: [\"村人の視線\", \"霧の奥へ伸びる道\"]",
+        f"{indent}  audience_knowledge_delta:",
+        f"{indent}    before_scene: [\"{topic}が旅に出る物語である\"]",
+        f"{indent}    learned_during_scene: [\"{topic}が自分の意思で責務を引き受ける\"]",
+        f"{indent}    still_unknown_after_scene: [\"鬼との決着\"]",
+        f"{indent}    forbidden_early_reveals: [\"勝利の証拠\"]",
+        f"{indent}  handoff_chain:",
+        f"{indent}    incoming:",
+        f"{indent}      anchor_id: \"scene{scene_idx}_incoming_mist\"",
+        f"{indent}      anchor_type: \"sound\"",
+        f"{indent}      visible_or_audible_form: \"朝霧の中の村の沈黙\"",
+        f"{indent}    outgoing:",
+        f"{indent}      anchor_id: \"scene{scene_idx}_footprint\"",
+        f"{indent}      anchor_type: \"{outgoing_anchor_type}\"",
+        f"{indent}      next_scene_selector: \"{next_selector}\"",
+        f"{indent}      required_next_scene_start_pressure: \"足跡と握られたきびだんご袋が、村人の視線を背に山道へ向かわせる\"",
+        f"{indent}  object_arc:",
+        f"{indent}    - object_id: \"kibidango_bag\"",
+        f"{indent}      first_meaning: \"旅の支え\"",
+        f"{indent}      current_scene_meaning: \"決意の物証\"",
+        f"{indent}      later_meaning: \"仲間を得る契機\"",
+        f"{indent}      visible_state_in_this_scene: \"腰で揺れる小袋\"",
+        f"{indent}      must_not_show_yet: [\"勝利の証拠\"]",
+        f"{indent}  story_specificity:",
+        f"{indent}    non_compressible_beat: \"{topic}が責務を自分の行為として引き受ける\"",
+        f"{indent}    scene_promotion_reason: \"独立した問い、決意への価値変化、村道を越える因果 turn を持つ\"",
+        f"{indent}    unique_scene_responsibility: \"旅の責務が口約束から身体行為へ変わる瞬間を担う\"",
+        f"{indent}    actor_forces:",
+        f"{indent}      protagonist: \"{topic}\"",
+        f"{indent}      opposing: [\"見えない鬼の脅威\"]",
+        f"{indent}      helping: [\"村人の沈黙\"]",
+        f"{indent}      observing: [\"道端の子ども\"]",
+        f"{indent}      pressure_method: \"村人の視線と霧の道が後戻りできない圧力を作る\"",
+        f"{indent}    meaning_ladder:",
+        f"{indent}      protagonist_stage: \"受け身から能動へ\"",
+        f"{indent}      relationship_stage: \"村との関係が保護から責務へ移る\"",
+        f"{indent}      object_or_setpiece_stage: \"きびだんご袋が旅の証拠になる\"",
+        f"{indent}    concrete_handoff:",
+        f"{indent}      incoming_trigger: \"村の沈黙と朝霧\"",
+        f"{indent}      outgoing_anchor: \"足跡と握られた袋\"",
+        f"{indent}      outgoing_pressure: \"足跡が残るため次の移動が避けられない\"",
+        f"{indent}    anti_template_language:",
+        f"{indent}      banned_generic_phrases_absent: true",
+        f"{indent}      story_specific_terms: [\"{topic}\", \"きびだんご袋\", \"村道\"]",
+        f"{indent}      specificity_note: \"人物、道具、場所、行為を明示する\"",
+        f"{indent}  handoff_notes: {{p500_asset: [\"momotaro\", \"kibidango_bag\"], p600_image: [\"足跡と袋を見せる\"], p700_narration: [\"決意を補う\"], p800_video: [\"袋を握る動き\"]}}",
+    ]
+
+
 def _write_valid_immersive_p400_pair(
     run_dir: Path,
     *,
@@ -310,6 +427,130 @@ def _write_valid_immersive_p400_pair(
         f"  target_duration_seconds: {target_duration}",
         "scenes:",
     ]
+
+    def coverage_plan_lines(scene_idx: int) -> list[str]:
+        return [
+            "    scene_cut_coverage_plan:",
+            "      coverage_strategy: \"reverse_from_scene_obligations\"",
+            "      min_cut_count: {by_importance: 3, by_duration: 4, selected: 4, exception_reason: \"\"}",
+            "      scene_obligations:",
+            "        - obligation_id: \"dramatic_question_01\"",
+            "          source: \"dramatic_question\"",
+            f"          evidence: \"scene {scene_idx} の問い\"",
+            f"          assigned_cut_ids: [\"scene{scene_idx}_cut1\"]",
+            "        - obligation_id: \"value_shift_01\"",
+            "          source: \"value_shift.visible_evidence\"",
+            "          evidence: [\"桃太郎\"]",
+            f"          assigned_cut_ids: [\"scene{scene_idx}_cut2\"]",
+            "        - obligation_id: \"causal_turn_01\"",
+            "          source: \"causal_turn\"",
+            f"          evidence: \"scene {scene_idx} の因果\"",
+            f"          assigned_cut_ids: [\"scene{scene_idx}_cut3\"]",
+            "        - obligation_id: \"handoff_01\"",
+            "          source: \"handoff_to_next_scene\"",
+            f"          evidence: \"scene {scene_idx} の受け渡し\"",
+            f"          assigned_cut_ids: [\"scene{scene_idx}_cut4\"]",
+            "      cut_assignments:",
+            f"        - {{cut_index: 1, cut_selector: \"scene{scene_idx}_cut1\", obligation_ids: [\"dramatic_question_01\"], cut_function: \"setup\", assigned_story_event_ids: [\"scene_obligation:dramatic_question_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が見える\", audience_knowledge_delta: \"桃太郎を理解する\", causal_proof: \"桃太郎が画面にいる\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:setup\"}}",
+            f"        - {{cut_index: 2, cut_selector: \"scene{scene_idx}_cut2\", obligation_ids: [\"value_shift_01\"], cut_function: \"pressure\", assigned_story_event_ids: [\"scene_obligation:value_shift_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が進む\", audience_knowledge_delta: \"桃太郎の変化を理解する\", causal_proof: \"桃太郎が前を向く\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:pressure\"}}",
+            f"        - {{cut_index: 3, cut_selector: \"scene{scene_idx}_cut3\", obligation_ids: [\"causal_turn_01\"], cut_function: \"turn\", assigned_story_event_ids: [\"scene_obligation:causal_turn_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が決める\", audience_knowledge_delta: \"因果を理解する\", causal_proof: \"決意が行動を生む\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:turn\"}}",
+            f"        - {{cut_index: 4, cut_selector: \"scene{scene_idx}_cut4\", obligation_ids: [\"handoff_01\"], cut_function: \"handoff\", assigned_story_event_ids: [\"scene_obligation:handoff_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が次へ向く\", audience_knowledge_delta: \"次への理由を理解する\", causal_proof: \"視線が次へ渡る\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:handoff\"}}",
+            "      unassigned_obligations: []",
+            "      overloaded_cuts: []",
+            "      duplicate_meaning_risks: []",
+        ]
+
+    def cut_contract_lines(scene_idx: int, cut_idx: int, selector: str) -> list[str]:
+        next_anchor = f"scene{scene_idx}_cut{cut_idx}_to_cut{cut_idx + 1}" if cut_idx < 4 else f"scene{scene_idx}_to_next"
+        incoming_anchor = f"scene{scene_idx}_incoming" if cut_idx == 1 else f"scene{scene_idx}_cut{cut_idx - 1}_to_cut{cut_idx}"
+        incoming_type = "none" if cut_idx == 1 else "gesture"
+        outgoing_type = "gesture"
+        return [
+            "        cut_contract:",
+            "          schema_version: \"2.2\"",
+            "          cut_function: \"setup\"",
+            "          intent_budget:",
+            f"            primary_intent: \"桃太郎 cut {cut_idx}\"",
+            f"            assigned_obligation_ids: [\"obligation_{cut_idx}\"]",
+            "            secondary_intents_allowed: []",
+            "            forbidden_combined_intents: [\"new_location_establishing + major_reveal + next_scene_handoff\"]",
+            "            overload_exception_reason: \"\"",
+            "          viewer_contract:",
+            "            target_beat: \"桃太郎\"",
+            "            screen_question: \"桃太郎は何をするか\"",
+            "            dramatic_job: \"sceneの意味を一つ進める\"",
+            "            audience_knowledge_delta: \"桃太郎の状態を理解する\"",
+            "            causal_proof: \"桃太郎が画面にいて前へ進む\"",
+            "            visual_evidence: [\"桃太郎\"]",
+            "            required_roles: [\"protagonist\"]",
+            f"            assigned_story_event_ids: [\"scene_obligation:obligation_{cut_idx}\"]",
+            f"            anti_redundancy_key: \"scene{scene_idx}:cut{cut_idx}\"",
+            "            visual_proof: \"桃太郎が見える\"",
+            "            must_show: [\"桃太郎\"]",
+            "            must_avoid: []",
+            "            done_when: [\"桃太郎が見える\"]",
+            "          cinematic_contract:",
+            "            camera_intent: \"桃太郎へ視線を導く\"",
+            "            subject_priority: {primary: \"桃太郎\", secondary: \"道\", background: \"村\"}",
+            "            screen_geography: {foreground: \"土の道\", midground: \"桃太郎\", background: \"村\", screen_direction: \"left_to_right\"}",
+            "          continuity_contract:",
+            "            start_state: {character_state: \"歩く前\", prop_state: \"袋が見える\", spatial_state: \"村道\", time_state: \"朝\"}",
+            "            end_state: {character_state: \"前へ向く\", prop_state: \"袋が残る\", spatial_state: \"村道\", time_state: \"朝\"}",
+            "            carry_forward_to_next_cut: [\"桃太郎\", \"村道\"]",
+            "          cut_handoff:",
+            "            receives_from_previous:",
+            f"              anchor_id: \"{incoming_anchor}\"",
+            f"              anchor_type: \"{incoming_type}\"",
+            "              visible_or_audible_form: \"前cutから残る視線\"",
+            f"              expected_previous_cut_selector: \"{'scene' + str(scene_idx) + '_cut' + str(cut_idx - 1) if cut_idx > 1 else ''}\"",
+            "            delivers_to_next:",
+            f"              anchor_id: \"{next_anchor}\"",
+            f"              anchor_type: \"{outgoing_type}\"",
+            "              visible_or_audible_form: \"次へ残る視線\"",
+            f"              expected_next_cut_selector: \"{'scene' + str(scene_idx) + '_cut' + str(cut_idx + 1) if cut_idx < 4 else ''}\"",
+            "          first_frame_contract:",
+            "            imageable: true",
+            "            first_frame_brief: \"桃太郎が村道に立つ\"",
+            "            visible_start_state: {character_state: \"歩く前\", prop_state: \"袋が見える\", spatial_state: \"村道\", emotional_state: \"決意\", gaze_or_attention: \"前方\"}",
+            "            motion_start_affordance: {movable_subject: \"桃太郎\", movement_vector: \"left_to_right\", camera_start_reason: \"道が奥へ続く\"}",
+            "            action_completion_state: \"pre_action\"",
+            "            static_first_frame_rule: \"静止画として桃太郎の状態が読める\"",
+            "            must_be_static_evidence_not_motion: true",
+            "          motion_contract:",
+            "            movable: true",
+            "            motion_brief: \"桃太郎が前へ進む\"",
+            "            start_from_visible_state: \"first_frame_contract.visible_start_state\"",
+            "            end_state: \"桃太郎が次へ向く\"",
+            "            end_frame_brief: \"桃太郎が次へ向く\"",
+            "            must_not_add: [\"新しい人物\"]",
+            "          narration_contract:",
+            "            role: \"emotion\"",
+            "            target_function: \"絵を説明せず決意を補う\"",
+            "            must_avoid: [\"映像のキャプション化\"]",
+            "            silence_reason: \"\"",
+            "          rhythm_contract:",
+            "            expected_duration_seconds: 12",
+            "            pacing: \"standard\"",
+            "            comprehension_moment: \"桃太郎が見えた瞬間\"",
+            "            cut_out_reason: \"次への視線が残る\"",
+            "            audio_visual_sync_point: \"視線の後に声が入る\"",
+            "            duration_exception: {allowed: false, reason: \"\"}",
+            "          asset_dependency:",
+            "            character_ids_required: [\"momotaro\"]",
+            "            object_ids_required: []",
+            "            location_ids_required: [\"village_road\"]",
+            "            variant_ids_required: []",
+            "            new_asset_requests: []",
+            "            reusable_anchor_ids: [\"momotaro\", \"village_road\"]",
+            "          downstream_handoff:",
+            "            p500_asset: {required_asset_ids: [\"momotaro\", \"village_road\"], asset_candidates: [\"momotaro\", \"village_road\"], continuity_anchor_needed: true, new_asset_needed: false, reuse_allowed: true}",
+            "            p600_image: {prompt_requirements: [\"桃太郎\"], reference_requirements: [], first_frame_must_include: [\"桃太郎\"], first_frame_must_avoid: []}",
+            "            p700_narration: {narration_requirements: [\"決意を補う\"], role: \"emotion\", must_not_caption_visible_content: true}",
+            "            p800_video: {motion_requirements: [\"桃太郎が前へ進む\"], start_state: \"歩く前\", last_frame_or_end_state: \"桃太郎が次へ向く\", must_not_add: [\"新しい人物\"]}",
+            "            carries_to_next_cut: [\"桃太郎\"]",
+            "            carries_to_next_scene: []",
+        ]
+
     for scene_idx in range(1, scene_count + 1):
         terminal = scene_idx == scene_count
         script_lines.extend(
@@ -321,23 +562,25 @@ def _write_valid_immersive_p400_pair(
                 "      target_duration_seconds: 30",
                 "      estimated_duration_seconds: 30",
                 ("      terminal_resolution: \"物語が締まる\"" if terminal else "      handoff_to_next_scene: \"次の場面へつながる\""),
-                "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                 "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
-                "      scene_intent:",
-                "        story_purpose: \"進行\"",
-                "        audience_information: [\"桃太郎\"]",
-                "        withheld_information: []",
-                "        reveal_constraints: []",
-                "        affect_transition: \"前進\"",
-                "        visual_value_source: \"none\"",
-                "        production_risks: []",
-                "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                *_valid_scene_intent_lines("桃太郎", scene_idx, terminal=terminal),
                 "      agent_review: {status: \"passed\"}",
                 "      cuts:",
             ]
         )
-        manifest_lines.extend([f"  - scene_id: {scene_idx}", "    cuts:"])
-        for cut_idx in range(1, 4):
+        manifest_lines.extend(
+            [
+                f"  - scene_id: {scene_idx}",
+                "    importance: \"medium\"",
+                "    target_duration_seconds: 30",
+                "    estimated_duration_seconds: 30",
+                "    scene_composite_review: {status: \"passed\", scene_obligation_covered_by_cut_group: true, no_duplicate_story_fact_without_new_evidence: true, scene_meaning_visualized_across_cuts: true, blocking_reason_keys: []}",
+                *coverage_plan_lines(scene_idx),
+                "    cuts:",
+            ]
+        )
+        for cut_idx in range(1, 5):
             selector = f"scene{scene_idx}_cut{cut_idx}"
             script_lines.extend(
                 [
@@ -359,12 +602,15 @@ def _write_valid_immersive_p400_pair(
                 [
                     f"      - cut_id: {cut_idx}",
                     f"        selector: \"{selector}\"",
+                    *cut_contract_lines(scene_idx, cut_idx, selector),
                     "        scene_contract: {target_beat: \"桃太郎\", must_show: [\"桃太郎\"], must_avoid: [], done_when: [\"桃太郎が見える\"]}",
                     "        image_generation:",
                     "          prompt: \"画面内テキストなし。実写映画風の村道。前景に湿った土と小石、中央に桃太郎の顔と衣装、腰のきびだんご袋、背景に朝霧の村と山並み、横から柔らかな朝日、布の質感、足元の影、次へ進む緊張まで具体的に見える。\"",
                     "          character_ids: [\"momotaro\"]",
                     "          object_ids: []",
                     f"          output: \"assets/scenes/{selector}.png\"",
+                    "          review:",
+                    "            triangulation_review: {status: \"passed\", same_target_beat: true, image_supports_motion_start: true, motion_reaches_declared_end_state: true, narration_not_captioning_image: true, reveal_constraints_preserved: true, continuity_preserved: true, handoff_visible_or_audible: true}",
                     "        video_generation:",
                     f"          duration_seconds: {cut_duration}",
                     "          motion_prompt: \"桃太郎が前へ進む。\"",
@@ -454,7 +700,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "evaluation_contract:",
                         "  target_arc: \"opening,development,climax\"",
                         "  must_cover: [\"桃太郎\"]",
-                        "  must_avoid: [\"TODO\"]",
+                        "  must_avoid: [\"drift\"]",
                         "  done_when: [\"主要 phase を含む\"]",
                         "scene_set_review:",
                         "  status: \"approved\"",
@@ -475,20 +721,12 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "      phase: \"opening\"",
                         "      summary: \"桃太郎が村で育つ。十分な長さの台本本文です。十分な長さの台本本文です。\"",
                     "      importance: \"low\"",
-                    "      target_duration_seconds: 24",
-                    "      estimated_duration_seconds: 24",
+                    "      target_duration_seconds: 16",
+                    "      estimated_duration_seconds: 16",
                         "      handoff_to_next_scene: \"旅支度へ進む\"",
-                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
-                        "      scene_intent:",
-                        "        story_purpose: \"導入\"",
-                        "        audience_information: [\"桃太郎が村にいる\"]",
-                        "        withheld_information: []",
-                        "        reveal_constraints: []",
-                        "        affect_transition: \"hook\"",
-                        "        visual_value_source: \"none\"",
-                        "        production_risks: []",
-                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        *_valid_scene_intent_lines("桃太郎", 1, terminal=False),
                         "      agent_review:",
                         "        status: \"passed\"",
                         "      cuts:",
@@ -522,20 +760,12 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "      phase: \"development\"",
                         "      summary: \"桃太郎が旅支度を整える。十分な長さの台本本文です。十分な長さの台本本文です。\"",
                     "      importance: \"low\"",
-                    "      target_duration_seconds: 24",
-                    "      estimated_duration_seconds: 24",
+                    "      target_duration_seconds: 16",
+                    "      estimated_duration_seconds: 16",
                         "      handoff_to_next_scene: \"決戦へ進む\"",
-                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
-                        "      scene_intent:",
-                        "        story_purpose: \"旅立ち\"",
-                        "        audience_information: [\"桃太郎が旅支度をする\"]",
-                        "        withheld_information: []",
-                        "        reveal_constraints: []",
-                        "        affect_transition: \"lift\"",
-                        "        visual_value_source: \"none\"",
-                        "        production_risks: []",
-                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        *_valid_scene_intent_lines("桃太郎", 2, terminal=False),
                         "      agent_review:",
                         "        status: \"passed\"",
                         "      cuts:",
@@ -569,20 +799,12 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "      phase: \"climax\"",
                         "      summary: \"桃太郎が決戦へ向かう。十分な長さの台本本文です。十分な長さの台本本文です。\"",
                     "      importance: \"low\"",
-                    "      target_duration_seconds: 24",
-                    "      estimated_duration_seconds: 24",
+                    "      target_duration_seconds: 16",
+                    "      estimated_duration_seconds: 16",
                         "      terminal_resolution: \"決戦への余韻で終わる\"",
-                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
+                        "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                         "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
-                        "      scene_intent:",
-                        "        story_purpose: \"決戦\"",
-                        "        audience_information: [\"桃太郎が決戦へ向かう\"]",
-                        "        withheld_information: []",
-                        "        reveal_constraints: []",
-                        "        affect_transition: \"spike\"",
-                        "        visual_value_source: \"none\"",
-                        "        production_risks: []",
-                        "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
+                        *_valid_scene_intent_lines("桃太郎", 3, terminal=True),
                         "      agent_review:",
                         "        status: \"passed\"",
                         "      cuts:",
@@ -629,7 +851,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "        scene_contract:",
                         "          target_beat: \"桃太郎\"",
                         "          must_show: [\"桃太郎\"]",
-                        "          must_avoid: [\"TODO\"]",
+                        "          must_avoid: [\"drift\"]",
                         "          done_when: [\"narration と prompt に桃太郎が出る\"]",
                         "        image_generation:",
                         "          prompt: \"桃太郎が朝の村をゆっくり歩く。藁屋根の家並み、土の道、やわらかな朝日、前景には風に揺れるのぼり、中央には桃太郎、背景には山並み。実写的で自然な衣装と光。\"",
@@ -932,7 +1154,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             _write_valid_immersive_p400_pair(run_dir)
             text = (run_dir / "script.md").read_text(encoding="utf-8")
             text = text.replace("      handoff_to_next_scene: \"次の場面へつながる\"\n", "", 1)
-            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}\n", "", 1)
+            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}\n", "", 1)
             (run_dir / "script.md").write_text(text, encoding="utf-8")
             _resolve_ready_grounding(run_dir, "script", flow="immersive")
 
@@ -940,6 +1162,21 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertFalse(stage["passed"])
             self.assertIn("script.scene_readiness_contract", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_generic_scene_template_phrase(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_template_phrase_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014b"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            text = (run_dir / "script.md").read_text(encoding="utf-8")
+            text = text.replace("桃太郎が進む。", "主人公は前進できるか", 1)
+            (run_dir / "script.md").write_text(text, encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "script", flow="immersive")
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.no_generic_scene_template_phrases", stage["reason_keys"])
 
     def test_manifest_evaluator_gates_p400_duration_and_review_integrity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_duration_") as td:
@@ -949,7 +1186,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000015\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
                 encoding="utf-8",
             )
-            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=7, scene_count=10)
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=6, scene_count=10)
             (run_dir / "production_readiness_review.md").write_text(
                 "status: passed\n\nStructure: ok\nDuration: p700 で後続確認する。\nQuality: ok\n",
                 encoding="utf-8",
@@ -973,7 +1210,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             )
             _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
             text = (run_dir / "script.md").read_text(encoding="utf-8")
-            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}\n", "", 1)
+            text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}\n", "", 1)
             (run_dir / "script.md").write_text(text, encoding="utf-8")
             _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
 
@@ -982,6 +1219,28 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(stage["passed"])
             self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
             self.assertIn("p400.script_readiness_contract", stage["reason_keys"])
+
+    def test_manifest_p400_readiness_requires_scene_specificity_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_scene_specificity_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0018b"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000018b\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            aggregate = run_dir / "logs" / "eval" / "scene_set" / "round_01" / "aggregated_review.md"
+            text = aggregate.read_text(encoding="utf-8")
+            start = text.index("## Scene Specificity Gate")
+            end = text.index("## Generator Patch Brief", start)
+            aggregate.write_text(text[:start] + text[end:], encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.review_loop_integrity", stage["reason_keys"])
 
     def test_manifest_evaluator_approves_complete_p400_readiness(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_ready_") as td:

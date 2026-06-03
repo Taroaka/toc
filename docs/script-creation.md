@@ -19,10 +19,11 @@ p400 は、scene を直接画像や動画にする stage ではない。
 
 - 各 scene が purpose / intended affect / visual beat / narration boundary / timing / `done_when` を持つ
 - 事実主張は story / research の参照に紐づき、創作補完は production 上の演出として区別されている
-- narration と `tts_text` は script 側を正本とし、映像生成 prompt の主要ソースにしない
+- p400 では narration の役割・境界・draft だけを決め、final `audio.narration.text` / `tts_text` は p700 で actual cut / image / duration に合わせて確定する
 - reveal 順序、主人公、theme、承認済み human request を、無断で変更していない
 - provider 固有の prompt syntax と実行管理は `video_manifest.md` 側に渡せる粒度で残っている
 - p400 の時点で、各 scene が `scene intent card` を持ち、各 cut が `cut blueprint` として review できる
+- 各 scene が `story_specificity` を持ち、非圧縮 beat、scene 昇格理由、固有責務、actor forces、道具/舞台装置の意味段階、具体 handoff、anti-template 判定を説明できる
 - asset / image / video の実行は p400 では行わず、必要な依存関係だけを p500/p600/p800 へ渡している
 
 ### Scope boundaries
@@ -45,6 +46,14 @@ p400 の scene 設計は「台本を時間で割る」作業ではなく、story
   - まず不足しない方向へ scene を追加/分割し、願望の発生、拒絶、選択、変身、対決、証拠 reveal、照合、帰結のような不可逆 beat を 1 scene に圧縮しない。
   - 上限は固定数ではなく「これ以上 scene を増やしても独立した `dramatic_question` / `value_shift` / `causal_turn` を持てず、各 scene 内の cut 設計を厚くした方が品質が上がる」地点とする。
   - 追加候補の scene が既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持たない場合は、scene 追加ではなく p420 の cut 増厚で扱う。
+- scene 設計では、story から scene へ落とす中間層として次の 7 項目を必須にする。
+  - `non_compressible_beat`: cut に圧縮してはいけない不可逆 beat
+  - `scene_promotion_reason`: beat を scene に昇格させる理由
+  - `unique_scene_responsibility`: その scene だけが担う物語責務
+  - `actor_forces`: 対立者、助力者、観測者など scene に圧力を与える力
+  - `meaning_ladder`: 主人公、関係、道具/舞台装置の意味段階
+  - `concrete_handoff`: 次 scene を発生させる具体的な物、音、視線、行為、圧力
+  - `anti_template_language`: テンプレ文を避け、固有名詞・道具・関係・場所・行為で書けているか
 - scene は必ず `before_state → pressure → turn → after_state` を持つ。
 - scene は「観客がこの scene 中に追う問い」を持つ。問いがない scene は、単なる説明または素材集になりやすい。
 - scene は `visual_thesis` を持つ。これは p600 が一枚絵として描ける scene の代表的意味であり、単なる美術説明ではない。
@@ -82,11 +91,50 @@ scene_intent:
     continuity_anchors: []
   production_risks: []
   handoff_to_next_scene: "次へ渡す視覚/音/因果アンカー"
+  story_specificity:
+    non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
+    scene_promotion_reason: "独立した問い/価値変化/因果 turn を持つため scene に昇格させる理由"
+    unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
+    actor_forces:
+      protagonist: ""
+      opposing: []
+      helping: []
+      observing: []
+      pressure_method: "誰が何によって scene 内の圧力を作るか"
+    meaning_ladder:
+      protagonist_stage: ""
+      relationship_stage: ""
+      object_or_setpiece_stage: ""
+    concrete_handoff:
+      incoming_trigger: ""
+      outgoing_anchor: ""
+      outgoing_pressure: ""
+    anti_template_language:
+      banned_generic_phrases_absent: false
+      story_specific_terms: []
+      specificity_note: ""
+  scene_conflict_engine:
+    desire: "scene 内で主体が欲しているもの"
+    obstacle: "それを妨げる力"
+    stakes: "失敗すると失うもの"
+    escalation: "scene 内で圧力が上がる過程"
+    no_return_point: "後戻りできなくなる瞬間"
+    visible_pressure: ["画面で圧力として読めるもの"]
+  audience_knowledge_delta:
+    before_scene: []
+    learned_during_scene: []
+    still_unknown_after_scene: []
+    forbidden_early_reveals: []
+  handoff_chain:
+    incoming: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|none", visible_or_audible_form: ""}
+    outgoing: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|terminal", next_scene_selector: "", required_next_scene_start_pressure: ""}
+  object_arc: []
   coverage_review:
     audience_information_covered: false
     visualizable_action_covered: false
     value_shift_visible: false
     causal_turn_visible: false
+    scene_specificity_gate_passed: false
     next_scene_connection_checked: false
   handoff_notes:
     p500_asset: []
@@ -114,6 +162,7 @@ p400 は次の順で進める。
    - `visual_value.md` がある場合は、その scene の visual value / anchor / regeneration risk を読む
    - scene ごとに、観客へ渡す情報、まだ隠す情報、感情変化、根拠境界、後続 stage への注意を残す
    - scene ごとに `importance`, `target_duration_seconds`, `estimated_duration_seconds`, `handoff_to_next_scene`（最終 scene は `terminal_resolution`）, `coverage_review` を必須で残す
+   - scene ごとに `story_specificity` の 7 項目を必須で残す。抽象語だけの `主人公は前進できるか`, `次へ進む理由が生まれる`, `光が次の場面へ運ぶ`, `価値変化の兆し`, `場所の圧力`, `主人公の姿勢と視線` は通さない
    - scene-set 初稿は圧縮優先にしない。主要 beat が scene として独立可能なら一度 scene 化し、review で「追加するより cut を厚くした方が良い」と説明できるところまで scene 数を増やす
    - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する
    - 抽象 scene-set review は、1体の汎用 reviewer だけで見切らない。少なくとも `scene_count_coverage`, `dramatic_structure`, `reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` の観点に分け、必要に応じて複数 critic agent で独立評価する
@@ -125,12 +174,13 @@ p400 は次の順で進める。
    - human review は `gate.script_scene_review=required|optional|skipped` に従うが、agent 指摘の自動適用を都度止める gate ではない
 2. `p420 cut blueprint`
    - 全 scene が `review.script.scene_set.status=approved` / `review.script.scene_detail.status=approved` / `agent_review.status=passed` を満たした後だけ cut 化する
-   - cinematic_story の production scene は原則 3 cut 以上に分ける。low importance scene だけ 2 cut を許容し、high / critical scene は 5 cut 以上を目安にする
-   - `target_duration_seconds` が長い scene は 1 cut 約 12 秒で割った cut 数を下回らない。reference / title / pure transition のような例外は理由を残す
+   - cinematic_story の production scene は原則 3 cut 以上に分ける。low importance scene だけ 2 cut を許容し、high は 5 cut 以上、critical は 7 cut 以上を必須目安にする
+   - `target_duration_seconds` が長い scene は `ceil(target_duration_seconds / 8)` を下回らない。reference / title / pure transition のような例外は理由を残す
+   - cut 数と cut 役割は固定 template で決めない。scene の不可逆な story event、因果証明、観客理解差分、必要な人物役割を列挙し、それを画で証明するために必要な cut へ逆算する
    - scene 単位で並列 agent に分担してよいが、`script.md` は担当 `p400` L2 supervisor が bucket single writer として統合する
    - 1 cut は 1 意図に限定する。1 cut の中で場所移動、reveal、感情反転、説明を同時に背負わせない
-   - spectacle / transformation / emotional reversal / proof reveal は 1 cut に圧縮せず、setup / action threshold / payoff / reaction / handoff のように分ける
-   - cut ごとに `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を書く
+   - spectacle / transformation / emotional reversal / proof reveal は 1 cut に圧縮しない。ただし `setup / pressure / threshold / turn / payoff / reaction / handoff` は候補ラベルであり、scene ごとの必要性に従って使う
+   - cut ごとに `target_beat`, `audience_knowledge_delta`, `causal_proof`, `visual_evidence`, `required_roles`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `first_frame_brief`, `narration role`, `asset dependency hint` を書く
    - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
    - cut blueprint review は、critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
    - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame / motion readiness、multimodal contract、duration / handoff が説明できる場合だけ `approved` にする
@@ -150,7 +200,7 @@ p400 は次の順で進める。
    - p500 へ進むには `eval.p400_readiness.status=approved` が必要で、scene/cut/review/duration/selector 対応の deterministic gate が 1 つでも落ちたら p500 grounding は開始しない
 5. `p450 skeleton manifest`
    - `script.md` から `video_manifest.md` を `manifest_phase: skeleton` として materialize する
-   - skeleton manifest は scene/cut selector、`scene_contract`、asset id placeholder、image/audio/video の実行枠を持つ
+   - skeleton manifest は scene/cut selector、正本 `cut_contract`、旧 reader 用 `scene_contract` alias、asset id placeholder、image/audio/video の実行枠を持つ
    - final image prompt、asset 生成、TTS 実行、motion prompt の確定は後続 stage に渡す
 
 ### p410 Scene Intent Card
@@ -186,11 +236,50 @@ scene_intent:
     continuity_anchors: []
   production_risks: ["後続 stage で崩れやすい点"]
   handoff_to_next_scene: "次 scene へつなぐ視覚/音/因果アンカー。最終 scene は terminal_resolution"
+  story_specificity:
+    non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
+    scene_promotion_reason: "独立した問い/価値変化/因果 turn を持つため scene に昇格させる理由"
+    unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
+    actor_forces:
+      protagonist: ""
+      opposing: []
+      helping: []
+      observing: []
+      pressure_method: "誰が何によって scene 内の圧力を作るか"
+    meaning_ladder:
+      protagonist_stage: ""
+      relationship_stage: ""
+      object_or_setpiece_stage: ""
+    concrete_handoff:
+      incoming_trigger: ""
+      outgoing_anchor: ""
+      outgoing_pressure: ""
+    anti_template_language:
+      banned_generic_phrases_absent: false
+      story_specific_terms: []
+      specificity_note: ""
+  scene_conflict_engine:
+    desire: "scene 内で主体が欲しているもの"
+    obstacle: "それを妨げる力"
+    stakes: "失敗すると失うもの"
+    escalation: "scene 内で圧力が上がる過程"
+    no_return_point: "後戻りできなくなる瞬間"
+    visible_pressure: ["画面で圧力として読めるもの"]
+  audience_knowledge_delta:
+    before_scene: []
+    learned_during_scene: []
+    still_unknown_after_scene: []
+    forbidden_early_reveals: []
+  handoff_chain:
+    incoming: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|none", visible_or_audible_form: ""}
+    outgoing: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|terminal", next_scene_selector: "", required_next_scene_start_pressure: ""}
+  object_arc: []
   coverage_review:
     audience_information_covered: false
     visualizable_action_covered: false
     value_shift_visible: false
     causal_turn_visible: false
+    scene_specificity_gate_passed: false
     next_scene_connection_checked: false
   handoff_notes:
     p500_asset: ["asset 化すべき候補"]
@@ -211,11 +300,18 @@ cut_blueprint:
   target_beat: "この cut で伝える 1 つのこと"
   screen_question: "この cut の間、観客が画面から読む問い"
   dramatic_job: "scene 全体の pressure / turn / payoff のどこを担当するか"
+  audience_knowledge_delta: "この cut で観客の理解がどう進むか"
+  causal_proof: "原因と結果が画面上でどう同時に読めるか"
+  visual_evidence: ["因果を証明する画面内証拠"]
+  required_roles: ["protagonist|opponent|helper|witness|authority_or_community"]
+  assigned_story_event_ids: []
+  anti_redundancy_key: "同義反復を検出するための意味キー"
   must_show: ["画・音・動きのどこかで必ず見せるもの"]
   must_avoid: ["drift / reveal 破り / 説明過多など"]
   done_when: ["reviewer が完了判断できる条件"]
   visual_beat: "画として何が見えるか"
   first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない"
+  static_first_frame_rule: "動きではなく静止画として何を証明するか"
   motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
   narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
   asset_dependency_hint:
@@ -242,7 +338,7 @@ p410 の review は抽象から具体へ進む。
    - `duration_density` reviewer は、全体尺・scene 重要度・cut 数から、scene 追加と cut 増厚のどちらが品質に効くかを見る
    - `visual_production` reviewer は、追加 scene が後段 p500/p600/p800 で実際に映像化できる visible evidence を持つかを見る
    - `handoff_integrity` reviewer は、scene 間の因果と handoff が途切れていないかを見る
-   - aggregator は全 reviewer の finding を統合し、`maximal_meaningful` の stop condition が説明できる場合だけ `approved` にする
+   - aggregator は全 reviewer の finding を統合し、`Scene Count Gate`、`Scene Specificity Gate`、`Reveal Order Gate`、`Handoff Chain Gate` が説明できる場合だけ `approved` にする
    - 標準 5 critic では `dramatic_structure` と `reveal_order` を同一 critic が担当してよいが、report では判定を分ける
    - この review が `approved` になるまで、per-scene review や cut blueprint へ進まない
 2. `scene_detail_review`
@@ -254,6 +350,7 @@ p410 の review は抽象から具体へ進む。
    - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する
    - つながらない場合は、もう 1 cut 追加するか、最終 cut を厚くする修正案を出す
    - 全 scene の `agent_review.status=passed` が揃うまで cut blueprint へ進まない
+   - aggregator は `Scene Detail Gate` として scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、隣接 scene handoff を確認し、未解決なら `approved` にしない
 
 ### Subagent use
 
@@ -285,6 +382,11 @@ p410 の review は抽象から具体へ進む。
 - キャラクター設計、シーン詳細、タイムライン
 
 ---
+
+## Legacy Short-form Template（非正本）
+
+以下の第1章以降には、旧 60 秒動画、固定 8 scene、`text_overlay`、p400 時点の final narration / `tts_text` などの短尺テンプレートが残っている。
+これは互換・参照用の legacy short-form template であり、`cinematic_story` の正本ではない。新規の映画的 story run では、上記の p400 Cinematic Scene Design Contract、p410 scene_set/detail gate、p420 cut contract を canonical とする。
 
 ## 第1章：台本の役割と原則
 
@@ -1590,46 +1692,134 @@ production_notes:
 ### p420 Additional Output
 
 ```yaml
-coverage_plan:
-  coverage_strategy: "3_cut|5_cut|7_cut|spectacle_ladder|custom"
+scene_cut_coverage_plan:
+  coverage_strategy: "reverse_from_scene_obligations"
   min_cut_count:
     by_importance: 3
     by_duration: 3
     selected: 3
     exception_reason: ""
-  function_sequence: []
   scene_obligations:
-    audience_information_to_cover: []
-    withheld_information_to_preserve: []
-    visual_evidence_to_show: []
-    causal_turn_cut_selector: ""
-    handoff_cut_selector: ""
+    - obligation_id: "story_event_obligations_01"
+      source: "story_event_obligations"
+      evidence:
+        - event_id: ""
+          source_events: []
+          audience_knowledge_delta: ""
+          causal_proof: ""
+          visual_evidence: []
+          required_roles: []
+      assigned_cut_ids: []
+  cut_assignments:
+    - cut_index: 1
+      cut_selector: ""
+      obligation_ids: []
+      cut_function: ""
+      assigned_story_event_ids: []
+      target_beat: ""
+      visual_proof: ""
+      audience_knowledge_delta: ""
+      causal_proof: ""
+      required_roles: []
+      anti_redundancy_key: ""
+  unassigned_obligations: []
+  overloaded_cuts: []
+  duplicate_meaning_risks: []
 ```
 
 各 cut は `cut_contract` を正本にする。既存 reader のために `scene_contract` は互換 alias として残してよい。
 
 ```yaml
 cut_contract:
-  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+  schema_version: "2.2"
+  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff|custom"
+  intent_budget:
+    primary_intent: ""
+    assigned_obligation_ids: []
+    overload_exception_reason: ""
   viewer_contract:
     target_beat: ""
     screen_question: ""
+    dramatic_job: ""
+    audience_knowledge_delta: ""
+    causal_proof: ""
+    visual_evidence: []
+    required_roles: []
+    assigned_story_event_ids: []
+    anti_redundancy_key: ""
+    reveal_constraints:
+      inherited_from_scene: []
+      allowed_reveals_in_this_cut: []
+      forbidden_until_later_cut: []
+      forbidden_until_later_scene: []
     visual_proof: ""
     must_show: []
     must_avoid: []
     done_when: []
   cinematic_contract: {}
-  continuity_contract: {}
+  continuity_contract:
+    start_state: {}
+    end_state: {}
+    carry_forward_to_next_cut: []
+    continuity_risks: []
+  cut_handoff:
+    receives_from_previous: {}
+    delivers_to_next: {}
   first_frame_contract:
     first_frame_brief: ""
+    visible_start_state: {}
+    motion_start_affordance: {}
     action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+    static_first_frame_rule: ""
+    must_be_static_evidence_not_motion: true
   motion_contract:
     motion_brief: ""
+    start_from_visible_state: ""
     end_state: ""
+    end_frame_brief: ""
+    must_not_add: []
   narration_contract:
     role: "setup|fact|emotion|contrast|aftertaste|silent"
+    target_function: ""
+    must_avoid: []
     silence_reason: ""
-  downstream_handoff: {}
+  rhythm_contract:
+    expected_duration_seconds: 8
+    pacing: "quick|standard|slow_hold|spectacle_hold"
+    comprehension_moment: ""
+    cut_out_reason: ""
+    audio_visual_sync_point: ""
+    duration_exception:
+      allowed: false
+      reason: ""
+  asset_dependency:
+    character_ids_required: []
+    object_ids_required: []
+    location_ids_required: []
+    variant_ids_required: []
+    new_asset_requests: []
+    reusable_anchor_ids: []
+  downstream_handoff:
+    p500_asset:
+      required_asset_ids: []
+      asset_candidates: []
+      continuity_anchor_needed: false
+      new_asset_needed: false
+      reuse_allowed: false
+    p600_image:
+      prompt_requirements: []
+      reference_requirements: []
+      first_frame_must_include: []
+      first_frame_must_avoid: []
+    p700_narration:
+      narration_requirements: []
+      role: "setup|fact|emotion|contrast|aftertaste|silent"
+      must_not_caption_visible_content: true
+    p800_video:
+      motion_requirements: []
+      start_state: ""
+      last_frame_or_end_state: ""
+      must_not_add: []
 ```
 
 ### Cut Count and Split Rules

@@ -787,13 +787,40 @@ def _video_target_last_frame_path(base_dir: Path, target: VideoRenderTargetSpec)
     return None
 
 
-def _video_target_image_prompts(target: VideoRenderTargetSpec) -> list[str]:
-    prompts: list[str] = []
+def _cut_contract_first_frame_observed_state_block(contract: dict[str, Any]) -> str:
+    first_frame = contract.get("first_frame_contract") if isinstance(contract.get("first_frame_contract"), dict) else {}
+    continuity = contract.get("continuity_contract") if isinstance(contract.get("continuity_contract"), dict) else {}
+    if not first_frame and not continuity:
+        return ""
+    visible_start_state = first_frame.get("visible_start_state") if isinstance(first_frame.get("visible_start_state"), dict) else {}
+    affordance = first_frame.get("motion_start_affordance") if isinstance(first_frame.get("motion_start_affordance"), dict) else {}
+    start_state = continuity.get("start_state") if isinstance(continuity.get("start_state"), dict) else {}
+    anchors = continuity.get("carry_forward_to_next_cut") if isinstance(continuity.get("carry_forward_to_next_cut"), list) else []
+    lines = ["first_frame_observed_state:"]
+    brief = _contract_text(contract, "first_frame_contract.first_frame_brief", "first_frame_brief")
+    if brief:
+        lines.append(f"  first_frame_brief: {brief}")
+    for key in ("character_state", "prop_state", "spatial_state", "emotional_state", "gaze_or_attention"):
+        value = str(visible_start_state.get(key) or start_state.get(key) or "").strip()
+        if value:
+            lines.append(f"  {key}: {value}")
+    for key in ("movable_subject", "movement_vector", "camera_start_reason"):
+        value = str(affordance.get(key) or "").strip()
+        if value:
+            lines.append(f"  {key}: {value}")
+    anchor_terms = [str(item).strip() for item in anchors if str(item).strip()]
+    if anchor_terms:
+        lines.append("  continuity_anchors: " + " / ".join(anchor_terms))
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _video_target_first_frame_context_blocks(target: VideoRenderTargetSpec) -> list[str]:
+    blocks: list[str] = []
     for scene in target.source_scenes:
-        prompt = str(scene.image_prompt or "").strip()
-        if prompt:
-            prompts.append(prompt)
-    return _dedupe_keep_order(prompts)
+        block = _cut_contract_first_frame_observed_state_block(scene.cut_contract)
+        if block:
+            blocks.append(block)
+    return _dedupe_keep_order(blocks)
 
 
 def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
@@ -3962,6 +3989,17 @@ def _cut_contract_image_prompt_block(contract: dict[str, Any]) -> str:
     visual_proof = _sanitize_contract_prompt_text(_contract_text(contract, "visual_beat", "viewer_contract.visual_proof"))
     first_frame = _sanitize_contract_prompt_text(_contract_text(contract, "first_frame_brief", "first_frame_contract.first_frame_brief"))
     screen_question = _sanitize_contract_prompt_text(_contract_text(contract, "screen_question", "viewer_contract.screen_question"))
+    audience_delta = _sanitize_contract_prompt_text(_contract_text(contract, "audience_knowledge_delta", "viewer_contract.audience_knowledge_delta"))
+    causal_proof = _sanitize_contract_prompt_text(_contract_text(contract, "causal_proof", "viewer_contract.causal_proof"))
+    static_rule = _sanitize_contract_prompt_text(_contract_text(contract, "static_first_frame_rule", "first_frame_contract.static_first_frame_rule"))
+    visual_evidence = [
+        _sanitize_contract_prompt_text(item)
+        for item in _contract_list(contract, "visual_evidence", "viewer_contract.visual_evidence")
+    ]
+    required_roles = [
+        _sanitize_contract_prompt_text(item)
+        for item in _contract_list(contract, "required_roles", "viewer_contract.required_roles")
+    ]
     must_show = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_show", "viewer_contract.must_show")]
     must_avoid = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_avoid", "viewer_contract.must_avoid", "first_frame_contract.must_avoid")]
     geography = _dict_value(_contract_value(contract, "cinematic_contract.screen_geography"))
@@ -3971,10 +4009,20 @@ def _cut_contract_image_prompt_block(contract: dict[str, Any]) -> str:
         lines.append(f"場面の核: {target_beat}")
     if screen_question:
         lines.append(f"画面上の問い: {screen_question}")
+    if audience_delta:
+        lines.append(f"観客理解の増分: {audience_delta}")
+    if causal_proof:
+        lines.append(f"因果の証明: {causal_proof}")
     if visual_proof:
         lines.append(f"映像で成立させる証拠: {visual_proof}")
+    if visual_evidence:
+        lines.append("画面に置く証拠: " + " / ".join(item for item in visual_evidence if item))
+    if required_roles:
+        lines.append("必要な役割: " + " / ".join(item for item in required_roles if item))
     if first_frame:
         lines.append(f"初期状態: {first_frame}")
+    if static_rule:
+        lines.append(f"静止画ルール: {static_rule}")
     if subject_priority:
         for label, key in (("主役", "primary"), ("副要素", "secondary"), ("背景要素", "background")):
             value = _sanitize_contract_prompt_text(str(subject_priority.get(key) or ""))
@@ -4010,7 +4058,9 @@ def _cut_contract_video_prompt_block(contract: dict[str, Any]) -> str:
     subject_motion = _contract_text(contract, "motion_contract.subject_motion")
     environment_motion = _contract_text(contract, "motion_contract.environment_motion")
     emotional_change = _contract_text(contract, "motion_contract.emotional_change")
+    start_from_visible_state = _contract_text(contract, "motion_contract.start_from_visible_state")
     end_state = _contract_text(contract, "motion_contract.end_state", "motion_end_state")
+    end_frame_brief = _contract_text(contract, "motion_contract.end_frame_brief")
     must_not_add = _contract_list(contract, "motion_contract.must_not_add")
     if cut_function:
         lines.append(f"cut_function: {cut_function}")
@@ -4026,8 +4076,12 @@ def _cut_contract_video_prompt_block(contract: dict[str, Any]) -> str:
         lines.append(f"environment_motion: {environment_motion}")
     if emotional_change:
         lines.append(f"emotional_change: {emotional_change}")
+    if start_from_visible_state:
+        lines.append(f"start_from_visible_state: {start_from_visible_state}")
     if end_state:
         lines.append(f"end_state: {end_state}")
+    if end_frame_brief:
+        lines.append(f"end_frame_brief: {end_frame_brief}")
     if must_not_add:
         lines.append("must_not_add: " + " / ".join(must_not_add))
     if not lines:
@@ -4061,10 +4115,11 @@ def _compose_final_video_prompt(scene: SceneSpec, *, prefix: str, suffix: str) -
     contract_block = _cut_contract_video_prompt_block(scene.cut_contract)
     if contract_block:
         prompt_parts.append(contract_block)
+    observed_state = _cut_contract_first_frame_observed_state_block(scene.cut_contract)
+    if observed_state:
+        prompt_parts.append(observed_state)
     if scene.video_motion_prompt:
         prompt_parts.append(scene.video_motion_prompt.strip())
-    if scene.image_prompt:
-        prompt_parts.append("シーン説明:\n" + scene.image_prompt.strip())
     prompt = "\n\n".join(prompt_parts).strip()
     if prefix:
         prompt = prefix + "\n\n" + prompt if prompt else prefix
@@ -4087,17 +4142,11 @@ def _compose_final_video_prompt_for_target(
     ]
     if contract_blocks:
         prompt_parts.append("\n\n".join(contract_blocks))
+    first_frame_context_blocks = _video_target_first_frame_context_blocks(target)
+    if first_frame_context_blocks:
+        prompt_parts.append("\n\n".join(first_frame_context_blocks))
     if target.video_motion_prompt:
         prompt_parts.append(target.video_motion_prompt.strip())
-    image_prompts = _video_target_image_prompts(target)
-    if len(image_prompts) == 1:
-        prompt_parts.append("シーン説明:\n" + image_prompts[0])
-    elif len(image_prompts) > 1:
-        prompt_parts.append(
-            "\n\n".join(
-                f"補助シーン説明{idx}:\n{prompt}" for idx, prompt in enumerate(image_prompts, start=1)
-            )
-        )
     prompt = "\n\n".join(prompt_parts).strip()
     if prefix:
         prompt = prefix + "\n\n" + prompt if prompt else prefix
@@ -5303,7 +5352,7 @@ def main() -> None:
         for target in video_render_targets:
             if not _video_target_matches_filter(target, scene_filter):
                 continue
-            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
+            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_first_frame_context_blocks(target)):
                 continue
             video_targets_preview.append(target)
 
@@ -5408,7 +5457,7 @@ def main() -> None:
         for target in video_render_targets:
             if not _video_target_matches_filter(target, scene_filter):
                 continue
-            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
+            if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_first_frame_context_blocks(target)):
                 continue
             video_targets_in_order.append(target)
 
@@ -5459,7 +5508,7 @@ def main() -> None:
 
     prev_chain_first_frame: Path | None = None
     for target in video_targets_in_order:
-        if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_image_prompts(target)):
+        if args.skip_videos or not target.video_output or not (target.video_motion_prompt or _video_target_first_frame_context_blocks(target)):
             continue
 
         tool = normalize_tool_name(target.video_tool)

@@ -21,6 +21,21 @@ scene_design_rules:
   scene_count_goal: "承認済み story の主要 beat を落とさず、独立した production scene として成立する範囲で scene 数を最大化する"
   scene_count_stop_condition: "これ以上 scene を増やしても独立した dramatic_question / value_shift / causal_turn を持てず、各 scene 内の cut 設計を厚くした方が品質が上がる"
   scene_count_review_required: true
+  scene_specificity_required_layers:
+    - "non_compressible_beat_inventory"
+    - "scene_promotion_rule"
+    - "unique_scene_responsibility"
+    - "actor_force_coverage"
+    - "object_meaning_ladder"
+    - "concrete_handoff_chain"
+    - "anti_template_language"
+  banned_generic_scene_phrases:
+    - "主人公は前進できるか"
+    - "次へ進む理由が生まれる"
+    - "光が次の場面へ運ぶ"
+    - "価値変化の兆し"
+    - "場所の圧力"
+    - "主人公の姿勢と視線"
   p400_does_not_write_final_prompt: true
   scene_must_have_value_shift: true
   scene_must_have_causal_turn: true
@@ -55,6 +70,30 @@ story_truth:
   forbidden_changes:
     - "story.md の事実関係/reveal順序/主人公/themeを無断変更しない"
 
+story_beat_coverage_matrix:
+  - beat_id: "story_beat_01"
+    source_story_selector: "story.beats[0]"
+    beat_summary: ""
+    irreversible: true
+    assigned_scene_ids: []
+    promotion_decision: "scene|cut|narration|omitted"
+    promotion_reason: ""
+    reveal_timing: "before|during|after"
+    emotional_function: "hook|pressure|turn|payoff|aftertaste"
+    visual_evidence_required: []
+    risk_if_compressed: ""
+
+scene_decision_log:
+  - decision_id: "scene_decision_001"
+    action: "add_scene|merge_scene|split_scene|delete_scene|reorder_scene"
+    target_scene_ids: []
+    source_story_beat_ids: []
+    reason: ""
+    rejected_alternative: ""
+    impact_on_reveal_order: ""
+    impact_on_duration: ""
+    human_approval_required: false
+
 scenes:
   - scene_id: 1
     scene_name: "<短いscene名>"
@@ -87,6 +126,64 @@ scenes:
           - "表情/姿勢/距離/手の動きなど"
       visual_thesis: "この scene を代表する映画的な一枚絵の考え方"
       handoff_to_next_scene: "次 scene へつなぐ視覚/音/因果アンカー。最終 scene は terminal_resolution"
+      scene_conflict_engine:
+        desire: "この scene で主体が欲しているもの"
+        obstacle: "それを妨げる力"
+        stakes: "失敗すると何を失うか"
+        escalation: "scene内で圧力がどう上がるか"
+        no_return_point: "後戻りできなくなる瞬間"
+        visible_pressure:
+          - "画面で圧力として読めるもの"
+      audience_knowledge_delta:
+        before_scene:
+          - "観客がすでに知っていること"
+        learned_during_scene:
+          - "このsceneで初めて知ること"
+        misdirected_or_reframed:
+          - "意味が反転・再解釈される情報"
+        still_unknown_after_scene:
+          - "まだ隠す情報"
+        forbidden_early_reveals:
+          - "ここで見せてはいけないもの"
+      handoff_chain:
+        incoming:
+          anchor_id: "opening_or_previous_anchor"
+          anchor_type: "object|sound|gaze|gesture|threat|question|none"
+          visible_or_audible_form: ""
+        outgoing:
+          anchor_id: "next_scene_anchor"
+          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
+          next_scene_selector: ""
+          required_next_scene_start_pressure: ""
+      object_arc:
+        - object_id: ""
+          first_meaning: ""
+          current_scene_meaning: ""
+          later_meaning: ""
+          visible_state_in_this_scene: ""
+          must_not_show_yet: []
+      story_specificity:
+        non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
+        scene_promotion_reason: "この beat を scene に昇格させる理由。独立した問い/価値変化/因果 turn を明記する"
+        unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
+        actor_forces:
+          protagonist: "この scene で変化を受ける人物/主体"
+          opposing: []
+          helping: []
+          observing: []
+          pressure_method: "誰が、何によって、主人公や状況へ圧力をかけるか"
+        meaning_ladder:
+          protagonist_stage: "主人公の意味/関係/自己認識がどの段階にあるか"
+          relationship_stage: "関係性がどの段階にあるか"
+          object_or_setpiece_stage: "物語上の道具/舞台装置の意味がどの段階にあるか"
+        concrete_handoff:
+          incoming_trigger: "前 scene から来た具体的な圧力/物/音/視線/行為"
+          outgoing_anchor: "次 scene に渡す具体的な圧力/物/音/視線/行為"
+          outgoing_pressure: "なぜ次 scene が発生せざるを得ないか"
+        anti_template_language:
+          banned_generic_phrases_absent: false
+          story_specific_terms: []
+          specificity_note: "固有名詞、道具、関係、場所、行為のうち複数を入れて抽象語を避ける"
 
     grounding:
       research_refs:
@@ -128,6 +225,7 @@ scenes:
       visualizable_action_covered: false
       value_shift_visible: false
       causal_turn_visible: false
+      scene_specificity_gate_passed: false
       next_scene_connection_checked: false
       notes: "未達なら cut 追加または scene 再設計"
 

@@ -15,7 +15,9 @@ Use this template after p420 cut contracts are approved.
 
 - coverage_strategy:
 - min_cut_count:
-- function_sequence:
+- candidate_function_labels:
+- cut_assignments:
+- story_event_obligations:
 - visual_evidence_to_show:
 - causal_turn_cut_selector:
 - handoff_cut_selector:
@@ -27,8 +29,15 @@ Use this template after p420 cut contracts are approved.
 - cut_function:
 - target_beat:
 - screen_question:
+- audience_knowledge_delta:
+- causal_proof:
+- visual_evidence:
+- required_roles:
+- assigned_story_event_ids:
+- anti_redundancy_key:
 - visual_proof:
 - first_frame_brief:
+- static_first_frame_rule:
 - action_completion_state:
 - motion_brief:
 - narration_role:
@@ -59,4 +68,3 @@ Use this template after p420 cut contracts are approved.
 - p600_image:
 - p700_narration:
 - p800_video:
-

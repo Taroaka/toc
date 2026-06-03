@@ -2,9 +2,10 @@
 
 このテンプレは `output/<topic>_<timestamp>/scenes/sceneXX/video_manifest.md` 用。
 scene 単体 run でも、p400 の cinematic scene contract → p600 still → p800 motion の責務を崩さない。
+このファイルは skeleton テンプレートであり、TODO を含めてよい。production manifest へ昇格する時点では TODO / TBD / pending を残さない。
 
 ```yaml
-manifest_phase: "production"
+manifest_phase: "skeleton"
 video_metadata:
   topic: "<topic>"
   source_run: "output/<topic>_<timestamp>/"
@@ -33,6 +34,11 @@ human_change_requests: []
 scenes:
   - scene_id: 1
     timestamp: "00:00-00:30"
+    importance: "medium"
+    target_duration_seconds: 30
+    estimated_duration_seconds: 30
+    handoff_to_next_scene: "terminal_resolution または次sceneへのアンカー"
+    terminal_resolution: ""
     scene_intent:
       importance: "medium"
       target_duration_seconds: 30
@@ -50,8 +56,58 @@ scenes:
       withheld_information: []
       reveal_constraints: []
       affect_transition: "観客感情の変化"
+      character_state:
+        start: "開始時の人物/関係/身体状態"
+        end: "終了時の人物/関係/身体状態"
+        visible_behavior: []
       visual_thesis: "この scene を代表する映画的な一枚絵"
       handoff_to_next_scene: "terminal_resolution または次sceneへのアンカー"
+      story_specificity:
+        non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
+        scene_promotion_reason: "独立した問い/価値変化/因果 turn を持つため scene に昇格させる理由"
+        unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
+        actor_forces:
+          protagonist: ""
+          opposing: []
+          helping: []
+          observing: []
+          pressure_method: ""
+        meaning_ladder:
+          protagonist_stage: ""
+          relationship_stage: ""
+          object_or_setpiece_stage: ""
+        concrete_handoff:
+          incoming_trigger: ""
+          outgoing_anchor: ""
+          outgoing_pressure: ""
+        anti_template_language:
+          banned_generic_phrases_absent: false
+          story_specific_terms: []
+          specificity_note: ""
+      scene_conflict_engine:
+        desire: ""
+        obstacle: ""
+        stakes: ""
+        escalation: ""
+        no_return_point: ""
+        visible_pressure: []
+      audience_knowledge_delta:
+        before_scene: []
+        learned_during_scene: []
+        misdirected_or_reframed: []
+        still_unknown_after_scene: []
+        forbidden_early_reveals: []
+      handoff_chain:
+        incoming:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|none"
+          visible_or_audible_form: ""
+        outgoing:
+          anchor_id: ""
+          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
+          next_scene_selector: ""
+          required_next_scene_start_pressure: ""
+      object_arc: []
       production_risks: []
       handoff_notes:
         p500_asset: []
@@ -63,24 +119,65 @@ scenes:
         visualizable_action_covered: false
         value_shift_visible: false
         causal_turn_visible: false
+        scene_specificity_gate_passed: false
         next_scene_connection_checked: false
 
     # カット設計ルール:
     # - 1カット = 1意図。
-    # - production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
-    # - target_duration_seconds / 8 を切り上げたカット数を下回らない。
-    # - cut_contract が正本。scene_contract は既存 reader 向け互換 alias。
+    # - cut 数は固定テンプレートではなく scene_cut_coverage_plan で scene obligation から逆算する。
+    # - low/medium/high/critical の重要度 floor と target_duration_seconds / 8 の duration floor を下回らない。
+    # - 同じ story fact の繰り返しなら cut 追加ではなく既存 cut の prompt/contract を厚くする。
+    # - cut_contract が正本。legacy_scene_contract_alias / scene_contract は既存 reader 向け互換 alias。
+    scene_cut_coverage_plan:
+      coverage_strategy: "reverse_from_scene_obligations"
+      min_cut_count:
+        by_importance: 3
+        by_duration: 4
+        selected: 4
+        exception_reason: ""
+      scene_obligations:
+        - source: "dramatic_question|story_event_obligations|value_shift.visible_evidence|causal_turn|reveal_constraints|handoff_to_next_scene"
+          evidence: []
+      cut_assignments:
+        - cut_index: 1
+          obligation_id: ""
+          cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+          assigned_story_event_ids: []
+          target_beat: ""
+          visual_proof: ""
+          audience_knowledge_delta: ""
+          causal_proof: ""
+          required_roles: []
+          anti_redundancy_key: ""
     cuts:
       - cut_id: 1
         cut_role: "main"
         cut_status: "active"
         cut_contract:
-          schema_version: "2.1"
+          schema_version: "2.2"
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          intent_budget:
+            primary_intent: ""
+            assigned_obligation_ids: []
+            secondary_intents_allowed: []
+            forbidden_combined_intents:
+              - "new_location_establishing + major_reveal + next_scene_handoff"
+            overload_exception_reason: ""
           viewer_contract:
             target_beat: "この cut で観客に体験させる1つのこと"
             screen_question: "この cut の間、観客が画面から読む問い"
             dramatic_job: "scene全体のどこを担当するか"
+            audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
+            causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+            visual_evidence: []
+            required_roles: []
+            assigned_story_event_ids: []
+            anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
+            reveal_constraints:
+              inherited_from_scene: []
+              allowed_reveals_in_this_cut: []
+              forbidden_until_later_cut: []
+              forbidden_until_later_scene: []
             emotional_micro_shift: {from: "", to: ""}
             visual_proof: "映像だけで target_beat が成立したと分かる証拠"
             must_show: []
@@ -94,40 +191,112 @@ scenes:
             start_state: {}
             end_state: {}
             carry_forward_to_next_cut: []
+            continuity_risks: []
+          cut_handoff:
+            receives_from_previous:
+              anchor_id: ""
+              anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|none"
+              visible_or_audible_form: ""
+              expected_previous_cut_selector: ""
+            delivers_to_next:
+              anchor_id: ""
+              anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
+              visible_or_audible_form: ""
+              expected_next_cut_selector: ""
           first_frame_contract:
             imageable: true
             first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+            visible_start_state:
+              character_state: ""
+              prop_state: ""
+              spatial_state: ""
+              emotional_state: ""
+              gaze_or_attention: ""
+            motion_start_affordance:
+              movable_subject: ""
+              movement_vector: ""
+              camera_start_reason: ""
             action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+            static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
+            must_be_static_evidence_not_motion: true
           motion_contract:
             movable: true
             motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+            start_from_visible_state: ""
             end_state: "次 cut へ渡す最後の状態"
+            end_frame_brief: ""
             must_not_add: []
           narration_contract:
             speakable_or_silent: true
             role: "setup|fact|emotion|contrast|aftertaste|silent"
             target_function: "この声が cut で果たす役割"
-            text: ""
-            tts_text: ""
+            must_cover: []
+            must_avoid:
+              - "映像のキャプション化"
+            timing_intent: ""
             silence_reason: ""
+          rhythm_contract:
+            expected_duration_seconds: 8
+            pacing: "quick|standard|slow_hold|spectacle_hold"
+            comprehension_moment: ""
+            cut_out_reason: ""
+            audio_visual_sync_point: ""
+            duration_exception: {allowed: false, reason: ""}
+          asset_dependency:
+            character_ids_required: []
+            object_ids_required: []
+            location_ids_required: []
+            variant_ids_required: []
+            new_asset_requests: []
+            reusable_anchor_ids: []
+            reference_role: {}
           downstream_handoff:
-            p500_asset: {}
-            p600_image: {}
-            p700_narration: {}
-            p800_video: {}
+            p500_asset:
+              required_asset_ids: []
+              asset_candidates: []
+              continuity_anchor_needed: false
+              new_asset_needed: false
+              reuse_allowed: false
+            p600_image:
+              prompt_requirements: []
+              reference_requirements: []
+              first_frame_must_include: []
+              first_frame_must_avoid: []
+            p700_narration:
+              narration_requirements: []
+              role: "setup|fact|emotion|contrast|aftertaste|silent"
+              must_not_caption_visible_content: true
+            p800_video:
+              motion_requirements: []
+              start_state: ""
+              last_frame_or_end_state: ""
+              must_not_add: []
             carries_to_next_cut: []
             carries_to_next_scene: []
-        scene_contract:
+        legacy_scene_contract_alias:
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           target_beat: "この cut で伝える1つのこと"
           screen_question: "観客が画面から読む問い"
           dramatic_job: "scene全体のどこを担当するか"
+          audience_knowledge_delta: "<cut_contract.viewer_contract.audience_knowledge_delta>"
+          causal_proof: "<cut_contract.viewer_contract.causal_proof>"
+          visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
+          required_roles: "<cut_contract.viewer_contract.required_roles>"
+          assigned_story_event_ids: "<cut_contract.viewer_contract.assigned_story_event_ids>"
+          anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
           visual_beat: "画として何が見えるか"
           first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          static_first_frame_rule: "<cut_contract.first_frame_contract.static_first_frame_rule>"
           motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
           must_show: []
           must_avoid: []
           done_when: []
+        scene_contract:
+          legacy_note: "旧runtime向け cut-level alias。新規設計では cut_contract を正本とする。"
+          target_beat: "<cut_contract.viewer_contract.target_beat>"
+          must_show: "<cut_contract.viewer_contract.must_show>"
+          must_avoid: "<cut_contract.viewer_contract.must_avoid>"
+          done_when: "<cut_contract.viewer_contract.done_when>"
         image_generation:
           tool: "codex_builtin_image"
           character_ids: []
@@ -203,7 +372,7 @@ scenes:
           last_frame_asset_id: ""
           reference_asset_ids: []
           motion_prompt: |
-            cut_function: <scene_contract.cut_function>
+            cut_function: <cut_contract.cut_function>
             camera: TODO
             subject_motion: TODO
             environment_motion: TODO
@@ -218,8 +387,11 @@ scenes:
               must_cover: []
               must_avoid: []
               done_when: []
-            text: "TODO: ナレーション。silent cut の場合は空文字にし、tool: silent と silence_contract を持つ。"
-            tts_text: "TODO"
+            draft:
+              text: "TODO: 任意の下書き。p700で最終text/tts_textへ昇格する。"
+              status: "optional_draft|approved_by_human|superseded_by_p700"
+            text: ""
+            tts_text: ""
             tool: "elevenlabs"
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false

@@ -209,8 +209,15 @@ def collect_scene_composite_entries(
                     "target_focus": semantic_contract.get("target_focus", ""),
                     "screen_question": _as_str(contract.get("screen_question")),
                     "dramatic_job": _as_str(contract.get("dramatic_job")),
+                    "audience_knowledge_delta": _as_str(contract.get("audience_knowledge_delta")),
+                    "causal_proof": _as_str(contract.get("causal_proof")),
+                    "visual_evidence": _as_str_list(contract.get("visual_evidence")),
+                    "required_roles": _as_str_list(contract.get("required_roles")),
+                    "anti_redundancy_key": _as_str(contract.get("anti_redundancy_key")),
+                    "assigned_story_event_ids": _as_str_list(contract.get("assigned_story_event_ids")),
                     "visual_proof": _as_str(contract.get("visual_beat") or contract.get("visual_proof")),
                     "first_frame_brief": _as_str(contract.get("first_frame_brief")),
+                    "static_first_frame_rule": _as_str(contract.get("static_first_frame_rule")),
                     "prompt": _as_str(image_generation.get("prompt")),
                     "image_output": output,
                     "image_output_exists": output_exists,
@@ -230,6 +237,7 @@ def collect_scene_composite_entries(
             "estimated_duration_seconds": scene.get("estimated_duration_seconds"),
             "cut_count": len(cut_entries),
         }
+        scene_cut_coverage_plan = _dict(scene.get("scene_cut_coverage_plan"))
         entries.append(
             {
                 "stage": stage,
@@ -237,15 +245,25 @@ def collect_scene_composite_entries(
                 "selector": f"scene{scene.get('scene_id')}",
                 "scene_id": scene.get("scene_id"),
                 "scene_contract": scene_contract,
-                "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
+                "scene_cut_coverage_plan": scene_cut_coverage_plan,
+                "story_event_obligations": _list(_dict(scene.get("scene_intent")).get("story_event_obligations")),
+                "role_coverage": _dict(_dict(scene.get("scene_intent")).get("role_coverage")),
+                "audience_knowledge_delta": _dict(_dict(scene.get("scene_intent")).get("audience_knowledge_delta")),
+                "audience_knowledge_plan": _audience_knowledge_items(_dict(scene.get("scene_intent"))),
+                "visual_proof_obligations": _list(_dict(scene.get("scene_intent")).get("visual_proof_obligations")),
+                "anti_redundancy_policy": _dict(_dict(scene.get("scene_intent")).get("anti_redundancy_policy")),
+                "static_first_frame_rules": _as_str_list(_dict(scene.get("scene_intent")).get("static_first_frame_rules")),
                 "cut_count": len(cut_entries),
                 "cut_entries": cut_entries,
                 "scene_composite_gate": {
                     "required": True,
-                    "minimum_cut_count": _as_int(_dict(scene.get("scene_cut_coverage_plan")).get("minimum_cut_count")) or 2,
+                    "minimum_cut_count": _coverage_minimum_cut_count(scene_cut_coverage_plan),
                     "must_judge": [
                         "scene_cut_coverage_plan の scene_obligations が cut_entries に割り当てられているか",
+                        "story_event_obligations の不可逆な物語出来事が cut 群の audience_knowledge_delta / causal_proof に割り当てられているか",
+                        "role_coverage.required_roles にある妨害者・助力者・証人・共同体などが、必要なsceneで主人公単独に潰されていないか",
                         "cutごとの差異が番号差分や同義反復ではなく、sceneを再現するために必要な視覚要件の分担になっているか",
+                        "各cutの first_frame_brief が motion ではなく静止画として読める causal proof を持つか",
                         "各cutの画像promptが、動画として接続した時にscene設計の問い、価値変化、因果転換、handoffを伝えられるか",
                         "不足時は scene_requires_more_cuts、絵の具体性不足は cut_prompt_requires_reinforcement、重複過多は scene_cut_prompt_too_similar として判定する",
                     ],
@@ -256,6 +274,12 @@ def collect_scene_composite_entries(
                         "scene_video_handoff_weak",
                         "scene_requires_more_cuts",
                         "cut_prompt_requires_reinforcement",
+                        "story_event_obligation_unassigned",
+                        "audience_knowledge_delta_missing",
+                        "causal_proof_weak",
+                        "role_coverage_missing",
+                        "static_first_frame_not_imageable",
+                        "scene_cut_redundancy_excessive",
                     ],
                 },
             }
@@ -440,12 +464,19 @@ def _cut_semantic_contract(
             "target_beat": _as_str(viewer.get("target_beat") or cut_contract.get("target_beat")),
             "screen_question": _as_str(viewer.get("screen_question")),
             "dramatic_job": _as_str(viewer.get("dramatic_job")),
+            "audience_knowledge_delta": _as_str(viewer.get("audience_knowledge_delta")),
+            "causal_proof": _as_str(viewer.get("causal_proof")),
+            "visual_evidence": _as_str_list(viewer.get("visual_evidence")),
+            "required_roles": _as_str_list(viewer.get("required_roles")),
+            "anti_redundancy_key": _as_str(viewer.get("anti_redundancy_key")),
+            "assigned_story_event_ids": _as_str_list(viewer.get("assigned_story_event_ids") or cut_contract.get("assigned_story_event_ids")),
             "visual_beat": _as_str(viewer.get("visual_proof") or cut_contract.get("visual_beat")),
             "must_include": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
             "must_show": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
             "must_avoid": _as_str_list(viewer.get("must_avoid") or first_frame.get("must_avoid")),
             "done_when": _as_str_list(viewer.get("done_when")),
             "first_frame_brief": _as_str(first_frame.get("first_frame_brief")),
+            "static_first_frame_rule": _as_str(first_frame.get("static_first_frame_rule")),
             "motion_brief": _as_str(motion.get("motion_brief")),
             "primary_location": _as_str(geography.get("background") or (location_ids[0] if location_ids else "")),
             "continuity_from_previous": _as_str(start_state.get("spatial_state") or start_state.get("character_state")),
@@ -464,6 +495,13 @@ def semantic_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:
         "primary_location": _as_str(contract.get("primary_location")),
         "emotional_state": _as_str(contract.get("emotional_state")),
         "continuity_from_previous": _as_str(contract.get("continuity_from_previous")),
+        "audience_knowledge_delta": _as_str(contract.get("audience_knowledge_delta")),
+        "causal_proof": _as_str(contract.get("causal_proof")),
+        "visual_evidence": _as_str_list(contract.get("visual_evidence")),
+        "required_roles": _as_str_list(contract.get("required_roles")),
+        "static_first_frame_rule": _as_str(contract.get("static_first_frame_rule")),
+        "anti_redundancy_key": _as_str(contract.get("anti_redundancy_key")),
+        "assigned_story_event_ids": _as_str_list(contract.get("assigned_story_event_ids")),
     }
 
 
@@ -596,3 +634,27 @@ def _as_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _coverage_minimum_cut_count(plan: dict[str, Any]) -> int:
+    if not isinstance(plan, dict):
+        return 2
+    direct = _as_int(plan.get("minimum_cut_count"))
+    if direct:
+        return direct
+    min_cut_count = _dict(plan.get("min_cut_count"))
+    selected = _as_int(min_cut_count.get("selected"))
+    if selected:
+        return selected
+    by_importance = _as_int(min_cut_count.get("by_importance"))
+    by_duration = _as_int(min_cut_count.get("by_duration"))
+    return max(by_importance, by_duration, 2)
+
+
+def _audience_knowledge_items(scene_intent: dict[str, Any]) -> list[str]:
+    delta = _dict(scene_intent.get("audience_knowledge_delta"))
+    items: list[str] = []
+    for key in ("before_scene", "learned_during_scene", "misdirected_or_reframed", "still_unknown_after_scene", "forbidden_early_reveals"):
+        items.extend(_as_str_list(delta.get(key)))
+    items.extend(_as_str_list(scene_intent.get("audience_knowledge_plan")))
+    return list(dict.fromkeys(item for item in items if item))

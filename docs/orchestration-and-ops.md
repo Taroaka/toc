@@ -207,7 +207,7 @@ run 直下には `p000_index.md` を置き、人間向けの入口にする。
 - `p000_index.md` の stage table / slot table を、その run の進捗正本とする
 - 第1段階では binary / logs / scratch の物理 rename は行わず、navigation layer として番号を導入する
 - narration は
-  - `p400`: narration draft / `tts_text` / human changes / skeleton manifest materialization
+  - `p400`: narration contract / narration draft / human changes / skeleton manifest materialization
   - `p700`: TTS 実行 / duration fit gate / audio handoff
   の 2 層で扱う
 - 画像生成の request 改稿は、scene 単位で自然言語エージェントへ割り当てる

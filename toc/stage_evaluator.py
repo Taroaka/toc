@@ -10,7 +10,13 @@ from typing import Any
 from toc.grounding import grounding_validation
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
-from toc.review_loop import CUT_BLUEPRINT_GATE_MARKERS, REVIEW_LOOP_CRITIC_COUNT, REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
+from toc.review_loop import (
+    CUT_BLUEPRINT_GATE_MARKERS,
+    REVIEW_LOOP_CRITIC_COUNT,
+    REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
+    SCENE_DETAIL_GATE_MARKERS,
+    SCENE_SET_GATE_MARKERS,
+)
 
 
 STAGE_RUBRIC_WEIGHTS = {
@@ -92,7 +98,72 @@ STAGE_RUBRIC_THRESHOLDS = {
 CINEMATIC_SCENE_MIN_CUTS = 3
 CINEMATIC_LOW_IMPORTANCE_MIN_CUTS = 2
 CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS = 5
-CINEMATIC_SECONDS_PER_CUT_TARGET = 12
+CINEMATIC_CRITICAL_IMPORTANCE_MIN_CUTS = 7
+CINEMATIC_SECONDS_PER_CUT_TARGET = 8
+GENERIC_SCENE_TEMPLATE_PHRASES: tuple[str, ...] = (
+    "主人公は前進できるか",
+    "次へ進む理由が生まれる",
+    "光が次の場面へ運ぶ",
+    "価値変化の兆し",
+    "場所の圧力",
+    "主人公の姿勢と視線",
+    "主人公が変化する",
+    "次の展開につながる",
+    "感情が動く",
+    "状況が悪くなる",
+    "何かが起きる",
+    "物語が進む",
+)
+GENERIC_HANDOFF_ONLY_PHRASES: tuple[str, ...] = (
+    "次へ",
+    "つながる",
+    "進む",
+    "次の場面",
+    "次の展開",
+)
+UNRESOLVED_GATE_VALUES: set[str] = {
+    "todo",
+    "tbd",
+    "pending",
+    "...",
+    "changes_requested",
+    "failed",
+    "missing",
+    "unclear",
+    "none",
+    "null",
+    "n/a",
+    "なし",
+    "不明",
+    "未定",
+    "不足",
+    "",
+}
+SCENE_COVERAGE_REVIEW_REQUIRED_KEYS: tuple[str, ...] = (
+    "audience_information_covered",
+    "visualizable_action_covered",
+    "value_shift_visible",
+    "causal_turn_visible",
+    "scene_specificity_gate_passed",
+    "next_scene_connection_checked",
+)
+MOTION_LEAK_TOKENS: tuple[str, ...] = (
+    "motion_brief",
+    "p800",
+    "動画生成",
+    "カメラが動く",
+    "このあと",
+    "end_state",
+)
+TRIANGULATION_REQUIRED_KEYS: tuple[str, ...] = (
+    "same_target_beat",
+    "image_supports_motion_start",
+    "motion_reaches_declared_end_state",
+    "narration_not_captioning_image",
+    "reveal_constraints_preserved",
+    "continuity_preserved",
+    "handoff_visible_or_audible",
+)
 
 
 def has_todo(text: str) -> bool:
@@ -130,6 +201,10 @@ def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> An
             return default
         cur = cur[key]
     return cur
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def flatten_text(value: Any) -> str:
@@ -186,8 +261,13 @@ def _contract_list_paths(contract: dict[str, Any], *paths: str) -> list[str]:
     return []
 
 
-def _node_cut_contract(node: dict[str, Any]) -> dict[str, Any]:
-    for key in ("cut_contract", "scene_contract", "cut_blueprint"):
+def _node_cut_contract(node: dict[str, Any], *, allow_legacy: bool = True) -> dict[str, Any]:
+    value = node.get("cut_contract") if isinstance(node, dict) else None
+    if isinstance(value, dict) and value:
+        return value
+    if not allow_legacy:
+        return {}
+    for key in ("scene_contract", "cut_blueprint"):
         value = node.get(key) if isinstance(node, dict) else None
         if isinstance(value, dict) and value:
             return value
@@ -213,24 +293,109 @@ def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     if not isinstance(contract, dict) or not contract:
         return ["cut_contract:missing"]
-    if not non_empty(_contract_string(contract, "cut_function")):
-        issues.append("cut_function")
-    if not non_empty(_contract_string(contract, "target_beat", "viewer_contract.target_beat")):
-        issues.append("viewer_contract.target_beat")
-    if not non_empty(_contract_string(contract, "screen_question", "viewer_contract.screen_question")):
-        issues.append("viewer_contract.screen_question")
-    if not non_empty(_contract_string(contract, "visual_beat", "viewer_contract.visual_proof")):
-        issues.append("viewer_contract.visual_proof")
-    if not bool(_contract_list_paths(contract, "must_show", "viewer_contract.must_show")):
-        issues.append("viewer_contract.must_show")
-    if not bool(_contract_list_paths(contract, "done_when", "viewer_contract.done_when")):
-        issues.append("viewer_contract.done_when")
-    if not non_empty(_contract_string(contract, "first_frame_brief", "first_frame_contract.first_frame_brief")):
-        issues.append("first_frame_contract.first_frame_brief")
-    if not non_empty(_contract_string(contract, "motion_brief", "motion_contract.motion_brief")):
-        issues.append("motion_contract.motion_brief")
-    if not non_empty(_contract_string(contract, "narration_role", "narration_contract.role")):
-        issues.append("narration_contract.role")
+    required_strings = (
+        ("cut_function", "cut_function"),
+        ("viewer_contract.target_beat", "target_beat", "viewer_contract.target_beat"),
+        ("viewer_contract.screen_question", "screen_question", "viewer_contract.screen_question"),
+        ("viewer_contract.dramatic_job", "dramatic_job", "viewer_contract.dramatic_job"),
+        ("viewer_contract.audience_knowledge_delta", "audience_knowledge_delta", "viewer_contract.audience_knowledge_delta"),
+        ("viewer_contract.causal_proof", "causal_proof", "viewer_contract.causal_proof"),
+        ("viewer_contract.anti_redundancy_key", "anti_redundancy_key", "viewer_contract.anti_redundancy_key"),
+        ("viewer_contract.visual_proof", "visual_beat", "viewer_contract.visual_proof"),
+        ("first_frame_contract.first_frame_brief", "first_frame_brief", "first_frame_contract.first_frame_brief"),
+        ("first_frame_contract.action_completion_state", "action_completion_state", "first_frame_contract.action_completion_state"),
+        ("first_frame_contract.static_first_frame_rule", "static_first_frame_rule", "first_frame_contract.static_first_frame_rule"),
+        ("motion_contract.motion_brief", "motion_brief", "motion_contract.motion_brief"),
+        ("motion_contract.end_state", "motion_end_state", "motion_contract.end_state"),
+        ("narration_contract.role", "narration_role", "narration_contract.role"),
+        ("narration_contract.target_function", "narration_target_function", "narration_contract.target_function"),
+    )
+    for label, *paths in required_strings:
+        if not non_empty(_contract_string(contract, *paths)):
+            issues.append(label)
+
+    required_lists = (
+        ("viewer_contract.visual_evidence", "visual_evidence", "viewer_contract.visual_evidence"),
+        ("viewer_contract.required_roles", "required_roles", "viewer_contract.required_roles"),
+        ("viewer_contract.assigned_story_event_ids", "assigned_story_event_ids", "viewer_contract.assigned_story_event_ids"),
+        ("viewer_contract.must_show", "must_show", "viewer_contract.must_show"),
+        ("viewer_contract.done_when", "done_when", "viewer_contract.done_when"),
+        ("motion_contract.must_not_add", "motion_contract.must_not_add"),
+        ("narration_contract.must_avoid", "narration_contract.must_avoid"),
+    )
+    for label, *paths in required_lists:
+        if not _contract_list_paths(contract, *paths):
+            issues.append(label)
+
+    first_frame = as_dict(contract.get("first_frame_contract"))
+    if first_frame.get("imageable") is not True:
+        issues.append("first_frame_contract.imageable")
+    if first_frame.get("must_be_static_evidence_not_motion") is not True:
+        issues.append("first_frame_contract.must_be_static_evidence_not_motion")
+    if not isinstance(first_frame.get("visible_start_state"), dict) or not first_frame.get("visible_start_state"):
+        issues.append("first_frame_contract.visible_start_state")
+    if not isinstance(first_frame.get("motion_start_affordance"), dict) or not first_frame.get("motion_start_affordance"):
+        issues.append("first_frame_contract.motion_start_affordance")
+
+    motion_contract = as_dict(contract.get("motion_contract"))
+    if not non_empty(motion_contract.get("start_from_visible_state")):
+        issues.append("motion_contract.start_from_visible_state")
+    if not non_empty(motion_contract.get("end_frame_brief")):
+        issues.append("motion_contract.end_frame_brief")
+
+    role = _contract_string(contract, "narration_contract.role", "narration_role").lower()
+    if role == "silent" and not non_empty(_contract_string(contract, "narration_contract.silence_reason", "silence_reason")):
+        issues.append("narration_contract.silence_reason")
+
+    downstream = as_dict(contract.get("downstream_handoff"))
+    downstream_required = {
+        "p500_asset": ("required_asset_ids", "asset_candidates", "continuity_anchor_needed", "new_asset_needed", "reuse_allowed"),
+        "p600_image": ("prompt_requirements", "reference_requirements", "first_frame_must_include", "first_frame_must_avoid"),
+        "p700_narration": ("narration_requirements", "role", "must_not_caption_visible_content"),
+        "p800_video": ("motion_requirements", "start_state", "last_frame_or_end_state", "must_not_add"),
+    }
+    for key, required_keys in downstream_required.items():
+        section = downstream.get(key)
+        if not isinstance(section, dict) or not section:
+            issues.append(f"downstream_handoff.{key}")
+            continue
+        if not all(required_key in section for required_key in required_keys):
+            issues.append(f"downstream_handoff.{key}")
+
+    intent_budget = as_dict(contract.get("intent_budget"))
+    if not intent_budget:
+        issues.append("intent_budget")
+    else:
+        if not non_empty(intent_budget.get("primary_intent")):
+            issues.append("intent_budget.primary_intent")
+        assigned = intent_budget.get("assigned_obligation_ids")
+        if not isinstance(assigned, list) or not assigned:
+            issues.append("intent_budget.assigned_obligation_ids")
+        elif len(assigned) > 3 and not non_empty(intent_budget.get("overload_exception_reason")):
+            issues.append("cut_overloaded_multiple_beats")
+        if str(contract.get("cut_function") or "").strip().lower() == "custom" and not non_empty(intent_budget.get("custom_function_reason")):
+            issues.append("cut_function_custom_without_reason")
+
+    rhythm_contract = as_dict(contract.get("rhythm_contract"))
+    if not rhythm_contract:
+        issues.append("rhythm_contract")
+    else:
+        for key in ("expected_duration_seconds", "pacing", "comprehension_moment", "cut_out_reason"):
+            if not non_empty(rhythm_contract.get(key)):
+                issues.append(f"rhythm_contract.{key}")
+        duration = rhythm_contract.get("expected_duration_seconds")
+        exception = as_dict(rhythm_contract.get("duration_exception"))
+        if isinstance(duration, (int, float)) and duration > 12 and not non_empty(exception.get("reason")):
+            issues.append("rhythm_contract.duration_exception.reason")
+
+    asset_dependency = as_dict(contract.get("asset_dependency"))
+    if not asset_dependency:
+        issues.append("asset_dependency")
+    else:
+        if not isinstance(asset_dependency.get("character_ids_required"), list):
+            issues.append("asset_dependency.character_ids_required")
+        if not isinstance(asset_dependency.get("location_ids_required"), list):
+            issues.append("asset_dependency.location_ids_required")
     return issues
 
 
@@ -936,6 +1101,15 @@ def _script_text_quality_checks(checks: list[dict[str, Any]], text: str, data: d
     add_check(checks, "script.content_length", meaningful_len >= 80, f"script content length is meaningful (got {meaningful_len} chars)", kind="rubric")
     if profile == "standard":
         add_check(checks, "script.no_todo", not has_todo(text), "script does not contain TODO/TBD markers", kind="rubric")
+    generic_hits = [phrase for phrase in GENERIC_SCENE_TEMPLATE_PHRASES if phrase in text]
+    add_check(
+        checks,
+        "script.no_generic_scene_template_phrases",
+        not generic_hits,
+        "script scene design does not rely on banned generic scene placeholders"
+        + (f" (hits: {', '.join(generic_hits)})" if generic_hits else ""),
+        kind="rubric",
+    )
 
     scenes = []
     if isinstance(data.get("scenes"), list):
@@ -947,22 +1121,196 @@ def _script_text_quality_checks(checks: list[dict[str, Any]], text: str, data: d
 
 
 def _scene_has_intent(scene: dict[str, Any]) -> bool:
+    return not _scene_intent_issue_map(scene)
+
+
+def _scene_id_for_issue(scene: dict[str, Any], fallback: str = "?") -> str:
+    return as_dotted_str(scene.get("scene_id")) or str(scene.get("scene_id") or fallback)
+
+
+def _dict_has_any_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(non_empty(v) for v in value.values())
+    if isinstance(value, list):
+        return bool(value)
+    return non_empty(value)
+
+
+def _contains_generic_scene_language(value: Any) -> bool:
+    text = flatten_text(value)
+    return any(phrase in text for phrase in GENERIC_SCENE_TEMPLATE_PHRASES)
+
+
+def _looks_only_generic_handoff(value: Any) -> bool:
+    text = "".join(flatten_text(value).split())
+    return bool(text) and len(text) <= 18 and any(phrase in text for phrase in GENERIC_HANDOFF_ONLY_PHRASES)
+
+
+def _has_story_specific_terms(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    return sum(1 for item in value if str(item).strip()) >= 2
+
+
+def _has_actor_force_pressure(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    people_keys = ("protagonist", "opposing", "helping", "observing", "witness", "community", "authority")
+    has_people = any(non_empty(value.get(key)) for key in people_keys)
+    pressure_keys = ("pressure_method", "pressure", "visible_pressure", "obstacle", "leverage")
+    has_pressure = any(non_empty(value.get(key)) for key in pressure_keys)
+    return has_people and has_pressure
+
+
+def _scene_intent_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
+    scene_id = _scene_id_for_issue(scene)
+    issues: dict[str, list[str]] = {
+        "dramatic_question": [],
+        "value_shift": [],
+        "causal_turn": [],
+        "visual_thesis": [],
+        "story_specificity": [],
+        "conflict_engine": [],
+        "handoff_chain": [],
+        "coverage_review": [],
+    }
     intent = scene.get("scene_intent")
     if not isinstance(intent, dict):
-        return False
+        for key in issues:
+            issues[key].append(f"scene{scene_id}:scene_intent")
+        return {key: values for key, values in issues.items() if values}
     required_keys = {
         "story_purpose",
+        "dramatic_question",
+        "scene_spine",
+        "value_shift",
+        "causal_turn",
         "audience_information",
         "withheld_information",
         "reveal_constraints",
         "affect_transition",
+        "character_state",
+        "visual_thesis",
+        "story_specificity",
         "visual_value_source",
         "production_risks",
         "handoff_notes",
     }
-    if not required_keys.issubset(set(intent)):
-        return False
-    return non_empty(intent.get("story_purpose")) and non_empty(intent.get("affect_transition")) and isinstance(intent.get("handoff_notes"), dict)
+    missing_required = sorted(required_keys - set(intent))
+    if missing_required:
+        issues["story_specificity"].extend(f"scene{scene_id}:scene_intent.{key}" for key in missing_required)
+    if not non_empty(intent.get("story_purpose")):
+        issues["story_specificity"].append(f"scene{scene_id}:story_purpose")
+    if not non_empty(intent.get("affect_transition")):
+        issues["story_specificity"].append(f"scene{scene_id}:affect_transition")
+    if not isinstance(intent.get("handoff_notes"), dict):
+        issues["handoff_chain"].append(f"scene{scene_id}:handoff_notes")
+
+    if not non_empty(intent.get("dramatic_question")):
+        issues["dramatic_question"].append(f"scene{scene_id}:dramatic_question")
+    if not non_empty(intent.get("scene_spine")):
+        issues["dramatic_question"].append(f"scene{scene_id}:scene_spine")
+    if not non_empty(intent.get("causal_turn")):
+        issues["causal_turn"].append(f"scene{scene_id}:causal_turn")
+    if not non_empty(intent.get("visual_thesis")):
+        issues["visual_thesis"].append(f"scene{scene_id}:visual_thesis")
+
+    value_shift = intent.get("value_shift")
+    if not isinstance(value_shift, dict):
+        issues["value_shift"].append(f"scene{scene_id}:value_shift")
+    else:
+        for key in ("from", "to"):
+            if not non_empty(value_shift.get(key)):
+                issues["value_shift"].append(f"scene{scene_id}:value_shift.{key}")
+        if not as_list(value_shift.get("visible_evidence")):
+            issues["value_shift"].append(f"scene{scene_id}:value_shift.visible_evidence")
+
+    character_state = intent.get("character_state")
+    if not isinstance(character_state, dict):
+        issues["story_specificity"].append(f"scene{scene_id}:character_state")
+    else:
+        for key in ("start", "end"):
+            if not non_empty(character_state.get(key)):
+                issues["story_specificity"].append(f"scene{scene_id}:character_state.{key}")
+        if not as_list(character_state.get("visible_behavior")):
+            issues["story_specificity"].append(f"scene{scene_id}:character_state.visible_behavior")
+
+    specificity = intent.get("story_specificity")
+    if not isinstance(specificity, dict):
+        issues["story_specificity"].append(f"scene{scene_id}:story_specificity")
+    else:
+        for key in ("non_compressible_beat", "scene_promotion_reason", "unique_scene_responsibility"):
+            if not non_empty(specificity.get(key)):
+                issues["story_specificity"].append(f"scene{scene_id}:story_specificity.{key}")
+        if not _dict_has_any_value(specificity.get("actor_forces")):
+            issues["story_specificity"].append(f"scene{scene_id}:story_specificity.actor_forces")
+        elif not _has_actor_force_pressure(specificity.get("actor_forces")):
+            issues["story_specificity"].append(f"scene{scene_id}:story_specificity.actor_forces.pressure_method")
+        if not _dict_has_any_value(specificity.get("meaning_ladder")):
+            issues["story_specificity"].append(f"scene{scene_id}:story_specificity.meaning_ladder")
+        concrete_handoff = specificity.get("concrete_handoff")
+        if not isinstance(concrete_handoff, dict):
+            issues["handoff_chain"].append(f"scene{scene_id}:story_specificity.concrete_handoff")
+        else:
+            for key in ("incoming_trigger", "outgoing_anchor", "outgoing_pressure"):
+                if not non_empty(concrete_handoff.get(key)):
+                    issues["handoff_chain"].append(f"scene{scene_id}:story_specificity.concrete_handoff.{key}")
+                elif _looks_only_generic_handoff(concrete_handoff.get(key)):
+                    issues["handoff_chain"].append(f"scene{scene_id}:story_specificity.concrete_handoff.{key}.generic")
+        anti_template = specificity.get("anti_template_language")
+        if not isinstance(anti_template, dict):
+            issues["story_specificity"].append(f"scene{scene_id}:story_specificity.anti_template_language")
+        else:
+            if anti_template.get("banned_generic_phrases_absent") is not True:
+                issues["story_specificity"].append(f"scene{scene_id}:story_specificity.anti_template_language.banned_generic_phrases_absent")
+            if not _has_story_specific_terms(anti_template.get("story_specific_terms")):
+                issues["story_specificity"].append(f"scene{scene_id}:story_specificity.anti_template_language.story_specific_terms")
+
+    conflict_engine = intent.get("scene_conflict_engine")
+    if not isinstance(conflict_engine, dict):
+        issues["conflict_engine"].append(f"scene{scene_id}:scene_conflict_engine")
+    else:
+        for key in ("desire", "obstacle", "stakes", "escalation", "no_return_point"):
+            if not non_empty(conflict_engine.get(key)):
+                issues["conflict_engine"].append(f"scene{scene_id}:scene_conflict_engine.{key}")
+        if not as_list(conflict_engine.get("visible_pressure")):
+            issues["conflict_engine"].append(f"scene{scene_id}:scene_conflict_engine.visible_pressure")
+
+    knowledge_delta = intent.get("audience_knowledge_delta")
+    if not isinstance(knowledge_delta, dict):
+        issues["dramatic_question"].append(f"scene{scene_id}:audience_knowledge_delta")
+    else:
+        for key in ("before_scene", "learned_during_scene", "still_unknown_after_scene", "forbidden_early_reveals"):
+            if not as_list(knowledge_delta.get(key)):
+                issues["dramatic_question"].append(f"scene{scene_id}:audience_knowledge_delta.{key}")
+
+    handoff_chain = intent.get("handoff_chain")
+    if not isinstance(handoff_chain, dict):
+        issues["handoff_chain"].append(f"scene{scene_id}:handoff_chain")
+    else:
+        incoming = handoff_chain.get("incoming")
+        outgoing = handoff_chain.get("outgoing")
+        if not isinstance(incoming, dict) or not non_empty(incoming.get("anchor_type")) or not non_empty(incoming.get("visible_or_audible_form")):
+            issues["handoff_chain"].append(f"scene{scene_id}:handoff_chain.incoming")
+        if not isinstance(outgoing, dict) or not non_empty(outgoing.get("anchor_id")) or not non_empty(outgoing.get("anchor_type")):
+            issues["handoff_chain"].append(f"scene{scene_id}:handoff_chain.outgoing")
+        if isinstance(outgoing, dict) and not (non_empty(outgoing.get("next_scene_selector")) or str(outgoing.get("anchor_type") or "") == "terminal"):
+            issues["handoff_chain"].append(f"scene{scene_id}:handoff_chain.outgoing.next_scene_selector")
+        if isinstance(outgoing, dict) and _looks_only_generic_handoff(outgoing.get("required_next_scene_start_pressure")):
+            issues["handoff_chain"].append(f"scene{scene_id}:handoff_chain.outgoing.required_next_scene_start_pressure.generic")
+
+    coverage = scene.get("coverage_review")
+    if not isinstance(coverage, dict):
+        issues["coverage_review"].append(f"scene{scene_id}:coverage_review")
+    else:
+        for key in SCENE_COVERAGE_REVIEW_REQUIRED_KEYS:
+            if coverage.get(key) is not True:
+                issues["coverage_review"].append(f"scene{scene_id}:{key}")
+
+    if _contains_generic_scene_language(intent):
+        issues["story_specificity"].append(f"scene{scene_id}:generic_scene_template_phrase")
+
+    return {key: values for key, values in issues.items() if values}
 
 
 def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
@@ -999,18 +1347,59 @@ def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
 
 
 def _scene_target_duration_seconds(scene: dict[str, Any]) -> float:
-    value = scene.get("target_duration_seconds")
-    if isinstance(value, (int, float)) and value > 0:
-        return float(value)
-    value = scene.get("estimated_duration_seconds")
-    if isinstance(value, (int, float)) and value > 0:
-        return float(value)
+    for key in ("target_duration_seconds", "estimated_duration_seconds"):
+        value = scene.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    intent = scene.get("scene_intent") if isinstance(scene.get("scene_intent"), dict) else {}
+    for key in ("target_duration_seconds", "estimated_duration_seconds"):
+        value = intent.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
     return 0.0
 
 
+def _scene_importance(scene: dict[str, Any]) -> str:
+    value = scene.get("importance")
+    if not value and isinstance(scene.get("scene_intent"), dict):
+        value = scene["scene_intent"].get("importance")
+    return str(value or "").strip().lower()
+
+
+def _scene_cut_coverage_plan(scene: dict[str, Any]) -> dict[str, Any]:
+    return as_dict(scene.get("scene_cut_coverage_plan"))
+
+
+def _coverage_minimum_cut_count(plan: dict[str, Any]) -> int:
+    if not isinstance(plan, dict):
+        return 2
+    direct = as_int(plan.get("minimum_cut_count"))
+    if direct and direct > 0:
+        return direct
+    min_cut_count = as_dict(plan.get("min_cut_count"))
+    selected = as_int(min_cut_count.get("selected"))
+    if selected and selected > 0:
+        return selected
+    by_importance = as_int(min_cut_count.get("by_importance")) or 0
+    by_duration = as_int(min_cut_count.get("by_duration")) or 0
+    return max(by_importance, by_duration, 2)
+
+
+def _scene_cut_selector(scene_id: str, cut: dict[str, Any]) -> str:
+    selector = str(cut.get("selector") or "").strip()
+    if selector:
+        return selector
+    cut_id = as_dotted_str(cut.get("cut_id"))
+    if cut_id is None:
+        return ""
+    return make_scene_cut_selector(scene_id, cut_id)
+
+
 def _cinematic_min_cuts_for_scene(scene: dict[str, Any]) -> int:
-    importance = str(scene.get("importance") or "").strip().lower()
-    if importance in {"high", "critical"}:
+    importance = _scene_importance(scene)
+    if importance == "critical":
+        base_min = CINEMATIC_CRITICAL_IMPORTANCE_MIN_CUTS
+    elif importance == "high":
         base_min = CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS
     elif importance == "low":
         base_min = CINEMATIC_LOW_IMPORTANCE_MIN_CUTS
@@ -1023,16 +1412,171 @@ def _cinematic_min_cuts_for_scene(scene: dict[str, Any]) -> int:
     return base_min
 
 
+def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cuts: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    plan = _scene_cut_coverage_plan(scene)
+    if not plan:
+        return [f"scene{scene_id}:scene_cut_coverage_plan"]
+
+    actual_selectors = {_scene_cut_selector(scene_id, cut) for cut in cuts}
+    actual_selectors = {selector for selector in actual_selectors if selector}
+    selected_min = _coverage_minimum_cut_count(plan)
+    actual_cut_count = len(cuts)
+    if actual_cut_count < selected_min:
+        issues.append(f"scene{scene_id}:cut_count_below_coverage_plan:{actual_cut_count}<{selected_min}")
+
+    min_cut_count = as_dict(plan.get("min_cut_count"))
+    by_importance = as_int(min_cut_count.get("by_importance")) or 0
+    by_duration = as_int(min_cut_count.get("by_duration")) or 0
+    selected = as_int(min_cut_count.get("selected")) or as_int(plan.get("minimum_cut_count")) or 0
+    if selected and selected < max(by_importance, by_duration):
+        issues.append(f"scene{scene_id}:coverage_plan_selected_below_floor")
+
+    obligations = as_list(plan.get("scene_obligations"))
+    if not obligations:
+        issues.append(f"scene{scene_id}:scene_obligations")
+    obligation_ids: set[str] = set()
+    scene_obligation_assigned_selectors: set[str] = set()
+    for index, obligation in enumerate(obligations, start=1):
+        if not isinstance(obligation, dict):
+            issues.append(f"scene{scene_id}:scene_obligations[{index}]")
+            continue
+        obligation_id = str(obligation.get("obligation_id") or "").strip()
+        if obligation_id:
+            obligation_ids.add(obligation_id)
+        assigned = [str(item).strip() for item in as_list(obligation.get("assigned_cut_ids")) if str(item).strip()]
+        scene_obligation_assigned_selectors.update(assigned)
+        if not assigned:
+            issues.append(f"scene{scene_id}:scene_obligations[{obligation_id or index}].assigned_cut_ids")
+        for selector in assigned:
+            if selector not in actual_selectors:
+                issues.append(f"scene{scene_id}:scene_obligations[{obligation_id or index}].unknown_cut:{selector}")
+
+    assignments = as_list(plan.get("cut_assignments"))
+    if not assignments:
+        issues.append(f"scene{scene_id}:cut_assignments")
+    for index, assignment in enumerate(assignments, start=1):
+        if not isinstance(assignment, dict):
+            issues.append(f"scene{scene_id}:cut_assignments[{index}]")
+            continue
+        cut_selector_value = str(assignment.get("cut_selector") or "").strip()
+        if not cut_selector_value:
+            cut_index = as_int(assignment.get("cut_index"))
+            if cut_index:
+                cut_selector_value = make_scene_cut_selector(scene_id, f"{cut_index:02d}")
+        if cut_selector_value not in actual_selectors:
+            issues.append(f"scene{scene_id}:cut_assignments[{index}].cut_selector")
+        assignment_obligations = [
+            str(item).strip()
+            for item in as_list(assignment.get("obligation_ids"))
+            if str(item).strip()
+        ]
+        single_obligation = str(assignment.get("obligation_id") or "").strip()
+        if single_obligation:
+            assignment_obligations.append(single_obligation)
+        if obligation_ids and not any(obligation_id in obligation_ids for obligation_id in assignment_obligations) and cut_selector_value not in scene_obligation_assigned_selectors:
+            issues.append(f"scene{scene_id}:cut_assignments[{index}].obligation_ids")
+
+    if as_list(plan.get("unassigned_obligations")):
+        issues.append(f"scene{scene_id}:unassigned_obligations")
+    overloaded = as_list(plan.get("overloaded_cuts"))
+    for index, item in enumerate(overloaded, start=1):
+        if not isinstance(item, dict) or not non_empty(item.get("overload_exception_reason") or item.get("exception_reason")):
+            issues.append(f"scene{scene_id}:overloaded_cuts[{index}]")
+    duplicate_risks = as_list(plan.get("duplicate_meaning_risks"))
+    for index, item in enumerate(duplicate_risks, start=1):
+        if not isinstance(item, dict) or not non_empty(item.get("prompt_reinforcement_reason") or item.get("reinforcement_reason")):
+            issues.append(f"scene{scene_id}:duplicate_meaning_risks[{index}]")
+    return issues
+
+
+def _scene_cut_redundancy_issues(scene: dict[str, Any], *, scene_id: str, cuts: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    plan = _scene_cut_coverage_plan(scene)
+    allowed_duplicate_keys = {
+        str(item.get("anti_redundancy_key") or item.get("meaning_key") or "").strip()
+        for item in as_list(plan.get("duplicate_meaning_risks"))
+        if isinstance(item, dict) and non_empty(item.get("prompt_reinforcement_reason") or item.get("reinforcement_reason"))
+    }
+    seen: dict[str, str] = {}
+    for cut in cuts:
+        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "cut")
+        contract = _node_cut_contract(cut, allow_legacy=False)
+        key = _contract_string(contract, "viewer_contract.anti_redundancy_key", "anti_redundancy_key")
+        if not key:
+            issues.append(f"{selector}:anti_redundancy_key")
+            continue
+        if key in seen and key not in allowed_duplicate_keys:
+            issues.append(f"{selector}:duplicate_anti_redundancy_key:{key}")
+        seen.setdefault(key, selector)
+    return issues
+
+
+def _scene_cut_handoff_issues(scene: dict[str, Any], *, scene_id: str, cuts: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    previous_outgoing: dict[str, Any] | None = None
+    previous_selector = ""
+    for index, cut in enumerate(cuts):
+        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or index + 1)
+        contract = _node_cut_contract(cut, allow_legacy=False)
+        handoff = as_dict(contract.get("cut_handoff"))
+        incoming = as_dict(handoff.get("receives_from_previous"))
+        outgoing = as_dict(handoff.get("delivers_to_next"))
+        if not incoming:
+            issues.append(f"{selector}:cut_handoff.receives_from_previous")
+        if not outgoing:
+            issues.append(f"{selector}:cut_handoff.delivers_to_next")
+        if index == 0:
+            incoming_type = str(incoming.get("anchor_type") or "").strip().lower()
+            if incoming and incoming_type not in {"none", "question", "object", "sound", "gaze", "gesture", "movement", "light", "threat"}:
+                issues.append(f"{selector}:cut_handoff.incoming.anchor_type")
+        elif previous_outgoing:
+            previous_anchor = str(previous_outgoing.get("anchor_id") or "").strip()
+            incoming_anchor = str(incoming.get("anchor_id") or "").strip()
+            if previous_anchor and previous_anchor != incoming_anchor:
+                issues.append(f"{selector}:cut_handoff.anchor_mismatch:{previous_selector}->{selector}")
+        if index < len(cuts) - 1:
+            if not non_empty(outgoing.get("anchor_id")) or not non_empty(outgoing.get("visible_or_audible_form")):
+                issues.append(f"{selector}:cut_handoff.outgoing")
+        else:
+            outgoing_type = str(outgoing.get("anchor_type") or "").strip().lower()
+            if outgoing_type not in {"terminal", "question", "object", "sound", "gaze", "gesture", "movement", "light", "threat"}:
+                issues.append(f"{selector}:cut_handoff.final_anchor_type")
+        previous_outgoing = outgoing
+        previous_selector = selector
+    return issues
+
+
+def _triangulation_review_issues(cut: dict[str, Any], *, selector: str) -> list[str]:
+    review = as_dict(cut.get("review")).get("triangulation_review")
+    if not isinstance(review, dict):
+        image_review = as_dict(as_dict(cut.get("image_generation")).get("review"))
+        review = image_review.get("triangulation_review")
+    if not isinstance(review, dict):
+        return [f"{selector}:triangulation_review"]
+    status = str(review.get("status") or "").strip().lower()
+    human_waived = str(review.get("waived_by") or "").strip().lower() in {"human", "user"} and non_empty(review.get("waiver_reason"))
+    if status in {"waived", "approved"} and human_waived:
+        return []
+    issues = [f"{selector}:triangulation_review.status" if status and status not in {"passed", "approved"} else ""]
+    for key in TRIANGULATION_REQUIRED_KEYS:
+        if review.get(key) is not True:
+            issues.append(f"{selector}:triangulation_review.{key}")
+    return [issue for issue in issues if issue]
+
+
 def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
     issues: list[str] = []
     concrete_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
     for index, scene in enumerate(concrete_scenes):
         scene_id = as_dotted_str(scene.get("scene_id")) or str(index + 1)
-        importance = str(scene.get("importance") or "").strip().lower()
+        importance = _scene_importance(scene)
         if importance not in {"low", "medium", "high", "critical"}:
             issues.append(f"scene{scene_id}:importance")
         for key in ("target_duration_seconds", "estimated_duration_seconds"):
             value = scene.get(key)
+            if not isinstance(value, (int, float)) and isinstance(scene.get("scene_intent"), dict):
+                value = scene["scene_intent"].get(key)
             if not isinstance(value, (int, float)) or value <= 0:
                 issues.append(f"scene{scene_id}:{key}")
         if index < len(concrete_scenes) - 1:
@@ -1041,16 +1585,25 @@ def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
         elif not (non_empty(scene.get("terminal_resolution")) or non_empty(scene.get("handoff_to_next_scene"))):
             issues.append(f"scene{scene_id}:terminal_resolution")
 
-        cuts = [cut for cut in as_list(scene.get("cuts")) if isinstance(cut, dict)]
+        cuts = [
+            cut
+            for cut in as_list(scene.get("cuts"))
+            if isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() != "deleted"
+        ]
         min_cuts = _cinematic_min_cuts_for_scene(scene)
         if len(cuts) < min_cuts:
-            issues.append(f"scene{scene_id}:cuts<{min_cuts}")
+            issues.append(f"scene{scene_id}:cut_count_below_calculated_floor:{len(cuts)}<{min_cuts}")
+        has_new_cut_contract = any(isinstance(cut.get("cut_contract"), dict) and cut.get("cut_contract") for cut in cuts)
+        if _scene_cut_coverage_plan(scene) or has_new_cut_contract:
+            issues.extend(_scene_cut_coverage_plan_issues(scene, scene_id=scene_id, cuts=cuts))
+            issues.extend(_scene_cut_redundancy_issues(scene, scene_id=scene_id, cuts=cuts))
+            issues.extend(_scene_cut_handoff_issues(scene, scene_id=scene_id, cuts=cuts))
 
         coverage = scene.get("coverage_review")
         if not isinstance(coverage, dict):
             issues.append(f"scene{scene_id}:coverage_review")
         else:
-            for key in ("audience_information_covered", "visualizable_action_covered", "next_scene_connection_checked"):
+            for key in SCENE_COVERAGE_REVIEW_REQUIRED_KEYS:
                 if coverage.get(key) is not True:
                     issues.append(f"scene{scene_id}:{key}")
     return issues
@@ -1103,6 +1656,40 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         f"all scenes include p410 scene_intent cards ({scenes_with_intent}/{scene_count})",
         kind="rubric",
     )
+    scene_contract_issues: dict[str, list[str]] = {
+        "dramatic_question": [],
+        "value_shift": [],
+        "causal_turn": [],
+        "visual_thesis": [],
+        "story_specificity": [],
+        "conflict_engine": [],
+        "handoff_chain": [],
+        "coverage_review": [],
+    }
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        for key, values in _scene_intent_issue_map(scene).items():
+            scene_contract_issues.setdefault(key, []).extend(values)
+    scene_contract_checks = (
+        ("script.scene_dramatic_question_complete", "dramatic_question", "all scenes declare dramatic_question, scene_spine, and audience knowledge delta"),
+        ("script.scene_value_shift_complete", "value_shift", "all scenes declare value_shift.from/to and visible evidence"),
+        ("script.scene_causal_turn_complete", "causal_turn", "all scenes declare an irreversible causal_turn"),
+        ("script.scene_visual_thesis_complete", "visual_thesis", "all scenes declare a concrete visual thesis"),
+        ("script.scene_story_specificity_complete", "story_specificity", "all scenes declare story_specificity and avoid generic template language"),
+        ("script.scene_conflict_engine_complete", "conflict_engine", "all scenes declare desire, obstacle, stakes, escalation, no-return point, and visible pressure"),
+        ("script.scene_handoff_chain_complete", "handoff_chain", "all scenes declare concrete incoming/outgoing handoff chains"),
+        ("script.scene_coverage_review_complete", "coverage_review", "all scenes mark required coverage_review gates as true"),
+    )
+    for check_id, issue_key, message in scene_contract_checks:
+        issue_values = scene_contract_issues.get(issue_key, [])
+        add_check(
+            checks,
+            check_id,
+            not issue_values,
+            message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
+            kind="rubric",
+        )
     scenes_agent_passed = sum(
         1
         for scene in scenes
@@ -1267,7 +1854,17 @@ def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | N
         ]
         scene_min = min_cuts_per_scene if min_cuts_per_scene is not None else _cinematic_min_cuts_for_scene(scene)
         if len(cuts) < scene_min:
-            issues.append(f"scene{scene_id}:cuts<{scene_min}")
+            issues.append(f"scene{scene_id}:cut_count_below_calculated_floor:{len(cuts)}<{scene_min}")
+        plan = _scene_cut_coverage_plan(scene)
+        planned_min = _coverage_minimum_cut_count(plan) if plan else 0
+        if planned_min and len(cuts) < planned_min:
+            issues.append(f"scene{scene_id}:cut_count_below_coverage_plan:{len(cuts)}<{planned_min}")
+        min_cut_count = as_dict(plan.get("min_cut_count")) if plan else {}
+        selected = as_int(min_cut_count.get("selected")) or as_int(plan.get("minimum_cut_count")) or 0
+        by_importance = as_int(min_cut_count.get("by_importance")) or 0
+        by_duration = as_int(min_cut_count.get("by_duration")) or 0
+        if selected and selected < max(by_importance, by_duration):
+            issues.append(f"scene{scene_id}:coverage_plan_selected_below_floor")
     return issues
 
 
@@ -1289,8 +1886,14 @@ P400_READINESS_CHECK_IDS = {
     "manifest.contract_missing",
     "manifest.contract_must_show_unmet",
     "manifest.contract_must_avoid_violated",
-    "manifest.contract_target_beat_unmet",
     "manifest.reveal_constraints_violated",
+    "manifest.prompt_leaks_motion_brief",
+    "manifest.scene_cut_coverage_plan",
+    "manifest.scene_cut_redundancy",
+    "manifest.cut_handoff_chain",
+    "manifest.scene_composite_review",
+    "manifest.triangulation_review",
+    "manifest.cut_contract_structure",
 }
 
 
@@ -1426,6 +2029,19 @@ def _review_report_issues(run_dir: Path) -> list[str]:
 
 def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness")) -> list[str]:
     issues: list[str] = []
+
+    def marker_value_resolved(text: str, marker: str) -> bool:
+        if marker.startswith("##"):
+            return True
+        for line in text.splitlines():
+            if marker not in line:
+                continue
+            if ":" not in line:
+                return True
+            value = line.split(":", 1)[1].strip().strip("`").lower()
+            return value not in UNRESOLVED_GATE_VALUES and "todo" not in value
+        return False
+
     for stage in stages:
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         if not round_dir.exists():
@@ -1457,20 +2073,17 @@ def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("sce
         if patch_heading not in aggregate_text:
             issues.append(f"{stage}:missing:{patch_heading}")
         if stage_focus:
-            markers = (
-                (
-                    "## Scene Count Gate",
-                    "maximal_meaningful_stop_condition",
-                    "next_scene_candidate",
-                    "cut_thickening_reason",
-                    "critic_1_scene_count_coverage_resolution",
-                )
-                if stage in SCENE_REVIEW_CRITIC_FOCUS
-                else CUT_BLUEPRINT_GATE_MARKERS
-            )
+            if stage == "scene_set":
+                markers = SCENE_SET_GATE_MARKERS
+            elif stage == "scene_detail":
+                markers = SCENE_DETAIL_GATE_MARKERS
+            else:
+                markers = CUT_BLUEPRINT_GATE_MARKERS
             for marker in markers:
                 if marker not in aggregate_text:
                     issues.append(f"{stage}:missing:{marker}")
+                elif not marker_value_resolved(aggregate_text, marker):
+                    issues.append(f"{stage}:unresolved:{marker}")
     return issues
 
 
@@ -1695,6 +2308,10 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     scenes = as_list(data.get("scenes"))
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
+    manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
+    is_production = manifest_phase == "production"
+    experience_value = str(nested_get(data, ["video_metadata", "experience"]) or "").strip().lower()
+    strict_cut_contract = profile == "standard" and (flow == "immersive" or experience_value == "cinematic_story")
     add_check(checks, f"{path_label}.scenes", len(scenes) >= 1, f"{path_label} contains scenes", kind="rubric")
     add_check(checks, f"{path_label}.nodes", len(nodes) >= 1, f"{path_label} exposes renderable nodes", kind="rubric")
 
@@ -1705,6 +2322,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     narration_field_ok = True
     narration_text_ok = True
     ids_ok = True
+    prompt_motion_leak_issues: list[str] = []
     for node in nodes:
         video_generation = node.get("video_generation") if isinstance(node, dict) else None
         image_generation = node.get("image_generation") if isinstance(node, dict) else None
@@ -1718,6 +2336,10 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
         if isinstance(image_generation, dict):
             if "character_ids" not in image_generation or "object_ids" not in image_generation:
                 ids_ok = False
+            prompt = str(image_generation.get("prompt") or "")
+            if any(token in prompt for token in MOTION_LEAK_TOKENS):
+                selector = str(node.get("selector") or node.get("cut_id") or node.get("scene_id") or "node")
+                prompt_motion_leak_issues.append(selector)
 
         narration = (audio or {}).get("narration") if isinstance(audio, dict) else None
         if not isinstance(narration, dict):
@@ -1747,6 +2369,15 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     if profile == "standard":
         add_check(checks, f"{path_label}.narration_text", narration_text_ok, "spoken cuts have non-empty narration text and silent cuts declare silence_contract", kind="rubric")
     add_check(checks, f"{path_label}.asset_ids", ids_ok, "image_generation includes explicit character_ids/object_ids", kind="rubric")
+    if profile == "standard":
+        add_check(
+            checks,
+            f"{path_label}.prompt_leaks_motion_brief",
+            not prompt_motion_leak_issues,
+            "p600 image prompts do not leak p800 motion-only context"
+            + (f" (issues: {', '.join(prompt_motion_leak_issues[:8])})" if prompt_motion_leak_issues else ""),
+            kind="rubric",
+        )
 
     if flow == "immersive":
         experience = nested_get(data, ["video_metadata", "experience"])
@@ -1762,6 +2393,80 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             + (f" (issues: {', '.join(minimum_cut_issues[:8])})" if minimum_cut_issues else ""),
             kind="rubric",
         )
+        if profile == "standard":
+            coverage_issues: list[str] = []
+            redundancy_issues: list[str] = []
+            handoff_issues: list[str] = []
+            composite_issues: list[str] = []
+            triangulation_issues: list[str] = []
+            for index, scene in enumerate(scenes, start=1):
+                if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
+                    continue
+                scene_id = as_dotted_str(scene.get("scene_id")) or str(index)
+                cuts = [
+                    cut
+                    for cut in as_list(scene.get("cuts"))
+                    if isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() != "deleted"
+                ]
+                coverage_issues.extend(_scene_cut_coverage_plan_issues(scene, scene_id=scene_id, cuts=cuts))
+                redundancy_issues.extend(_scene_cut_redundancy_issues(scene, scene_id=scene_id, cuts=cuts))
+                handoff_issues.extend(_scene_cut_handoff_issues(scene, scene_id=scene_id, cuts=cuts))
+                if is_production:
+                    composite = as_dict(scene.get("scene_composite_review"))
+                    if not composite or str(composite.get("status") or "").strip().lower() not in {"passed", "approved"}:
+                        composite_issues.append(f"scene{scene_id}:scene_composite_review")
+                    else:
+                        for key in (
+                            "scene_obligation_covered_by_cut_group",
+                            "no_duplicate_story_fact_without_new_evidence",
+                            "scene_meaning_visualized_across_cuts",
+                        ):
+                            if composite.get(key) is not True:
+                                composite_issues.append(f"scene{scene_id}:scene_composite_review.{key}")
+                    for cut in cuts:
+                        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "cut")
+                        triangulation_issues.extend(_triangulation_review_issues(cut, selector=selector))
+            add_check(
+                checks,
+                f"{path_label}.scene_cut_coverage_plan",
+                not coverage_issues,
+                "scene_cut_coverage_plan assigns every scene obligation to real cuts"
+                + (f" (issues: {', '.join(coverage_issues[:8])})" if coverage_issues else ""),
+                kind="rubric",
+            )
+            add_check(
+                checks,
+                f"{path_label}.scene_cut_redundancy",
+                not redundancy_issues,
+                "anti_redundancy_key is present and unique within each scene"
+                + (f" (issues: {', '.join(redundancy_issues[:8])})" if redundancy_issues else ""),
+                kind="rubric",
+            )
+            add_check(
+                checks,
+                f"{path_label}.cut_handoff_chain",
+                not handoff_issues,
+                "adjacent cuts connect by explicit handoff anchors"
+                + (f" (issues: {', '.join(handoff_issues[:8])})" if handoff_issues else ""),
+                kind="rubric",
+            )
+            if is_production:
+                add_check(
+                    checks,
+                    f"{path_label}.scene_composite_review",
+                    not composite_issues,
+                    "production scenes have passed scene_composite_review gates"
+                    + (f" (issues: {', '.join(composite_issues[:8])})" if composite_issues else ""),
+                    kind="rubric",
+                )
+                add_check(
+                    checks,
+                    f"{path_label}.triangulation_review",
+                    not triangulation_issues,
+                    "production cuts pass image/narration/video triangulation review"
+                    + (f" (issues: {', '.join(triangulation_issues[:8])})" if triangulation_issues else ""),
+                    kind="rubric",
+                )
 
 
 def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[str, Any], dict[str, str]]:
@@ -1842,13 +2547,14 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         )
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
+    experience_value = str(nested_get(data, ["video_metadata", "experience"]) or "").strip().lower()
+    strict_cut_contract = profile == "standard" and (flow == "immersive" or experience_value == "cinematic_story")
     reveal_constraints = _load_script_reveal_constraints(run_dir)
     human_change_issues = _human_change_request_issues(data, run_dir=run_dir)
     contract_missing = False
     contract_structure_issues: list[str] = []
     must_show_failed = False
     must_avoid_failed = False
-    target_beat_failed = False
     reveal_failed = False
     for selector, node in nodes_with_selectors:
         combined = "\n".join(
@@ -1858,22 +2564,21 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
                 str(((((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration") or {}) if isinstance(((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration"), dict) else {}).get("text") or ""),
             ]
         )
-        contract = _node_cut_contract(node)
+        contract = _node_cut_contract(node, allow_legacy=not strict_cut_contract)
         if not contract:
             contract_missing = True
             continue
         if isinstance(node.get("cut_contract"), dict):
             for issue in _cut_contract_structure_issues(contract):
                 contract_structure_issues.append(f"{selector}:{issue}")
+        elif strict_cut_contract:
+            contract_missing = True
         must_show = _contract_list_paths(contract, "must_show", "viewer_contract.must_show")
         must_avoid = _contract_list_paths(contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
-        target_beat = _contract_string(contract, "target_beat", "viewer_contract.target_beat")
         if must_show and not all(term in combined for term in must_show):
             must_show_failed = True
         if must_avoid and any(term in combined for term in must_avoid):
             must_avoid_failed = True
-        if target_beat and target_beat not in combined:
-            target_beat_failed = True
         if reveal_constraints:
             image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
             declared_character_ids = set(as_list(image_generation.get("character_ids"))) if isinstance(image_generation, dict) else set()
@@ -1902,8 +2607,6 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         add_check(checks, "manifest.contract_must_show_unmet", False, "scene/cut contract must_show items are not fully represented.", kind="rubric")
     if must_avoid_failed:
         add_check(checks, "manifest.contract_must_avoid_violated", False, "scene/cut contract must_avoid items are still present.", kind="rubric")
-    if target_beat_failed:
-        add_check(checks, "manifest.contract_target_beat_unmet", False, "scene/cut contract target_beat is not clearly represented.", kind="rubric")
     if reveal_failed:
         add_check(checks, "manifest.reveal_constraints_violated", False, "one or more scene/cut nodes violate script reveal_constraints.", kind="rubric")
     if human_change_issues:

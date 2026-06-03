@@ -18,21 +18,23 @@
 この repo では、物語上の単位、生成実行の単位、設計書の単位を混同しない。
 
 - `scene` / シーン
-  - 物語上のまとまり。1つの出来事、場所、感情変化、または段落を表す。
-  - 例: 「亀を助ける」「竜宮城に着く」「故郷に戻る」。
+  - 物語全体の中で不可逆な変化を起こす劇的単位。単なる場所移動、段落、説明、雰囲気ではない。
+  - 独立した `dramatic_question`、`value_shift`、`causal_turn`、画面で読める `visible_evidence`、次 scene への `handoff_chain` を持つ。
+  - 場所が変わるだけ、説明が増えるだけ、または独立した価値変化がない beat は、scene ではなく cut / transition / narration beat として扱う。
+  - 例: 「亀を助ける」ではなく「浦島が暴力を止める選択をし、村との関係を変える」。
   - `script.md.scenes[]` と `video_manifest.md.scenes[]` の基本単位。
 - `cut` / カット
   - scene を映像として実装するための小単位。
   - 1つの画、短い動き、反応、間、transition、または narration beat を担う。
   - cut の枠は script / skeleton manifest で作り、production manifest で image / audio / video の実行情報を持つ。
-  - cut は `audio`, `image_generation`, `video_generation`, `scene_contract` などの部品を束ねる統合単位であり、audio そのものとは別概念。
+  - cut は `audio`, `image_generation`, `video_generation`, `cut_contract` などの部品を束ねる統合単位であり、audio そのものとは別概念。旧 reader 用の `scene_contract` は cut-level alias としてのみ残す。
 - `audio` / 音声
   - cut または scene に属する narration runtime。
   - `tts_text`, voice, prompt contract, generated audio path, actual duration を持つ。
   - 概念上は cut の部品だが、stage としては p700 / narration で、asset と scene image の後、video generation の前に確定する。
 - `visual`
   - cut または scene が画として何を伝えるかを表す設計領域。
-  - `visual_beat`, `scene_contract`, `image_generation`, `still_image_plan`, `reference_usage` などを含む。
+  - `visual_beat`, `cut_contract`, `image_generation`, `still_image_plan`, `reference_usage` などを含む。
   - visual planning stage では、cut prompt そのものではなく、visual identity / scene visual value / anchor / reference strategy を決める。
 - `asset`
   - 複数 cut / scene で visual identity を固定するための再利用可能な素材。
@@ -63,7 +65,7 @@ Scene
 標準順序:
 
 - p300 visual planning: cut を作る前に、visual identity / visual value / anchor / reference strategy を決める。
-- p400 script: scene / cut skeleton と narration / tts_text を作る。
+- p400 script: scene / cut skeleton と `narration_contract` / `narration_draft` を作る。final `text` / `tts_text` は p700 で確定する。
 - p500 asset: cut で使う reusable asset / reference を設計・生成する。
 - p600 scene implementation / image: asset references を使って cut の image 実装を作る。
 - p700 narration: 確定した visual に合わせて cut audio を生成し、実 duration を確定する。
@@ -352,11 +354,12 @@ Authoring の直後に置かれる review slot は、一回限りの採点では
   - それぞれ独立に同じ canonical artifact と stage readset を読み、rubric finding を出す
   - critic は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
   - finding は表層的な「不足」「弱い」「不明」だけで終わらせず、`root_cause`（本質原因）、`downstream_impact`（後段への影響）、`fix_direction`（修正方針）、`acceptance_condition`（次回通過条件）を明示する
-  - `p410b` / `p410c` では、必要に応じて critic を `scene_count_coverage`, `dramatic_structure`, `reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` に分ける。標準 5 critic 構成では critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` とする
+  - `p410b` scene_set では、critic を `scene_count_coverage`, `dramatic_structure + reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` に分ける。aggregator は `Scene Count Gate`、`Scene Specificity Gate`、`Reveal Order Gate`、`Handoff Chain Gate` を gate 項目として扱う
+  - `p410c` scene_detail では scene 数 gate を繰り返さず、各 scene の必要性、内部圧力、`value_shift` の可視性、`causal_turn` の可視性、隣接 scene handoff を `Scene Detail Gate` として扱う
 - aggregator: 1 agent
   - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
   - 採用する blocker には、失敗した check 名だけでなく、その failure を生んだ設計・依存・state・contract 上の原因と、明確な修正方針がある場合の target artifact / section / acceptance condition を書く
-  - `p410b` / `p410c` の aggregator は、次に追加できる scene 候補と、それを scene 追加ではなく cut 増厚へ回す理由が説明されるまで `passed` にしない
+  - `p410b` の aggregator は、次に追加できる scene 候補と、それを scene 追加ではなく cut 増厚へ回す理由、および scene_set gate の全項目が説明されるまで `passed` にしない。`p410c` の aggregator は `Scene Detail Gate` が解決されるまで `passed` にしない
   - aggregator も canonical artifact を直接編集しない
 - owning L2 P-Bucket Supervisor:
   - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
@@ -452,7 +455,7 @@ output/<topic>_<timestamp>/run_status.json
 - `p000_index.md` は fixed slot contract に基づく run progress の source of truth
 - 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
 - narration は
-  - `p400`: narration draft / `tts_text` / script review / human changes / skeleton manifest materialization
+  - `p400`: narration contract / narration draft / script review / human changes / skeleton manifest materialization
   - `p700`: TTS 実行 / duration fit gate / audio runtime handoff
   に分けて扱う
 
@@ -532,7 +535,7 @@ p400 の内部 slot:
 - `p410`: scene completion gate
   - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
   - semantic QA: 各 scene は、単なる段落や雰囲気ではなく、上流 story のどの意味を受け取り、何を変化させ、次 scene に何を渡すかを説明できる必要がある
-  - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、および `coverage_review` を持つ
+  - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、`story_specificity`、および `coverage_review` を持つ
   - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
   - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
   - `p410b` の stop condition は、これ以上 scene を増やしても既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持てず、cut 設計を厚くした方が品質が上がると説明できる状態である
@@ -568,7 +571,7 @@ p400 の内部 slot:
   - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この process 内で downstream design artifacts を触れるのは Design Owner だけとする
 - `p450`: skeleton manifest materialization
   - approved または review-ready な `script.md` から、`video_manifest.md` を `manifest_phase: skeleton` として materialize する
-  - skeleton manifest には scene/cut 構造、`scene_contract`、asset id placeholder、image/audio/video の実行枠を置く
+  - skeleton manifest には scene/cut 構造、cut 正本の `cut_contract`、旧 reader 用 `scene_contract` alias、asset id placeholder、image/audio/video の実行枠を置く
   - 本番 image prompt、asset 画像、motion prompt の最終文面は p500/p600/p800 に渡し、p400 で確定しない
 
 Canonical p400 done 条件:
@@ -578,7 +581,7 @@ Canonical p400 done 条件:
 - `video_manifest.md.video_metadata.target_duration_seconds` は 300-600 秒であり、skeleton または promoted production manifest 上の cut duration 合計が target の 90% 以上である
 - `script.md` と `video_manifest.md` の scene/cut selector が完全一致している
 - `scene_set_review.md` / `scene_detail_review.md` / `cut_blueprint_review.md` / `script_review.md` / `production_readiness_review.md` が required section と passed status を持つ
-- p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p435 は `Design Owner Patch Brief` を持つ
+- p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p410b aggregate は `Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate`、p410c aggregate は `Scene Detail Gate`、p420 aggregate は `Cut Blueprint Gate`、p435 は `Design Owner Patch Brief` を持つ。required gate の値が `TODO` / `TBD` / `pending` / `changes_requested` / `failed` / `missing` / `unclear` / `none` / `null` / `n/a` / `なし` / `不明` / `未定` / `不足` のままなら p400 readiness は落ちる
 - 各 scene が `scene_intent` 相当の情報を持つ
   - story purpose
   - audience information
@@ -586,7 +589,8 @@ Canonical p400 done 条件:
   - affect transition
   - visual value source
   - source grounding / creative boundary
-- 各 renderable scene が `cuts[]` を持ち、各 cut が `scene_contract` 相当の完了条件を持つ
+  - story_specificity: non-compressible beat, scene promotion reason, unique responsibility, actor forces, meaning ladder, concrete handoff, anti-template language
+- 各 renderable scene が `cuts[]` を持ち、各 cut が正本 `cut_contract` 相当の完了条件を持つ。`scene_contract` は旧 reader 用 alias であり、scene-level 正本ではない
 - 各 cut が narration の役割を持つ。無音 cut の場合は、p700 へ渡せる `silence_contract` の必要性が明示されている
 - asset が必要そうな character / object / location / reusable still は、p500 用の dependency hint として列挙されている
 - `human_change_requests[]` が selector 付きで正規化され、p400 内で採用/保留/承認待ちが追跡できる
@@ -806,10 +810,10 @@ output/<topic>_<timestamp>/
 
 - `script.md`
   - 物語と映像意図の正本
-  - `scene_summary`, `visual_beat`, reveal, `narration`, `tts_text`, human review 指示を持つ
+  - `scene_intent`, `cut_contract` の元になる cut blueprint、reveal、`narration_contract`、任意の `narration_draft`、human review 指示を持つ
 - `video_manifest.md`
   - image/video/audio generation の実装正本
-  - `scene_contract`, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
+  - `cut_contract`, 旧 reader 用 `scene_contract` alias, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
   - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
   - optional `render_units[]` を持てる
     - `render_units[]` は最終 render 用の動画クリップ単位
@@ -1021,7 +1025,7 @@ location の例外ルール:
 - `script.md.scenes[].cuts[].elevenlabs_prompt`
   - `spoken_context`, `voice_tags`, `spoken_body`, `stability_profile`
 - `script.md.scenes[].cuts[].tts_text`
-  - ElevenLabs v3 に渡す final string の正本
+  - 旧 authoring 経路の final string。新規 p400 cinematic contract では draft 扱いにし、p700 で actual cut/image/duration に合わせて final `audio.narration.tts_text` を確定する
   - 通常はひらがな寄せ + `[]` audio tag を許容する
   - 音声品質を優先する cut では、漢字かな交じりの自然な日本語を許可する
   - 締め / 教訓 narration の再現 baseline は `spoken_context: ""`, `voice_tags: ["low", "measured"]`, `stability_profile: "natural"`
@@ -1032,11 +1036,12 @@ location の例外ルール:
   - `change_requests`
   - `approved_narration`
   - `approved_tts_text`
-- `video_manifest.md.scenes[].cuts[].scene_contract`
+- `video_manifest.md.scenes[].cuts[].cut_contract`
   - `target_beat`
   - `must_show`
   - `must_avoid`
   - `done_when`
+  - 旧 reader が必要な場合のみ同内容を `scene_contract` alias に複写する
 - `video_manifest.md.quality_check.review_contract`
   - `target_outcome`
   - `must_have_artifacts`
@@ -1567,18 +1572,37 @@ Canonical reason key:
 - `dotted_selector_invalid`
 - `renumber_trace_missing`
 
-## Cut Contract v2.1
+## Cut Contract v2.2
 
 `video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。既存 runtime が `scene_contract` を読む場合は、`cut_contract` の主要 field を `scene_contract` に複写する。
 
 ```yaml
 cut_contract:
-  schema_version: "2.1"
-  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+  schema_version: "2.2"
+  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff|custom"
+  intent_budget:
+    primary_intent: ""
+    secondary_intents_allowed: []
+    forbidden_combined_intents:
+      - "new_location_establishing + major_reveal + next_scene_handoff"
+    assigned_obligation_ids: []
+    overload_exception_reason: ""
+    custom_function_reason: ""
   viewer_contract:
     target_beat: ""
     screen_question: ""
     dramatic_job: ""
+    audience_knowledge_delta: ""
+    causal_proof: ""
+    visual_evidence: []
+    required_roles: []
+    assigned_story_event_ids: []
+    anti_redundancy_key: ""
+    reveal_constraints:
+      inherited_from_scene: []
+      allowed_reveals_in_this_cut: []
+      forbidden_until_later_cut: []
+      forbidden_until_later_scene: []
     emotional_micro_shift:
       from: ""
       to: ""
@@ -1594,40 +1618,123 @@ cut_contract:
     start_state: {}
     end_state: {}
     carry_forward_to_next_cut: []
+    continuity_risks: []
+  cut_handoff:
+    receives_from_previous:
+      anchor_id: ""
+      anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|none"
+      visible_or_audible_form: ""
+      expected_previous_cut_selector: ""
+    delivers_to_next:
+      anchor_id: ""
+      anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
+      visible_or_audible_form: ""
+      expected_next_cut_selector: ""
   first_frame_contract:
     imageable: true
     first_frame_brief: ""
+    visible_start_state:
+      character_state: ""
+      prop_state: ""
+      spatial_state: ""
+      emotional_state: ""
+      gaze_or_attention: ""
+    motion_start_affordance:
+      movable_subject: ""
+      movement_vector: ""
+      camera_start_reason: ""
     action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+    static_first_frame_rule: ""
+    must_be_static_evidence_not_motion: true
   motion_contract:
     movable: true
     motion_brief: ""
+    start_from_visible_state: ""
     end_state: ""
+    end_frame_brief: ""
     must_not_add: []
   narration_contract:
     speakable_or_silent: true
     role: "setup|fact|emotion|contrast|aftertaste|silent"
     target_function: ""
-    text: ""
-    tts_text: ""
+    must_cover: []
+    must_avoid: []
+    timing_intent: ""
     silence_reason: ""
+    draft:
+      text: ""
+      status: "optional_draft|approved_by_human|superseded_by_p700"
+  rhythm_contract:
+    expected_duration_seconds: 8
+    pacing: "quick|standard|slow_hold|spectacle_hold"
+    comprehension_moment: ""
+    cut_out_reason: ""
+    audio_visual_sync_point: ""
+    duration_exception:
+      allowed: false
+      reason: ""
+  asset_dependency:
+    character_ids_required: []
+    object_ids_required: []
+    location_ids_required: []
+    variant_ids_required: []
+    new_asset_requests: []
+    reusable_anchor_ids: []
+    reference_role:
+      protagonist: ""
+      opponent: ""
+      proof_object: ""
+      location_anchor: ""
   downstream_handoff:
-    p500_asset: {}
-    p600_image: {}
-    p700_narration: {}
-    p800_video: {}
+    p500_asset:
+      required_asset_ids: []
+      asset_candidates: []
+      continuity_anchor_needed: false
+      new_asset_needed: false
+      reuse_allowed: false
+    p600_image:
+      prompt_requirements: []
+      reference_requirements: []
+      first_frame_must_include: []
+      first_frame_must_avoid: []
+    p700_narration:
+      narration_requirements: []
+      role: "setup|fact|emotion|contrast|aftertaste|silent"
+      must_not_caption_visible_content: true
+    p800_video:
+      motion_requirements: []
+      start_state: ""
+      last_frame_or_end_state: ""
+      must_not_add: []
+    carries_to_next_cut: []
+    carries_to_next_scene: []
 ```
 
 Additional cut review reason keys:
 
 ```yaml
 - cut_contract_missing
+- cut_intent_budget_missing
 - cut_missing_screen_question
 - cut_missing_visual_proof
+- story_event_obligation_unassigned
+- audience_knowledge_delta_missing
+- causal_proof_weak
+- role_coverage_missing
+- static_first_frame_not_imageable
+- scene_cut_redundancy_excessive
 - cut_missing_narration_contract
 - cut_narration_is_caption
 - cut_silent_without_reason
 - cut_downstream_handoff_missing
 - cut_triangulation_unready
+- cut_function_custom_without_reason
+- cut_count_below_calculated_floor
+- cut_count_below_coverage_plan
+- coverage_plan_selected_below_floor
+- prompt_leaks_motion_brief
+- scene_composite_review_missing
+- triangulation_review_missing
 - handoff_image_motion_mismatch
 - handoff_narration_captioning
 - handoff_motion_adds_new_story

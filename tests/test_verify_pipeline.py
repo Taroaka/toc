@@ -6,12 +6,14 @@ import sys
 import unittest
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot
-from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE, SCENE_REVIEW_CRITIC_FOCUS
+from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
 
 VERIFY_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify-pipeline.py"
 SPEC = importlib.util.spec_from_file_location("verify_pipeline", VERIFY_SCRIPT_PATH)
@@ -497,9 +499,9 @@ def _good_asset_inventory_yaml() -> str:
 asset_inventory:
   source_artifacts: ["story.md", "script.md", "video_manifest.md"]
   coverage_scope:
-    characters: ["桃太郎"]
-    story_specific_items: ["きびだんご"]
-    locations: ["村道"]
+    characters: ["momotaro_seed"]
+    story_specific_items: ["kibidango"]
+    locations: ["village_road"]
     setpieces: ["鬼ヶ島"]
     reusable_stills: []
   items:
@@ -554,7 +556,50 @@ assets:
         status: "approved"
         notes: "approved for p600 continuity"
   objects: []
-  locations: []
+  objects:
+    - asset_id: "kibidango"
+      asset_type: "object_reference"
+      source_script_selectors: ["scene10_cut1"]
+      story_purpose: "仲間を得る物語固有アイテム"
+      visual_spec:
+        identity: ["小さな黍団子", "布包み"]
+        fixed_details: ["手に持てる大きさ", "素朴な質感"]
+        must_avoid: ["現代的な包装"]
+      generation_plan:
+        output_dir: "assets/objects"
+        output: "assets/objects/kibidango.png"
+        execution_lane: "bootstrap_builtin"
+        bootstrap_allowed: true
+        bootstrap_reason: "no_reference_seed"
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "created"
+      existing_outputs: ["assets/objects/kibidango.png"]
+      review:
+        status: "approved"
+        notes: "approved for p600 continuity"
+  locations:
+    - asset_id: "village_road"
+      asset_type: "location_reference"
+      source_script_selectors: ["scene10_cut1"]
+      story_purpose: "旅立ちの場所参照"
+      visual_spec:
+        identity: ["昔話の村道", "土の道"]
+        fixed_details: ["木造家屋", "自然光"]
+        must_avoid: ["現代道路"]
+      generation_plan:
+        output_dir: "assets/locations"
+        output: "assets/locations/village_road.png"
+        execution_lane: "bootstrap_builtin"
+        bootstrap_allowed: true
+        bootstrap_reason: "no_reference_seed"
+        reference_inputs: []
+        derived_from_asset_id: ""
+      creation_status: "created"
+      existing_outputs: ["assets/locations/village_road.png"]
+      review:
+        status: "approved"
+        notes: "approved for p600 continuity"
   reusable_stills: []
 ```
 """
@@ -587,6 +632,42 @@ def _write_downstream_generation_artifacts(run_dir: Path) -> None:
 ```text
 桃太郎の全身キャラクター参照。正面、側面、背面の3面図。赤い鉢巻、素朴な旅装束、同じ体格と顔立ちを保つ。
 ```
+
+## kibidango
+
+- tool: `codex_builtin_image`
+- asset_id: `kibidango`
+- asset_type: `object_reference`
+- execution_lane: `bootstrap_builtin`
+- reference_count: `0`
+- review_status: `approved`
+- creation_status: `created`
+- source_script_selectors:
+  - `scene10_cut1`
+- output: `assets/objects/kibidango.png`
+- references: `[]`
+
+```text
+small handmade kibidango dumpling in a cloth wrap, photorealistic object reference, no text.
+```
+
+## village_road
+
+- tool: `codex_builtin_image`
+- asset_id: `village_road`
+- asset_type: `location_reference`
+- execution_lane: `bootstrap_builtin`
+- reference_count: `0`
+- review_status: `approved`
+- creation_status: `created`
+- source_script_selectors:
+  - `scene10_cut1`
+- output: `assets/locations/village_road.png`
+- references: `[]`
+
+```text
+old Japanese village road, wooden houses and dirt path, photorealistic location reference, no text.
+```
 """,
         encoding="utf-8",
     )
@@ -602,6 +683,18 @@ asset_generation_manifest:
       output: "assets/characters/momotaro_seed.png"
       execution_lane: "bootstrap_builtin"
       reference_count: 0
+    - asset_id: "kibidango"
+      asset_type: "object_reference"
+      status: "created"
+      output: "assets/objects/kibidango.png"
+      execution_lane: "bootstrap_builtin"
+      reference_count: 0
+    - asset_id: "village_road"
+      asset_type: "location_reference"
+      status: "created"
+      output: "assets/locations/village_road.png"
+      execution_lane: "bootstrap_builtin"
+      reference_count: 0
 ```
 """,
         encoding="utf-8",
@@ -609,8 +702,20 @@ asset_generation_manifest:
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     _write_photo_like_test_png(run_dir / "assets" / "characters" / "momotaro_seed.png")
     _append_app_server_image_provenance(run_dir, "assets/characters/momotaro_seed.png", item_id="momotaro_seed")
+    (run_dir / "assets" / "objects").mkdir(parents=True, exist_ok=True)
+    _write_photo_like_test_png(run_dir / "assets" / "objects" / "kibidango.png")
+    _append_app_server_image_provenance(run_dir, "assets/objects/kibidango.png", item_id="kibidango")
+    (run_dir / "assets" / "locations").mkdir(parents=True, exist_ok=True)
+    _write_photo_like_test_png(run_dir / "assets" / "locations" / "village_road.png")
+    _append_app_server_image_provenance(run_dir, "assets/locations/village_road.png", item_id="village_road")
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
+    _write_semantic_review_passed(run_dir, "asset_plan")
+    _write_semantic_review_passed(run_dir, "asset_output")
+    _write_semantic_review_passed(run_dir, "narration")
+    _write_semantic_review_passed(run_dir, "video_motion")
+    _write_semantic_review_passed(run_dir, "video_clip")
+    _write_semantic_review_passed(run_dir, "render")
 
 
 def _write_image_request(run_dir: Path, *, selector: str, output: str, reference: str = "assets/characters/momotaro_seed.png") -> None:
@@ -661,6 +766,9 @@ def _write_image_requests_from_manifest(run_dir: Path, *, reference: str = "asse
             ]
         )
     (run_dir / "image_generation_requests.md").write_text("\n".join(sections), encoding="utf-8")
+    _write_semantic_judgment_pack(run_dir)
+    _write_semantic_review_passed(run_dir, "image_prompt")
+    _write_semantic_review_passed(run_dir, "scene_image")
 
 
 def _write_semantic_judgment_pack(run_dir: Path, *, status: str = "passed", entry_count: int = 1, placeholder: bool = False) -> None:
@@ -676,6 +784,22 @@ def _write_semantic_judgment_pack(run_dir: Path, *, status: str = "passed", entr
     if placeholder:
         report = "# Image Prompt Judgment Review\n\n- status: `pending`\n\n## Findings\n\n- `...`\n"
     (review_dir / "image_prompt.judgment.md").write_text(report, encoding="utf-8")
+
+
+def _write_semantic_review_passed(run_dir: Path, stage: str, *, entry_count: int = 1) -> None:
+    from toc.semantic_review import semantic_review_relpaths, semantic_state_updates
+
+    paths = semantic_review_relpaths(stage)
+    for rel in paths.values():
+        (run_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+    (run_dir / paths["collection"]).write_text(f"# {stage} Collection\n\n## entry\n", encoding="utf-8")
+    (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": entry_count, "selectors": ["entry"]}), encoding="utf-8")
+    (run_dir / paths["prompt"]).write_text(f"# {stage} Prompt\n", encoding="utf-8")
+    (run_dir / paths["report"]).write_text("status: passed\nreviewed_entries: [entry]\nblocked_entries: []\nfindings: []\n", encoding="utf-8")
+    append_state_snapshot(
+        run_dir / "state.txt",
+        semantic_state_updates(stage, status="passed", entry_count=entry_count, error_count=0),
+    )
 
 
 def _write_p400_review_artifacts(run_dir: Path) -> None:
@@ -716,13 +840,38 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
             )
         heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
         scene_count_gate = ""
-        if stage in SCENE_REVIEW_CRITIC_FOCUS:
+        if stage == "scene_set":
             scene_count_gate = (
                 "## Scene Count Gate\n\n"
                 "- maximal_meaningful_stop_condition: no additional independent scene remains\n"
-                "- next_scene_candidate: none\n"
+                "- next_scene_candidate: no additional independent scene candidate remains\n"
                 "- cut_thickening_reason: additional material repeats the same scene turn\n"
                 "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed\n\n"
+                "## Scene Specificity Gate\n\n"
+                "- non_compressible_beat_inventory: approved story beats are inventoried\n"
+                "- scene_promotion_rule: every promoted scene has its own question, value shift, and causal turn\n"
+                "- unique_scene_responsibility: each scene owns a distinct story obligation\n"
+                "- actor_force_coverage: protagonist, opposing/helper, and witness forces are covered where story-relevant\n"
+                "- object_meaning_ladder: story objects and setpieces have staged meaning\n"
+                "- concrete_handoff_chain: handoff is visible or audible, not narration-only\n"
+                "- anti_template_language: banned generic placeholders are absent\n\n"
+                "## Reveal Order Gate\n\n"
+                "- reveal_order_preserved: approved reveal order is preserved\n"
+                "- withheld_information_preserved: future-only information remains withheld\n"
+                "- early_reveal_risk_resolved: no payoff evidence leaks early\n\n"
+                "## Handoff Chain Gate\n\n"
+                "- handoff_chain_coverage: each scene ending causes the next scene\n"
+                "- incoming_outgoing_anchor_ids: concrete anchor ids are present\n"
+                "- terminal_resolution_checked: final scene uses terminal_resolution\n\n"
+            )
+        elif stage == "scene_detail":
+            scene_count_gate = (
+                "## Scene Detail Gate\n\n"
+                "- scene_necessity: each scene owns a non-compressible beat\n"
+                "- internal_pressure: pressure escalates before the turn\n"
+                "- value_shift_visibility: value shift is visible\n"
+                "- causal_turn_visibility: causal turn is visible\n"
+                "- neighbor_handoff: neighboring handoffs are checked\n\n"
             )
         elif stage_focus:
             scene_count_gate = (
@@ -731,6 +880,11 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- beat_ladder_coverage: passed\n"
                 "- first_frame_motion_readiness: passed\n"
                 "- multimodal_contract_coverage: passed\n"
+                "- story_event_obligation_coverage: passed\n"
+                "- causal_proof_coverage: passed\n"
+                "- role_coverage: passed\n"
+                "- audience_knowledge_delta_coverage: passed\n"
+                "- anti_redundancy_gate: passed\n"
                 "- duration_density_and_handoff: passed\n"
                 "- coverage_plan_complete: passed\n"
                 "- continuity_contract_complete: passed\n"
@@ -742,106 +896,460 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
             f"- status: passed\n\n## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n## Rejected Suggestions\n\n[]\n\n{scene_count_gate}## {heading}\n\nNo changes.\n\n## Round Summary\n\npassed\n",
             encoding="utf-8",
         )
+    for semantic_stage in ("scene_set", "scene_detail", "cut_blueprint"):
+        _write_semantic_review_passed(run_dir, semantic_stage)
+
+
+def _valid_scene_intent_lines(topic: str, scene_idx: int, *, terminal: bool, indent: str = "      ") -> list[str]:
+    next_selector = f"scene{scene_idx + 1}" if not terminal else ""
+    outgoing_anchor_type = "terminal" if terminal else "question"
+    return [
+        f"{indent}scene_intent:",
+        f"{indent}  story_purpose: \"{topic}の不可逆な一歩を映画的に見せる\"",
+        f"{indent}  dramatic_question: \"{topic}は目の前の圧力を受けて次の責務を選べるか\"",
+        f"{indent}  scene_spine: \"村道の静けさから圧力が増し、{topic}が具体的な選択をして痕跡を残す\"",
+        f"{indent}  value_shift:",
+        f"{indent}    from: \"ためらいが残る状態\"",
+        f"{indent}    to: \"次の責務へ踏み出した状態\"",
+        f"{indent}    visible_evidence: [\"足跡\", \"握られた旅袋\"]",
+        f"{indent}  causal_turn: \"{topic}が袋を握り直し、後戻りせず進む決断を見せる\"",
+        f"{indent}  audience_information: [\"{topic}が旅の責務を受け入れる\"]",
+        f"{indent}  withheld_information: [\"結末の勝敗\"]",
+        f"{indent}  reveal_constraints: [\"決着はまだ見せない\"]",
+        f"{indent}  affect_transition: \"静かな不安から決意へ移る\"",
+        f"{indent}  character_state:",
+        f"{indent}    start: \"迷いが残る\"",
+        f"{indent}    end: \"視線が前に固定される\"",
+        f"{indent}    visible_behavior: [\"袋を握る\", \"足を前へ出す\"]",
+        f"{indent}  visual_thesis: \"朝の石畳で、{topic}の足跡と旅袋が決意の証拠になる\"",
+        f"{indent}  visual_value_source: \"none\"",
+        f"{indent}  production_risks: []",
+        f"{indent}  scene_conflict_engine:",
+        f"{indent}    desire: \"責務を果たすため前へ進む\"",
+        f"{indent}    obstacle: \"村を離れる不安と見えない敵の圧力\"",
+        f"{indent}    stakes: \"踏み出せなければ約束が宙に浮く\"",
+        f"{indent}    escalation: \"視線と沈黙が重くなる\"",
+        f"{indent}    no_return_point: \"{topic}が道を越える\"",
+        f"{indent}    visible_pressure: [\"村人の視線\", \"霧の奥へ伸びる道\"]",
+        f"{indent}  audience_knowledge_delta:",
+        f"{indent}    before_scene: [\"{topic}が旅に出る物語である\"]",
+        f"{indent}    learned_during_scene: [\"{topic}が自分の意思で責務を引き受ける\"]",
+        f"{indent}    still_unknown_after_scene: [\"結末\"]",
+        f"{indent}    forbidden_early_reveals: [\"勝利の証拠\"]",
+        f"{indent}  handoff_chain:",
+        f"{indent}    incoming:",
+        f"{indent}      anchor_id: \"scene{scene_idx}_incoming_silence\"",
+        f"{indent}      anchor_type: \"sound\"",
+        f"{indent}      visible_or_audible_form: \"村の沈黙\"",
+        f"{indent}    outgoing:",
+        f"{indent}      anchor_id: \"scene{scene_idx}_footprint\"",
+        f"{indent}      anchor_type: \"{outgoing_anchor_type}\"",
+        f"{indent}      next_scene_selector: \"{next_selector}\"",
+        f"{indent}      required_next_scene_start_pressure: \"足跡と握られた旅袋が、村人の視線を背に石畳の先へ向かわせる\"",
+        f"{indent}  object_arc:",
+        f"{indent}    - object_id: \"travel_bag\"",
+        f"{indent}      first_meaning: \"旅の支え\"",
+        f"{indent}      current_scene_meaning: \"決意の物証\"",
+        f"{indent}      later_meaning: \"仲間や試練への接点\"",
+        f"{indent}      visible_state_in_this_scene: \"腰で揺れる小袋\"",
+        f"{indent}      must_not_show_yet: [\"勝利の証拠\"]",
+        f"{indent}  story_specificity:",
+        f"{indent}    non_compressible_beat: \"{topic}が責務を自分の行為として引き受ける\"",
+        f"{indent}    scene_promotion_reason: \"独立した問い、決意への価値変化、道を越える因果 turn を持つ\"",
+        f"{indent}    unique_scene_responsibility: \"旅の責務が口約束から身体行為へ変わる瞬間を担う\"",
+        f"{indent}    actor_forces:",
+        f"{indent}      protagonist: \"{topic}\"",
+        f"{indent}      opposing: [\"見えない脅威\"]",
+        f"{indent}      helping: [\"村人の沈黙\"]",
+        f"{indent}      observing: [\"道端の子ども\"]",
+        f"{indent}      pressure_method: \"視線と霧の道が後戻りできない圧力を作る\"",
+        f"{indent}    meaning_ladder:",
+        f"{indent}      protagonist_stage: \"受け身から能動へ\"",
+        f"{indent}      relationship_stage: \"保護から責務へ移る\"",
+        f"{indent}      object_or_setpiece_stage: \"旅袋が決意の証拠になる\"",
+        f"{indent}    concrete_handoff:",
+        f"{indent}      incoming_trigger: \"村の沈黙\"",
+        f"{indent}      outgoing_anchor: \"足跡と握られた袋\"",
+        f"{indent}      outgoing_pressure: \"足跡が残るため次の移動が避けられない\"",
+        f"{indent}    anti_template_language:",
+        f"{indent}      banned_generic_phrases_absent: true",
+        f"{indent}      story_specific_terms: [\"{topic}\", \"旅袋\", \"石畳の道\"]",
+        f"{indent}      specificity_note: \"人物、道具、場所、行為を明示する\"",
+        f"{indent}  handoff_notes: {{p500_asset: [\"momotaro_seed\", \"travel_bag\"], p600_image: [\"足跡と袋を見せる\"], p700_narration: [\"決意を補う\"], p800_video: [\"袋を握る動き\"]}}",
+    ]
+
+
+def _valid_scene_intent_dict(topic: str, scene_idx: int, *, terminal: bool) -> dict:
+    parsed = yaml.safe_load("\n".join(_valid_scene_intent_lines(topic, scene_idx, terminal=terminal, indent="")))
+    return parsed["scene_intent"]
+
+
+def _p400_coverage_review() -> dict:
+    return {
+        "audience_information_covered": True,
+        "visualizable_action_covered": True,
+        "value_shift_visible": True,
+        "causal_turn_visible": True,
+        "scene_specificity_gate_passed": True,
+        "next_scene_connection_checked": True,
+    }
+
+
+def _verify_triangulation_review() -> dict:
+    return {
+        "status": "passed",
+        "same_target_beat": True,
+        "image_supports_motion_start": True,
+        "motion_reaches_declared_end_state": True,
+        "narration_not_captioning_image": True,
+        "reveal_constraints_preserved": True,
+        "continuity_preserved": True,
+        "handoff_visible_or_audible": True,
+    }
+
+
+def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[str]) -> dict:
+    obligation_ids = ["dramatic_question_01", "value_shift_01", "causal_turn_01", "handoff_01"]
+    functions = ["setup", "pressure", "turn", "handoff"]
+    return {
+        "coverage_strategy": "reverse_from_scene_obligations",
+        "minimum_cut_count": len(selectors),
+        "min_cut_count": {"by_importance": 3, "by_duration": len(selectors), "selected": len(selectors), "exception_reason": ""},
+        "scene_obligations": [
+            {
+                "obligation_id": "dramatic_question_01",
+                "source": "dramatic_question",
+                "evidence": f"scene {scene_idx} の問い",
+                "assigned_cut_ids": selectors[:1],
+            },
+            {
+                "obligation_id": "value_shift_01",
+                "source": "value_shift.visible_evidence",
+                "evidence": [topic],
+                "assigned_cut_ids": selectors[1:2],
+            },
+            {
+                "obligation_id": "causal_turn_01",
+                "source": "causal_turn",
+                "evidence": f"scene {scene_idx} の因果",
+                "assigned_cut_ids": selectors[2:3],
+            },
+            {
+                "obligation_id": "handoff_01",
+                "source": "handoff_to_next_scene",
+                "evidence": f"scene {scene_idx} の受け渡し",
+                "assigned_cut_ids": selectors[-1:],
+            },
+        ],
+        "cut_assignments": [
+            {
+                "cut_index": index,
+                "cut_selector": selector,
+                "obligation_ids": [obligation_ids[min(index - 1, len(obligation_ids) - 1)]],
+                "cut_function": functions[min(index - 1, len(functions) - 1)],
+                "assigned_story_event_ids": [f"scene_obligation:{obligation_ids[min(index - 1, len(obligation_ids) - 1)]}"],
+                "target_beat": topic,
+                "visual_proof": f"{topic}が画面で読める",
+                "audience_knowledge_delta": f"{topic}の状態変化を理解する",
+                "causal_proof": f"{topic}の行為が次の状態を作る",
+                "required_roles": ["protagonist"],
+                "anti_redundancy_key": f"scene{scene_idx}:{functions[min(index - 1, len(functions) - 1)]}",
+            }
+            for index, selector in enumerate(selectors, start=1)
+        ],
+        "unassigned_obligations": [],
+        "overloaded_cuts": [],
+        "duplicate_meaning_risks": [],
+    }
+
+
+def _verify_cut_contract(
+    scene_idx: int,
+    cut_idx: int,
+    selector: str,
+    topic: str,
+    *,
+    total_cuts: int,
+    silent: bool,
+) -> dict:
+    obligation_ids = ["dramatic_question_01", "value_shift_01", "causal_turn_01", "handoff_01"]
+    functions = ["setup", "pressure", "turn", "handoff"]
+    obligation_id = obligation_ids[min(cut_idx - 1, len(obligation_ids) - 1)]
+    cut_function = functions[min(cut_idx - 1, len(functions) - 1)]
+    previous_selector = f"scene{scene_idx}_cut{cut_idx - 1}" if cut_idx > 1 else ""
+    next_selector = f"scene{scene_idx}_cut{cut_idx + 1}" if cut_idx < total_cuts else ""
+    incoming_anchor = f"{previous_selector}_to_{selector}" if previous_selector else f"scene{scene_idx}_incoming"
+    outgoing_anchor = f"{selector}_to_{next_selector}" if next_selector else f"scene{scene_idx}_to_next"
+    narration_role = "silent" if silent else "emotion"
+    narration_requirements = ["無音で視覚報酬を保持"] if silent else ["決意を補う"]
+    return {
+        "schema_version": "2.2",
+        "cut_function": cut_function,
+        "intent_budget": {
+            "primary_intent": f"{topic} cut {cut_idx}",
+            "secondary_intents_allowed": [],
+            "forbidden_combined_intents": ["new_location_establishing + major_reveal + next_scene_handoff"],
+            "assigned_obligation_ids": [obligation_id],
+            "overload_exception_reason": "",
+        },
+        "viewer_contract": {
+            "target_beat": topic,
+            "screen_question": f"{topic}は何をするか",
+            "dramatic_job": "sceneの意味を一つ進める",
+            "audience_knowledge_delta": f"{topic}の状態を理解する",
+            "causal_proof": f"{topic}が画面にいて前へ進む",
+            "visual_evidence": [topic],
+            "required_roles": ["protagonist"],
+            "assigned_story_event_ids": [f"scene_obligation:{obligation_id}"],
+            "anti_redundancy_key": f"scene{scene_idx}:cut{cut_idx}",
+            "visual_proof": f"{topic}が見える",
+            "must_show": [topic],
+            "must_avoid": [],
+            "done_when": [f"{topic}が見える"],
+        },
+        "cinematic_contract": {
+            "camera_intent": f"{topic}へ視線を導く",
+            "subject_priority": {"primary": topic, "secondary": "道", "background": "村"},
+            "screen_geography": {
+                "foreground": "土の道",
+                "midground": topic,
+                "background": "村",
+                "screen_direction": "left_to_right",
+            },
+        },
+        "continuity_contract": {
+            "start_state": {"character_state": "歩く前", "prop_state": "袋が見える", "spatial_state": "村道", "time_state": "朝"},
+            "end_state": {"character_state": "前へ向く", "prop_state": "袋が残る", "spatial_state": "村道", "time_state": "朝"},
+            "carry_forward_to_next_cut": [topic, "村道"],
+        },
+        "cut_handoff": {
+            "receives_from_previous": {
+                "anchor_id": incoming_anchor,
+                "anchor_type": "none" if not previous_selector else "gesture",
+                "visible_or_audible_form": "前cutから残る視線",
+                "expected_previous_cut_selector": previous_selector,
+            },
+            "delivers_to_next": {
+                "anchor_id": outgoing_anchor,
+                "anchor_type": "gesture",
+                "visible_or_audible_form": "次へ残る視線",
+                "expected_next_cut_selector": next_selector,
+            },
+        },
+        "first_frame_contract": {
+            "imageable": True,
+            "first_frame_brief": f"{topic}が村道に立つ",
+            "visible_start_state": {
+                "character_state": "歩く前",
+                "prop_state": "袋が見える",
+                "spatial_state": "村道",
+                "emotional_state": "決意",
+                "gaze_or_attention": "前方",
+            },
+            "motion_start_affordance": {"movable_subject": topic, "movement_vector": "left_to_right", "camera_start_reason": "道が奥へ続く"},
+            "action_completion_state": "pre_action",
+            "static_first_frame_rule": f"静止画として{topic}の状態が読める",
+            "must_be_static_evidence_not_motion": True,
+        },
+        "motion_contract": {
+            "movable": True,
+            "motion_brief": f"{topic}が前へ進む",
+            "start_from_visible_state": "first_frame_contract.visible_start_state",
+            "end_state": f"{topic}が次へ向く",
+            "end_frame_brief": f"{topic}が次へ向く",
+            "must_not_add": ["新しい人物"],
+        },
+        "narration_contract": {
+            "role": narration_role,
+            "target_function": "絵を説明せず決意を補う",
+            "must_avoid": ["映像のキャプション化"],
+            "silence_reason": "映像で見せる価値が大きい追加カット" if silent else "",
+        },
+        "rhythm_contract": {
+            "expected_duration_seconds": 12,
+            "pacing": "standard",
+            "comprehension_moment": f"{topic}が見えた瞬間",
+            "cut_out_reason": "次への視線が残る",
+            "audio_visual_sync_point": "視線の後に声が入る",
+            "duration_exception": {"allowed": False, "reason": ""},
+        },
+        "asset_dependency": {
+            "character_ids_required": ["momotaro_seed"],
+            "object_ids_required": [],
+            "location_ids_required": ["village_road"],
+            "variant_ids_required": [],
+            "new_asset_requests": [],
+            "reusable_anchor_ids": ["momotaro_seed", "village_road"],
+        },
+        "downstream_handoff": {
+            "p500_asset": {
+                "required_asset_ids": ["momotaro_seed", "village_road"],
+                "asset_candidates": ["momotaro_seed", "village_road"],
+                "continuity_anchor_needed": True,
+                "new_asset_needed": False,
+                "reuse_allowed": True,
+            },
+            "p600_image": {
+                "prompt_requirements": [topic],
+                "reference_requirements": [],
+                "first_frame_must_include": [topic],
+                "first_frame_must_avoid": [],
+            },
+            "p700_narration": {
+                "narration_requirements": narration_requirements,
+                "role": narration_role,
+                "must_not_caption_visible_content": True,
+            },
+            "p800_video": {
+                "motion_requirements": [f"{topic}が前へ進む"],
+                "start_state": "歩く前",
+                "last_frame_or_end_state": f"{topic}が次へ向く",
+                "must_not_add": ["新しい人物"],
+            },
+            "carries_to_next_cut": [topic],
+            "carries_to_next_scene": [],
+        },
+    }
 
 
 def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", silent: bool = False) -> None:
     scene_count = 10
+    cut_count = 4
     cut_duration = 15
-    script_lines = [
-        "```yaml",
-        "evaluation_contract:",
-        "  target_arc: \"opening\"",
-        f"  must_cover: [\"{topic}\"]",
-        "  must_avoid: []",
-        "scene_set_review: {status: \"approved\"}",
-        "scene_detail_review: {status: \"approved\"}",
-        "cut_blueprint_review: {status: \"approved\"}",
-        "script:",
-        "  scenes:",
-    ]
-    manifest_lines = [
-        "```yaml",
-        "manifest_phase: production",
-        "video_metadata:",
-        f"  topic: \"{topic}\"",
-        "  experience: \"cinematic_story\"",
-        "  target_duration_seconds: 300",
-        "scenes:",
-    ]
+    script_scenes: list[dict] = []
+    manifest_scenes: list[dict] = []
     for scene_idx in range(1, scene_count + 1):
         terminal = scene_idx == scene_count
-        script_lines.extend(
-            [
-                f"    - scene_id: {scene_idx}",
-                "      phase: \"opening\"",
-                "      importance: \"medium\"",
-                f"      summary: \"{topic}が進む。十分な長さの本文です。十分な長さの本文です。\"",
-                "      target_duration_seconds: 30",
-                "      estimated_duration_seconds: 30",
-                ("      terminal_resolution: \"物語が締まる\"" if terminal else "      handoff_to_next_scene: \"次の場面へつながる\""),
-                "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, next_scene_connection_checked: true}",
-                "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
-                "      scene_intent:",
-                "        story_purpose: \"進行\"",
-                f"        audience_information: [\"{topic}\"]",
-                "        withheld_information: []",
-                "        reveal_constraints: []",
-                "        affect_transition: \"前進\"",
-                "        visual_value_source: \"none\"",
-                "        production_risks: []",
-                "        handoff_notes: {p500_asset: [], p600_image: [], p700_narration: [], p800_video: []}",
-                "      agent_review: {status: \"passed\"}",
-                "      cuts:",
-            ]
-        )
-        manifest_lines.extend([f"  - scene_id: {scene_idx}", "    cuts:"])
-        for cut_idx in range(1, 4):
-            selector = f"scene{scene_idx}_cut{cut_idx}"
+        selectors = [f"scene{scene_idx}_cut{cut_idx}" for cut_idx in range(1, cut_count + 1)]
+        coverage_plan = _verify_scene_cut_coverage_plan(scene_idx, topic, selectors)
+        common_scene = {
+            "scene_id": scene_idx,
+            "phase": "opening",
+            "importance": "medium",
+            "summary": f"{topic}が進む。十分な長さの本文です。十分な長さの本文です。",
+            "target_duration_seconds": 30,
+            "estimated_duration_seconds": 30,
+            "coverage_review": _p400_coverage_review(),
+            "scene_intent": _valid_scene_intent_dict(topic, scene_idx, terminal=terminal),
+            "scene_cut_coverage_plan": coverage_plan,
+        }
+        if terminal:
+            common_scene["terminal_resolution"] = "物語が締まる"
+        else:
+            common_scene["handoff_to_next_scene"] = "次の場面へつながる"
+
+        script_scene = {
+            **common_scene,
+            "research_refs": ["research.story_baseline.canonical_synopsis"],
+            "agent_review": {"status": "passed"},
+            "cuts": [],
+        }
+        manifest_scene = {
+            **common_scene,
+            "scene_composite_review": {
+                "status": "passed",
+                "scene_obligation_covered_by_cut_group": True,
+                "no_duplicate_story_fact_without_new_evidence": True,
+                "scene_meaning_visualized_across_cuts": True,
+                "blocking_reason_keys": [],
+            },
+            "cuts": [],
+        }
+
+        for cut_idx, selector in enumerate(selectors, start=1):
+            cut_is_silent = silent and scene_idx == 1 and cut_idx == 1
+            contract = _verify_cut_contract(scene_idx, cut_idx, selector, topic, total_cuts=cut_count, silent=cut_is_silent)
+            scene_contract = {"target_beat": topic, "must_show": [topic], "must_avoid": [], "done_when": [f"{topic}が見える"]}
             image_output = f"assets/scenes/{selector}.png"
             audio_output = f"assets/audio/{selector}.mp3"
-            script_lines.extend(
-                [
-                    f"        - cut_id: {cut_idx}",
-                    f"          selector: \"{selector}\"",
-                    "          cut_blueprint:",
-                    "            cut_role: \"main\"",
-                    "            duration_intent: \"standard\"",
-                    f"            target_beat: \"{topic}\"",
-                    f"            must_show: [\"{topic}\"]",
-                    "            must_avoid: []",
-                    f"            done_when: [\"{topic}が見える\"]",
-                    f"            visual_beat: \"{topic}が進む\"",
-                    "            narration_role: \"setup\"",
-                    "            asset_dependency_hint: {character_ids: [\"momotaro_seed\"], object_ids: [], location_ids: [], reusable_still_candidates: []}",
-                ]
+            script_scene["cuts"].append(
+                {
+                    "cut_id": cut_idx,
+                    "selector": selector,
+                    "cut_contract": contract,
+                    "scene_contract": scene_contract,
+                    "cut_blueprint": {
+                        "cut_role": "main",
+                        "duration_intent": "standard",
+                        "target_beat": topic,
+                        "must_show": [topic],
+                        "must_avoid": [],
+                        "done_when": [f"{topic}が見える"],
+                        "visual_beat": f"{topic}が進む",
+                        "narration_role": "silent" if cut_is_silent else "setup",
+                        "asset_dependency_hint": {
+                            "character_ids": ["momotaro_seed"],
+                            "object_ids": [],
+                            "location_ids": ["village_road"],
+                            "reusable_still_candidates": [],
+                        },
+                    },
+                }
             )
-            narration = "tool: \"silent\"\n            text: \"\"\n            tts_text: \"\"\n            silence_contract: {intentional: true, kind: \"visual_value_hold\", confirmed_by_human: true, reason: \"映像で見せる\"}" if silent and scene_idx == 1 and cut_idx == 1 else f"tool: \"elevenlabs\"\n            text: \"{topic}が進む。\""
-            manifest_lines.extend(
-                [
-                    f"      - cut_id: {cut_idx}",
-                    f"        selector: \"{selector}\"",
-                    f"        scene_contract: {{target_beat: \"{topic}\", must_show: [\"{topic}\"], must_avoid: [], done_when: [\"{topic}が見える\"]}}",
-                    "        image_generation:",
-                    f"          prompt: \"画面内テキストなし。{topic}が朝の石畳の道を進む。手前に草の露、横に古い木柵、奥に低い山並み、斜めから入る柔らかな朝日、衣服の布目、足元の影、旅立ち前の緊張した表情が実写映画風に具体的に見える。\"",
-                    "          character_ids: [\"momotaro_seed\"]",
-                    "          object_ids: []",
-                    f"          output: \"{image_output}\"",
-                    "        video_generation:",
-                    f"          duration_seconds: {cut_duration}",
-                    "          motion_prompt: \"前へ進む。\"",
-                    "        audio:",
-                    "          narration:",
-                    *[f"            {line.strip()}" for line in narration.splitlines()],
-                    f"            output: \"{audio_output}\"",
-                ]
+            narration = (
+                {
+                    "tool": "silent",
+                    "text": "",
+                    "tts_text": "",
+                    "silence_contract": {
+                        "intentional": True,
+                        "kind": "visual_value_hold",
+                        "confirmed_by_human": True,
+                        "reason": "映像で見せる",
+                    },
+                    "output": audio_output,
+                }
+                if cut_is_silent
+                else {"tool": "elevenlabs", "text": f"{topic}が進む。", "output": audio_output}
+            )
+            manifest_scene["cuts"].append(
+                {
+                    "cut_id": cut_idx,
+                    "selector": selector,
+                    "cut_contract": contract,
+                    "scene_contract": scene_contract,
+                    "image_generation": {
+                        "prompt": f"画面内テキストなし。{topic}が朝の石畳の道を進む。手前に草の露、横に古い木柵、奥に低い山並み、斜めから入る柔らかな朝日、衣服の布目、足元の影、旅立ち前の緊張した表情が実写映画風に具体的に見える。",
+                        "character_ids": ["momotaro_seed"],
+                        "object_ids": [],
+                        "output": image_output,
+                        "review": {"triangulation_review": _verify_triangulation_review()},
+                    },
+                    "video_generation": {
+                        "duration_seconds": cut_duration,
+                        "motion_prompt": "前へ進む。",
+                    },
+                    "audio": {"narration": narration},
+                    "review": {"triangulation_review": _verify_triangulation_review()},
+                }
             )
             _write_photo_like_test_png(run_dir / image_output)
             (run_dir / audio_output).parent.mkdir(parents=True, exist_ok=True)
             (run_dir / audio_output).write_bytes(b"audio")
-    script_lines.extend(["```", ""])
-    manifest_lines.extend(["```", ""])
-    (run_dir / "script.md").write_text("\n".join(script_lines), encoding="utf-8")
-    (run_dir / "video_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+
+        script_scenes.append(script_scene)
+        manifest_scenes.append(manifest_scene)
+
+    script_data = {
+        "evaluation_contract": {"target_arc": "opening", "must_cover": [topic], "must_avoid": []},
+        "scene_set_review": {"status": "approved"},
+        "scene_detail_review": {"status": "approved"},
+        "cut_blueprint_review": {"status": "approved"},
+        "script": {"scenes": script_scenes},
+    }
+    manifest_data = {
+        "manifest_phase": "production",
+        "video_metadata": {"topic": topic, "experience": "cinematic_story", "target_duration_seconds": 300},
+        "scenes": manifest_scenes,
+    }
+    (run_dir / "script.md").write_text(
+        "```yaml\n" + yaml.safe_dump(script_data, allow_unicode=True, sort_keys=False) + "```\n",
+        encoding="utf-8",
+    )
+    (run_dir / "video_manifest.md").write_text(
+        "```yaml\n" + yaml.safe_dump(manifest_data, allow_unicode=True, sort_keys=False) + "```\n",
+        encoding="utf-8",
+    )
     _write_p400_review_artifacts(run_dir)
 
 

@@ -71,6 +71,7 @@ class TestReviewLoop(unittest.TestCase):
         self.assertEqual(stage_for_slot("850"), "video_generation_review")
         self.assertEqual(stage_for_slot("p410b"), "scene_set")
         self.assertEqual(stage_for_slot("410c"), "scene_detail")
+        self.assertEqual(stage_for_slot("p420"), "cut_blueprint")
         self.assertEqual(stage_for_slot("p435"), "production_readiness")
         self.assertIn("scene_set", REVIEW_LOOP_SPECS)
         self.assertIn("scene_detail", REVIEW_LOOP_SPECS)
@@ -149,12 +150,34 @@ class TestReviewLoop(unittest.TestCase):
             scene_aggregate_prompt = (run_dir / aggregator_prompt_relpath("scene_set", 1)).read_text(encoding="utf-8")
             self.assertIn("scene_count_coverage", scene_aggregate_prompt)
             self.assertIn("scene_count_gate", scene_aggregate_prompt)
+            self.assertIn("Scene Specificity Gate", scene_aggregate_prompt)
+            self.assertIn("scene_specificity_gate", scene_aggregate_prompt)
+            self.assertIn("Reveal Order Gate", scene_aggregate_prompt)
+            self.assertIn("Handoff Chain Gate", scene_aggregate_prompt)
+            scene_review = render_aggregated_review(
+                stage="scene_set",
+                round_number=1,
+                critic_reports=["- critic_focus: scene_count_coverage"] * REVIEW_LOOP_CRITIC_COUNT,
+                status="passed",
+            )
+            self.assertIn("## Scene Specificity Gate", scene_review)
+            self.assertIn("anti_template_language", scene_review)
             self.assertTrue((run_dir / critic_prompt_relpath("scene_detail", 1, 1)).exists())
             detail_prompt = (run_dir / critic_prompt_relpath("scene_detail", 1, 1)).read_text(encoding="utf-8")
             self.assertIn("5-10 minute video", detail_prompt)
             self.assertIn("4-15 seconds", detail_prompt)
             self.assertIn("next scene", detail_prompt)
             self.assertIn("critic_focus: scene_detail_structure", detail_prompt)
+            detail_aggregate_prompt = (run_dir / aggregator_prompt_relpath("scene_detail", 1)).read_text(encoding="utf-8")
+            self.assertIn("scene_detail_gate", detail_aggregate_prompt)
+            self.assertNotIn("scene_count_gate: for p410 stages", detail_aggregate_prompt)
+            detail_review = render_aggregated_review(
+                stage="scene_detail",
+                round_number=1,
+                critic_reports=["- critic_focus: scene_detail_structure"] * REVIEW_LOOP_CRITIC_COUNT,
+                status="passed",
+            )
+            self.assertIn("## Scene Detail Gate", detail_review)
             self.assertTrue((run_dir / critic_prompt_relpath("cut_blueprint", 1, 1)).exists())
             cut_prompt = (run_dir / critic_prompt_relpath("cut_blueprint", 1, 1)).read_text(encoding="utf-8")
             self.assertIn("critic_focus: cut_intent_isolation", cut_prompt)

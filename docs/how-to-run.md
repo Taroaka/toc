@@ -297,7 +297,7 @@ python scripts/sync-narration-from-script.py \
     - narration review / TTS / duration gate に必要な最小構造
   - `manifest_phase: production`
     - image / video 実装 field を埋めた生成正本
-- production `video_manifest.md` では cinematic density contract を満たす。各 production scene は原則 3 cuts 以上、low importance だけ 2 cuts 以上、high / critical は 5 cuts 以上を基準にし、`target_duration_seconds / 12` を切り上げた cut 数も下回らない。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest や、medium 以上が 2 cuts だけで green になる manifest は p620/p650 review で差し戻す。
+- production `video_manifest.md` では cinematic density contract を満たす。各 production scene は原則 3 cuts 以上、low importance だけ 2 cuts 以上、high は 5 cuts 以上、critical は 7 cuts 以上を基準にし、`target_duration_seconds / 8` を切り上げた cut 数も下回らない。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest や、medium 以上が 2 cuts だけで green になる manifest は p620/p650 review で差し戻す。
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
@@ -307,11 +307,12 @@ python scripts/sync-narration-from-script.py \
   - `eval.*` summary は最新 aggregator result を反映する
   - round 途中の critic prompt は `logs/eval/<stage>/round_01/prompts/critic_1.prompt.md` 形式、critic report は `logs/eval/<stage>/round_01/critic_1.md` 形式、aggregator report は `logs/eval/<stage>/round_01/aggregated_review.md` に残す
   - critic / aggregator は、単に failed check や不足項目を列挙せず、根本原因、後段への影響、修正方針、次回 review の通過条件を artifact に残す。修正方針が明確でない場合は、推測で patch を作らず、次に集めるべき証拠を書く
-  - p410 scene review では critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` を標準割当とする。scene 数は `maximal_meaningful` まで展開されているかを確認し、これ以上 scene を増やすより cut を厚くすべき理由が説明できない限り aggregator は pass しない
+  - p410b scene_set review では critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` を標準割当とする。scene 数は `maximal_meaningful` まで展開されているかを確認し、これ以上 scene を増やすより cut を厚くすべき理由が説明できない限り aggregator は pass しない。`Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate` は必須 gate とする
+  - p410c scene_detail review では scene 数 gate を繰り返さず、`Scene Detail Gate` として scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、隣接 scene handoff を必須 gate とする
   - p420 cut review では critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする。`Cut Blueprint Gate` の全項目が説明できない限り aggregator は pass しない
   - research は `research.md.evaluation_contract`
   - script は `script.md.evaluation_contract`
-  - scene/cut は `video_manifest.md.scenes[].cuts[].scene_contract`
+  - scene/cut は `video_manifest.md.scenes[].cuts[].cut_contract` を正本とし、`scene_contract` は旧 reader 用 alias としてのみ扱う
   - video は `video_manifest.md.quality_check.review_contract`
 - narration の作成前に `audio.narration.contract` を置き、cut ごとの done 条件を明示してから原稿を書く
 - review では、不足 `character_ids` の自動補完、prompt が環境寄りに流れすぎていないか、story 上の関係性/ブロッキングが抜けていないかを点検する

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -85,6 +86,7 @@ from toc.semantic_review import (
     semantic_review_relpaths,
 )
 from toc.semantic_review_loop import (
+    SEMANTIC_REVIEW_PRODUCER_TARGETS,
     semantic_loop_state_updates,
     semantic_repair_state_updates,
     semantic_repair_timeout_seconds,
@@ -3744,6 +3746,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 semantic_loop_state_updates(stage, status="failed", attempt=attempt, max_attempts=attempts, error_count=len(result.errors)),
             )
             raise RuntimeError(f"{stage} semantic review failed after {attempts} attempt(s): " + "; ".join(result.errors))
+        repair_source_fingerprint_before = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
         try:
             await asyncio.wait_for(
                 _run_semantic_review_producer_repair(
@@ -3757,6 +3760,37 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 timeout=_semantic_repair_once_hard_timeout_seconds(),
             )
         except asyncio.TimeoutError as exc:
+            repair_source_fingerprint_after = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+            changed_artifacts = _changed_semantic_repair_artifacts(repair_source_fingerprint_before, repair_source_fingerprint_after)
+            if changed_artifacts:
+                _record_semantic_repair_salvaged_after_source_change(
+                    run_dir,
+                    stage,
+                    round_number=attempt,
+                    max_attempts=attempts,
+                    error_count=len(result.errors),
+                    timeout_seconds=_semantic_repair_once_hard_timeout_seconds(),
+                    changed_artifacts=changed_artifacts,
+                )
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_review_producer_repair",
+                    status="completed_after_source_artifact_change_before_hard_timeout",
+                    item_id=job_id,
+                    request={
+                        "stage": stage,
+                        "round": attempt,
+                        "maxAttempts": attempts,
+                    },
+                    response={
+                        "errorCount": len(result.errors),
+                        "transportErrorKind": "timeout",
+                        "changedArtifacts": changed_artifacts,
+                        "note": "producer repair changed source artifacts before the outer hard timeout; rerunning semantic review instead of failing transport",
+                    },
+                    error=f"TimeoutError: semantic producer repair hard timeout after {_semantic_repair_once_hard_timeout_seconds():.0f}s",
+                )
+                continue
             _record_semantic_repair_hard_timeout(
                 run_dir,
                 stage,
@@ -3806,6 +3840,89 @@ def _semantic_review_report_sources_are_current(run_dir: Path, stage: str) -> bo
         if source_path.stat().st_mtime_ns > report_mtime_ns:
             return False
     return True
+
+
+_SEMANTIC_REPAIR_HASH_LIMIT_BYTES = 2_000_000
+
+
+def _semantic_repair_source_artifact_relpaths(run_dir: Path, stage: str) -> list[str]:
+    relpaths = semantic_review_relpaths(stage)
+    scope_path = run_dir / relpaths["scope"]
+    source_artifacts: list[str] = []
+    if scope_path.exists():
+        try:
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            scope = {}
+        raw_artifacts = scope.get("source_artifacts") if isinstance(scope, dict) else None
+        if isinstance(raw_artifacts, list):
+            source_artifacts = [item for item in raw_artifacts if isinstance(item, str) and item.strip()]
+    if not source_artifacts:
+        target = SEMANTIC_REVIEW_PRODUCER_TARGETS.get(stage, {})
+        raw_artifacts = target.get("artifacts") if isinstance(target, dict) else None
+        if isinstance(raw_artifacts, list):
+            source_artifacts = [item for item in raw_artifacts if isinstance(item, str) and item.strip()]
+
+    run_root = run_dir.resolve()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in source_artifacts:
+        value = raw.strip().replace("\\", "/")
+        if not value:
+            continue
+        if any(char in value for char in "*?["):
+            value_path = Path(value)
+            if value_path.is_absolute() or ".." in value_path.parts:
+                continue
+            for candidate in sorted(run_dir.glob(value)):
+                if not candidate.is_file():
+                    continue
+                try:
+                    rel = candidate.resolve().relative_to(run_root).as_posix()
+                except ValueError:
+                    continue
+                if rel not in seen:
+                    seen.add(rel)
+                    normalized.append(rel)
+            continue
+        try:
+            target_path = resolve_run_relative(run_dir, value)
+            rel = target_path.resolve().relative_to(run_root).as_posix()
+        except (ValueError, RuntimeError):
+            continue
+        if rel not in seen:
+            seen.add(rel)
+            normalized.append(rel)
+    return normalized
+
+
+def _semantic_repair_artifact_signature(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        return f"stat_error:{type(exc).__name__}"
+    if not path.is_file():
+        return f"not_file:{stat.st_size}:{stat.st_mtime_ns}"
+    digest = ""
+    if stat.st_size <= _SEMANTIC_REPAIR_HASH_LIMIT_BYTES:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            digest = f"read_error:{type(exc).__name__}"
+    return f"file:{stat.st_size}:{stat.st_mtime_ns}:{digest}"
+
+
+def _semantic_repair_source_artifact_fingerprint(run_dir: Path, stage: str) -> dict[str, str]:
+    return {
+        rel: _semantic_repair_artifact_signature(resolve_run_relative(run_dir, rel))
+        for rel in _semantic_repair_source_artifact_relpaths(run_dir, stage)
+    }
+
+
+def _changed_semantic_repair_artifacts(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    return sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
 
 
 def _record_reused_semantic_review(
@@ -3921,6 +4038,38 @@ def _record_semantic_repair_hard_timeout(
     if slot:
         updates[f"slot.{slot}.status"] = "failed"
         updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by app-server timeout"
+    append_state_snapshot(run_dir / "state.txt", updates)
+
+
+def _record_semantic_repair_salvaged_after_source_change(
+    run_dir: Path,
+    stage: str,
+    *,
+    round_number: int,
+    max_attempts: int,
+    error_count: int,
+    timeout_seconds: float,
+    changed_artifacts: list[str],
+) -> None:
+    updates = semantic_repair_state_updates(
+        stage,
+        status="done",
+        round_number=round_number,
+        max_attempts=max_attempts,
+        error_count=error_count,
+    )
+    updates.update(
+        {
+            f"review.semantic.{stage}.repair.transport.status": "salvaged_after_source_artifact_change",
+            f"review.semantic.{stage}.repair.transport.error_kind": "timeout",
+            f"review.semantic.{stage}.repair.transport.error": f"semantic producer repair hard timeout after {timeout_seconds:.0f}s",
+            f"review.semantic.{stage}.repair.changed_artifacts_detected": ", ".join(changed_artifacts)[:2000],
+        }
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        updates[f"slot.{slot}.status"] = "in_progress"
+        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair changed artifacts before timeout; rereview pending"
     append_state_snapshot(run_dir / "state.txt", updates)
 
 
@@ -4207,6 +4356,9 @@ async def _run_semantic_review_producer_repair(
         state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair round {round_number} in progress"
     append_state_snapshot(run_dir / "state.txt", state_updates)
 
+    source_fingerprint_before = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+    completion_log_status = "completed"
+    completion_log_response: dict[str, Any] = {"errorCount": len(errors)}
     prompt = paths["prompt"].read_text(encoding="utf-8")
     client = create_codex_app_server_client(cwd=ROOT)
     transcript: list[dict[str, Any]] = []
@@ -4265,37 +4417,61 @@ async def _run_semantic_review_producer_repair(
         else:
             failed_updates = {}
             transport_kind = classify_codex_transport_error(str(exc))
+            salvaged_transport = False
+            changed_artifacts: list[str] = []
             if is_codex_transport_error(exc):
-                failed_updates.update(
-                    semantic_loop_state_updates(
-                        stage,
-                        status="blocked_transport",
-                        attempt=round_number,
-                        max_attempts=max_attempts,
-                        error_count=len(errors),
-                    )
-                )
-                failed_updates.update(
-                    semantic_repair_state_updates(
-                        stage,
-                        status="blocked_transport",
-                        round_number=round_number,
-                        max_attempts=max_attempts,
-                        error_count=len(errors),
-                    )
-                )
-                failed_updates.update(
-                    {
-                        f"review.semantic.{stage}.transport.status": "failed",
-                        f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
-                        f"review.semantic.{stage}.transport.error": str(exc)[:2000],
-                        f"review.semantic.{stage}.repair.transport.status": "failed",
-                        f"review.semantic.{stage}.repair.transport.error_kind": transport_kind or "unknown",
-                        "runtime.stage": "app_server_transport_failed",
-                        "runtime.app_server.transport.status": "failed",
-                        "runtime.app_server.transport.error_kind": transport_kind or "unknown",
+                source_fingerprint_after = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+                changed_artifacts = _changed_semantic_repair_artifacts(source_fingerprint_before, source_fingerprint_after)
+                if changed_artifacts:
+                    salvaged_transport = True
+                    transcript = getattr(exc, "transcript", transcript)
+                    completion_log_status = "completed_after_source_artifact_change_before_report"
+                    completion_log_response = {
+                        "errorCount": len(errors),
+                        "transportErrorKind": transport_kind or "unknown",
+                        "changedArtifacts": changed_artifacts,
+                        "note": "producer repair changed source artifacts before its report reached status: done; rerunning semantic review instead of failing transport",
                     }
-                )
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.semantic.{stage}.repair.transport.status": "salvaged_after_source_artifact_change",
+                            f"review.semantic.{stage}.repair.transport.error_kind": transport_kind or "unknown",
+                            f"review.semantic.{stage}.repair.transport.error": str(exc)[:2000],
+                            f"review.semantic.{stage}.repair.changed_artifacts_detected": ", ".join(changed_artifacts)[:2000],
+                        },
+                    )
+                else:
+                    failed_updates.update(
+                        semantic_loop_state_updates(
+                            stage,
+                            status="blocked_transport",
+                            attempt=round_number,
+                            max_attempts=max_attempts,
+                            error_count=len(errors),
+                        )
+                    )
+                    failed_updates.update(
+                        semantic_repair_state_updates(
+                            stage,
+                            status="blocked_transport",
+                            round_number=round_number,
+                            max_attempts=max_attempts,
+                            error_count=len(errors),
+                        )
+                    )
+                    failed_updates.update(
+                        {
+                            f"review.semantic.{stage}.transport.status": "failed",
+                            f"review.semantic.{stage}.transport.error_kind": transport_kind or "unknown",
+                            f"review.semantic.{stage}.transport.error": str(exc)[:2000],
+                            f"review.semantic.{stage}.repair.transport.status": "failed",
+                            f"review.semantic.{stage}.repair.transport.error_kind": transport_kind or "unknown",
+                            "runtime.stage": "app_server_transport_failed",
+                            "runtime.app_server.transport.status": "failed",
+                            "runtime.app_server.transport.error_kind": transport_kind or "unknown",
+                        }
+                    )
             else:
                 failed_updates.update(
                     semantic_loop_state_updates(
@@ -4315,31 +4491,32 @@ async def _run_semantic_review_producer_repair(
                         error_count=len(errors),
                     )
                 )
-            if slot:
+            if not salvaged_transport and slot:
                 failed_updates[f"slot.{slot}.status"] = "failed"
                 if is_codex_transport_error(exc):
                     failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by app-server transport"
                 else:
                     failed_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair failed"
-            failed_updates[f"review.semantic.{stage}.repair.last_error"] = str(exc)[:2000]
-            append_state_snapshot(run_dir / "state.txt", failed_updates)
-            write_app_server_debug_log(
-                run_dir=run_dir,
-                operation="semantic_review_producer_repair",
-                status="app_server_transport_failed" if is_codex_transport_error(exc) else "app_server_failed",
-                item_id=job_id,
-                request={
-                    "stage": stage,
-                    "round": round_number,
-                    "maxAttempts": max_attempts,
-                    "prompt": str(paths["prompt"].relative_to(run_dir)),
-                    "report": str(paths["report"].relative_to(run_dir)),
-                },
-                response={"failureContext": _codex_failure_context(exc, client=client)},
-                transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise
+            if not salvaged_transport:
+                failed_updates[f"review.semantic.{stage}.repair.last_error"] = str(exc)[:2000]
+                append_state_snapshot(run_dir / "state.txt", failed_updates)
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_review_producer_repair",
+                    status="app_server_transport_failed" if is_codex_transport_error(exc) else "app_server_failed",
+                    item_id=job_id,
+                    request={
+                        "stage": stage,
+                        "round": round_number,
+                        "maxAttempts": max_attempts,
+                        "prompt": str(paths["prompt"].relative_to(run_dir)),
+                        "report": str(paths["report"].relative_to(run_dir)),
+                    },
+                    response={"failureContext": _codex_failure_context(exc, client=client)},
+                    transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
     finally:
         await client.stop()
 
@@ -4357,7 +4534,7 @@ async def _run_semantic_review_producer_repair(
     write_app_server_debug_log(
         run_dir=run_dir,
         operation="semantic_review_producer_repair",
-        status="completed",
+        status=completion_log_status,
         item_id=job_id,
         request={
             "stage": stage,
@@ -4366,7 +4543,7 @@ async def _run_semantic_review_producer_repair(
             "prompt": str(paths["prompt"].relative_to(run_dir)),
             "report": str(paths["report"].relative_to(run_dir)),
         },
-        response={"errorCount": len(errors)},
+        response=completion_log_response,
         transcript=transcript,
     )
 

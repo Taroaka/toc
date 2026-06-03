@@ -51,6 +51,14 @@
 - emotional_beat: `<curiosity→awe→dread のような感情変化>`
 - visual_thesis: `<この scene を代表する映画的な一枚絵>`
 - handoff_to_next_scene: `<次へ繋ぐアンカー（視線/音/道具/方向/問い）>`
+- scene_conflict_engine:
+  - desire: `<この scene で主体が欲しているもの>`
+  - obstacle: `<妨げる力>`
+  - stakes: `<失敗すると失うもの>`
+  - escalation: `<圧力の上がり方>`
+  - no_return_point: `<後戻りできなくなる瞬間>`
+- audience_knowledge_delta: `<観客がこの scene の前後で何を知り、何をまだ知らないか>`
+- handoff_chain: `<object / sound / gaze / gesture / threat / question のID付きhandoff>`
 
 ---
 
@@ -102,8 +110,8 @@
 
 - 1カット = 1意図。
 - 1カット = 1ナレーション、または明示的な silent cut。
-- cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high/critical は5カット以上。
-- `target_duration_seconds / 12` を切り上げたカット数も下回らない。
+- cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high は5カット以上、critical は7カット以上。
+- `target_duration_seconds / 8` を切り上げたカット数も下回らない。
 - メインカット（最低1つ）: 5–15秒。
 - サブカット（最低1つ / 複数可）: 3–15秒。
 - spectacle / transformation / emotional reversal / proof reveal は、setup / threshold / payoff / reaction / handoff へ分解する。
@@ -154,7 +162,7 @@
 ## 6) `video_manifest.md` への落とし込み（チェック）
 
 - [ ] `scenes[].scene_intent` に dramatic_question / value_shift / causal_turn / visual_thesis がある。
-- [ ] `scenes[].cuts[]` として、各 cut を `scene_contract` に落とし込んだ。
+- [ ] `scenes[].cuts[]` として、各 cut を正本 `cut_contract` に落とし込み、必要なら旧 reader 用 `scene_contract` alias を用意した。
 - [ ] 各 cut に `cut_function` と `first_frame_brief` と `motion_brief` がある。
 - [ ] 各 cut に `character_ids: []` / `object_ids: []` / `location_ids: []` が明示されている。
 - [ ] `image_generation.prompt` は p600 で作り、6 block を必ず持つ。

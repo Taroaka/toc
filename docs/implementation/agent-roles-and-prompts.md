@@ -142,21 +142,23 @@
 - 出力: 観点別 critic report。canonical artifact は編集しない
 - 役割:
   - critic_1 `scene_count_coverage`: scene 数が `maximal_meaningful` まで展開され、独立 scene 化すべき主要 beat が埋もれていないかを見る
-  - critic_2 `dramatic_structure + reveal_order`: 各 scene が独立した問い・価値変化・因果 turn を持つか、scene 追加/分割で reveal の早出し、欠落、順序破壊がないかを見る
+  - critic_1 は `non_compressible_beat_inventory` と `scene_promotion_rule` も見る。cut に圧縮すべきでない beat が scene に昇格していない場合は blocking
+  - critic_2 `dramatic_structure + reveal_order`: 各 scene が独立した問い・価値変化・因果 turn と `unique_scene_responsibility` を持つか、scene 追加/分割で reveal の早出し、欠落、順序破壊、テンプレ文への退行がないかを見る
   - critic_3 `duration_density`: scene 追加と cut 増厚のどちらが品質に効くかを、目標尺・重要度・cut 数で見る
-  - critic_4 `visual_production`: 追加 scene が p500/p600/p800 へ渡せる visible evidence を持つかを見る
-  - critic_5 `handoff_integrity`: scene 間の因果と handoff が途切れていないかを見る
-  - aggregator は各 critic を統合し、次に追加できる scene と cut 増厚へ回す理由が説明できる場合だけ pass を返す
+  - critic_4 `visual_production`: 追加 scene が p500/p600/p800 へ渡せる visible evidence、`actor_force_coverage`、`object_meaning_ladder` を持つかを見る
+  - critic_5 `handoff_integrity`: scene 間の因果と `concrete_handoff_chain` が途切れていないかを見る
+  - scene_set aggregator は各 critic を統合し、次に追加できる scene と cut 増厚へ回す理由、`Scene Specificity Gate`、`Reveal Order Gate`、`Handoff Chain Gate` が説明できる場合だけ pass を返す
+  - scene_detail aggregator は scene 数ではなく、各 scene の `Scene Detail Gate`（scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、隣接 scene handoff）を gate として判定する
 
 ### p420 Cut Blueprint Review Critics
 - 入力: `story.md` / `visual_value.md` / `script.md` cut blueprint draft / stage readset
 - 出力: 観点別 critic report。canonical artifact は編集しない
 - 役割:
   - critic_1 `cut_intent_isolation`: 1 cut = 1 intent が守られ、場所移動/reveal/感情反転/説明/反応を詰め込んでいないかを見る
-  - critic_2 `beat_ladder_coverage`: cut_function 列が scene_spine を進め、重要 beat が段階分解されているかを見る
+  - critic_2 `beat_ladder_coverage`: 固定順の cut_function 列ではなく、scene の story_event_obligations / dramatic_question / value_shift / causal_turn が cut 群に割り当てられているかを見る
   - critic_3 `first_frame_motion_readiness`: first_frame_brief が p600 still の入力として完結し、motion_brief が p800 専用入力として分離されているかを見る
-  - critic_4 `multimodal_contract_coverage`: target_beat / must_show / must_avoid / done_when が image / narration / motion へ渡せるかを見る
-  - critic_5 `duration_density_and_handoff`: 重要度・尺・cut数・最終cutのhandoffが十分かを見る
+  - critic_4 `multimodal_contract_coverage`: target_beat / audience_knowledge_delta / causal_proof / visual_evidence / required_roles / must_show / must_avoid / done_when が image / narration / motion へ渡せるかを見る
+  - critic_5 `duration_density_and_handoff`: 重要度・尺・cut数・最終cutのhandoffが十分か、同じ意味のcut反復を追加cutではなくprompt補強に回しているかを見る
   - aggregator は各 critic を統合し、`Cut Blueprint Gate` の全項目が説明できる場合だけ pass を返す
 
 ### Stage Evaluator
@@ -190,17 +192,7 @@
 - 入力: `scenes/sceneXX/evidence.md`
 - 出力: `scenes/sceneXX/script.md`（30–60s）
 - 品質ゲート: シーン必要性（ストーリー前進 / 矛盾・停滞なし / 登場人物の不可欠性 / テーマ整合）を自己点検して出力末尾に記録
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
 - Claude Code 互換 agent 定義: `.claude/agents/scene-scriptwriter.md`
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-- エージェント定義: `.claude/agents/scene-scriptwriter.md`
->>>>>>> theirs
 
 ## プロンプト構成
 
