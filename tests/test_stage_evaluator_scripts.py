@@ -2,7 +2,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -263,6 +265,9 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- internal_pressure: pressure escalates before the turn",
                     "- value_shift_visibility: value shift is visible",
                     "- causal_turn_visibility: causal turn is visible",
+                    "- scene_event_sequence: setup, pressure, turn, and payoff are present",
+                    "- turning_event_alignment: turning_event matches scene_intent.causal_turn",
+                    "- end_situation_alignment: end_situation matches scene_intent.value_shift.to",
                     "- neighbor_handoff: neighboring handoffs are checked",
                     "",
                 ]
@@ -271,10 +276,16 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "## Cut Blueprint Gate",
                     "",
                     "- cut_intent_isolation: passed",
-                    "- beat_ladder_coverage: passed",
+                    "- scene_event_coverage: passed",
+                    "- event_beat_reference_integrity: passed",
                     "- first_frame_motion_readiness: passed",
-                    "- multimodal_contract_coverage: passed",
-                    "- story_event_obligation_coverage: passed",
+                    "- event_first_frame_alignment: passed",
+                    "- multimodal_event_boundary_coverage: passed",
+                    "- source_event_preservation: passed",
+                    "- no_unapproved_event_invention: passed",
+                    "- event_motion_boundary: passed",
+                    "- event_narration_boundary: passed",
+                    "- event_context_for_cut_ready: passed",
                     "- causal_proof_coverage: passed",
                     "- role_coverage: passed",
                     "- audience_knowledge_delta_coverage: passed",
@@ -398,6 +409,71 @@ def _valid_scene_intent_lines(topic: str, scene_idx: int, *, terminal: bool, ind
     ]
 
 
+def _valid_scene_event_lines(topic: str, scene_idx: int, *, indent: str = "      ") -> list[str]:
+    return [
+        f"{indent}scene_event:",
+        f"{indent}  schema_version: \"scene_event_v1\"",
+        f"{indent}  event_logline: \"{topic}が村道で迷いを越え、次へ進む証拠を残す\"",
+        f"{indent}  start_situation: \"{topic}は村道で旅立ちをためらい、村人の視線を受けている\"",
+        f"{indent}  source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}  event_sequence:",
+        f"{indent}    - beat_id: \"scene{scene_idx}_event_setup\"",
+        f"{indent}      beat_function: \"setup\"",
+        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}      what_happens: \"{topic}が村道に立ち、腰の袋と伸びる道が見える\"",
+        f"{indent}      visible_action: \"{topic}が村道の入口で足を止める\"",
+        f"{indent}      visible_reaction: \"村人が黙って見守る\"",
+        f"{indent}      immediate_consequence: \"旅立ちの圧力が画面に生まれる\"",
+        f"{indent}      emotional_pressure: \"ためらいと責務が同時に見える\"",
+        f"{indent}      required_visual_evidence: [\"村道\", \"旅袋\", \"村人の視線\"]",
+        f"{indent}      story_information_revealed_ids: [\"departure_pressure\"]",
+        f"{indent}    - beat_id: \"scene{scene_idx}_event_pressure\"",
+        f"{indent}      beat_function: \"pressure\"",
+        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}      what_happens: \"霧の道と沈黙が{topic}に後戻りできない圧力をかける\"",
+        f"{indent}      visible_action: \"{topic}が袋を握る手に力を入れる\"",
+        f"{indent}      visible_reaction: \"道端の子どもが息をのむ\"",
+        f"{indent}      immediate_consequence: \"迷いが行為へ変わり始める\"",
+        f"{indent}      emotional_pressure: \"見えない敵への不安が高まる\"",
+        f"{indent}      required_visual_evidence: [\"握られた袋\", \"霧\", \"止まった足\"]",
+        f"{indent}      story_information_revealed_ids: [\"choice_pressure\"]",
+        f"{indent}    - beat_id: \"scene{scene_idx}_event_turn\"",
+        f"{indent}      beat_function: \"turn\"",
+        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}      what_happens: \"{topic}が袋を握り直し、村道を越える決断を行動にする\"",
+        f"{indent}      visible_action: \"{topic}が最初の一歩を前へ出す\"",
+        f"{indent}      visible_reaction: \"村人の視線が足跡へ集まる\"",
+        f"{indent}      immediate_consequence: \"後戻りできない足跡が残る\"",
+        f"{indent}      emotional_pressure: \"不安が決意へ変わる\"",
+        f"{indent}      required_visual_evidence: [\"一歩\", \"足跡\", \"握られた袋\"]",
+        f"{indent}      story_information_revealed_ids: [\"departure_decision\"]",
+        f"{indent}    - beat_id: \"scene{scene_idx}_event_payoff\"",
+        f"{indent}      beat_function: \"payoff\"",
+        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}      what_happens: \"{topic}の足跡と前を向く姿が次の場面の理由になる\"",
+        f"{indent}      visible_action: \"{topic}が霧の先へ進む\"",
+        f"{indent}      visible_reaction: \"村道に残った足跡が見える\"",
+        f"{indent}      immediate_consequence: \"次の移動が避けられなくなる\"",
+        f"{indent}      emotional_pressure: \"責務が継続する\"",
+        f"{indent}      required_visual_evidence: [\"足跡\", \"前を向く姿\", \"霧の先の道\"]",
+        f"{indent}      story_information_revealed_ids: [\"departure_handoff\"]",
+        f"{indent}  turning_event:",
+        f"{indent}    source_event_beat_id: \"scene{scene_idx}_event_turn\"",
+        f"{indent}    causal_turn_ref: \"scene_intent.causal_turn\"",
+        f"{indent}    irreversible_change: \"{topic}が旅立ちを身体行為として確定する\"",
+        f"{indent}  end_situation:",
+        f"{indent}    value_shift_to_ref: \"scene_intent.value_shift.to\"",
+        f"{indent}    outcome: \"{topic}は次の責務へ踏み出した状態になる\"",
+        f"{indent}    character_position: \"村道の先へ進んでいる\"",
+        f"{indent}    object_state: \"袋は握られ、旅の証拠になる\"",
+        f"{indent}    relationship_state: \"村との関係が保護から責務へ変わる\"",
+        f"{indent}    new_pressure: \"足跡が次の移動を要求する\"",
+        f"{indent}    visible_evidence_refs: [\"scene{scene_idx}_event_payoff\"]",
+        f"{indent}  offscreen_context: [\"鬼との決着はまだ起きていない\"]",
+        f"{indent}  forbidden_event_changes: [\"鬼との決着をこのsceneで起こさない\", \"勝利の証拠を見せない\"]",
+    ]
+
+
 def _write_valid_immersive_p400_pair(
     run_dir: Path,
     *,
@@ -431,8 +507,14 @@ def _write_valid_immersive_p400_pair(
     def coverage_plan_lines(scene_idx: int) -> list[str]:
         return [
             "    scene_cut_coverage_plan:",
-            "      coverage_strategy: \"reverse_from_scene_obligations\"",
-            "      min_cut_count: {by_importance: 3, by_duration: 4, selected: 4, exception_reason: \"\"}",
+            "      coverage_strategy: \"reverse_from_scene_event\"",
+            "      source_schema_version: \"scene_event_v1\"",
+            "      min_cut_count: {by_importance: 3, by_duration: 4, by_event_beats: 4, selected: 4, exception_reason: \"\"}",
+            "      event_beat_inventory:",
+            f"        - {{beat_id: \"scene{scene_idx}_event_setup\", beat_function: \"setup\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut1\"]}}",
+            f"        - {{beat_id: \"scene{scene_idx}_event_pressure\", beat_function: \"pressure\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut2\"]}}",
+            f"        - {{beat_id: \"scene{scene_idx}_event_turn\", beat_function: \"turn\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut3\"]}}",
+            f"        - {{beat_id: \"scene{scene_idx}_event_payoff\", beat_function: \"payoff\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut4\"]}}",
             "      scene_obligations:",
             "        - obligation_id: \"dramatic_question_01\"",
             "          source: \"dramatic_question\"",
@@ -451,10 +533,10 @@ def _write_valid_immersive_p400_pair(
             f"          evidence: \"scene {scene_idx} の受け渡し\"",
             f"          assigned_cut_ids: [\"scene{scene_idx}_cut4\"]",
             "      cut_assignments:",
-            f"        - {{cut_index: 1, cut_selector: \"scene{scene_idx}_cut1\", obligation_ids: [\"dramatic_question_01\"], cut_function: \"setup\", assigned_story_event_ids: [\"scene_obligation:dramatic_question_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が見える\", audience_knowledge_delta: \"桃太郎を理解する\", causal_proof: \"桃太郎が画面にいる\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:setup\"}}",
-            f"        - {{cut_index: 2, cut_selector: \"scene{scene_idx}_cut2\", obligation_ids: [\"value_shift_01\"], cut_function: \"pressure\", assigned_story_event_ids: [\"scene_obligation:value_shift_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が進む\", audience_knowledge_delta: \"桃太郎の変化を理解する\", causal_proof: \"桃太郎が前を向く\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:pressure\"}}",
-            f"        - {{cut_index: 3, cut_selector: \"scene{scene_idx}_cut3\", obligation_ids: [\"causal_turn_01\"], cut_function: \"turn\", assigned_story_event_ids: [\"scene_obligation:causal_turn_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が決める\", audience_knowledge_delta: \"因果を理解する\", causal_proof: \"決意が行動を生む\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:turn\"}}",
-            f"        - {{cut_index: 4, cut_selector: \"scene{scene_idx}_cut4\", obligation_ids: [\"handoff_01\"], cut_function: \"handoff\", assigned_story_event_ids: [\"scene_obligation:handoff_01\"], target_beat: \"桃太郎\", visual_proof: \"桃太郎が次へ向く\", audience_knowledge_delta: \"次への理由を理解する\", causal_proof: \"視線が次へ渡る\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:handoff\"}}",
+            f"        - {{cut_index: 1, cut_selector: \"scene{scene_idx}_cut1\", obligation_ids: [\"dramatic_question_01\"], cut_function: \"setup\", event_assignment: {{source_event_contract: {{primary_event_beat_id: \"scene{scene_idx}_event_setup\", source_event_beat_ids: [\"scene{scene_idx}_event_setup\"]}}}}, target_beat: \"桃太郎\", visual_proof: \"桃太郎が見える\", audience_knowledge_delta: \"桃太郎を理解する\", causal_proof: \"桃太郎が画面にいる\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:setup\"}}",
+            f"        - {{cut_index: 2, cut_selector: \"scene{scene_idx}_cut2\", obligation_ids: [\"value_shift_01\"], cut_function: \"pressure\", event_assignment: {{source_event_contract: {{primary_event_beat_id: \"scene{scene_idx}_event_pressure\", source_event_beat_ids: [\"scene{scene_idx}_event_pressure\"]}}}}, target_beat: \"桃太郎\", visual_proof: \"桃太郎が進む\", audience_knowledge_delta: \"桃太郎の変化を理解する\", causal_proof: \"桃太郎が前を向く\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:pressure\"}}",
+            f"        - {{cut_index: 3, cut_selector: \"scene{scene_idx}_cut3\", obligation_ids: [\"causal_turn_01\"], cut_function: \"turn\", event_assignment: {{source_event_contract: {{primary_event_beat_id: \"scene{scene_idx}_event_turn\", source_event_beat_ids: [\"scene{scene_idx}_event_turn\"]}}}}, target_beat: \"桃太郎\", visual_proof: \"桃太郎が決める\", audience_knowledge_delta: \"因果を理解する\", causal_proof: \"決意が行動を生む\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:turn\"}}",
+            f"        - {{cut_index: 4, cut_selector: \"scene{scene_idx}_cut4\", obligation_ids: [\"handoff_01\"], cut_function: \"handoff\", event_assignment: {{source_event_contract: {{primary_event_beat_id: \"scene{scene_idx}_event_payoff\", source_event_beat_ids: [\"scene{scene_idx}_event_payoff\"]}}}}, target_beat: \"桃太郎\", visual_proof: \"桃太郎が次へ向く\", audience_knowledge_delta: \"次への理由を理解する\", causal_proof: \"視線が次へ渡る\", required_roles: [\"protagonist\"], anti_redundancy_key: \"scene{scene_idx}:handoff\"}}",
             "      unassigned_obligations: []",
             "      overloaded_cuts: []",
             "      duplicate_meaning_risks: []",
@@ -465,9 +547,65 @@ def _write_valid_immersive_p400_pair(
         incoming_anchor = f"scene{scene_idx}_incoming" if cut_idx == 1 else f"scene{scene_idx}_cut{cut_idx - 1}_to_cut{cut_idx}"
         incoming_type = "none" if cut_idx == 1 else "gesture"
         outgoing_type = "gesture"
+        beat_functions = ["setup", "pressure", "turn", "payoff"]
+        beat_function = beat_functions[min(cut_idx - 1, len(beat_functions) - 1)]
+        beat_id = f"scene{scene_idx}_event_{beat_function}"
+        beat_data = {
+            "setup": (
+                f"桃太郎が村道に立ち、腰の袋と伸びる道が見える",
+                f"桃太郎が村道の入口で足を止める",
+                "村人が黙って見守る",
+                ["村道", "旅袋", "村人の視線"],
+            ),
+            "pressure": (
+                f"霧の道と沈黙が桃太郎に後戻りできない圧力をかける",
+                f"桃太郎が袋を握る手に力を入れる",
+                "道端の子どもが息をのむ",
+                ["握られた袋", "霧", "止まった足"],
+            ),
+            "turn": (
+                f"桃太郎が袋を握り直し、村道を越える決断を行動にする",
+                f"桃太郎が最初の一歩を前へ出す",
+                "村人の視線が足跡へ集まる",
+                ["一歩", "足跡", "握られた袋"],
+            ),
+            "payoff": (
+                f"桃太郎の足跡と前を向く姿が次の場面の理由になる",
+                f"桃太郎が霧の先へ進む",
+                "村道に残った足跡が見える",
+                ["足跡", "前を向く姿", "霧の先の道"],
+            ),
+        }
+        what_happens, visible_action, visible_reaction, visual_evidence = beat_data[beat_function]
+        blocked_ids = [
+            f"scene{scene_idx}_event_{function}"
+            for function in ("turn", "payoff")
+            if function != beat_function
+        ]
+        neighbor_functions = [
+            beat_functions[index]
+            for index in (cut_idx - 2, cut_idx)
+            if 0 <= index < len(beat_functions)
+        ]
         return [
             "        cut_contract:",
-            "          schema_version: \"2.2\"",
+            "          schema_version: \"3.0\"",
+            "          source_event_contract:",
+            f"            primary_event_beat_id: \"{beat_id}\"",
+            f"            source_event_beat_ids: [\"{beat_id}\"]",
+            f"            event_beat_function: \"{beat_function}\"",
+            "            event_time_position: \"before_trigger\"",
+            f"            source_event_summary: \"{what_happens}\"",
+            f"            source_visible_action: \"{visible_action}\"",
+            f"            source_visible_reaction: \"{visible_reaction}\"",
+            f"            source_required_visual_evidence: {json.dumps(visual_evidence, ensure_ascii=False)}",
+            "            source_story_information_revealed_ids: []",
+            "            source_story_information_hinted_ids: []",
+            f"            event_facts_to_preserve: {json.dumps([what_happens], ensure_ascii=False)}",
+            "            event_facts_not_to_invent: [\"鬼との決着をこのsceneで起こさない\", \"勝利の証拠を見せない\"]",
+            "            allowed_reveal_info_ids: []",
+            "            forbidden_reveal_info_ids: [\"勝利の証拠\"]",
+            "            must_not_change: [\"scene_eventにない出来事を追加しない\"]",
             "          cut_function: \"setup\"",
             "          intent_budget:",
             f"            primary_intent: \"桃太郎 cut {cut_idx}\"",
@@ -483,7 +621,6 @@ def _write_valid_immersive_p400_pair(
             "            causal_proof: \"桃太郎が画面にいて前へ進む\"",
             "            visual_evidence: [\"桃太郎\"]",
             "            required_roles: [\"protagonist\"]",
-            f"            assigned_story_event_ids: [\"scene_obligation:obligation_{cut_idx}\"]",
             f"            anti_redundancy_key: \"scene{scene_idx}:cut{cut_idx}\"",
             "            visual_proof: \"桃太郎が見える\"",
             "            must_show: [\"桃太郎\"]",
@@ -510,6 +647,10 @@ def _write_valid_immersive_p400_pair(
             f"              expected_next_cut_selector: \"{'scene' + str(scene_idx) + '_cut' + str(cut_idx + 1) if cut_idx < 4 else ''}\"",
             "          first_frame_contract:",
             "            imageable: true",
+            f"            source_event_beat_id: \"{beat_id}\"",
+            "            event_time_position: \"before_trigger\"",
+            f"            event_fact_visible_in_still: \"{visible_action}\"",
+            "            not_yet_happened_in_still: [\"鬼との決着\"]",
             "            first_frame_brief: \"桃太郎が村道に立つ\"",
             "            visible_start_state: {character_state: \"歩く前\", prop_state: \"袋が見える\", spatial_state: \"村道\", emotional_state: \"決意\", gaze_or_attention: \"前方\"}",
             "            motion_start_affordance: {movable_subject: \"桃太郎\", movement_vector: \"left_to_right\", camera_start_reason: \"道が奥へ続く\"}",
@@ -518,12 +659,23 @@ def _write_valid_immersive_p400_pair(
             "            must_be_static_evidence_not_motion: true",
             "          motion_contract:",
             "            movable: true",
+            f"            source_event_beat_id: \"{beat_id}\"",
+            "            starts_from_first_frame: true",
+            "            reaches_event_position: \"early_action\"",
+            f"            must_not_advance_to_event_beat_ids: {json.dumps(blocked_ids, ensure_ascii=False)}",
+            "            must_not_resolve_scene_turn_unless_primary_event_is_turn: true",
             "            motion_brief: \"桃太郎が前へ進む\"",
             "            start_from_visible_state: \"first_frame_contract.visible_start_state\"",
             "            end_state: \"桃太郎が次へ向く\"",
             "            end_frame_brief: \"桃太郎が次へ向く\"",
             "            must_not_add: [\"新しい人物\"]",
             "          narration_contract:",
+            f"            source_event_beat_ids: [\"{beat_id}\"]",
+            "            allowed_info_ids: []",
+            "            forbidden_info_ids: [\"勝利の証拠\"]",
+            f"            must_not_advance_to_event_beat_ids: {json.dumps(blocked_ids, ensure_ascii=False)}",
+            "            must_not_explain_visible_action_as_caption: true",
+            "            narration_event_boundary: \"same_event_only\"",
             "            role: \"emotion\"",
             "            target_function: \"絵を説明せず決意を補う\"",
             "            must_avoid: [\"映像のキャプション化\"]",
@@ -549,14 +701,31 @@ def _write_valid_immersive_p400_pair(
             "            p800_video: {motion_requirements: [\"桃太郎が前へ進む\"], start_state: \"歩く前\", last_frame_or_end_state: \"桃太郎が次へ向く\", must_not_add: [\"新しい人物\"]}",
             "            carries_to_next_cut: [\"桃太郎\"]",
             "            carries_to_next_scene: []",
+            "          event_context_for_cut:",
+            "            derived_from: [\"scene_event.event_sequence[]\", \"cut_contract.source_event_contract\"]",
+            "            editable: false",
+            "            primary_event_beat:",
+            f"              beat_id: \"{beat_id}\"",
+            f"              beat_function: \"{beat_function}\"",
+            f"              what_happens: \"{what_happens}\"",
+            f"              visible_action: \"{visible_action}\"",
+            f"              visible_reaction: \"{visible_reaction}\"",
+            f"              required_visual_evidence: {json.dumps(visual_evidence, ensure_ascii=False)}",
+            "            source_event_beats:",
+            f"              - {{beat_id: \"{beat_id}\"}}",
+            "            neighboring_event_beats:",
+            *[f"              - {{beat_id: \"scene{scene_idx}_event_{function}\"}}" for function in neighbor_functions],
+            "            forbidden_event_changes: [\"鬼との決着をこのsceneで起こさない\", \"勝利の証拠を見せない\"]",
+            "            reveal_constraints_for_this_cut: []",
         ]
 
     for scene_idx in range(1, scene_count + 1):
         terminal = scene_idx == scene_count
+        phase = "opening" if scene_idx <= max(1, scene_count // 3) else "development" if scene_idx <= max(2, (scene_count * 2) // 3) else "climax"
         script_lines.extend(
             [
                 f"    - scene_id: {scene_idx}",
-                "      phase: \"opening\"",
+                f"      phase: \"{phase}\"",
                 "      importance: \"medium\"",
                 "      summary: \"桃太郎が進む。十分な長さの本文です。十分な長さの本文です。\"",
                 "      target_duration_seconds: 30",
@@ -565,6 +734,8 @@ def _write_valid_immersive_p400_pair(
                 "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                 "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                 *_valid_scene_intent_lines("桃太郎", scene_idx, terminal=terminal),
+                *_valid_scene_event_lines("桃太郎", scene_idx),
+                *[line.replace("    ", "      ", 1) for line in coverage_plan_lines(scene_idx)],
                 "      agent_review: {status: \"passed\"}",
                 "      cuts:",
             ]
@@ -576,6 +747,7 @@ def _write_valid_immersive_p400_pair(
                 "    target_duration_seconds: 30",
                 "    estimated_duration_seconds: 30",
                 "    scene_composite_review: {status: \"passed\", scene_obligation_covered_by_cut_group: true, no_duplicate_story_fact_without_new_evidence: true, scene_meaning_visualized_across_cuts: true, blocking_reason_keys: []}",
+                *_valid_scene_event_lines("桃太郎", scene_idx, indent="    "),
                 *coverage_plan_lines(scene_idx),
                 "    cuts:",
             ]
@@ -586,6 +758,7 @@ def _write_valid_immersive_p400_pair(
                 [
                     f"        - cut_id: {cut_idx}",
                     f"          selector: \"{selector}\"",
+                    *[line.replace("        ", "          ", 1) for line in cut_contract_lines(scene_idx, cut_idx, selector)],
                     "          cut_blueprint:",
                     "            cut_role: \"main\"",
                     "            duration_intent: \"standard\"",
@@ -625,6 +798,24 @@ def _write_valid_immersive_p400_pair(
     (run_dir / "script.md").write_text("\n".join(script_lines), encoding="utf-8")
     (run_dir / "video_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
     _write_p400_review_artifacts(run_dir)
+
+
+def _read_script_yaml(run_dir: Path) -> dict:
+    _, data = STAGE_EVALUATOR.load_structured_document(run_dir / "script.md")
+    return data if isinstance(data, dict) else {}
+
+
+def _write_script_yaml(run_dir: Path, data: dict) -> None:
+    (run_dir / "script.md").write_text("```yaml\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
+
+
+def _read_manifest_yaml(run_dir: Path) -> dict:
+    _, data = STAGE_EVALUATOR.load_structured_document(run_dir / "video_manifest.md")
+    return data if isinstance(data, dict) else {}
+
+
+def _write_manifest_yaml(run_dir: Path, data: dict) -> None:
+    (run_dir / "video_manifest.md").write_text("```yaml\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
@@ -876,6 +1067,9 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            original_manifest_text = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            _write_valid_immersive_p400_pair(run_dir)
+            (run_dir / "video_manifest.md").write_text(original_manifest_text, encoding="utf-8")
             (run_dir / "video.mp4").write_bytes(b"fake")
             _resolve_ready_grounding(run_dir, "research", "story", "script", "image_prompt", "video_generation")
 
@@ -1178,6 +1372,274 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(stage["passed"])
             self.assertIn("script.no_generic_scene_template_phrases", stage["reason_keys"])
 
+    def test_scene_series_evaluator_requires_scene_event_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_series_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014bb"
+            scene_dir = run_dir / "scenes" / "scene1"
+            scene_dir.mkdir(parents=True, exist_ok=True)
+            (scene_dir / "script.md").write_text(
+                "\n".join(
+                    [
+                        "```yaml",
+                        "scene_id: 1",
+                        "scene_intent:",
+                        "  dramatic_question: \"問い\"",
+                        "cuts:",
+                        "  - cut_id: 1",
+                        "    cut_blueprint:",
+                        "      cut_role: main",
+                        "      duration_intent: standard",
+                        "      target_beat: \"beat\"",
+                        "      must_show: [\"beat\"]",
+                        "      must_avoid: []",
+                        "      done_when: [\"done\"]",
+                        "      visual_beat: \"visual\"",
+                        "      narration_role: setup",
+                        "      asset_dependency_hint: {character_ids: [], object_ids: [], location_ids: [], reusable_still_candidates: []}",
+                        "```",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage, _ = STAGE_EVALUATOR.check_script_scene_series(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_series_scene_event_contract", stage["reason_keys"])
+
+    def test_script_evaluator_requires_scene_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0].pop("scene_event", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_exists", stage["reason_keys"])
+
+    def test_script_evaluator_requires_complete_scene_event_sequence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014d"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            sequence = data["script"]["scenes"][0]["scene_event"]["event_sequence"]
+            data["script"]["scenes"][0]["scene_event"]["event_sequence"] = [
+                beat for beat in sequence if beat.get("beat_function") != "payoff"
+            ]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_sequence_complete", stage["reason_keys"])
+            self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_duplicate_scene_event_beat_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014e"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            sequence = data["script"]["scenes"][0]["scene_event"]["event_sequence"]
+            sequence[1]["beat_id"] = sequence[0]["beat_id"]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_beat_ids_unique", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_forbidden_scene_event_directing_field(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014f"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_event"]["event_sequence"][0]["camera"] = "wide shot"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_no_forbidden_directing_fields", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_forbidden_reveal_id_in_scene_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014fr"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            scene = data["script"]["scenes"][0]
+            scene["scene_intent"]["reveal_constraints"] = [{"forbidden_info_ids": ["victory_proof"]}]
+            scene["scene_event"]["event_sequence"][0]["story_information_revealed_ids"] = ["victory_proof"]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_reveal_constraints_respected", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_string_forbidden_reveal_id_in_scene_event(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014fs"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            scene = data["script"]["scenes"][0]
+            scene["scene_intent"]["reveal_constraints"] = ["victory_proof"]
+            scene["scene_event"]["event_sequence"][0]["story_information_revealed_ids"] = ["victory_proof"]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_reveal_constraints_respected", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_invalid_cut_event_refs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014g"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["cuts"][0]["cut_contract"]["source_event_contract"]["source_event_beat_ids"] = ["missing_event"]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_requires_cut_event_fact_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014gf"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            contract["source_event_contract"].pop("event_facts_to_preserve", None)
+            contract["source_event_contract"].pop("event_facts_not_to_invent", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_allows_empty_scene_event_context_lists(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014gl"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            scene_event = data["script"]["scenes"][0]["scene_event"]
+            scene_event["offscreen_context"] = []
+            scene_event["forbidden_event_changes"] = []
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertNotIn("script.scene_event_exists", stage["reason_keys"])
+
+    def test_script_evaluator_requires_turn_and_payoff_cut_assignment(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014h"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            for cut in data["script"]["scenes"][0]["cuts"]:
+                source_contract = cut["cut_contract"]["source_event_contract"]
+                source_contract["primary_event_beat_id"] = "scene1_event_setup"
+                source_contract["source_event_beat_ids"] = ["scene1_event_setup"]
+                source_contract["event_beat_function"] = "setup"
+                cut["cut_contract"]["first_frame_contract"]["source_event_beat_id"] = "scene1_event_setup"
+                cut["cut_contract"]["motion_contract"]["source_event_beat_id"] = "scene1_event_setup"
+                cut["cut_contract"]["narration_contract"]["source_event_beat_ids"] = ["scene1_event_setup"]
+                cut["cut_contract"]["event_context_for_cut"]["primary_event_beat"]["beat_id"] = "scene1_event_setup"
+                cut["cut_contract"]["event_context_for_cut"]["primary_event_beat"]["beat_function"] = "setup"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.cuts_cover_scene_event_sequence", stage["reason_keys"])
+            self.assertIn("script.turn_and_payoff_event_beats_have_cuts", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_v2_top_level_cut_event_refs_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014i"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            source_contract = contract.pop("source_event_contract")
+            contract["schema_version"] = "2.2"
+            contract["primary_event_beat_id"] = source_contract["primary_event_beat_id"]
+            contract["source_event_beat_ids"] = source_contract["source_event_beat_ids"]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_mismatched_source_event_function_and_context(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014j"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            contract["source_event_contract"]["event_beat_function"] = "turn"
+            contract["event_context_for_cut"]["primary_event_beat"]["beat_id"] = "wrong_event"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.event_beat_reference_integrity", stage["reason_keys"])
+            self.assertIn("script.event_context_for_cut_ready", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_invented_v3_event_projection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014jp"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            contract["source_event_contract"]["event_facts_to_preserve"] = ["別の出来事"]
+            contract["source_event_contract"]["source_required_visual_evidence"] = ["別の証拠"]
+            contract["event_context_for_cut"]["source_event_beats"] = [{"beat_id": "scene1_event_turn"}]
+            contract["event_context_for_cut"]["neighboring_event_beats"] = []
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.source_event_preservation", stage["reason_keys"])
+            self.assertIn("script.event_context_for_cut_ready", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_first_frame_and_motion_event_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014k"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            contract["first_frame_contract"]["source_event_beat_id"] = "scene1_event_turn"
+            contract["motion_contract"]["source_event_beat_id"] = "scene1_event_turn"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.event_first_frame_alignment", stage["reason_keys"])
+            self.assertIn("script.event_motion_boundary", stage["reason_keys"])
+
     def test_manifest_evaluator_gates_p400_duration_and_review_integrity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_duration_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0015"
@@ -1212,6 +1674,46 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             text = (run_dir / "script.md").read_text(encoding="utf-8")
             text = text.replace("      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}\n", "", 1)
             (run_dir / "script.md").write_text(text, encoding="utf-8")
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.script_readiness_contract", stage["reason_keys"])
+
+    def test_manifest_p400_readiness_includes_script_scene_event_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_script_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0018e"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000018e\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0].pop("scene_event", None)
+            _write_script_yaml(run_dir, data)
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+            self.assertFalse(stage["passed"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+            self.assertIn("p400.script_readiness_contract", stage["reason_keys"])
+
+    def test_manifest_p400_readiness_includes_manifest_scene_event_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_manifest_event_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0018f"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000018f\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=15, scene_count=10)
+            data = _read_manifest_yaml(run_dir)
+            data["scenes"][0].pop("scene_event", None)
+            _write_manifest_yaml(run_dir, data)
             _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
 
             stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")

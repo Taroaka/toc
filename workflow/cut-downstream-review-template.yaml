@@ -1,24 +1,43 @@
-# Cut Downstream Triangulation Review Template v2.1
+# Cut Downstream Triangulation Review Template v3.0
 
-triangulation_review_version: "2.1"
+triangulation_review_version: "3.0"
 selector: "scene1_cut1"
 source_cut_contract:
+  source_event_contract:
+    primary_event_beat_id: ""
+    source_event_beat_ids: []
+    event_beat_function: ""
+    event_time_position: ""
+    event_facts_to_preserve: []
+    event_facts_not_to_invent: []
   cut_function: ""
   target_beat: ""
   audience_knowledge_delta: ""
   causal_proof: ""
   visual_evidence: []
   required_roles: []
-  assigned_story_event_ids: []
   anti_redundancy_key: ""
   visual_proof: ""
   first_frame_brief: ""
   static_first_frame_rule: ""
   motion_brief: ""
+  narrative_position: ""
+  voice_function: ""
+  visual_distance_policy: ""
+  pronunciation_targets: []
   narration_role: ""
   handoff: ""
+event_context_for_cut:
+  derived_from: "scene_event.event_sequence + cut_contract.source_event_contract"
+  editable: false
+  primary_event_beat: {}
+  neighboring_event_beats: []
+  forbidden_event_changes: []
+  reveal_constraints_for_this_cut: {}
 
 p600_image_review:
+  receives_only_event_context_for_cut_not_full_scene_event: false
+  prompt_does_not_include_motion_brief: false
   prompt_uses_first_frame_only: false
   prompt_contains_no_authoring_metadata: false
   still_does_not_finish_action: false
@@ -32,6 +51,11 @@ p600_image_review:
   findings: []
 
 p700_narration_review:
+  uses_event_context_for_cut: false
+  does_not_advance_to_forbidden_next_beat: false
+  voice_function_matches_contract: false
+  visual_distance_policy_respected: false
+  pronunciation_targets_resolved: false
   narration_role_matches_contract: false
   narration_not_captioning_image: false
   silent_cut_has_reason: false
@@ -40,6 +64,8 @@ p700_narration_review:
   findings: []
 
 p800_video_review:
+  uses_event_context_for_cut: false
+  respects_must_not_advance_to_event_beat_ids: false
   motion_starts_from_still: false
   motion_does_not_add_new_story: false
   motion_reaches_declared_end_state: false
@@ -48,6 +74,9 @@ p800_video_review:
   findings: []
 
 overall:
+  event_context_for_cut_is_derived_projection: false
+  source_event_contract_preserved: false
+  event_boundaries_preserved_across_p600_p700_p800: false
   same_target_beat: false
   scene_obligation_covered_by_cut_group: false
   no_duplicate_story_fact_without_new_evidence: false

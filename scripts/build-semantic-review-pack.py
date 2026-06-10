@@ -31,13 +31,9 @@ STAGE_LABELS = {
     "scene_detail": "scene detail design",
     "cut_blueprint": "cut blueprint design",
     "asset_plan": "asset planning",
-    "asset_output": "generated asset output",
     "image_prompt": "scene image prompt",
-    "scene_image": "generated scene image output",
     "narration": "narration text and audio handoff",
     "video_motion": "video motion prompt",
-    "video_clip": "generated video clip output",
-    "render": "final render output",
 }
 
 
@@ -142,13 +138,9 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
     common = ["story.md", "script.md", "video_manifest.md"]
     by_stage = {
         "asset_plan": ["asset_inventory.md", "asset_plan.md"],
-        "asset_output": ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "asset_generation_manifest.md", "location_asset_generation_manifest.md"],
         "image_prompt": ["asset_inventory.md", "asset_plan.md", "image_generation_requests.md", "image_prompt_story_review.md"],
-        "scene_image": ["asset_inventory.md", "asset_plan.md", "image_generation_requests.md", "logs/review/semantic/scene_image.contact_sheet.png", "logs/review/semantic/scene_image.contact_sheet.jpg"],
         "narration": ["narration_text_review.md", "logs/review/narration_text_quality.md"],
         "video_motion": ["video_generation_requests.md"],
-        "video_clip": ["video_generation_requests.md", "logs/review/semantic/video_clip.contact_sheet.png", "logs/review/semantic/video_clip.contact_sheet.jpg"],
-        "render": ["video_clips.txt", "video_narration_list.txt", "run_report.md", "eval_report.json"],
     }
     candidates = common + by_stage.get(stage, [])
     seen: set[str] = set()
@@ -218,11 +210,10 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "",
             "Judge whether each entry preserves the intended story/source meaning and is usable by the next downstream stage.",
             "Check subject identity, location, object/setpiece visibility, timeline, reveal order, continuity, narration alignment, and output-media suitability when those fields exist.",
-            "For upstream planning stages (`scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by later output stages. In upstream stages, judge whether the declared outputs/prompts/contracts would be meaningful if generated.",
-            "For output stages (`asset_output`, `scene_image`, `video_clip`, `render`), generated file existence and semantic match are hard gates.",
+            "For planning stages (`scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
             "Flag round-robin references, always-on story objects in unrelated entries, mismatched location/character/object references, missing semantic contracts, and outputs that do not support the contract.",
             "For entries whose review_scope is `scene_composite`, this is a gate, not advice: judge the scene as a whole across its split cuts.",
-            "A scene_composite passes only when scene_cut_coverage_plan.scene_obligations and story_event_obligations are assigned to cut_entries, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
+            "A scene_composite passes only when scene_cut_coverage_plan.scene_obligations and scene_event.event_sequence setup/pressure/turn/payoff beats are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
             "Do not require a fixed setup/turn/handoff order or a fixed cut count; judge whether the cuts were reverse-designed from the scene's actual visual obligations.",
             "If the scene meaning cannot be conveyed by the listed cuts, fail the gate and state whether it needs more cuts, stronger per-cut prompts, or a different scene split.",
             "",

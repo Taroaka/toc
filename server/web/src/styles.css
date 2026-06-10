@@ -538,6 +538,71 @@ body {
     rgba(83, 221, 255, 0.08);
 }
 
+.sceneCutPager {
+  position: relative;
+  min-width: 0;
+}
+
+.sceneCutOverlayButton {
+  position: absolute;
+  top: 72px;
+  z-index: 4;
+}
+
+.sceneCutOverlayButtonLeft {
+  left: 16px;
+}
+
+.sceneCutOverlayButtonRight {
+  right: 16px;
+}
+
+.sceneCutOverlayButton .MuiIconButton-root {
+  width: 50px;
+  height: 50px;
+  color: rgba(255, 232, 170, 0.98) !important;
+  border: 1px solid rgba(255, 154, 47, 0.62);
+  background:
+    radial-gradient(120% 130% at 28% 0%, rgba(255, 245, 214, 0.34), transparent 38%),
+    radial-gradient(120% 140% at 86% 100%, rgba(255, 122, 26, 0.34), transparent 44%),
+    linear-gradient(145deg, rgba(255, 224, 138, 0.22), rgba(255, 154, 47, 0.22) 46%, rgba(255, 122, 26, 0.18)),
+    rgba(20, 13, 8, 0.72);
+  -webkit-backdrop-filter: blur(13px) saturate(142%) brightness(1.06);
+  backdrop-filter: blur(13px) saturate(142%) brightness(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.34),
+    0 0 0 1px rgba(255, 224, 138, 0.18),
+    0 0 22px rgba(255, 154, 47, 0.28),
+    0 0 38px rgba(255, 122, 26, 0.22),
+    0 16px 34px rgba(0, 0, 0, 0.34);
+}
+
+.sceneCutOverlayButton .MuiIconButton-root:hover {
+  border-color: rgba(255, 190, 74, 0.82);
+  background:
+    radial-gradient(120% 130% at 28% 0%, rgba(255, 245, 214, 0.42), transparent 38%),
+    radial-gradient(120% 140% at 86% 100%, rgba(255, 122, 26, 0.42), transparent 44%),
+    linear-gradient(145deg, rgba(255, 224, 138, 0.28), rgba(255, 154, 47, 0.28) 46%, rgba(255, 122, 26, 0.22)),
+    rgba(24, 15, 8, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(255, 122, 26, 0.42),
+    0 0 0 1px rgba(255, 224, 138, 0.28),
+    0 0 28px rgba(255, 154, 47, 0.34),
+    0 0 46px rgba(255, 122, 26, 0.28),
+    0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
+.sceneCutOverlayButton .MuiIconButton-root.Mui-disabled {
+  color: rgba(255, 232, 170, 0.28) !important;
+  border-color: rgba(255, 190, 74, 0.14);
+  background: rgba(8, 11, 13, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
 .emptyGallery {
   grid-column: 1 / -1;
   min-height: 220px;
@@ -669,6 +734,15 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.11);
 }
 
+.promptGenerateButton {
+  align-self: stretch;
+}
+
+.promptCard.is-scene .promptGenerateButton {
+  width: calc(100% - 66px);
+  align-self: flex-end;
+}
+
 .promptCardContent {
   padding: 14px !important;
 }
@@ -704,6 +778,63 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.promptCard.is-scene .promptLayout {
+  grid-template-columns: minmax(300px, 0.72fr) minmax(420px, 1.28fr);
+  align-items: start;
+}
+
+.promptCard.is-scene .comparisonWall {
+  min-height: 0;
+  overflow: visible;
+}
+
+.scenePrimaryPreview {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(255, 190, 74, 0.22);
+  border-radius: 8px;
+  background:
+    radial-gradient(120% 140% at 50% 0%, rgba(255, 224, 138, 0.08), transparent 42%),
+    rgba(7, 10, 12, 0.82);
+}
+
+.scenePrimaryMedia {
+  position: relative;
+  height: clamp(250px, 38vh, 470px);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  cursor: zoom-in;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    #05080a;
+  background-size: 16px 16px;
+}
+
+.scenePrimaryMedia img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.scenePrimaryCaption {
+  min-width: 0;
+}
+
+.promptCard.is-scene .candidateGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 150px;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .promptCard.is-generating::after {
@@ -1697,8 +1828,17 @@ body {
     grid-template-columns: 1fr;
   }
 
+  .sceneCutOverlayButton .MuiIconButton-root {
+    width: 36px;
+    height: 36px;
+  }
+
   .candidateGrid {
     grid-template-columns: 1fr;
+  }
+
+  .promptCard.is-scene .candidateGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .videoSettingsGrid,

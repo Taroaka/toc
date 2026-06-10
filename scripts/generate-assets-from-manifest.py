@@ -24,7 +24,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 try:
     import yaml  # type: ignore[import-not-found]
@@ -399,6 +399,10 @@ def _as_opt_bool(value: Any) -> bool | None:
 
 def _dict_value(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_value(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _node_cut_contract(node: dict[str, Any]) -> dict[str, Any]:
@@ -3981,70 +3985,752 @@ def _sanitize_contract_prompt_text(text: str) -> str:
     return value.strip()
 
 
-def _cut_contract_image_prompt_block(contract: dict[str, Any]) -> str:
-    if not contract:
-        return ""
+def _dedupe_nonempty(values: Iterable[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _sanitize_contract_prompt_text(str(value or ""))
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _strip_legacy_prompt_blocks(prompt: str) -> str:
     lines: list[str] = []
-    target_beat = _sanitize_contract_prompt_text(_contract_text(contract, "target_beat", "viewer_contract.target_beat"))
-    visual_proof = _sanitize_contract_prompt_text(_contract_text(contract, "visual_beat", "viewer_contract.visual_proof"))
-    first_frame = _sanitize_contract_prompt_text(_contract_text(contract, "first_frame_brief", "first_frame_contract.first_frame_brief"))
-    screen_question = _sanitize_contract_prompt_text(_contract_text(contract, "screen_question", "viewer_contract.screen_question"))
-    audience_delta = _sanitize_contract_prompt_text(_contract_text(contract, "audience_knowledge_delta", "viewer_contract.audience_knowledge_delta"))
-    causal_proof = _sanitize_contract_prompt_text(_contract_text(contract, "causal_proof", "viewer_contract.causal_proof"))
-    static_rule = _sanitize_contract_prompt_text(_contract_text(contract, "static_first_frame_rule", "first_frame_contract.static_first_frame_rule"))
-    visual_evidence = [
-        _sanitize_contract_prompt_text(item)
-        for item in _contract_list(contract, "visual_evidence", "viewer_contract.visual_evidence")
+    skip_old_heading = False
+    for raw in (prompt or "").splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            skip_old_heading = False
+            continue
+        if re.fullmatch(r"\[(?:全体\s*/\s*不変条件|登場人物|小道具\s*/\s*舞台装置|シーン|連続性|禁止|cut契約からの可視要件)\]", stripped):
+            skip_old_heading = True
+            continue
+        if skip_old_heading:
+            skip_old_heading = False
+        if re.search(r"場面の核:|画面上の問い:|観客理解の増分:|因果の証明:|映像で成立させる証拠:|必要な役割:|motion_brief:", stripped):
+            continue
+        cleaned = _sanitize_contract_prompt_text(stripped)
+        if cleaned:
+            lines.append(cleaned)
+    return " ".join(_dedupe_nonempty(lines))
+
+
+def _source_event_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return _dict_value(contract.get("source_event_contract"))
+
+
+def _first_frame_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return _dict_value(contract.get("first_frame_contract"))
+
+
+def _viewer_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return _dict_value(contract.get("viewer_contract"))
+
+
+def _event_context_for_cut(contract: dict[str, Any]) -> dict[str, Any]:
+    return _dict_value(contract.get("event_context_for_cut"))
+
+
+def _image_prompt_section(title: str, lines: Iterable[Any]) -> str:
+    cleaned = _dedupe_nonempty(lines)
+    if not cleaned:
+        cleaned = ["未指定の項目は、他のblockの具体描写と参照画像に矛盾しない範囲で自然に補完する。"]
+    return f"[{title}]\n" + "\n".join(cleaned)
+
+
+def _reference_usage_lines(scene: SceneSpec) -> list[str]:
+    lines: list[str] = []
+    if scene.image_character_ids:
+        lines.append("人物参照: " + ", ".join(scene.image_character_ids) + " の顔、体格、衣装状態を維持する。")
+    if scene.image_location_ids:
+        lines.append("場所参照: " + ", ".join(scene.image_location_ids) + " の空間構造、床、壁、光源を背景基準にする。")
+    if scene.image_object_ids:
+        lines.append("小道具参照: " + ", ".join(scene.image_object_ids) + " の形状、素材、サイズ感を維持する。")
+    if scene.image_references and not lines:
+        lines.append("参照画像: " + " / ".join(scene.image_references) + " を、人物・場所・小道具の外観基準として使う。")
+    if scene.image_references:
+        lines.append("参照パス: " + " / ".join(scene.image_references))
+    return lines
+
+
+def _cut_start_state_lines(scene: SceneSpec) -> list[str]:
+    contract = scene.cut_contract
+    source = _source_event_contract(contract)
+    first_frame = _first_frame_contract(contract)
+    event_context = _event_context_for_cut(contract)
+    primary_beat = _dict_value(event_context.get("primary_event_beat"))
+    source_ids = _ensure_str_list(source.get("source_event_beat_ids"))
+    primary_id = _contract_text(source, "primary_event_beat_id") or _contract_text(first_frame, "source_event_beat_id")
+    lines = [
+        f"source_event_beat_id: {primary_id or (source_ids[0] if source_ids else 'unknown')}",
+        f"event_beat_function: {_contract_text(source, 'event_beat_function') or _contract_text(primary_beat, 'beat_function') or 'unknown'}",
+        f"event_time_position: {_contract_text(source, 'event_time_position') or _contract_text(first_frame, 'event_time_position') or 'before_trigger'}",
     ]
-    required_roles = [
-        _sanitize_contract_prompt_text(item)
-        for item in _contract_list(contract, "required_roles", "viewer_contract.required_roles")
+    what_happens = (
+        _contract_text(source, "source_event_summary")
+        or _contract_text(primary_beat, "what_happens")
+        or _contract_text(_viewer_contract(contract), "target_beat")
+    )
+    if what_happens:
+        lines.append(f"what_happens: {what_happens}")
+    visible_action = _contract_text(source, "source_visible_action") or _contract_text(primary_beat, "visible_action")
+    if visible_action:
+        lines.append(f"visible_action: {visible_action}")
+    visible_reaction = _contract_text(source, "source_visible_reaction") or _contract_text(primary_beat, "visible_reaction")
+    if visible_reaction:
+        lines.append(f"visible_reaction: {visible_reaction}")
+    visible_fact = _contract_text(first_frame, "event_fact_visible_in_still") or _contract_text(first_frame, "first_frame_brief")
+    if visible_fact:
+        lines.append(f"event_fact_visible_in_still: {visible_fact}")
+    not_yet = _dedupe_nonempty(
+        _contract_list(first_frame, "not_yet_happened_in_still")
+        + _contract_list(source, "event_facts_not_to_invent")
+        + _ensure_str_list(event_context.get("forbidden_event_changes"))
+    )
+    lines.append("not_yet_happened_in_still: " + (" / ".join(not_yet) if not_yet else "このcutの後続結果、次sceneの解決、未承認のrevealをまだ見せない。"))
+    return lines
+
+
+def _must_include_lines(scene: SceneSpec, base_prompt: str) -> list[str]:
+    contract = scene.cut_contract
+    viewer = _viewer_contract(contract)
+    source = _source_event_contract(contract)
+    first_frame = _first_frame_contract(contract)
+    values = (
+        _contract_list(viewer, "must_show")
+        + _contract_list(first_frame, "must_include")
+        + scene.image_character_ids
+        + scene.image_object_ids
+        + scene.image_location_ids
+        + _contract_list(source, "event_facts_to_preserve")
+    )
+    cleaned = _dedupe_nonempty(values)
+    if base_prompt:
+        cleaned.append("追加の具体描写: " + base_prompt)
+    return cleaned
+
+
+def _must_not_include_lines(scene: SceneSpec) -> list[str]:
+    contract = scene.cut_contract
+    viewer = _viewer_contract(contract)
+    source = _source_event_contract(contract)
+    first_frame = _first_frame_contract(contract)
+    event_context = _event_context_for_cut(contract)
+    return _dedupe_nonempty(
+        _contract_list(viewer, "must_avoid")
+        + _contract_list(first_frame, "must_avoid")
+        + _contract_list(first_frame, "not_yet_happened_in_still")
+        + _contract_list(source, "event_facts_not_to_invent")
+        + _contract_list(source, "forbidden_reveal_info_ids")
+        + _ensure_str_list(event_context.get("forbidden_event_changes"))
+    )
+
+
+def _character_state_lines(scene: SceneSpec) -> list[str]:
+    first_frame = _first_frame_contract(scene.cut_contract)
+    visible = _dict_value(first_frame.get("visible_start_state"))
+    continuity = _dict_value(scene.cut_contract.get("continuity_contract"))
+    start_state = _dict_value(continuity.get("start_state"))
+    lines = []
+    costume = str(visible.get("costume_state") or start_state.get("character_state") or "").strip()
+    if costume:
+        lines.append(f"costume_state: {costume}")
+    elif scene.image_character_ids:
+        lines.append("costume_state: 参照画像とcutの時点に合う衣装状態を維持し、後続の衣装状態を先取りしない。")
+    pose = str(visible.get("pose") or _contract_text(first_frame, "first_frame_brief") or "").strip()
+    if pose:
+        lines.append(f"pose: {pose}")
+    gaze = str(visible.get("gaze_or_attention") or visible.get("gaze") or "").strip()
+    if gaze:
+        lines.append(f"gaze: {gaze}")
+    emotional = str(visible.get("emotional_state") or first_frame.get("emotional_state") or "").strip()
+    if emotional:
+        lines.append(f"emotional_state: {emotional}")
+    return lines
+
+
+def _prop_setpiece_lines(scene: SceneSpec) -> list[str]:
+    contract = scene.cut_contract
+    source = _source_event_contract(contract)
+    event_context = _event_context_for_cut(contract)
+    allowed = _contract_list(source, "allowed_reveal_info_ids")
+    forbidden = _contract_list(source, "forbidden_reveal_info_ids") + _ensure_str_list(event_context.get("forbidden_event_changes"))
+    lines: list[str] = []
+    if scene.image_object_ids:
+        lines.append("object_state: " + ", ".join(scene.image_object_ids) + " を物語上の証拠として画面内の実物にする。")
+        lines.append("visibility: " + ", ".join(f"{item}=clearly_visible" for item in scene.image_object_ids))
+    elif allowed:
+        lines.append("object_state: allowed reveal objects are visible only as required by this cut.")
+        lines.append("visibility: " + ", ".join(f"{item}=clearly_visible" for item in allowed))
+    else:
+        lines.append("object_state: このcutで承認された小道具だけを画面に置く。")
+        lines.append("visibility: 未承認または後続revealの小道具は hidden。")
+    if forbidden:
+        lines.append("must_not_show_yet: " + " / ".join(_dedupe_nonempty(forbidden)))
+    meaning = _contract_text(_viewer_contract(contract), "visual_proof") or _contract_text(source, "source_event_summary")
+    if meaning:
+        lines.append(f"story_meaning_in_this_cut: {meaning}")
+    return lines
+
+
+def _composition_lines(scene: SceneSpec) -> list[str]:
+    cinematic = _dict_value(scene.cut_contract.get("cinematic_contract"))
+    geography = _dict_value(cinematic.get("screen_geography"))
+    priority = _dict_value(cinematic.get("subject_priority"))
+    lines = [
+        f"aspect_ratio: {scene.image_aspect_ratio or '16:9'}",
+        f"shot_size: {str(cinematic.get('shot_size') or 'medium wide').strip()}",
+        f"camera_angle: {str(cinematic.get('camera_angle') or cinematic.get('camera_height') or '目線に近い映画的な高さ').strip()}",
+        f"foreground: {str(geography.get('foreground') or '主要な小道具、足元、手元などの近景証拠').strip()}",
+        f"midground: {str(geography.get('midground') or '主要人物の姿勢、表情、視線').strip()}",
+        f"background: {str(geography.get('background') or '場所が読める建築、床、壁、空気感').strip()}",
     ]
-    must_show = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_show", "viewer_contract.must_show")]
-    must_avoid = [_sanitize_contract_prompt_text(item) for item in _contract_list(contract, "must_avoid", "viewer_contract.must_avoid", "first_frame_contract.must_avoid")]
-    geography = _dict_value(_contract_value(contract, "cinematic_contract.screen_geography"))
-    subject_priority = _dict_value(_contract_value(contract, "cinematic_contract.subject_priority"))
-    continuity = _dict_value(_contract_value(contract, "continuity_contract"))
-    if target_beat:
-        lines.append(f"場面の核: {target_beat}")
-    if screen_question:
-        lines.append(f"画面上の問い: {screen_question}")
-    if audience_delta:
-        lines.append(f"観客理解の増分: {audience_delta}")
-    if causal_proof:
-        lines.append(f"因果の証明: {causal_proof}")
-    if visual_proof:
-        lines.append(f"映像で成立させる証拠: {visual_proof}")
-    if visual_evidence:
-        lines.append("画面に置く証拠: " + " / ".join(item for item in visual_evidence if item))
-    if required_roles:
-        lines.append("必要な役割: " + " / ".join(item for item in required_roles if item))
-    if first_frame:
-        lines.append(f"初期状態: {first_frame}")
-    if static_rule:
-        lines.append(f"静止画ルール: {static_rule}")
-    if subject_priority:
-        for label, key in (("主役", "primary"), ("副要素", "secondary"), ("背景要素", "background")):
-            value = _sanitize_contract_prompt_text(str(subject_priority.get(key) or ""))
-            if value:
-                lines.append(f"{label}: {value}")
-    if geography:
-        for label, key in (("前景", "foreground"), ("中景", "midground"), ("背景", "background"), ("画面方向", "screen_direction")):
-            value = _sanitize_contract_prompt_text(str(geography.get(key) or ""))
-            if value:
-                lines.append(f"{label}: {value}")
-    carry_forward = continuity.get("carry_forward_to_next_cut") if isinstance(continuity, dict) else None
-    if isinstance(carry_forward, list) and carry_forward:
-        items = [_sanitize_contract_prompt_text(str(item)) for item in carry_forward if _sanitize_contract_prompt_text(str(item))]
-        if items:
-            lines.append("維持する連続性: " + " / ".join(items))
-    if must_show:
-        lines.append("必ず見せる: " + " / ".join(item for item in must_show if item))
-    if must_avoid:
-        lines.append("入れない: " + " / ".join(item for item in must_avoid if item))
+    if priority:
+        lines.append("subject_priority: " + " / ".join(f"{key}={value}" for key, value in priority.items() if str(value).strip()))
+    return lines
+
+
+def _light_material_lines(scene: SceneSpec, base_prompt: str) -> list[str]:
+    first_frame = _first_frame_contract(scene.cut_contract)
+    visible = _dict_value(first_frame.get("visible_start_state"))
+    lines = [
+        f"light_source: {str(visible.get('light_source') or 'scene固有の自然な光源').strip()}",
+        f"light_direction: {str(visible.get('light_direction') or '人物と小道具の形が読める方向').strip()}",
+    ]
+    material = str(visible.get("dominant_materials") or "").strip()
+    if not material:
+        material_terms = [term for term in ("灰", "布", "木", "石", "金属", "ガラス", "水", "砂", "床", "階段") if term in base_prompt]
+        material = "、".join(material_terms) if material_terms else "場所固有の床、壁、衣服、小道具の質感"
+    lines.append(f"dominant_materials: {material}")
+    air = str(visible.get("air_quality") or "").strip()
+    if air:
+        lines.append(f"air_quality: {air}")
+    return lines
+
+
+def _motion_start_affordance_lines(scene: SceneSpec) -> list[str]:
+    first_frame = _first_frame_contract(scene.cut_contract)
+    affordance = _dict_value(first_frame.get("motion_start_affordance"))
+    lines = []
+    for key in ("movable_subject", "movement_vector", "motion_should_start_from", "camera_start_reason", "must_not_resolve_in_image"):
+        value = str(affordance.get(key) or "").strip()
+        if value:
+            lines.append(f"{key}: {value}")
     if not lines:
-        return ""
-    return "[cut契約からの可視要件]\n" + "\n".join(lines)
+        visible_action = _contract_text(_source_event_contract(scene.cut_contract), "source_visible_action")
+        if visible_action:
+            lines.append(f"movable_subject: {visible_action}")
+        lines.append("motion_should_start_from: この静止画に見える初期姿勢と視線から自然に動き出す。")
+        lines.append("must_not_resolve_in_image: 行為完了後、次beat、次sceneの結果まで進めない。")
+    return lines
+
+
+def _infer_action_completion_state(event_time_position: str, first_frame: dict[str, Any]) -> str:
+    explicit = str(first_frame.get("action_completion_state") or "").strip()
+    if explicit:
+        return explicit
+    return {
+        "before_trigger": "pre_action",
+        "trigger_moment": "early_action",
+        "early_action": "early_action",
+        "mid_action": "mid_action",
+        "consequence": "aftermath",
+        "reaction_after": "aftermath",
+        "handoff_after": "hold",
+    }.get(event_time_position, "hold")
+
+
+def _first_frame_visible_text(scene: SceneSpec) -> str:
+    first_frame = _first_frame_contract(scene.cut_contract)
+    source = _source_event_contract(scene.cut_contract)
+    event_context = _event_context_for_cut(scene.cut_contract)
+    primary_beat = _dict_value(event_context.get("primary_event_beat"))
+    return (
+        _contract_text(first_frame, "event_fact_visible_in_still")
+        or _contract_text(first_frame, "first_frame_brief")
+        or _contract_text(source, "source_visible_action")
+        or _contract_text(primary_beat, "visible_action")
+        or _contract_text(_viewer_contract(scene.cut_contract), "visual_proof")
+        or _strip_legacy_prompt_blocks(scene.image_prompt or "")
+    )
+
+
+def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+    contract = cut_contract if isinstance(cut_contract, dict) else scene.cut_contract
+    source = _source_event_contract(contract)
+    first_frame = _first_frame_contract(contract)
+    viewer = _viewer_contract(contract)
+    event_context = _event_context_for_cut(contract)
+    primary_beat = _dict_value(event_context.get("primary_event_beat"))
+    cinematic = _dict_value(contract.get("cinematic_contract"))
+    geography = _dict_value(cinematic.get("screen_geography"))
+    priority = _dict_value(cinematic.get("subject_priority"))
+    continuity = _dict_value(contract.get("continuity_contract"))
+    visible_start = _dict_value(first_frame.get("visible_start_state"))
+    motion_affordance = _dict_value(first_frame.get("motion_start_affordance"))
+    motion_contract = _dict_value(contract.get("motion_contract"))
+
+    source_ids = _ensure_str_list(source.get("source_event_beat_ids"))
+    primary_id = (
+        _contract_text(source, "primary_event_beat_id")
+        or _contract_text(first_frame, "source_event_beat_id")
+        or _contract_text(primary_beat, "beat_id")
+        or (source_ids[0] if source_ids else "unknown")
+    )
+    event_time_position = (
+        _contract_text(source, "event_time_position")
+        or _contract_text(first_frame, "event_time_position")
+        or "before_trigger"
+    )
+    action_completion_state = _infer_action_completion_state(event_time_position, first_frame)
+    not_yet = _dedupe_nonempty(
+        _contract_list(first_frame, "not_yet_happened_in_still")
+        + _contract_list(source, "event_facts_not_to_invent")
+        + _ensure_str_list(event_context.get("forbidden_event_changes"))
+        + _contract_list(motion_contract, "must_not_advance_to_event_beat_ids")
+    )
+    if not not_yet:
+        not_yet = ["このcutの後続結果、次sceneの解決、未承認のrevealをまだ見せない。"]
+
+    event_fact_visible = _first_frame_visible_text(scene)
+    must_show = _dedupe_nonempty(
+        _contract_list(viewer, "must_show")
+        + _contract_list(first_frame, "must_include")
+        + scene.image_character_ids
+        + scene.image_object_ids
+        + scene.image_location_ids
+        + _contract_list(source, "event_facts_to_preserve")
+    )
+    primary_anchor = (
+        str(priority.get("primary") or "").strip()
+        or (must_show[0] if must_show else "")
+        or event_fact_visible
+        or "このcutの主役になる人物・小道具・場所の証拠"
+    )
+    secondary_anchors = _dedupe_nonempty(
+        [str(priority.get("secondary") or "").strip()]
+        + must_show[1:4]
+        + [str(priority.get("tertiary") or "").strip()]
+    )
+    forbidden_reveals = _dedupe_nonempty(
+        _contract_list(source, "forbidden_reveal_info_ids")
+        + _contract_list(first_frame, "must_avoid")
+        + _contract_list(viewer, "must_avoid")
+        + _ensure_str_list(event_context.get("forbidden_event_changes"))
+    )
+    object_entries = []
+    for object_id in scene.image_object_ids:
+        object_entries.append(
+            {
+                "object_id": object_id,
+                "object_name": object_id,
+                "visibility_in_this_cut": "clearly_visible",
+                "object_state": f"{object_id} をこのcutの出来事に関係する実物として画面内に置く。",
+                "relation_to_character": "主要人物の視線、手元、足元、または進路と関係づける。",
+                "relation_to_event": event_fact_visible,
+                "story_meaning_in_this_cut": _contract_text(viewer, "visual_proof") or _contract_text(source, "source_event_summary"),
+                "required_screen_position": "foreground" if object_id == scene.image_object_ids[0] else "midground",
+                "must_not_show_states": forbidden_reveals,
+            }
+        )
+    if not object_entries:
+        object_entries.append(
+            {
+                "object_id": "approved_story_evidence",
+                "object_name": "このcutで承認された物語上の証拠",
+                "visibility_in_this_cut": "hinted",
+                "object_state": "未承認または後続revealの小道具は出さない。",
+                "relation_to_character": "主要人物の行為や視線と矛盾しない位置。",
+                "relation_to_event": event_fact_visible,
+                "story_meaning_in_this_cut": _contract_text(viewer, "visual_proof") or _contract_text(source, "source_event_summary"),
+                "required_screen_position": "midground",
+                "must_not_show_states": forbidden_reveals,
+            }
+        )
+
+    material = str(visible_start.get("dominant_materials") or "").strip()
+    if not material:
+        base_prompt = _strip_legacy_prompt_blocks(scene.image_prompt or "")
+        material_terms = [term for term in ("灰", "布", "木", "石", "金属", "ガラス", "水", "砂", "床", "階段") if term in base_prompt]
+        material = "、".join(material_terms) if material_terms else "場所固有の床、壁、衣服、小道具の質感"
+
+    movement_vector = str(
+        motion_affordance.get("movement_vector")
+        or motion_contract.get("movement_vector")
+        or motion_contract.get("subject_motion")
+        or ""
+    ).strip()
+    if not movement_vector:
+        movement_vector = "画面内の姿勢、視線、手足の位置から次の動きが自然に始まる方向。"
+    movable_subject = str(
+        motion_affordance.get("movable_subject")
+        or motion_affordance.get("subject_id")
+        or _contract_text(source, "source_visible_action")
+        or primary_anchor
+    ).strip()
+
+    return {
+        "schema_version": "first_frame_visual_plan_v1",
+        "derived_from": [
+            "scene_event.event_sequence[]",
+            "cut_contract.source_event_contract",
+            "cut_contract.first_frame_contract",
+            "cut_contract.motion_contract",
+            "cut_contract.event_context_for_cut",
+        ],
+        "editable": False,
+        "source_grounding": {
+            "scene_id": scene.scene_id,
+            "cut_id": scene.manifest_cut_id or "",
+            "source_event_beat_id": primary_id,
+            "source_event_beat_ids": source_ids or [primary_id],
+            "event_beat_function": _contract_text(source, "event_beat_function") or _contract_text(primary_beat, "beat_function") or "custom",
+            "cut_function": _contract_text(contract, "cut_function") or "custom",
+            "what_happens": _contract_text(source, "source_event_summary") or _contract_text(primary_beat, "what_happens") or _contract_text(viewer, "target_beat"),
+            "visible_action": _contract_text(source, "source_visible_action") or _contract_text(primary_beat, "visible_action"),
+            "visible_reaction": _contract_text(source, "source_visible_reaction") or _contract_text(primary_beat, "visible_reaction"),
+            "event_facts_to_preserve": _contract_list(source, "event_facts_to_preserve"),
+            "event_facts_not_to_invent": _contract_list(source, "event_facts_not_to_invent"),
+            "allowed_reveal_info_ids": _contract_list(source, "allowed_reveal_info_ids"),
+            "forbidden_reveal_info_ids": _contract_list(source, "forbidden_reveal_info_ids"),
+        },
+        "temporal_boundary": {
+            "event_time_position": event_time_position,
+            "first_visible_moment": event_fact_visible,
+            "action_completion_state": action_completion_state,
+            "event_fact_visible_in_still": event_fact_visible,
+            "not_yet_happened_in_still": not_yet,
+            "forbidden_future_event_beat_ids": _contract_list(motion_contract, "must_not_advance_to_event_beat_ids"),
+            "forbidden_future_outcomes": not_yet,
+            "still_must_not_show_completion": True,
+            "one_visible_moment_rule": True,
+        },
+        "visual_translation": {
+            "abstract_intent_terms": [],
+            "concrete_visible_evidence": [
+                {"abstract_term": "cutの出来事", "visible_substitute": event_fact_visible, "must_be_drawn_as": event_fact_visible}
+            ],
+            "nonvisual_terms_to_exclude_from_prompt": ["場面の核", "観客理解", "因果の証明", "価値変化", "場所の圧力"],
+            "imageable_causal_proof": _contract_text(viewer, "visual_proof") or event_fact_visible,
+            "imageable_pressure": _contract_text(viewer, "screen_question") or _contract_text(source, "source_visible_action"),
+            "imageable_value_shift_evidence": _contract_text(viewer, "done_when") or event_fact_visible,
+            "imageable_handoff_anchor": _contract_text(viewer, "handoff") or "",
+        },
+        "subject_binding": {
+            "primary_subject": {
+                "id": primary_anchor,
+                "name": primary_anchor,
+                "role": "protagonist" if scene.image_character_ids else "proof_object",
+                "must_be_clearly_readable": True,
+                "screen_priority": 1,
+            },
+            "secondary_subjects": [
+                {"id": item, "name": item, "role": "supporting_visual_anchor", "relation_to_primary": "主役の行為や証拠を補強する。", "screen_priority": index + 2}
+                for index, item in enumerate(secondary_anchors)
+            ],
+            "background_subjects": [
+                {"id": item, "name": item, "role": "location_anchor", "visibility": "clearly_visible"}
+                for item in scene.image_location_ids
+            ],
+        },
+        "reference_binding": {
+            "character_references": [
+                {
+                    "reference_label": ref,
+                    "target_character_id": ref,
+                    "preserve": ["face", "body_type", "hair", "costume_shape"],
+                    "may_change": ["pose", "gaze", "lighting"],
+                    "must_not_change": [],
+                }
+                for ref in scene.image_character_ids
+            ],
+            "object_references": [
+                {
+                    "reference_label": ref,
+                    "target_object_id": ref,
+                    "preserve": ["silhouette", "material", "scale"],
+                    "required_visibility": "clearly_visible",
+                }
+                for ref in scene.image_object_ids
+            ],
+            "location_references": [
+                {
+                    "reference_label": ref,
+                    "target_location_id": ref,
+                    "preserve": ["layout", "material", "lighting_family"],
+                    "may_change": ["camera_angle", "foreground_blocking"],
+                }
+                for ref in scene.image_location_ids
+            ],
+        },
+        "character_state_gate": {
+            "costume_state": str(visible_start.get("costume_state") or _dict_value(continuity.get("start_state")).get("character_state") or "参照画像とcutの時点に合う衣装状態を維持する。").strip(),
+            "hair_state": str(visible_start.get("hair_state") or "参照画像とcut時点に合う髪型を維持する。").strip(),
+            "physical_state": str(visible_start.get("physical_state") or event_fact_visible).strip(),
+            "pose": str(visible_start.get("pose") or first_frame.get("first_frame_brief") or event_fact_visible).strip(),
+            "gaze": str(visible_start.get("gaze_or_attention") or visible_start.get("gaze") or "主要な出来事の証拠へ向く。").strip(),
+            "expression": str(visible_start.get("expression") or first_frame.get("expression") or "このcutの圧力や選択が読める表情。").strip(),
+            "emotional_state": str(visible_start.get("emotional_state") or first_frame.get("emotional_state") or "scene内の現在の感情状態。").strip(),
+            "hand_position": str(visible_start.get("hand_position") or "行為が始まる直前または途中だと読める手の位置。").strip(),
+            "foot_position": str(visible_start.get("foot_position") or "次に動き出せる足元の重心。").strip(),
+            "continuity_must_preserve": _contract_list(continuity, "must_preserve"),
+            "must_not_show_character_states": _contract_list(first_frame, "must_not_show_character_states"),
+        },
+        "object_visibility_gate": {"objects": object_entries},
+        "spatial_composition": {
+            "aspect_ratio": scene.image_aspect_ratio or "16:9",
+            "shot_size": str(cinematic.get("shot_size") or "medium_wide").strip(),
+            "camera_height": str(cinematic.get("camera_height") or "目線に近い映画的な高さ").strip(),
+            "camera_angle": str(cinematic.get("camera_angle") or cinematic.get("camera_height") or "目線に近い映画的な高さ").strip(),
+            "lens_feel": str(cinematic.get("lens_feel") or "自然な遠近感").strip(),
+            "depth_of_field": str(cinematic.get("depth_of_field") or "主役と物語上の証拠が読める被写界深度").strip(),
+            "subject_priority_order": _dedupe_nonempty([primary_anchor] + secondary_anchors + scene.image_location_ids),
+            "foreground": str(geography.get("foreground") or "主要な小道具、足元、手元などの近景証拠").strip(),
+            "midground": str(geography.get("midground") or "主要人物の姿勢、表情、視線").strip(),
+            "background": str(geography.get("background") or "場所が読める建築、床、壁、空気感").strip(),
+            "negative_space": str(geography.get("negative_space") or "動き出す方向に余白を残す。").strip(),
+            "gaze_path": str(geography.get("gaze_path") or "主要人物の視線が物語上の証拠へ流れる。").strip(),
+            "screen_direction": str(geography.get("screen_direction") or "static").strip(),
+            "frame_edge_handoff": str(geography.get("frame_edge_handoff") or "次の動きが始まる画面端に余白を残す。").strip(),
+        },
+        "scene_material_pack": {
+            "location_id": scene.image_location_ids[0] if scene.image_location_ids else "",
+            "dominant_materials": [material],
+            "light_source": str(visible_start.get("light_source") or "scene固有の自然な光源").strip(),
+            "light_direction": str(visible_start.get("light_direction") or "人物と小道具の形が読める方向").strip(),
+            "light_quality": str(visible_start.get("light_quality") or "映画的だが場所に固有の光質").strip(),
+            "air_quality": str(visible_start.get("air_quality") or "場所の空気感が読める。").strip(),
+            "floor_or_ground_texture": str(visible_start.get("floor_or_ground_texture") or "足元の床または地面の質感。").strip(),
+            "background_texture": str(visible_start.get("background_texture") or "背景の壁、床、空、建築の質感。").strip(),
+            "story_specific_texture": str(visible_start.get("story_specific_texture") or material).strip(),
+            "material_must_not_leak_from_other_scenes": _contract_list(first_frame, "material_must_not_include"),
+        },
+        "motion_affordance": {
+            "movable_subjects": [
+                {
+                    "subject_id": movable_subject,
+                    "visible_start_state": event_fact_visible,
+                    "movement_vector": movement_vector,
+                    "motion_can_begin_from_this_still": True,
+                }
+            ],
+            "camera_start_reason": str(motion_affordance.get("camera_start_reason") or "主役と物語上の証拠を追える位置から動き出せる。").strip(),
+            "image_supports_motion_start": True,
+            "must_not_resolve_in_image": _ensure_str_list(motion_affordance.get("must_not_resolve_in_image")) or not_yet,
+            "motion_ceiling": {
+                "must_stop_before_event_beat_ids": _contract_list(motion_contract, "must_not_advance_to_event_beat_ids"),
+                "must_not_complete_outcomes": _ensure_str_list(motion_affordance.get("must_not_resolve_in_image")) or not_yet,
+            },
+        },
+        "prompt_rendering_policy": {
+            "render_only_drawable_information": True,
+            "do_not_render_internal_ids_except_source_event_beat_id": True,
+            "do_not_render_design_meta": True,
+            "do_not_render_future_motion_as_action": True,
+            "convert_abstract_terms_to_visible_evidence": True,
+            "final_prompt_language": "Japanese",
+            "final_prompt_style": "concrete_visual_prompt",
+        },
+        "validation_gates": {
+            "event_source_present": bool(primary_id),
+            "temporal_boundary_present": bool(event_time_position),
+            "not_yet_state_present": bool(not_yet),
+            "single_moment_preserved": True,
+            "visual_translation_complete": bool(event_fact_visible),
+            "reference_binding_complete": bool(scene.image_references or scene.image_character_ids or scene.image_object_ids or scene.image_location_ids),
+            "character_state_gate_complete": True,
+            "object_visibility_gate_complete": bool(object_entries),
+            "composition_specific": True,
+            "scene_material_specific": True,
+            "motion_affordance_complete": bool(movable_subject and movement_vector),
+            "no_design_meta_leak": True,
+            "no_future_event_leak": True,
+        },
+    }
+
+
+def _render_first_frame_image_prompt(plan: dict[str, Any], *, base_prompt: str) -> str:
+    source = _dict_value(plan.get("source_grounding"))
+    temporal = _dict_value(plan.get("temporal_boundary"))
+    visual = _dict_value(plan.get("visual_translation"))
+    subjects = _dict_value(plan.get("subject_binding"))
+    references = _dict_value(plan.get("reference_binding"))
+    character = _dict_value(plan.get("character_state_gate"))
+    objects = _dict_value(plan.get("object_visibility_gate"))
+    composition = _dict_value(plan.get("spatial_composition"))
+    material = _dict_value(plan.get("scene_material_pack"))
+    motion = _dict_value(plan.get("motion_affordance"))
+
+    character_refs = [
+        f"人物参照: {item.get('target_character_id')} は face/body_type/hair/costume_shape を維持し、pose/gaze/lighting だけをcutに合わせる。"
+        for item in _list_value(references.get("character_references"))
+        if isinstance(item, dict) and str(item.get("target_character_id") or "").strip()
+    ]
+    object_refs = [
+        f"小道具参照: {item.get('target_object_id')} は silhouette/material/scale を維持し、visibility={item.get('required_visibility') or 'clearly_visible'}。"
+        for item in _list_value(references.get("object_references"))
+        if isinstance(item, dict) and str(item.get("target_object_id") or "").strip()
+    ]
+    location_refs = [
+        f"場所参照: {item.get('target_location_id')} は layout/material/lighting_family を維持し、camera_angle と foreground_blocking だけをcutに合わせる。"
+        for item in _list_value(references.get("location_references"))
+        if isinstance(item, dict) and str(item.get("target_location_id") or "").strip()
+    ]
+    primary = _dict_value(subjects.get("primary_subject"))
+    secondary = [item for item in _list_value(subjects.get("secondary_subjects")) if isinstance(item, dict)]
+    background = [item for item in _list_value(subjects.get("background_subjects")) if isinstance(item, dict)]
+    evidence = [
+        str(item.get("must_be_drawn_as") or item.get("visible_substitute") or "").strip()
+        for item in _list_value(visual.get("concrete_visible_evidence"))
+        if isinstance(item, dict)
+    ]
+    object_lines: list[str] = []
+    for item in _list_value(objects.get("objects")):
+        if not isinstance(item, dict):
+            continue
+        object_lines.extend(
+            _dedupe_nonempty(
+                [
+                    f"object_id: {item.get('object_id')}",
+                    f"object_state: {item.get('object_state')}",
+                    f"visibility: {item.get('visibility_in_this_cut')}",
+                    f"relation_to_character: {item.get('relation_to_character')}",
+                    f"relation_to_event: {item.get('relation_to_event')}",
+                    f"story_meaning_in_this_cut: {item.get('story_meaning_in_this_cut')}",
+                    f"required_screen_position: {item.get('required_screen_position')}",
+                    "must_not_show_states: " + " / ".join(_ensure_str_list(item.get("must_not_show_states"))),
+                ]
+            )
+        )
+
+    movable_lines: list[str] = []
+    for item in _list_value(motion.get("movable_subjects")):
+        if isinstance(item, dict):
+            movable_lines.extend(
+                _dedupe_nonempty(
+                    [
+                        f"movable_subject: {item.get('subject_id')}",
+                        f"movement_vector: {item.get('movement_vector')}",
+                        f"motion_should_start_from: {item.get('visible_start_state')}",
+                    ]
+                )
+            )
+
+    blocks = [
+        _image_prompt_section("参照画像の使い方", character_refs + object_refs + location_refs),
+        _image_prompt_section(
+            "このcutの開始状態",
+            [
+                f"source_event_beat_id: {source.get('source_event_beat_id')}",
+                f"event_beat_function: {source.get('event_beat_function')}",
+                f"event_time_position: {temporal.get('event_time_position')}",
+                f"what_happens: {source.get('what_happens')}",
+                f"visible_action: {source.get('visible_action')}",
+                f"visible_reaction: {source.get('visible_reaction')}",
+                f"event_fact_visible_in_still: {temporal.get('event_fact_visible_in_still')}",
+                "not_yet_happened_in_still: " + " / ".join(_ensure_str_list(temporal.get("not_yet_happened_in_still"))),
+                f"action_completion_state: {temporal.get('action_completion_state')}",
+                "forbidden_future_event_beat_ids: " + " / ".join(_ensure_str_list(temporal.get("forbidden_future_event_beat_ids"))),
+            ],
+        ),
+        _image_prompt_section(
+            "単一瞬間ルール",
+            [
+                f"visible_moment: {temporal.get('first_visible_moment')}",
+                "must_not_mix: before_event / during_event / after_event / montage",
+                "この画像は1つの瞬間だけを描く。同じ画像内に出来事の前・途中・後を同時に入れない。",
+            ],
+        ),
+        _image_prompt_section(
+            "画面に必ず見えるもの",
+            [
+                f"primary_visual_anchor: {primary.get('name') or primary.get('id')}",
+                "secondary_visual_anchors: " + " / ".join(_dedupe_nonempty([str(item.get("name") or item.get("id") or "") for item in secondary])),
+                "location_anchor: " + " / ".join(_dedupe_nonempty([str(item.get("name") or item.get("id") or "") for item in background])),
+                f"light_anchor: {material.get('light_source')} / {material.get('light_direction')}",
+                "required_story_evidence: " + " / ".join(_dedupe_nonempty(evidence + [str(visual.get("imageable_causal_proof") or "")])),
+                f"追加の具体描写: {base_prompt}" if base_prompt else "",
+            ],
+        ),
+        _image_prompt_section(
+            "画面に入れてはいけないもの",
+            [
+                "forbidden_later_events: " + " / ".join(_ensure_str_list(temporal.get("forbidden_future_outcomes"))),
+                "forbidden_reveals: " + " / ".join(_ensure_str_list(source.get("forbidden_reveal_info_ids"))),
+                "forbidden_character_states: " + " / ".join(_ensure_str_list(character.get("must_not_show_character_states"))),
+                "forbidden_object_states: " + " / ".join(_ensure_str_list(temporal.get("forbidden_future_outcomes"))),
+                "unapproved_extra_subjects: 未承認の追加人物、後続sceneのreveal、字幕、ロゴ。",
+            ],
+        ),
+        _image_prompt_section(
+            "人物状態",
+            [
+                f"costume_state: {character.get('costume_state')}",
+                f"hair_state: {character.get('hair_state')}",
+                f"physical_state: {character.get('physical_state')}",
+                f"pose: {character.get('pose')}",
+                f"gaze: {character.get('gaze')}",
+                f"expression: {character.get('expression')}",
+                f"hand_position: {character.get('hand_position')}",
+                f"foot_position: {character.get('foot_position')}",
+                f"emotional_state: {character.get('emotional_state')}",
+                "must_not_show: " + " / ".join(_ensure_str_list(character.get("must_not_show_character_states"))),
+            ],
+        ),
+        _image_prompt_section("小道具 / 舞台装置", object_lines),
+        _image_prompt_section(
+            "構図",
+            [
+                f"aspect_ratio: {composition.get('aspect_ratio')}",
+                f"shot_size: {composition.get('shot_size')}",
+                f"camera_height: {composition.get('camera_height')}",
+                f"camera_angle: {composition.get('camera_angle')}",
+                f"lens_feel: {composition.get('lens_feel')}",
+                f"depth_of_field: {composition.get('depth_of_field')}",
+                f"foreground: {composition.get('foreground')}",
+                f"midground: {composition.get('midground')}",
+                f"background: {composition.get('background')}",
+                "subject_priority: " + " / ".join(_ensure_str_list(composition.get("subject_priority_order"))),
+                f"negative_space: {composition.get('negative_space')}",
+                f"gaze_path: {composition.get('gaze_path')}",
+                f"frame_edge_handoff: {composition.get('frame_edge_handoff')}",
+            ],
+        ),
+        _image_prompt_section(
+            "光 / 質感",
+            [
+                f"light_source: {material.get('light_source')}",
+                f"light_direction: {material.get('light_direction')}",
+                f"light_quality: {material.get('light_quality')}",
+                "dominant_materials: " + " / ".join(_ensure_str_list(material.get("dominant_materials"))),
+                f"air_quality: {material.get('air_quality')}",
+                f"floor_or_ground_texture: {material.get('floor_or_ground_texture')}",
+                f"scene_specific_texture: {material.get('story_specific_texture')}",
+                "material_must_not_include: " + " / ".join(_ensure_str_list(material.get("material_must_not_leak_from_other_scenes"))),
+            ],
+        ),
+        _image_prompt_section(
+            "動画化のための開始余地",
+            movable_lines
+            + [
+                f"camera_start_reason: {motion.get('camera_start_reason')}",
+                f"image_supports_motion_start: {str(bool(motion.get('image_supports_motion_start'))).lower()}",
+                "must_not_resolve_in_image: " + " / ".join(_ensure_str_list(motion.get("must_not_resolve_in_image"))),
+                "motion_ceiling: " + " / ".join(_ensure_str_list(_dict_value(motion.get("motion_ceiling")).get("must_not_complete_outcomes"))),
+            ],
+        ),
+        _image_prompt_section("禁止", ["text, subtitles, logos, watermark, anime, illustration, distorted anatomy, extra unapproved characters, wrong costume state, later event reveal."]),
+    ]
+    return "\n\n".join(blocks)
+
+
+def _structured_image_prompt_blocks(scene: SceneSpec) -> str:
+    base_prompt = _strip_legacy_prompt_blocks(scene.image_prompt or "")
+    plan = _build_first_frame_visual_plan(scene)
+    return _render_first_frame_image_prompt(plan, base_prompt=base_prompt)
 
 
 def _cut_contract_video_prompt_block(contract: dict[str, Any]) -> str:
@@ -4096,13 +4782,10 @@ def _compose_final_image_prompt(
     suffix: str,
     request_visual_beat: str | None = None,
 ) -> str:
-    prompt = (scene.image_prompt or "").strip()
-    contract_block = _cut_contract_image_prompt_block(scene.cut_contract)
-    if contract_block:
-        prompt = f"{contract_block}\n\n{prompt}".strip() if prompt else contract_block
+    prompt = _structured_image_prompt_blocks(scene)
     visual_beat = (request_visual_beat or "").strip()
     if visual_beat and visual_beat not in prompt:
-        prompt = f"[場面の核]\n{visual_beat}\n\n{prompt}".strip()
+        prompt = prompt.replace("[画面に必ず見えるもの]\n", f"[画面に必ず見えるもの]\n{_sanitize_contract_prompt_text(visual_beat)}\n", 1)
     if prefix:
         prompt = prefix + "\n\n" + prompt if prompt else prefix
     if suffix:
@@ -4239,6 +4922,21 @@ def _write_request_preview_md(
                 lines.append(f"  - `{item['label']}`: `{item['path']}`")
         else:
             lines.append("- references: `[]`")
+        first_frame_visual_plan = entry.get("first_frame_visual_plan")
+        if isinstance(first_frame_visual_plan, dict) and first_frame_visual_plan:
+            lines.append("")
+            lines.append("```yaml")
+            if yaml is not None:
+                lines.append(
+                    yaml.safe_dump(
+                        {"first_frame_visual_plan": first_frame_visual_plan},
+                        allow_unicode=True,
+                        sort_keys=False,
+                    ).rstrip()
+                )
+            else:
+                lines.append(json.dumps({"first_frame_visual_plan": first_frame_visual_plan}, ensure_ascii=False, indent=2))
+            lines.append("```")
         lines.append("")
         lines.append("```text")
         lines.append(
@@ -5313,6 +6011,7 @@ def main() -> None:
                 if is_asset_stage_request
                 else "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
             )
+            first_frame_visual_plan = _build_first_frame_visual_plan(scene)
             image_preview_entries.append(
                 {
                     "selector": selector,
@@ -5330,6 +6029,7 @@ def main() -> None:
                     "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
                     "source_requests": source_requests,
                     "references": list(scene.image_references or []),
+                    "first_frame_visual_plan": first_frame_visual_plan,
                     "prompt": _compose_final_image_prompt(
                         scene,
                         prefix=image_prefix,

@@ -116,6 +116,81 @@ def _scene_intent_dict(scene_id: int | str, *, topic: str = "request preview") -
     }
 
 
+def _scene_event_dict(scene_id: int | str, *, topic: str = "request preview") -> dict:
+    return {
+        "schema_version": "scene_event_v1",
+        "event_logline": f"{topic} が preview の圧力を受けて次の生成に渡る",
+        "start_situation": f"{topic} は画面中央で未確定の状態にある",
+        "source_story_beat_ids": [f"preview_scene{scene_id}_beat"],
+        "event_sequence": [
+            {
+                "beat_id": f"scene{scene_id}_event_setup",
+                "beat_function": "setup",
+                "source_story_beat_ids": [f"preview_scene{scene_id}_beat"],
+                "what_happens": f"{topic} の主対象と道具が同じ画面に現れる",
+                "visible_action": "主対象が画面中央に立つ",
+                "visible_reaction": "周囲の視線が主対象へ集まる",
+                "immediate_consequence": "preview の問いが発生する",
+                "emotional_pressure": "未確定さが残る",
+                "required_visual_evidence": [topic, "道具", "足跡"],
+                "story_information_revealed_ids": ["preview_setup"],
+            },
+            {
+                "beat_id": f"scene{scene_id}_event_pressure",
+                "beat_function": "pressure",
+                "source_story_beat_ids": [f"preview_scene{scene_id}_beat"],
+                "what_happens": f"{topic} が道具を握り、次の行為への圧力を受ける",
+                "visible_action": "手元の道具が握られる",
+                "visible_reaction": "主対象の視線が前へ向く",
+                "immediate_consequence": "画面上の証拠が増える",
+                "emotional_pressure": "生成可能な緊張が高まる",
+                "required_visual_evidence": ["握られた道具", "視線", "足跡"],
+                "story_information_revealed_ids": ["preview_pressure"],
+            },
+            {
+                "beat_id": f"scene{scene_id}_event_turn",
+                "beat_function": "turn",
+                "source_story_beat_ids": [f"preview_scene{scene_id}_beat"],
+                "what_happens": f"{topic} が次の cut に渡せる行為を始める",
+                "visible_action": "主対象が一歩動く",
+                "visible_reaction": "足跡が残る",
+                "immediate_consequence": "後続生成の原因が確定する",
+                "emotional_pressure": "未確定から生成可能へ変わる",
+                "required_visual_evidence": ["一歩", "足跡", "道具"],
+                "story_information_revealed_ids": ["preview_turn"],
+            },
+            {
+                "beat_id": f"scene{scene_id}_event_payoff",
+                "beat_function": "payoff",
+                "source_story_beat_ids": [f"preview_scene{scene_id}_beat"],
+                "what_happens": f"{topic} の足跡と道具が後続 prompt の根拠として残る",
+                "visible_action": "主対象が次へ向く",
+                "visible_reaction": "道具と足跡が画面に残る",
+                "immediate_consequence": "次の cut の圧力が成立する",
+                "emotional_pressure": "後続への期待が残る",
+                "required_visual_evidence": ["足跡", "道具", "前を向く姿"],
+                "story_information_revealed_ids": ["preview_payoff"],
+            },
+        ],
+        "turning_event": {
+            "source_event_beat_id": f"scene{scene_id}_event_turn",
+            "causal_turn_ref": "scene_intent.causal_turn",
+            "irreversible_change": f"{topic} が後続生成へ渡る",
+        },
+        "end_situation": {
+            "value_shift_to_ref": "scene_intent.value_shift.to",
+            "outcome": f"{topic} が次の生成へ渡せる状態になる",
+            "character_position": "前方へ向く",
+            "object_state": "道具が手元に残る",
+            "relationship_state": "reviewer と生成対象の関係が明確になる",
+            "new_pressure": "足跡が次の cut を要求する",
+            "visible_evidence_refs": [f"scene{scene_id}_event_payoff"],
+        },
+        "offscreen_context": ["後続 cut の結末はまだ起きていない"],
+        "forbidden_event_changes": ["後続 cut の結末をこのsceneで起こさない"],
+    }
+
+
 def _preview_triangulation_review() -> dict:
     return {
         "status": "passed",
@@ -149,8 +224,71 @@ def _preview_cut_contract(
     next_selector = next_selector if sequence_index < total_cuts else ""
     incoming_anchor = f"{previous_selector}_to_{selector}" if previous_selector else f"scene{scene_id}_incoming"
     outgoing_anchor = f"{selector}_to_{next_selector}" if next_selector else f"scene{scene_id}_to_next"
+    event_records = [
+        {
+            "beat_id": f"scene{scene_id}_event_setup",
+            "beat_function": "setup",
+            "what_happens": f"{label} の主対象と道具が同じ画面に現れる",
+            "visible_action": "主対象が画面中央に立つ",
+            "visible_reaction": "周囲の視線が主対象へ集まる",
+            "required_visual_evidence": [label, "道具", "足跡"],
+        },
+        {
+            "beat_id": f"scene{scene_id}_event_pressure",
+            "beat_function": "pressure",
+            "what_happens": f"{label} が道具を握り、次の行為への圧力を受ける",
+            "visible_action": "手元の道具が握られる",
+            "visible_reaction": "主対象の視線が前へ向く",
+            "required_visual_evidence": ["握られた道具", "視線", "足跡"],
+        },
+        {
+            "beat_id": f"scene{scene_id}_event_turn",
+            "beat_function": "turn",
+            "what_happens": f"{label} が次の cut に渡せる行為を始める",
+            "visible_action": "主対象が一歩動く",
+            "visible_reaction": "足跡が残る",
+            "required_visual_evidence": ["一歩", "足跡", "道具"],
+        },
+        {
+            "beat_id": f"scene{scene_id}_event_payoff",
+            "beat_function": "payoff",
+            "what_happens": f"{label} の足跡と道具が後続 prompt の根拠として残る",
+            "visible_action": "主対象が次へ向く",
+            "visible_reaction": "道具と足跡が画面に残る",
+            "required_visual_evidence": ["足跡", "道具", "前を向く姿"],
+        },
+    ]
+    event_index = min(sequence_index - 1, len(event_records) - 1)
+    event_record = event_records[event_index]
+    event_function = str(event_record["beat_function"])
+    event_beat_id = str(event_record["beat_id"])
+    source_event_beat_ids = [event_beat_id]
+    blocked_future_event_beat_ids = [
+        str(record["beat_id"])
+        for record in event_records
+        if record["beat_id"] not in source_event_beat_ids and record["beat_function"] in {"turn", "payoff"}
+    ]
+    neighboring_event_beats = []
+    for neighbor_index in (event_index - 1, event_index + 1):
+        if 0 <= neighbor_index < len(event_records):
+            neighboring_event_beats.append(event_records[neighbor_index])
+    forbidden_event_changes = ["後続 cut の結末をこのsceneで起こさない"]
     return {
-        "schema_version": "2.2",
+        "schema_version": "3.0",
+        "source_event_contract": {
+            "primary_event_beat_id": event_beat_id,
+            "source_event_beat_ids": source_event_beat_ids,
+            "event_beat_function": event_function,
+            "event_time_position": "before_trigger",
+            "source_event_summary": event_record["what_happens"],
+            "source_visible_action": event_record["visible_action"],
+            "source_visible_reaction": event_record["visible_reaction"],
+            "source_required_visual_evidence": event_record["required_visual_evidence"],
+            "event_facts_to_preserve": [event_record["what_happens"]],
+            "event_facts_not_to_invent": forbidden_event_changes,
+            "allowed_reveal_info_ids": [],
+            "forbidden_reveal_info_ids": ["後続 cut の結末"],
+        },
         "cut_function": "setup",
         "intent_budget": {
             "primary_intent": label,
@@ -167,7 +305,6 @@ def _preview_cut_contract(
             "causal_proof": f"{label} が人物・場所・道具の関係で読める",
             "visual_evidence": [label],
             "required_roles": ["protagonist"],
-            "assigned_story_event_ids": [f"scene_obligation:obligation_{cut_id}"],
             "anti_redundancy_key": f"scene{scene_id}:cut{cut_id}:{label}",
             "visual_proof": f"{label} が見える",
             "must_show": [label],
@@ -200,7 +337,11 @@ def _preview_cut_contract(
         },
         "first_frame_contract": {
             "imageable": True,
-            "first_frame_brief": f"{label} が静止状態で見える",
+            "source_event_beat_id": event_beat_id,
+            "event_time_position": "before_trigger",
+            "event_fact_visible_in_still": event_record["visible_action"],
+            "not_yet_happened_in_still": ["後続 cut の結末"],
+            "first_frame_brief": event_record["visible_action"],
             "visible_start_state": {"character_state": "開始前", "prop_state": "道具が見える", "spatial_state": "場所", "emotional_state": "緊張", "gaze_or_attention": "前方"},
             "motion_start_affordance": {"movable_subject": label, "movement_vector": "left_to_right", "camera_start_reason": "奥行きがある"},
             "action_completion_state": "pre_action",
@@ -209,13 +350,27 @@ def _preview_cut_contract(
         },
         "motion_contract": {
             "movable": True,
+            "source_event_beat_id": event_beat_id,
+            "starts_from_first_frame": True,
+            "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
             "motion_brief": f"{label} がゆっくり動く",
             "start_from_visible_state": "first_frame_contract.visible_start_state",
             "end_state": f"{label} が次へ向く",
             "end_frame_brief": f"{label} が次へ向く",
             "must_not_add": ["新しい人物"],
         },
-        "narration_contract": {"role": "emotion", "target_function": "絵を説明せず補う", "must_avoid": ["映像のキャプション化"], "silence_reason": ""},
+        "narration_contract": {
+            "source_event_beat_ids": [event_beat_id],
+            "allowed_info_ids": [],
+            "forbidden_info_ids": ["後続 cut の結末"],
+            "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
+            "must_not_explain_visible_action_as_caption": True,
+            "narration_event_boundary": "same_event_only",
+            "role": "emotion",
+            "target_function": "絵を説明せず補う",
+            "must_avoid": ["映像のキャプション化"],
+            "silence_reason": "",
+        },
         "rhythm_contract": {
             "expected_duration_seconds": 12,
             "pacing": "standard",
@@ -240,14 +395,31 @@ def _preview_cut_contract(
             "carries_to_next_cut": [label],
             "carries_to_next_scene": [],
         },
+        "event_context_for_cut": {
+            "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+            "editable": False,
+            "primary_event_beat": {
+                "beat_id": event_beat_id,
+                "beat_function": event_function,
+                "what_happens": event_record["what_happens"],
+                "visible_action": event_record["visible_action"],
+                "visible_reaction": event_record["visible_reaction"],
+                "required_visual_evidence": event_record["required_visual_evidence"],
+            },
+            "source_event_beats": [event_record],
+            "neighboring_event_beats": neighboring_event_beats,
+            "forbidden_event_changes": forbidden_event_changes,
+            "reveal_constraints_for_this_cut": [],
+        },
     }
 
 
 def _preview_scene_cut_coverage_plan(scene_id: int | str, cut_count: int, *, label: str = "request preview", selectors: list[str] | None = None) -> dict:
     selectors = selectors or [f"scene{scene_id}_cut{index}" for index in range(1, cut_count + 1)]
     return {
-        "coverage_strategy": "reverse_from_scene_obligations",
-        "min_cut_count": {"by_importance": 3, "by_duration": min(4, max(3, cut_count)), "selected": min(4, max(3, cut_count)), "exception_reason": ""},
+        "coverage_strategy": "reverse_from_scene_event",
+        "source_schema_version": "scene_event_v1",
+        "min_cut_count": {"by_importance": 3, "by_duration": min(4, max(3, cut_count)), "by_event_beats": min(4, max(3, cut_count)), "selected": min(4, max(3, cut_count)), "exception_reason": ""},
         "scene_obligations": [
             {"obligation_id": "dramatic_question_01", "source": "dramatic_question", "evidence": label, "assigned_cut_ids": selectors[:1]},
             {"obligation_id": "value_shift_01", "source": "value_shift.visible_evidence", "evidence": [label], "assigned_cut_ids": selectors[1:2] or selectors[:1]},
@@ -260,7 +432,12 @@ def _preview_scene_cut_coverage_plan(scene_id: int | str, cut_count: int, *, lab
                 "cut_selector": selector,
                 "obligation_ids": ["dramatic_question_01"] if index == 1 else ["value_shift_01"] if index == 2 else ["causal_turn_01"] if index == 3 else ["handoff_01"],
                 "cut_function": "setup",
-                "assigned_story_event_ids": [f"scene_obligation:obligation_{index}"],
+                "event_assignment": {
+                    "source_event_contract": {
+                        "primary_event_beat_id": f"scene{scene_id}_event_{['setup', 'pressure', 'turn', 'payoff'][min(index - 1, 3)]}",
+                        "source_event_beat_ids": [f"scene{scene_id}_event_{['setup', 'pressure', 'turn', 'payoff'][min(index - 1, 3)]}"],
+                    }
+                },
                 "target_beat": label,
                 "visual_proof": f"{label} が見える",
                 "audience_knowledge_delta": f"{label} を理解する",
@@ -495,6 +672,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     "next_scene_connection_checked": True,
                 },
                 "scene_intent": _scene_intent_dict(scene_id),
+                "scene_event": _scene_event_dict(scene_id),
                 "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(scene_id, len(script_cuts), selectors=[str(item) for item in active_selectors]),
                 "agent_review": {"status": "passed"},
                 "cuts": script_cuts,
@@ -503,6 +681,8 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scene["importance"] = "medium"
         scene["target_duration_seconds"] = max(32, len(script_cuts) * 8)
         scene["estimated_duration_seconds"] = max(32, len(script_cuts) * 8)
+        scene["scene_intent"] = _scene_intent_dict(scene_id)
+        scene["scene_event"] = _scene_event_dict(scene_id)
         scene["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(scene_id, len(script_cuts), selectors=[str(item) for item in active_selectors])
         scene["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
 
@@ -515,11 +695,11 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
             manifest_cuts.append(
                 {
                     "cut_id": cut_id,
-                    "cut_contract": _preview_cut_contract(filler_scene_id, cut_id, label="filler"),
-                    "scene_contract": {"target_beat": "filler", "must_show": ["filler"], "must_avoid": [], "done_when": ["filler is visible"]},
+                    "cut_contract": _preview_cut_contract(filler_scene_id, cut_id, label="filler preview"),
+                    "scene_contract": {"target_beat": "filler preview", "must_show": ["filler preview"], "must_avoid": [], "done_when": ["filler preview is visible"]},
                     "image_generation": {
                         "tool": "codex_builtin_image",
-                        "prompt": "画面内テキストなし。filler が見える。実写映画風の道、人物、背景、光、空気感、足元の動き、衣装の布目、地面の質感、前景の小物、中景の人物、背景の奥行き、自然な影が具体的に見える。",
+                        "prompt": "画面内テキストなし。filler preview が見える。実写映画風の道、人物、背景、光、空気感、足元の動き、衣装の布目、地面の質感、前景の小物、中景の人物、背景の奥行き、自然な影が具体的に見える。",
                         "character_ids": [],
                         "object_ids": [],
                         "output": f"assets/scenes/scene{filler_scene_id}_cut{cut_id}.png",
@@ -534,22 +714,22 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 {
                     "cut_id": cut_id,
                     "selector": f"scene{filler_scene_id}_cut{cut_id}",
-                    "cut_contract": _preview_cut_contract(filler_scene_id, cut_id, label="filler"),
-                    "scene_contract": {"target_beat": "filler", "must_show": ["filler"], "must_avoid": [], "done_when": ["filler is visible"]},
+                    "cut_contract": _preview_cut_contract(filler_scene_id, cut_id, label="filler preview"),
+                    "scene_contract": {"target_beat": "filler preview", "must_show": ["filler preview"], "must_avoid": [], "done_when": ["filler preview is visible"]},
                     "cut_blueprint": {
                         "cut_role": "main",
                         "duration_intent": "standard",
-                        "target_beat": "filler",
-                        "must_show": ["filler"],
+                        "target_beat": "filler preview",
+                        "must_show": ["filler preview"],
                         "must_avoid": [],
-                        "done_when": ["filler is visible"],
-                        "visual_beat": "filler",
+                        "done_when": ["filler preview is visible"],
+                        "visual_beat": "filler preview",
                         "narration_role": "setup",
                         "asset_dependency_hint": {"character_ids": [], "object_ids": [], "location_ids": [], "reusable_still_candidates": []},
                     },
                 }
             )
-        scenes.append({"scene_id": filler_scene_id, "cuts": manifest_cuts})
+        scenes.append({"scene_id": filler_scene_id, "scene_intent": _scene_intent_dict(filler_scene_id, topic="filler preview"), "scene_event": _scene_event_dict(filler_scene_id, topic="filler preview"), "cuts": manifest_cuts})
         script_scenes.append(
             {
                 "scene_id": filler_scene_id,
@@ -569,7 +749,8 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     "next_scene_connection_checked": True,
                 },
                 "scene_intent": _scene_intent_dict(filler_scene_id, topic="filler preview"),
-                "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(filler_scene_id, len(filler_cuts), label="filler"),
+                "scene_event": _scene_event_dict(filler_scene_id, topic="filler preview"),
+                "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(filler_scene_id, len(filler_cuts), label="filler preview"),
                 "agent_review": {"status": "passed"},
                 "cuts": filler_cuts,
             }
@@ -577,7 +758,9 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scenes[-1]["importance"] = "medium"
         scenes[-1]["target_duration_seconds"] = 32
         scenes[-1]["estimated_duration_seconds"] = 32
-        scenes[-1]["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(filler_scene_id, len(manifest_cuts), label="filler")
+        scenes[-1]["scene_intent"] = _scene_intent_dict(filler_scene_id, topic="filler preview")
+        scenes[-1]["scene_event"] = _scene_event_dict(filler_scene_id, topic="filler preview")
+        scenes[-1]["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(filler_scene_id, len(manifest_cuts), label="filler preview")
         scenes[-1]["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
         filler_scene_id += 1
 
@@ -649,16 +832,25 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "- internal_pressure: pressure escalates before the turn\n"
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
+                "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
+                "- end_situation_alignment: end_situation matches scene_intent.value_shift.to\n"
                 "- neighbor_handoff: neighboring handoffs are checked\n"
             )
         elif stage_focus:
             scene_count_gate = (
                 "## Cut Blueprint Gate\n"
                 "- cut_intent_isolation: passed\n"
-                "- beat_ladder_coverage: passed\n"
+                "- scene_event_coverage: passed\n"
+                "- event_beat_reference_integrity: passed\n"
                 "- first_frame_motion_readiness: passed\n"
-                "- multimodal_contract_coverage: passed\n"
-                "- story_event_obligation_coverage: passed\n"
+                "- event_first_frame_alignment: passed\n"
+                "- multimodal_event_boundary_coverage: passed\n"
+                "- source_event_preservation: passed\n"
+                "- no_unapproved_event_invention: passed\n"
+                "- event_motion_boundary: passed\n"
+                "- event_narration_boundary: passed\n"
+                "- event_context_for_cut_ready: passed\n"
                 "- causal_proof_coverage: passed\n"
                 "- role_coverage: passed\n"
                 "- audience_knowledge_delta_coverage: passed\n"
@@ -1234,9 +1426,22 @@ scenes:
         scene = scenes[0]
 
         image_prompt = MODULE._compose_final_image_prompt(scene, prefix="", suffix="")
+        self.assertIn("[このcutの開始状態]", image_prompt)
+        self.assertIn("event_time_position:", image_prompt)
+        self.assertIn("not_yet_happened_in_still:", image_prompt)
+        self.assertIn("[単一瞬間ルール]", image_prompt)
+        self.assertIn("[構図]", image_prompt)
+        self.assertIn("[動画化のための開始余地]", image_prompt)
+        self.assertIn("primary_visual_anchor:", image_prompt)
+        self.assertIn("action_completion_state:", image_prompt)
+        self.assertIn("motion_ceiling:", image_prompt)
         self.assertIn("ガラスの靴", image_prompt)
         self.assertIn("王子の手はまだ靴に触れていない", image_prompt)
         self.assertIn("灰色の城階段", image_prompt)
+        self.assertNotIn("first_frame_visual_plan", image_prompt)
+        self.assertNotIn("[cut契約からの可視要件]", image_prompt)
+        self.assertNotIn("観客理解の増分:", image_prompt)
+        self.assertNotIn("因果の証明:", image_prompt)
         self.assertNotIn("motion_brief", image_prompt)
         self.assertNotIn("王子の手が靴へゆっくり近づく", image_prompt)
         self.assertNotIn("最初の1フレーム", image_prompt)
@@ -2086,8 +2291,9 @@ scenes:
             )
 
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
-            self.assertIn("[場面の核]", request_text)
-            self.assertIn("竜宮城の宴会エリアで楽しむ他のキャラクターたちに囲まれる中、頭をかかえる浦島太郎。", request_text)
+            self.assertIn("[画面に必ず見えるもの]", request_text)
+            self.assertNotIn("[場面の核]", request_text)
+            self.assertIn("竜宮城の宴会エリアで楽しむ他のキャラクターたちに囲まれる中、頭をかかえる浦島太郎", request_text)
             self.assertIn("既存の prompt", request_text)
 
     def test_deleted_cuts_are_excluded_from_requests_and_reported(self) -> None:

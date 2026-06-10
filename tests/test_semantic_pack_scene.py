@@ -176,6 +176,80 @@ scenes:
         self.assertEqual(entries[2]["semantic_contract"]["target_beat"], "ガラスの靴が証拠になる")
         self.assertFalse(entries[2]["semantic_contract_missing"])
 
+    def test_cut_blueprint_entry_uses_event_context_without_full_scene_event(self) -> None:
+        fixture = """# Script
+
+```yaml
+scenes:
+  - scene_id: 10
+    scene_intent:
+      dramatic_question: "問い"
+      value_shift: "変化"
+      causal_turn: "因果"
+      reveal_constraints:
+        - "future_reveal"
+    scene_event:
+      schema_version: "scene_event_v1"
+      event_sequence:
+        - beat_id: "scene10_event_setup"
+          beat_function: "setup"
+          what_happens: "開始"
+        - beat_id: "scene10_event_pressure"
+          beat_function: "pressure"
+          what_happens: "圧力"
+        - beat_id: "scene10_event_turn"
+          beat_function: "turn"
+          what_happens: "転換"
+      forbidden_event_changes: ["future_reveal"]
+    cuts:
+      - cut_id: "01"
+        cut_contract:
+          schema_version: "3.0"
+          source_event_contract:
+            primary_event_beat_id: "scene10_event_pressure"
+            source_event_beat_ids: ["scene10_event_pressure"]
+            event_beat_function: "pressure"
+            event_time_position: "before_trigger"
+            source_event_summary: "圧力"
+            source_visible_action: "圧力が見える"
+            source_visible_reaction: "表情が変わる"
+            event_facts_to_preserve: ["圧力"]
+            event_facts_not_to_invent: ["future_reveal"]
+            allowed_reveal_info_ids: []
+            forbidden_reveal_info_ids: ["future_reveal"]
+          viewer_contract:
+            target_beat: "圧力を見せる"
+            must_show: ["圧力"]
+            must_avoid: []
+            done_when: ["圧力が見える"]
+          first_frame_contract:
+            source_event_beat_id: "scene10_event_pressure"
+            event_time_position: "before_trigger"
+            event_fact_visible_in_still: "圧力"
+          motion_contract:
+            source_event_beat_id: "scene10_event_pressure"
+            starts_from_first_frame: true
+            must_not_advance_to_event_beat_ids: ["scene10_event_turn"]
+          narration_contract:
+            source_event_beat_ids: ["scene10_event_pressure"]
+            forbidden_info_ids: ["future_reveal"]
+            must_not_explain_visible_action_as_caption: true
+            narration_event_boundary: "same_event_only"
+```
+"""
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(fixture, encoding="utf-8")
+
+            entries = collect_entries("cut_blueprint", run_dir)
+
+        self.assertNotIn("scene_event", entries[0])
+        context = entries[0]["event_context_for_cut"]
+        self.assertEqual(context["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+        self.assertEqual([beat["beat_id"] for beat in context["neighboring_event_beats"]], ["scene10_event_setup", "scene10_event_turn"])
+        self.assertEqual(context["forbidden_event_changes"], ["future_reveal"])
+        self.assertEqual(context["reveal_constraints_for_this_cut"], ["future_reveal"])
+
     def test_falls_back_to_video_manifest_when_script_is_absent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
             run_dir = Path(td)

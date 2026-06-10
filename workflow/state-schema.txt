@@ -204,6 +204,10 @@
 #   review.narration.change_request_count=0
 #   review.narration.open_change_request_count=0
 #   review.narration.last_change_request_id=string
+#   review.narration.pronunciation_candidates=logs/eval/narration/round_01/pronunciation_candidates.tsv
+#   review.narration.pronunciation_unresolved_count=0
+#   review.narration.arc.status=passed|warning|changes_requested|skipped
+#   review.narration.arc.report=logs/eval/narration/round_01/arc_review.md
 #   review.duration_fit.status=passed|changes_requested|skipped
 #   review.duration_fit.actual_seconds=0
 #   review.duration_fit.minimum_seconds=0
@@ -323,6 +327,10 @@
 #   eval.narration.rubric.anti_redundancy=0.0-1.0
 #   eval.narration.rubric.pacing_fit=0.0-1.0
 #   eval.narration.rubric.spoken_japanese=0.0-1.0
+#   eval.narration.rubric.voice_continuity=0.0-1.0
+#   eval.narration.rubric.emotional_curve=0.0-1.0
+#   eval.narration.rubric.information_flow=0.0-1.0
+#   eval.narration.rubric.repetition_control=0.0-1.0
 #   selection.story.candidate_count=2
 #   selection.story.chosen_id=A
 #   artifact.eval_report=output/<topic>_<timestamp>/eval_report.json

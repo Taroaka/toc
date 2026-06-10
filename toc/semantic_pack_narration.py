@@ -91,6 +91,9 @@ def _entry_from_node(
     output = _as_str(narration.get("output"))
     text_quality_review = _quality_review_for_selector(run_dir, selector)
     semantic_contract = _semantic_contract(narration, node)
+    cut_contract = _dict_or_empty(node.get("cut_contract"))
+    source_event_contract = _dict_or_empty(cut_contract.get("source_event_contract"))
+    event_context_for_cut = _dict_or_empty(cut_contract.get("event_context_for_cut"))
     missing_required_contract_fields = _missing_required_contract_fields(semantic_contract)
     tool = _as_str(narration.get("tool")).lower()
     silence_contract = _dict_or_empty(narration.get("silence_contract"))
@@ -123,6 +126,8 @@ def _entry_from_node(
         "silence_contract_reason": _silence_contract_reason(silence_contract),
         "too_visual_redundant_check": _too_visual_redundant_check(narration=narration, design_context=design_context),
         "audio_output_check": output_check,
+        "source_event_contract": source_event_contract,
+        "event_context_for_cut": event_context_for_cut,
     }
     entry = {
         "stage": "narration",
@@ -150,6 +155,8 @@ def _entry_from_node(
             "silence_contract": silence_contract,
         },
         "semantic_contract": semantic_contract,
+        "source_event_contract": source_event_contract,
+        "event_context_for_cut": event_context_for_cut,
         "semantic_contract_missing": not bool(semantic_contract),
         "contract_required_fields_missing": missing_required_contract_fields,
         "semantic_review_inputs": semantic_review_inputs,
@@ -180,7 +187,12 @@ def _semantic_contract(narration: dict[str, Any], node: dict[str, Any]) -> dict[
     if isinstance(audio, dict) and isinstance(audio.get("narration_contract"), dict):
         return audio["narration_contract"]
     fallback = node.get("narration_contract")
-    return fallback if isinstance(fallback, dict) else {}
+    if isinstance(fallback, dict):
+        return fallback
+    cut_contract = node.get("cut_contract")
+    if isinstance(cut_contract, dict) and isinstance(cut_contract.get("narration_contract"), dict):
+        return cut_contract["narration_contract"]
+    return {}
 
 
 def _missing_required_contract_fields(contract: dict[str, Any]) -> list[str]:

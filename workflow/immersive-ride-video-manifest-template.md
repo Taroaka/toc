@@ -200,7 +200,20 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
+        authoring_status: "missing|draft|approved|silent"
+        missing_reason: "p700_narration_not_written_yet"
         contract:
+          schema_version: "narration_contract_v2"
+          story_role:
+            narrative_position: "opening|middle|ending"
+            cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+            voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+          visual_distance:
+            distance_policy: "stay_close|contextual|meaning_first|silent"
+            narration_should_add: []
+          tts_readiness:
+            pronunciation_targets: []
+          # compatibility alias
           target_function: ""
           must_cover: []
           must_avoid: []
@@ -262,13 +275,27 @@ scenes:
       output: "assets/scenes/scene20_to_30.mp4"
     audio:
       narration:
+        authoring_status: "missing|draft|approved|silent"
+        missing_reason: "p700_narration_not_written_yet"
         contract:
+          schema_version: "narration_contract_v2"
+          story_role:
+            narrative_position: "opening|middle|ending"
+            cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+            voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+          visual_distance:
+            distance_policy: "stay_close|contextual|meaning_first|silent"
+            narration_should_add: []
+          tts_readiness:
+            pronunciation_targets: []
+          # compatibility alias
           target_function: ""
           must_cover: []
           must_avoid: []
           done_when: []
         # review metadata は audio.narration.review に保持する。
         text: ""
+        tts_text: ""
         tool: "elevenlabs"
         output: "assets/audio/scene20_narration.mp3"
         normalize_to_scene_duration: false

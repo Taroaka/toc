@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import unittest
+import json
 from pathlib import Path
 
 
@@ -49,10 +50,23 @@ class TestTocRunScaffold(unittest.TestCase):
             self.assertFalse((run_dir / "logs" / "grounding" / "narration.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "research.readset.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "research.audit.json").exists())
+            scene_event_input = json.loads((run_dir / "logs" / "scene_design" / "scene_event_input.json").read_text(encoding="utf-8"))
+            scene_event_output = json.loads((run_dir / "logs" / "scene_design" / "scene_event_output.json").read_text(encoding="utf-8"))
+            latest_context = json.loads((run_dir / "logs" / "scene_design" / "latest_generation_context.json").read_text(encoding="utf-8"))
+            self.assertEqual(scene_event_input["schema_version"], "scene_event_log_v1")
+            self.assertEqual(scene_event_output["schema_version"], "scene_event_log_v1")
+            self.assertEqual(latest_context["schema_version"], "cut_design_generation_context_v1")
+            self.assertEqual(scene_event_input["flow"], "toc-run")
+            self.assertEqual(scene_event_output["status"], "not_generated")
+            self.assertEqual(latest_context["flow"], "toc-run")
+            self.assertEqual(latest_context["status"], "not_generated")
+            self.assertEqual(latest_context["phase"], "cut_design_not_started")
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
             self.assertNotIn("eval.p400_readiness.status=approved", state)
+            self.assertIn("runtime.cut_design.status=not_generated", state)
+            self.assertIn("runtime.cut_design.latest_context=logs/scene_design/latest_generation_context.json", state)
             manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
-            self.assertIn("manifest_phase: skeleton", manifest)
+            self.assertRegex(manifest, r'manifest_phase:\s*"?skeleton"?')
 
 
 if __name__ == "__main__":

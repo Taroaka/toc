@@ -101,128 +101,82 @@ class TestSemanticPackVideo(unittest.TestCase):
                 ["motion_intent", "must_preserve", "must_not_add", "handoff_state"],
             )
 
-    def test_video_clip_collects_outputs_contact_sheet_and_sampled_frames(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
+    def test_video_motion_collects_v3_cut_contract_motion_boundary(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_v3_") as td:
             run_dir = Path(td)
-            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
-            (run_dir / "assets" / "videos").mkdir(parents=True)
-            (run_dir / "assets" / "videos" / "scene03_cut01.mp4").write_bytes(b"video")
+            manifest = {
+                "scenes": [
+                    {
+                        "scene_id": 10,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "cut_contract": {
+                                    "source_event_contract": {
+                                        "primary_event_beat_id": "scene10_event_pressure",
+                                        "source_event_beat_ids": ["scene10_event_pressure"],
+                                    },
+                                    "motion_contract": {
+                                        "source_event_beat_id": "scene10_event_pressure",
+                                        "starts_from_first_frame": True,
+                                        "must_not_advance_to_event_beat_ids": ["scene10_event_turn"],
+                                        "motion_brief": "圧力の姿勢だけが小さく動く",
+                                        "start_from_visible_state": "first_frame_contract.visible_start_state",
+                                        "end_state": "turnの直前で止まる",
+                                        "must_not_add": ["解決"],
+                                    },
+                                    "event_context_for_cut": {
+                                        "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+                                        "editable": False,
+                                        "primary_event_beat": {"beat_id": "scene10_event_pressure"},
+                                    },
+                                },
+                                "video_generation": {
+                                    "tool": "kling_3_0",
+                                    "motion_prompt": "圧力の姿勢だけが小さく動く",
+                                    "first_frame": "assets/scenes/scene10_cut01.png",
+                                    "duration_seconds": 8,
+                                    "output": "assets/videos/scene10_cut01.mp4",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
 
-            entries = collect_entries("video_clip", run_dir)
-
-            first = entries[0]
-            second = entries[1]
-            self.assertEqual(first["selector"], "scene3_cut1")
-            self.assertEqual(first["output"], "assets/videos/scene03_cut01.mp4")
-            self.assertTrue(first["output_exists"])
-            self.assertEqual(first["contact_sheet"], "logs/review/semantic/scene3_cut1_contact_sheet.jpg")
-            self.assertTrue(first["contact_sheet_required"])
-            self.assertFalse(first["contact_sheet_missing"])
-            self.assertTrue(first["sampled_frames_missing"])
-            self.assertEqual(first["provider_history"][0]["status"], "failed")
-            self.assertEqual(second["selector"], "scene4_unit1")
-            self.assertFalse(second["output_exists"])
-            self.assertTrue(second["contact_sheet_missing"])
-            self.assertFalse(second["sampled_frames_missing"])
-            self.assertEqual(second["provider_history"][0]["failures"], ["first attempt drifted from coach"])
-            self.assertEqual(
-                second["sampled_frames"],
-                [
-                    "logs/review/semantic/scene4_unit1_frame001.jpg",
-                    "logs/review/semantic/scene4_unit1_frame002.jpg",
-                ],
-            )
-
-    def test_video_clip_discovers_sample_frame_directory_and_contact_sheet_files(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
-            run_dir = Path(td)
-            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
-            frame_dir = run_dir / "assets" / "videos" / "scene03_cut01_frames"
-            frame_dir.mkdir(parents=True)
-            (frame_dir / "0001.jpg").write_bytes(b"jpg")
-            (frame_dir / "0002.png").write_bytes(b"png")
-            (run_dir / "assets" / "videos" / "scene03_cut01_contact_sheet.png").write_bytes(b"png")
-
-            entries = collect_entries("video_clip", run_dir)
-
-            self.assertEqual(entries[0]["sampled_frames"], ["assets/videos/scene03_cut01_frames/0001.jpg", "assets/videos/scene03_cut01_frames/0002.png"])
-            self.assertEqual(entries[0]["contact_sheet"], "logs/review/semantic/scene3_cut1_contact_sheet.jpg")
-
-    def test_render_collects_final_artifacts_and_concat_lists(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
-            run_dir = Path(td)
-            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
-            (run_dir / "dist").mkdir()
-            (run_dir / "dist" / "final_story.mp4").write_bytes(b"video")
-            (run_dir / "video_clips.txt").write_text("file 'assets/videos/scene03_cut01.mp4'\n", encoding="utf-8")
-            (run_dir / "video_narration_list.txt").write_text("file 'assets/audio/scene04_cut01.mp3'\n", encoding="utf-8")
-
-            entries = collect_entries("render", run_dir)
+            entries = collect_entries("video_motion", run_dir, manifest)
 
             self.assertEqual(len(entries), 1)
             entry = entries[0]
-            self.assertEqual(entry["selector"], "render")
-            self.assertEqual(entry["semantic_contract"]["render_meaning"], "final video preserves the approved story order")
-            self.assertIn({"path": "dist/final_story.mp4", "exists": True}, entry["final_outputs"])
-            self.assertEqual(entry["clip_list"]["entry_count"], 1)
-            self.assertEqual(entry["narration_list"]["entry_count"], 1)
-            self.assertEqual(
-                entry["render_order_materials"]["manifest_clip_order"],
-                [
-                    {"selector": "scene3_cut1", "output": "assets/videos/scene03_cut01.mp4"},
-                    {"selector": "scene4_unit1", "source_cut_ids": [1, 2], "output": "assets/videos/scene04_unit01.mp4"},
-                ],
-            )
-            self.assertEqual(entry["render_order_materials"]["concat_clip_order"], ["assets/videos/scene03_cut01.mp4"])
-            self.assertEqual(
-                entry["render_order_materials"]["manifest_narration_order"],
-                [
-                    {"selector": "scene4_cut1", "output": "assets/audio/scene04_cut01.mp3"},
-                    {"selector": "scene4_cut2", "output": "assets/audio/scene04_cut02.mp3"},
-                ],
-            )
-            self.assertEqual(entry["render_order_materials"]["concat_narration_order"], ["assets/audio/scene04_cut01.mp3"])
-            self.assertEqual(
-                entry["render_sample_refs"],
-                [
-                    {
-                        "output": "dist/final_story.mp4",
-                        "sampled_frames": ["logs/review/semantic/render_frame001.jpg", "logs/review/semantic/render_frame002.jpg"],
-                        "sampled_frames_missing": False,
-                        "contact_sheet": "logs/review/semantic/render_contact_sheet.jpg",
-                        "contact_sheet_missing": False,
-                    },
-                    {
-                        "output": "video.mp4",
-                        "sampled_frames": ["logs/review/semantic/render_frame001.jpg", "logs/review/semantic/render_frame002.jpg"],
-                        "sampled_frames_missing": False,
-                        "contact_sheet": "logs/review/semantic/render_contact_sheet.jpg",
-                        "contact_sheet_missing": False,
-                    },
-                    {
-                        "output": "final.mp4",
-                        "sampled_frames": ["logs/review/semantic/render_frame001.jpg", "logs/review/semantic/render_frame002.jpg"],
-                        "sampled_frames_missing": False,
-                        "contact_sheet": "logs/review/semantic/render_contact_sheet.jpg",
-                        "contact_sheet_missing": False,
-                    },
-                    {
-                        "output": "render.mp4",
-                        "sampled_frames": ["logs/review/semantic/render_frame001.jpg", "logs/review/semantic/render_frame002.jpg"],
-                        "sampled_frames_missing": False,
-                        "contact_sheet": "logs/review/semantic/render_contact_sheet.jpg",
-                        "contact_sheet_missing": False,
-                    },
-                    {
-                        "output": "output.mp4",
-                        "sampled_frames": ["logs/review/semantic/render_frame001.jpg", "logs/review/semantic/render_frame002.jpg"],
-                        "sampled_frames_missing": False,
-                        "contact_sheet": "logs/review/semantic/render_contact_sheet.jpg",
-                        "contact_sheet_missing": False,
-                    },
-                ],
-            )
-            self.assertEqual(len(entry["clip_entries"]), 2)
+            self.assertFalse(entry["motion_contract_missing"])
+            self.assertEqual(entry["motion_contract_required_fields_missing"], [])
+            self.assertEqual(entry["motion_contract"]["source_event_beat_id"], "scene10_event_pressure")
+            self.assertEqual(entry["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
+            self.assertEqual(entry["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+
+    def test_video_clip_semantic_stage_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unsupported video semantic pack stage"):
+                collect_entries("video_clip", run_dir)
+
+    def test_video_clip_sample_frame_semantic_stage_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unsupported video semantic pack stage"):
+                collect_entries("video_clip", run_dir)
+
+    def test_render_semantic_stage_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(MANIFEST, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unsupported video semantic pack stage"):
+                collect_entries("render", run_dir)
 
     def test_rejects_unknown_stage(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:

@@ -88,7 +88,7 @@ graph TD
 - Built-in image generation is serialized in production (`IMAGE_GENERATION_PARALLELISM=1`). The generated-images fallback can complete before `turn/completed` and is discovered from the shared generated-image directory; running multiple fallback-backed image turns concurrently can assign a finished image to the wrong request. Parallel semantic review is allowed, but p500/p600 image generation must not fan out until the app-server provides per-turn saved-path provenance independent of global file ordering. The default per-image deadline is intentionally long (`TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS=900` unless overridden) because app-server image turns can legitimately take more than 300 seconds; treating slow normal generation as timeout causes needless retry churn and can obscure provenance failures.
 - Startup preflight checks the Codex binary, writable effective `CODEX_HOME`, `chatgpt.com` DNS, and HTTPS reachability for `backend-api/codex/responses`. The local server restart helper additionally runs a short no-op turn, because `thread/start` can pass while the later turn transport still fails.
 - Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
-- App-server turns use a total deadline, not an idle-notification timeout. A turn that keeps emitting deltas but never reaches `turn/completed` must still stop at the configured deadline.
+- Semantic QA / producer repair app-server turns use a no-progress watchdog, not a fixed total work deadline. Codex app-server streams turn notifications while agent work is active, so semantic orchestration treats turn notifications, semantic report writes, producer report writes, and source artifact changes as progress. It keeps waiting while progress is observable, and records `review.semantic.<stage>.watchdog.status=no_progress_timeout` only when progress stops for the configured interval.
 - Transport/runtime setup failure is a runtime block, not a semantic review result. A missing semantic report caused by app-server transport failure records `review.semantic.<stage>.transport.status=failed` and must not invoke the producer repair loop. If transport fails during producer repair before a completed producer report exists, the repair loop records `blocked_transport` instead of semantic failure. If the producer has already written `status: done`, the orchestrator accepts the report and immediately runs the next semantic review.
 
 ## Task granularity (MVP)
@@ -286,6 +286,7 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
 - `p700`: narration / audio runtime
   - `p710`: narration grounding
   - `p720`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+    - standard critic split: story_role / visual_distance / tts_delivery / arc_and_pacing / spoken_japanese
   - `p730`: TTS request / generation
   - `p740`: duration fit gate
   - `p750`: audio QA / human review handoff
@@ -321,7 +322,7 @@ slot ごとの標準分担:
 | `p400` script | `script.md` と skeleton manifest の統合、p400 review loops、slot 更新 | scene draft / narration draft / structure-duration-quality council |
 | `p500` asset | asset plan 採用、request 発行、asset generation、canonical asset 更新 | asset brief / coverage review / continuity review / image generation workers |
 | `p600` scene implementation | production manifest 統合、scene requests、scene image generation、image handoff | scene/cut prompt rewrite / image prompt judgment / image QA |
-| `p700` narration | p710-p750 の bucket single writer。TTS 実行判断、duration gate、manifest 反映、audio handoff | narration review / duration stretch review / TTS workers |
+| `p700` narration | p710-p750 の bucket single writer。TTS 実行判断、duration gate、manifest 反映、audio handoff | story-role / visual-distance / TTS-delivery / arc-and-pacing / spoken-Japanese narration reviewers, duration stretch review, TTS workers |
 | `p800` video | 採用判定、manifest 更新、除外理由の記録、video handoff | clip generation fan-out / clip review |
 | `p900` render / QA | final report 生成、完了判定、run closeout | QA reviewer / runtime summary review |
 

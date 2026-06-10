@@ -12,7 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id
 
 
-VIDEO_STAGE_NAMES = {"video_motion", "video_clip", "render"}
+VIDEO_STAGE_NAMES = {"video_motion"}
 _YAML_BLOCK_RE = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".png", ".jpg", ".jpeg", ".webp"}
 _MOTION_CONTRACT_FIELD_ALIASES = {
@@ -27,11 +27,7 @@ def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None =
     if stage not in VIDEO_STAGE_NAMES:
         raise ValueError(f"unsupported video semantic pack stage: {stage}")
     data = manifest if manifest is not None else _load_manifest(run_dir)
-    if stage == "render":
-        return _collect_render_entries(run_dir, data)
-    if stage == "video_motion":
-        return _collect_video_motion_entries(run_dir, data)
-    return _collect_video_clip_entries(run_dir, data)
+    return _collect_video_motion_entries(run_dir, data)
 
 
 def _load_manifest(run_dir: Path) -> dict[str, Any]:
@@ -59,6 +55,7 @@ def _collect_video_motion_entries(run_dir: Path, manifest: dict[str, Any]) -> li
             selector = _cut_selector(scene, cut)
             motion_contract = _motion_contract(cut, video_generation)
             missing_fields = _motion_contract_required_fields_missing(motion_contract)
+            cut_contract = _mapping(cut.get("cut_contract"))
             entries.append(
                 {
                     "stage": "video_motion",
@@ -67,6 +64,8 @@ def _collect_video_motion_entries(run_dir: Path, manifest: dict[str, Any]) -> li
                     "cut_id": cut.get("cut_id"),
                     "source": "video_manifest.md.scenes[].cuts[].video_generation",
                     "semantic_contract": _semantic_contract(cut, video_generation),
+                    "source_event_contract": _mapping(cut_contract.get("source_event_contract")),
+                    "event_context_for_cut": _mapping(cut_contract.get("event_context_for_cut")),
                     "motion_prompt": _first_text(video_generation, "motion_prompt", "prompt", "video_prompt"),
                     "motion_contract": motion_contract,
                     "motion_contract_missing": not bool(motion_contract),
@@ -204,10 +203,20 @@ def _is_deleted(item: dict[str, Any]) -> bool:
 
 
 def _semantic_contract(item: dict[str, Any], video_generation: dict[str, Any]) -> Any:
-    return (
+    cut_contract = _mapping(item.get("cut_contract"))
+    explicit = (
         _first_value(video_generation, "semantic_contract", "contract", "review_contract")
-        or _first_value(item, "semantic_contract", "video_semantic_contract", "cut_contract", "scene_contract", "review_contract")
+        or _first_value(item, "semantic_contract", "video_semantic_contract", "scene_contract", "review_contract")
     )
+    if explicit:
+        return explicit
+    if cut_contract and not cut_contract.get("source_event_contract"):
+        return cut_contract
+    return {
+        "source_event_contract": _mapping(cut_contract.get("source_event_contract")),
+        "event_context_for_cut": _mapping(cut_contract.get("event_context_for_cut")),
+        "motion_contract": _mapping(cut_contract.get("motion_contract")),
+    }
 
 
 def _render_contract(manifest: dict[str, Any]) -> Any:
@@ -221,9 +230,11 @@ def _render_contract(manifest: dict[str, Any]) -> Any:
 
 
 def _motion_contract(item: dict[str, Any], video_generation: dict[str, Any]) -> Any:
+    cut_contract = _mapping(item.get("cut_contract"))
     return (
         _first_value(video_generation, "motion_contract", "video_motion_contract")
         or _first_value(item, "motion_contract", "video_motion_contract")
+        or _first_value(cut_contract, "motion_contract")
         or _first_value(video_generation, "semantic_contract", "contract")
     )
 
@@ -231,6 +242,14 @@ def _motion_contract(item: dict[str, Any], video_generation: dict[str, Any]) -> 
 def _motion_contract_required_fields_missing(contract: Any) -> list[str]:
     if not isinstance(contract, dict):
         return list(_MOTION_CONTRACT_FIELD_ALIASES.keys())
+    if (
+        _has_contract_value(contract, "source_event_beat_id")
+        and _has_contract_value(contract, "starts_from_first_frame")
+        and _has_contract_value(contract, "must_not_advance_to_event_beat_ids")
+        and _has_contract_value(contract, "motion_brief")
+        and _has_contract_value(contract, "end_state")
+    ):
+        return []
     missing: list[str] = []
     for canonical, aliases in _MOTION_CONTRACT_FIELD_ALIASES.items():
         if not any(_has_contract_value(contract, alias) for alias in aliases):

@@ -125,6 +125,10 @@
 - visual_beat: `<画として何が見えるか>`
 - first_frame_brief: `<動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない>`
 - motion_brief: `<p800 motion prompt 専用。p600 image prompt authoring では参照しない>`
+- narrative_position: `opening|middle|ending`
+- voice_function: `information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence`
+- visual_distance_policy: `stay_close|contextual|meaning_first|silent`
+- pronunciation_targets: []
 - narration_role: `setup|fact|emotion|contrast|aftertaste|silent`
 - narration_text: `<このカットのナレーション。silent の場合は空文字>`
 - shot_type: `<WS/MS/CU/POV/etc>`

@@ -39,6 +39,8 @@ import ChatIcon from '@mui/icons-material/Chat';
 import DownloadIcon from '@mui/icons-material/Download';
 import FactCheckIcon from '@mui/icons-material/FactCheck';
 import ImageIcon from '@mui/icons-material/Image';
+import KeyboardArrowLeftIcon from '@mui/icons-material/KeyboardArrowLeft';
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import MovieCreationIcon from '@mui/icons-material/MovieCreation';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import SendIcon from '@mui/icons-material/Send';
@@ -109,6 +111,9 @@ type EditableItem = ImageRequestItem & {
   narrationTtsText: string;
   narrationOutput: string | null;
   narrationTool: string;
+  narrationStatus: string;
+  narrationReviewStatus: string;
+  narrationSilentOk: boolean;
   narrationDurationSec: number | null;
   narrationExists: boolean;
   narrationGenerating: boolean;
@@ -206,6 +211,9 @@ type NarrationManifestItem = {
   narrationTtsText: string;
   narrationOutput: string | null;
   narrationTool: string;
+  narrationStatus: string;
+  narrationReviewStatus: string;
+  narrationSilentOk: boolean;
   narrationExists: boolean;
   narrationDurationSeconds: number | null;
   renderNarrationOffsetSeconds: number;
@@ -221,6 +229,20 @@ type NarrationGenerateResponse = {
     durationSeconds: number | null;
     error?: string;
   };
+  progress?: RunProgress;
+};
+
+type NarrationDraftCreateResponse = {
+  status: string;
+  updated: string[];
+  skipped: string[];
+  reportPath: string;
+  progress?: RunProgress;
+};
+
+type NarrationSilentOkResponse = {
+  status: string;
+  itemId: string;
   progress?: RunProgress;
 };
 
@@ -411,6 +433,9 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       narrationTtsText: narration?.narrationTtsText || narration?.narrationText || '',
       narrationOutput: narration?.narrationOutput || null,
       narrationTool: narration?.narrationTool || 'elevenlabs',
+      narrationStatus: narration?.narrationStatus || '',
+      narrationReviewStatus: narration?.narrationReviewStatus || '',
+      narrationSilentOk: Boolean(narration?.narrationSilentOk),
       narrationDurationSec: narration?.narrationDurationSeconds ?? null,
       narrationExists: Boolean(narration?.narrationExists),
       narrationGenerating: false,
@@ -884,6 +909,9 @@ function existingAssetItems(refs: ReferenceOption[]): EditableItem[] {
         narrationTtsText: '',
         narrationOutput: null,
         narrationTool: 'elevenlabs',
+        narrationStatus: '',
+        narrationReviewStatus: '',
+        narrationSilentOk: false,
         narrationDurationSec: null,
         narrationExists: false,
         narrationGenerating: false,
@@ -922,6 +950,15 @@ function videoCandidateSlots(item: EditableItem, count: number): Candidate[] {
   });
 }
 
+function itemNarrationDraftReady(item: EditableItem): boolean {
+  return Boolean(item.narrationText.trim() || item.narrationTtsText.trim() || item.narrationStatus || item.narrationReviewStatus);
+}
+
+function itemNarrationAudioReady(item: EditableItem): boolean {
+  const statusReady = ['audio_ready', 'approved'].includes(item.narrationStatus.trim().toLowerCase()) || item.narrationReviewStatus.trim().toLowerCase() === 'approved';
+  return (item.narrationExists && statusReady) || (item.narrationTool === 'silent' && item.narrationSilentOk);
+}
+
 function labelFromPath(path: string): string {
   const filename = path.split('/').pop() || path;
   return filename.replace(/\.[^.]+$/, '');
@@ -945,12 +982,13 @@ type SceneVideoPanelProps = {
   runId: string;
   references: ReferenceOption[];
   videoGenerationBusy: boolean;
+  videoReady: boolean;
   videoCandidateCount: number;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
   onGenerateVideo: (item: EditableItem) => void;
 };
 
-function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoCandidateCount, onPatchItem, onGenerateVideo }: SceneVideoPanelProps) {
+function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoReady, videoCandidateCount, onPatchItem, onGenerateVideo }: SceneVideoPanelProps) {
   const options = useMemo(() => videoReferenceOptions(item, references), [item, references]);
   const byPath = useMemo(() => new Map(options.map((option) => [option.path, option])), [options]);
   const firstReference = item.videoFirstReferencePath ? byPath.get(item.videoFirstReferencePath) ?? null : null;
@@ -1118,7 +1156,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoCa
               variant="outlined"
               startIcon={<MovieCreationIcon />}
               onClick={handleGenerateVideo}
-              disabled={videoGenerationBusy || item.videoGenerating || !item.videoDraftPrompt.trim()}
+              disabled={!videoReady || videoGenerationBusy || item.videoGenerating || !item.videoDraftPrompt.trim()}
             >
               このcutを動画生成
             </Button>
@@ -1192,6 +1230,35 @@ const PromptCard = React.memo(function PromptCard({
     [item.id, onPatchItem],
   );
   const handleGenerate = useCallback(() => onGenerateItem(item), [item, onGenerateItem]);
+  const primarySceneImage = useMemo(() => {
+    if (viewKind !== 'scene') return null;
+    const selectedCandidate = item.selectedCandidatePath
+      ? item.candidates.find((candidate) => candidate.path === item.selectedCandidatePath)
+      : null;
+    if (selectedCandidate?.path) {
+      return {
+        label: `採用候補 ${selectedCandidate.index}`,
+        path: selectedCandidate.path,
+        source: 'selected',
+      };
+    }
+    if (item.existingImage) {
+      return {
+        label: '現在',
+        path: item.existingImage,
+        source: 'existing',
+      };
+    }
+    const firstCandidate = item.candidates.find((candidate) => candidate.path);
+    if (firstCandidate?.path) {
+      return {
+        label: `候補 ${firstCandidate.index}`,
+        path: firstCandidate.path,
+        source: 'candidate',
+      };
+    }
+    return null;
+  }, [item.candidates, item.existingImage, item.selectedCandidatePath, viewKind]);
   const openExistingImage = useCallback((event?: React.MouseEvent | React.KeyboardEvent) => {
     if (!item.existingImage) return;
     event?.stopPropagation();
@@ -1203,6 +1270,17 @@ const PromptCard = React.memo(function PromptCard({
       src: fileUrl(runId, item.existingImage),
     });
   }, [item.existingImage, item.id, onOpenImage, onSetActiveItemId, runId]);
+  const openPrimarySceneImage = useCallback((event?: React.MouseEvent | React.KeyboardEvent) => {
+    if (!primarySceneImage) return;
+    event?.stopPropagation();
+    onSetActiveItemId(item.id);
+    onOpenImage({
+      itemId: item.id,
+      label: primarySceneImage.label,
+      path: primarySceneImage.path,
+      src: fileUrl(runId, primarySceneImage.path),
+    });
+  }, [item.id, onOpenImage, onSetActiveItemId, primarySceneImage, runId]);
   const selectedReferenceThumbs = useMemo(
     () =>
       item.selectedReferences.map((ref) => {
@@ -1250,6 +1328,7 @@ const PromptCard = React.memo(function PromptCard({
           </Stack>
 
           <Button
+            className="promptGenerateButton"
             variant="contained"
             startIcon={<AutoAwesomeIcon />}
             disabled={item.generating || item.promptGenerating || !item.draftPrompt.trim()}
@@ -1298,6 +1377,29 @@ const PromptCard = React.memo(function PromptCard({
               <Typography fontWeight={900}>候補比較</Typography>
               <Chip size="small" label={item.promptGenerating ? 'プロンプト作成中' : item.generating ? '生成中' : item.candidates.length ? '確認待ち' : '未生成'} />
             </Box>
+            {primarySceneImage && (
+              <Box className="scenePrimaryPreview">
+                <Box
+                  className="scenePrimaryMedia"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${item.id}の${primarySceneImage.label}を拡大表示`}
+                  onClick={openPrimarySceneImage}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      openPrimarySceneImage(event);
+                    }
+                  }}
+                >
+                  <img src={fileUrl(runId, primarySceneImage.path)} alt={`${item.id} ${primarySceneImage.label}`} loading="eager" decoding="async" />
+                </Box>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} className="scenePrimaryCaption">
+                  <Typography variant="caption" fontWeight={900} noWrap>{primarySceneImage.label}</Typography>
+                  <Chip size="small" color={primarySceneImage.source === 'selected' ? 'primary' : 'default'} label={primarySceneImage.source === 'selected' ? '選択画像' : 'プレビュー'} />
+                </Stack>
+              </Box>
+            )}
             <Box className="candidateGrid">
             {item.existingImage && (
               <GlassStatusRim
@@ -1414,6 +1516,7 @@ type VideoCutCardProps = {
   runId: string;
   references: ReferenceOption[];
   videoGenerationBusy: boolean;
+  videoReady: boolean;
   videoCandidateCount: number;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
   onGenerateVideo: (item: EditableItem) => void;
@@ -1424,6 +1527,7 @@ const VideoCutCard = React.memo(function VideoCutCard({
   runId,
   references,
   videoGenerationBusy,
+  videoReady,
   videoCandidateCount,
   onPatchItem,
   onGenerateVideo,
@@ -1445,6 +1549,7 @@ const VideoCutCard = React.memo(function VideoCutCard({
           runId={runId}
           references={references}
           videoGenerationBusy={videoGenerationBusy}
+          videoReady={videoReady}
           videoCandidateCount={videoCandidateCount}
           onPatchItem={onPatchItem}
           onGenerateVideo={onGenerateVideo}
@@ -1460,6 +1565,7 @@ type NarrationCutCardProps = {
   narrationBusy: boolean;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
   onGenerateNarration: (item: EditableItem) => void;
+  onConfirmSilentOk: (item: EditableItem) => void;
 };
 
 const NarrationCutCard = React.memo(function NarrationCutCard({
@@ -1468,6 +1574,7 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
   narrationBusy,
   onPatchItem,
   onGenerateNarration,
+  onConfirmSilentOk,
 }: NarrationCutCardProps) {
   const handleAudioPlay = useCallback((event: React.SyntheticEvent<HTMLAudioElement>) => {
     document.querySelectorAll('audio').forEach((audio) => {
@@ -1475,6 +1582,8 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
     });
   }, []);
   const handleGenerate = useCallback(() => onGenerateNarration(item), [item, onGenerateNarration]);
+  const handleSilentOk = useCallback(() => onConfirmSilentOk(item), [item, onConfirmSilentOk]);
+  const audioReady = itemNarrationAudioReady(item);
   return (
     <Card className="narrationCutCard" variant="outlined">
       <CardContent className="narrationCutCardContent">
@@ -1487,8 +1596,8 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
           </Box>
           <Chip
             size="small"
-            color={item.narrationExists ? 'success' : 'default'}
-            label={item.narrationDurationSec ? `${item.narrationDurationSec.toFixed(1)}s` : item.narrationExists ? '生成済み' : '未生成'}
+            color={audioReady ? 'success' : 'default'}
+            label={item.narrationSilentOk ? '無音OK' : item.narrationDurationSec ? `${item.narrationDurationSec.toFixed(1)}s` : item.narrationExists ? '生成済み' : '未生成'}
           />
         </Stack>
 
@@ -1541,6 +1650,16 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
             >
               このcutの音声生成
             </Button>
+            {item.narrationTool === 'silent' && (
+              <Button
+                variant={item.narrationSilentOk ? 'contained' : 'outlined'}
+                color={item.narrationSilentOk ? 'success' : 'primary'}
+                onClick={handleSilentOk}
+                disabled={narrationBusy || item.narrationGenerating}
+              >
+                このcutは無音OK
+              </Button>
+            )}
           </Box>
           {item.narrationGenerating && <LinearProgress className="videoCandidateProgress" />}
         </Box>
@@ -1655,6 +1774,7 @@ function App() {
   const [videoCandidateCount, setVideoCandidateCount] = useState(3);
   const [videoCandidateCountDraft, setVideoCandidateCountDraft] = useState(3);
   const [activeImageSceneKey, setActiveImageSceneKey] = useState('');
+  const [activeImageCutId, setActiveImageCutId] = useState('');
   const [activeVideoSceneKey, setActiveVideoSceneKey] = useState('');
   const [items, setItems] = useState<EditableItem[]>([]);
   const [references, setReferences] = useState<ReferenceOption[]>([]);
@@ -1677,6 +1797,7 @@ function App() {
   const [videoBulkCompletedCount, setVideoBulkCompletedCount] = useState(0);
   const [videoBulkFailedCount, setVideoBulkFailedCount] = useState(0);
   const [narrationBusy, setNarrationBusy] = useState(false);
+  const [narrationDraftBusy, setNarrationDraftBusy] = useState(false);
   const [narrationStatus, setNarrationStatus] = useState<string | null>(null);
   const [narrationBulkTotal, setNarrationBulkTotal] = useState(0);
   const [narrationBulkCompletedCount, setNarrationBulkCompletedCount] = useState(0);
@@ -1704,6 +1825,7 @@ function App() {
   const [confirmRegenerateOpen, setConfirmRegenerateOpen] = useState(false);
   const [confirmImageGenerateOpen, setConfirmImageGenerateOpen] = useState(false);
   const [confirmVideoPromptOpen, setConfirmVideoPromptOpen] = useState(false);
+  const [confirmNarrationReplaceOpen, setConfirmNarrationReplaceOpen] = useState(false);
   const [pendingWorkspaceMode, setPendingWorkspaceMode] = useState<WorkspaceMode | null>(null);
   const [enlargedImage, setEnlargedImage] = useState<EnlargedImage | null>(null);
   const [regenerateBusy, setRegenerateBusy] = useState(false);
@@ -1770,11 +1892,36 @@ function App() {
     () => videoSceneGroups.find((group) => group.key === activeVideoSceneKey) ?? videoSceneGroups[0] ?? null,
     [activeVideoSceneKey, videoSceneGroups],
   );
-  const imageDisplayItems = workspaceMode === 'image' && viewKind === 'scene' ? activeImageScene?.items ?? [] : visibleItems;
+  const imageSceneItems = workspaceMode === 'image' && viewKind === 'scene' ? activeImageScene?.items ?? [] : [];
+  const activeImageCutIndex = useMemo(() => {
+    if (!imageSceneItems.length) return -1;
+    const index = imageSceneItems.findIndex((item) => item.id === activeImageCutId);
+    return index >= 0 ? index : 0;
+  }, [activeImageCutId, imageSceneItems]);
+  const activeImageCutItem = activeImageCutIndex >= 0 ? imageSceneItems[activeImageCutIndex] : null;
+  const imageDisplayItems = workspaceMode === 'image' && viewKind === 'scene'
+    ? activeImageCutItem ? [activeImageCutItem] : []
+    : visibleItems;
   const videoDisplayItems = workspaceMode === 'video' ? activeVideoScene?.items ?? [] : visibleItems;
   const displayedItemCount = workspaceMode === 'image' ? imageDisplayItems.length : workspaceMode === 'video' ? videoDisplayItems.length : visibleItems.length;
+  const sceneCutItems = useMemo(() => items.filter(isSceneCutItem), [items]);
+  const narrationDraftReadyCount = useMemo(() => sceneCutItems.filter(itemNarrationDraftReady).length, [sceneCutItems]);
+  const narrationAudioReadyCount = useMemo(() => sceneCutItems.filter(itemNarrationAudioReady).length, [sceneCutItems]);
+  const hasNarrationDrafts = sceneCutItems.length > 0 && narrationDraftReadyCount > 0;
+  const allNarrationDraftsReady = sceneCutItems.length > 0 && narrationDraftReadyCount === sceneCutItems.length;
+  const allNarrationAudioReady = sceneCutItems.length > 0 && narrationAudioReadyCount === sceneCutItems.length;
+  const canGoPrevImageCut = activeImageCutIndex > 0;
+  const canGoNextImageCut = activeImageCutIndex >= 0 && activeImageCutIndex < imageSceneItems.length - 1;
+  const moveImageCut = useCallback((delta: -1 | 1) => {
+    if (!imageSceneItems.length || activeImageCutIndex < 0) return;
+    const nextIndex = Math.min(Math.max(activeImageCutIndex + delta, 0), imageSceneItems.length - 1);
+    const nextItem = imageSceneItems[nextIndex];
+    if (!nextItem) return;
+    setActiveImageCutId(nextItem.id);
+    setActiveItemId(nextItem.id);
+  }, [activeImageCutIndex, imageSceneItems]);
   const imageGenerationActive = bulkGenerating || regenerateBusy || addAssetBusy || items.some((item) => item.generating || item.promptGenerating);
-  const narrationGenerationActive = narrationBusy || items.some((item) => item.narrationGenerating);
+  const narrationGenerationActive = narrationBusy || narrationDraftBusy || items.some((item) => item.narrationGenerating);
   const videoGenerationActive = videoPromptBusy || items.some((item) => item.videoGenerating);
   const generationInFlight = imageGenerationActive || narrationGenerationActive || videoGenerationActive || renderBusy;
   const backgroundGenerationLabel = useMemo(() => {
@@ -1900,6 +2047,14 @@ function App() {
       return imageSceneGroups[0]?.key || '';
     });
   }, [imageSceneGroups, viewKind, workspaceMode]);
+
+  useEffect(() => {
+    if (workspaceMode !== 'image' || viewKind !== 'scene') return;
+    setActiveImageCutId((current) => {
+      if (current && imageSceneItems.some((item) => item.id === current)) return current;
+      return imageSceneItems[0]?.id || '';
+    });
+  }, [imageSceneItems, viewKind, workspaceMode]);
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1100px)');
@@ -2332,6 +2487,11 @@ function App() {
 
   const openVideoPromptConfirm = useCallback(async () => {
     if (!runId) return;
+    if (!allNarrationAudioReady) {
+      applyWorkspaceMode('video');
+      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+      return;
+    }
     setVideoPromptStatus(null);
     const shouldLoadSceneRequests = viewKind !== 'scene' || !items.some(isSceneCutItem);
     applyWorkspaceMode('video');
@@ -2339,7 +2499,7 @@ function App() {
       await loadRunRequests(runId, 'scene');
     }
     setConfirmVideoPromptOpen(true);
-  }, [applyWorkspaceMode, items, loadRunRequests, runId, viewKind]);
+  }, [allNarrationAudioReady, applyWorkspaceMode, items, loadRunRequests, runId, viewKind]);
 
   const buildVideoGenerateItem = useCallback((item: EditableItem, count = videoCandidateCount): VideoGenerateItemPayload => ({
     item_id: item.id,
@@ -2366,6 +2526,10 @@ function App() {
 
   const generateVideoForCut = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    if (!allNarrationAudioReady) {
+      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+      return;
+    }
     ensureItemsInState([item]);
     setActiveItemId(item.id);
     setVideoPromptBusy(true);
@@ -2398,10 +2562,14 @@ function App() {
       patchItem(item.id, { videoGenerating: false });
       setVideoPromptBusy(false);
     }
-  }, [ensureItemsInState, generateVideoRequest, patchItem, runId, saveCurrentReview]);
+  }, [allNarrationAudioReady, ensureItemsInState, generateVideoRequest, patchItem, runId, saveCurrentReview]);
 
   const generateVideoItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId || !targetItems.length) return;
+    if (!allNarrationAudioReady) {
+      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+      return;
+    }
     ensureItemsInState(targetItems);
     const targetIds = new Set(targetItems.map((item) => item.id));
     const concurrency = Math.min(2, Math.max(targetItems.length, 1));
@@ -2467,14 +2635,80 @@ function App() {
     } finally {
       setVideoPromptBusy(false);
     }
-  }, [ensureItemsInState, generateVideoRequest, runId, saveCurrentReview]);
+  }, [allNarrationAudioReady, ensureItemsInState, generateVideoRequest, runId, saveCurrentReview]);
 
   const generateAllVideos = useCallback(async () => {
+    if (!allNarrationAudioReady) {
+      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+      setConfirmVideoPromptOpen(false);
+      return;
+    }
     const sceneItems = items.filter(isSceneCutItem);
     if (!sceneItems.length) return;
     setConfirmVideoPromptOpen(false);
     await generateVideoItems(sceneItems);
-  }, [generateVideoItems, items]);
+  }, [allNarrationAudioReady, generateVideoItems, items]);
+
+  const createNarrationDrafts = useCallback(async (replace = false) => {
+    if (!runId) return;
+    setConfirmNarrationReplaceOpen(false);
+    setNarrationDraftBusy(true);
+    setNarrationStatus(replace ? 'ナレーション文面を再作成中' : 'ナレーション文面を作成中');
+    try {
+      const data = await jsonFetch<NarrationDraftCreateResponse>('/api/image-gen/narration-drafts/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: runId,
+          note: 'frontend narration draft creation',
+          replace,
+        }),
+      });
+      if (data.progress) setRunProgress(data.progress);
+      await loadRunRequests(runId, 'scene');
+      setNarrationStatus(`ナレーション文面 ${data.updated.length} cut 作成`);
+    } catch (error) {
+      console.error(error);
+      setNarrationStatus(replace ? 'ナレーション文面の再作成に失敗' : 'ナレーション文面の作成に失敗');
+    } finally {
+      setNarrationDraftBusy(false);
+    }
+  }, [loadRunRequests, runId]);
+
+  const confirmSilentOk = useCallback(async (item: EditableItem) => {
+    if (!runId) return;
+    patchItem(item.id, { narrationGenerating: true });
+    setNarrationStatus(`${item.id} 無音OKを保存中`);
+    try {
+      const data = await jsonFetch<NarrationSilentOkResponse>('/api/image-gen/narration-silent-ok', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: runId,
+          item_id: item.id,
+          reason: 'frontend confirmed intentional silence',
+        }),
+      });
+      if (data.progress) setRunProgress(data.progress);
+      patchItem(item.id, {
+        narrationGenerating: false,
+        narrationTool: 'silent',
+        narrationText: '',
+        narrationTtsText: '',
+        narrationOutput: null,
+        narrationExists: false,
+        narrationStatus: 'audio_ready',
+        narrationReviewStatus: 'approved',
+        narrationSilentOk: true,
+        renderNarrationPath: null,
+      });
+      setNarrationStatus(`${item.id} 無音OK`);
+    } catch (error) {
+      console.error(error);
+      patchItem(item.id, { narrationGenerating: false });
+      setNarrationStatus(`${item.id} 無音OKの保存に失敗`);
+    }
+  }, [patchItem, runId]);
 
   const narrationPayload = useCallback((item: EditableItem) => ({
     item_id: item.id,
@@ -2495,6 +2729,9 @@ function App() {
               narrationExists: result.status === 'completed' || item.narrationExists,
               narrationOutput: result.path || item.narrationOutput,
               renderNarrationPath: result.path || item.renderNarrationPath,
+              narrationStatus: result.status === 'completed' ? 'audio_ready' : item.narrationStatus,
+              narrationReviewStatus: result.status === 'completed' ? 'approved' : item.narrationReviewStatus,
+              narrationSilentOk: item.narrationTool === 'silent' && result.status === 'completed' ? true : item.narrationSilentOk,
               narrationDurationSec: result.durationSeconds ?? item.narrationDurationSec,
               videoDurationSec: Math.max(item.videoDurationSec, Math.ceil(result.durationSeconds || 0), 1),
               renderVideoDurationSec: Math.max(item.renderVideoDurationSec, Math.ceil(result.durationSeconds || 0), 1),
@@ -2539,7 +2776,15 @@ function App() {
 
   const generateAllNarration = useCallback(async () => {
     if (!runId) return;
-    const sceneItems = items.filter(isSceneCutItem);
+    if (!allNarrationDraftsReady) {
+      setNarrationStatus(`音声生成には全cutの文面が必要です ${narrationDraftReadyCount}/${sceneCutItems.length}`);
+      return;
+    }
+    const sceneItems = items.filter((item) => isSceneCutItem(item) && !itemNarrationAudioReady(item));
+    if (!sceneItems.length && items.some(isSceneCutItem)) {
+      setNarrationStatus('全cutの音声または無音OKが揃っています');
+      return;
+    }
     if (!sceneItems.length) return;
     ensureItemsInState(sceneItems);
     const targetIds = new Set(sceneItems.map((item) => item.id));
@@ -2579,12 +2824,12 @@ function App() {
     } finally {
       setNarrationBusy(false);
     }
-  }, [applyNarrationResult, ensureItemsInState, items, narrationPayload, runId, saveCurrentReview]);
+  }, [allNarrationDraftsReady, applyNarrationResult, ensureItemsInState, items, narrationDraftReadyCount, narrationPayload, runId, saveCurrentReview, sceneCutItems.length]);
 
   const buildRenderItems = useCallback((targetItems: EditableItem[]) => targetItems.map((item) => ({
     item_id: item.id,
     video_path: item.renderVideoPath,
-    narration_path: item.renderNarrationPath || item.narrationOutput,
+    narration_path: itemNarrationAudioReady(item) && item.narrationTool === 'silent' && !item.narrationExists ? null : item.renderNarrationPath || item.narrationOutput,
     video_duration_seconds: Math.max(item.renderVideoDurationSec, Math.ceil((item.narrationDurationSec || 0) + item.renderNarrationOffsetSec), 1),
     narration_offset_seconds: item.renderNarrationOffsetSec,
   })), []);
@@ -2723,6 +2968,9 @@ function App() {
       narrationTtsText: '',
       narrationOutput: null,
       narrationTool: 'elevenlabs',
+      narrationStatus: '',
+      narrationReviewStatus: '',
+      narrationSilentOk: false,
       narrationDurationSec: null,
       narrationExists: false,
       narrationGenerating: false,
@@ -2986,19 +3234,29 @@ function App() {
                 </>
               ) : workspaceMode === 'narration' ? (
                 <>
-                  <Typography variant="caption" className="stationLabel">音声生成</Typography>
+                  <Typography variant="caption" className="stationLabel">p720 / p750</Typography>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
                     <Typography fontWeight={800}>全cutナレーション</Typography>
-                    <Chip color="primary" label={`${visibleItems.filter((item) => item.narrationExists).length}/${visibleItems.length}`} />
+                    <Chip color={allNarrationAudioReady ? 'success' : 'primary'} label={`${narrationAudioReadyCount}/${sceneCutItems.length}`} />
                   </Stack>
-                  <Button
-                    variant="contained"
-                    startIcon={<RecordVoiceOverIcon />}
-                    onClick={generateAllNarration}
-                    disabled={!visibleItems.length || narrationBusy}
-                  >
-                    全cut音声生成
-                  </Button>
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      variant={hasNarrationDrafts ? 'outlined' : 'contained'}
+                      startIcon={<RecordVoiceOverIcon />}
+                      onClick={() => (hasNarrationDrafts ? setConfirmNarrationReplaceOpen(true) : createNarrationDrafts(false))}
+                      disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy}
+                    >
+                      {hasNarrationDrafts ? '文面を再作成' : '文面を作成'}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      startIcon={<RecordVoiceOverIcon />}
+                      onClick={generateAllNarration}
+                      disabled={!visibleItems.length || !allNarrationDraftsReady || allNarrationAudioReady || narrationBusy || narrationDraftBusy}
+                    >
+                      全cut音声生成
+                    </Button>
+                  </Stack>
                 </>
               ) : workspaceMode === 'render' ? (
                 <>
@@ -3021,7 +3279,7 @@ function App() {
                   <Typography variant="caption" className="stationLabel">動画生成本数</Typography>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
                     <Typography fontWeight={800}>同時生成本数</Typography>
-                    <Chip color="primary" label={`${displayedVideoCandidateCount}候補`} />
+                    <Chip color={allNarrationAudioReady ? 'primary' : 'default'} label={allNarrationAudioReady ? `${displayedVideoCandidateCount}候補` : `音声 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />
                   </Stack>
                   <Slider
                     className="countSlider"
@@ -3048,7 +3306,7 @@ function App() {
                     variant="contained"
                     startIcon={<MovieCreationIcon />}
                     onClick={openVideoPromptConfirm}
-                    disabled={!visibleItems.length || videoPromptBusy}
+                    disabled={!visibleItems.length || !allNarrationAudioReady || videoPromptBusy}
                   >
                     全cut動画生成
                   </Button>
@@ -3099,7 +3357,7 @@ function App() {
                         <Tab key={group.key} value={group.key} label={`${group.label} / ${group.items.length}`} />
                       ))}
                     </Tabs>
-                    <Chip size="small" color="primary" label={`${imageDisplayItems.length}/${visibleItems.length} cut`} />
+                    <Chip size="small" color="primary" label={`${imageSceneItems.length}/${visibleItems.length} cut`} />
                   </Box>
                 )}
                 {!busy && !items.length && (
@@ -3119,21 +3377,61 @@ function App() {
                     </Typography>
                   </GlassPanel>
                 )}
-                {imageDisplayItems.map((item) => (
-                  <PromptCard
-                    key={item.id}
-                    item={item}
-                    runId={runId}
-                    viewKind={viewKind}
-                    references={references}
-                    candidateCount={candidateCount}
-                    adoptedKeys={adoptedKeys}
-                    onPatchItem={patchItem}
-                    onGenerateItem={generateItem}
-                    onSetActiveItemId={setActiveItemIdStable}
-                    onOpenImage={openEnlargedImage}
-                  />
-                ))}
+                {viewKind === 'scene' && activeImageCutItem ? (
+                  <Box className="sceneCutPager" aria-label="シーン内cut移動">
+                    <PromptCard
+                      key={activeImageCutItem.id}
+                      item={activeImageCutItem}
+                      runId={runId}
+                      viewKind={viewKind}
+                      references={references}
+                      candidateCount={candidateCount}
+                      adoptedKeys={adoptedKeys}
+                      onPatchItem={patchItem}
+                      onGenerateItem={generateItem}
+                      onSetActiveItemId={setActiveItemIdStable}
+                      onOpenImage={openEnlargedImage}
+                    />
+                    <Tooltip title="前のcut">
+                      <span className="sceneCutOverlayButton sceneCutOverlayButtonLeft">
+                        <IconButton
+                          color="primary"
+                          onClick={() => moveImageCut(-1)}
+                          disabled={!canGoPrevImageCut}
+                          aria-label="前のcutへ移動"
+                        >
+                          <KeyboardArrowLeftIcon />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="次のcut">
+                      <span className="sceneCutOverlayButton sceneCutOverlayButtonRight">
+                        <IconButton
+                          color="primary"
+                          onClick={() => moveImageCut(1)}
+                          disabled={!canGoNextImageCut}
+                          aria-label="次のcutへ移動"
+                        >
+                          <KeyboardArrowRightIcon />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                ) : imageDisplayItems.map((item) => (
+                    <PromptCard
+                      key={item.id}
+                      item={item}
+                      runId={runId}
+                      viewKind={viewKind}
+                      references={references}
+                      candidateCount={candidateCount}
+                      adoptedKeys={adoptedKeys}
+                      onPatchItem={patchItem}
+                      onGenerateItem={generateItem}
+                      onSetActiveItemId={setActiveItemIdStable}
+                      onOpenImage={openEnlargedImage}
+                    />
+                  ))}
                 {!busy && viewKind === 'asset' && Boolean(runId) && (
                   <GlassPanel variant="frosted" density="spacious" className="addCutCard">
                     <AddCircleOutlineIcon className="addCutIcon" />
@@ -3188,14 +3486,24 @@ function App() {
                     <Typography fontWeight={900}>表示できるシーンcutがありません</Typography>
                   </GlassPanel>
                 )}
+                {workspaceMode === 'video' && !allNarrationAudioReady && (
+                  <GlassPanel variant="frosted" density="spacious" className="emptyGallery narrationGateCard">
+                    <Typography fontWeight={900}>動画生成には音声レビューが必要です</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      音声タブで全cutの音声ファイルを生成するか、無音cutを「無音OK」にしてください。
+                    </Typography>
+                    <Chip color="primary" label={`音声 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />
+                  </GlassPanel>
+                )}
                 {workspaceMode === 'narration' && visibleItems.map((item) => (
                   <NarrationCutCard
                     key={item.id}
                     item={item}
                     runId={runId}
-                    narrationBusy={narrationBusy}
+                    narrationBusy={narrationBusy || narrationDraftBusy}
                     onPatchItem={patchItem}
                     onGenerateNarration={generateNarrationForCut}
+                    onConfirmSilentOk={confirmSilentOk}
                   />
                 ))}
                 {workspaceMode === 'video' && videoDisplayItems.map((item) => (
@@ -3205,6 +3513,7 @@ function App() {
                     runId={runId}
                     references={references}
                     videoGenerationBusy={videoPromptBusy}
+                    videoReady={allNarrationAudioReady}
                     videoCandidateCount={videoCandidateCount}
                     onPatchItem={patchItem}
                     onGenerateVideo={generateVideoForCut}
@@ -3237,6 +3546,9 @@ function App() {
               {workspaceMode === 'video' && videoPromptBusy && <Chip size="small" color="primary" label={`動画生成中 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal || visibleItems.length}`} />}
               {workspaceMode === 'video' && !videoPromptBusy && videoBulkTotal > 0 && <Chip size="small" label={`動画生成完了 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal}`} />}
               {workspaceMode === 'video' && videoBulkFailedCount > 0 && <Chip size="small" color="error" label={`動画失敗 ${videoBulkFailedCount}`} />}
+              {workspaceMode === 'video' && !allNarrationAudioReady && <Chip size="small" color="warning" label={`音声未完了 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />}
+              {workspaceMode === 'narration' && narrationDraftBusy && <Chip size="small" color="primary" label="文面作成中" />}
+              {workspaceMode === 'narration' && !narrationDraftBusy && hasNarrationDrafts && <Chip size="small" color="primary" label={`文面 ${narrationDraftReadyCount}/${sceneCutItems.length}`} />}
               {workspaceMode === 'narration' && narrationBusy && <Chip size="small" color="primary" label={`音声生成中 ${narrationBulkCompletedCount + narrationBulkFailedCount}/${narrationBulkTotal || visibleItems.length}`} />}
               {workspaceMode === 'narration' && !narrationBusy && narrationBulkTotal > 0 && <Chip size="small" label={`音声生成完了 ${narrationBulkCompletedCount + narrationBulkFailedCount}/${narrationBulkTotal}`} />}
               {workspaceMode === 'narration' && narrationBulkFailedCount > 0 && <Chip size="small" color="error" label={`音声失敗 ${narrationBulkFailedCount}`} />}
@@ -3269,15 +3581,25 @@ function App() {
                   </Button>
                 </>
               ) : workspaceMode === 'narration' ? (
-                <Button
-                  className="insertAction"
-                  variant="contained"
-                  startIcon={<RecordVoiceOverIcon />}
-                  onClick={generateAllNarration}
-                  disabled={!visibleItems.length || narrationBusy}
-                >
-                  全cut音声生成
-                </Button>
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    variant={hasNarrationDrafts ? 'outlined' : 'contained'}
+                    startIcon={<RecordVoiceOverIcon />}
+                    onClick={() => (hasNarrationDrafts ? setConfirmNarrationReplaceOpen(true) : createNarrationDrafts(false))}
+                    disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy}
+                  >
+                    {hasNarrationDrafts ? '文面を再作成' : '文面を作成'}
+                  </Button>
+                  <Button
+                    className="insertAction"
+                    variant="contained"
+                    startIcon={<RecordVoiceOverIcon />}
+                    onClick={generateAllNarration}
+                    disabled={!visibleItems.length || !allNarrationDraftsReady || allNarrationAudioReady || narrationBusy || narrationDraftBusy}
+                  >
+                    全cut音声生成
+                  </Button>
+                </Stack>
               ) : workspaceMode === 'render' ? (
                 <>
                   <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || renderBusy}>
@@ -3293,7 +3615,7 @@ function App() {
                   variant="contained"
                   startIcon={<MovieCreationIcon />}
                   onClick={openVideoPromptConfirm}
-                  disabled={!visibleItems.length || videoPromptBusy}
+                  disabled={!visibleItems.length || !allNarrationAudioReady || videoPromptBusy}
                 >
                   全cut動画生成
                 </Button>
@@ -3503,6 +3825,31 @@ function App() {
         </Dialog>
 
         <Dialog
+          open={confirmNarrationReplaceOpen}
+          onClose={() => setConfirmNarrationReplaceOpen(false)}
+          className="settingsDialog"
+          aria-labelledby="confirm-narration-replace-title"
+        >
+          <DialogTitle id="confirm-narration-replace-title">ナレーション文面を再作成しますか？</DialogTitle>
+          <DialogContent dividers>
+            <Stack spacing={1.5}>
+              <Typography>
+                既存のナレーション文面、TTS文面、scene_narration_plan、無音設定、レビュー状態を上書きします。
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                既存の音声ファイルは削除しませんが、再作成後は文面と一致しない可能性があります。
+              </Typography>
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmNarrationReplaceOpen(false)}>キャンセル</Button>
+            <Button variant="contained" color="warning" onClick={() => createNarrationDrafts(true)} disabled={narrationDraftBusy}>
+              再作成
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
           open={confirmVideoPromptOpen}
           onClose={() => setConfirmVideoPromptOpen(false)}
           className="settingsDialog"
@@ -3515,13 +3862,18 @@ function App() {
                 現在の動画レビューを一時保存してから、各cutの設定で実動画APIを呼び出します。
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                対象: {items.filter(isSceneCutItem).length} cut / 各cut {videoCandidateCount} 本を候補動画として並列生成します。
+                対象: {sceneCutItems.length} cut / 各cut {videoCandidateCount} 本を候補動画として並列生成します。
               </Typography>
+              {!allNarrationAudioReady && (
+                <Typography variant="body2" color="error">
+                  動画生成には全cutの音声ファイルまたは無音OKが必要です。
+                </Typography>
+              )}
             </Stack>
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setConfirmVideoPromptOpen(false)}>キャンセル</Button>
-            <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={generateAllVideos} disabled={videoPromptBusy || !items.some(isSceneCutItem)}>
+            <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={generateAllVideos} disabled={videoPromptBusy || !sceneCutItems.length || !allNarrationAudioReady}>
               全cut動画生成
             </Button>
           </DialogActions>

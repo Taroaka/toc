@@ -14,13 +14,9 @@ SPECIALIZED_COLLECTORS = {
     "scene_detail": "toc.semantic_pack_scene",
     "cut_blueprint": "toc.semantic_pack_scene",
     "asset_plan": "toc.semantic_pack_asset",
-    "asset_output": "toc.semantic_pack_asset",
     "image_prompt": "toc.semantic_pack_image",
-    "scene_image": "toc.semantic_pack_image",
     "narration": "toc.semantic_pack_narration",
     "video_motion": "toc.semantic_pack_video",
-    "video_clip": "toc.semantic_pack_video",
-    "render": "toc.semantic_pack_video",
 }
 
 
@@ -337,12 +333,12 @@ def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None =
         return _scene_entries(stage, run_dir, manifest_data)
     if stage == "cut_blueprint":
         return _cut_entries(manifest_data)
-    if stage in {"asset_plan", "asset_output"}:
+    if stage == "asset_plan":
         return _asset_entries(stage, run_dir, manifest_data)
-    if stage in {"image_prompt", "scene_image"}:
+    if stage == "image_prompt":
         return _image_entries(stage, run_dir, manifest_data)
     if stage == "narration":
         return _narration_entries(run_dir, manifest_data)
-    if stage in {"video_motion", "video_clip", "render"}:
+    if stage == "video_motion":
         return _video_entries(stage, run_dir, manifest_data)
     return []

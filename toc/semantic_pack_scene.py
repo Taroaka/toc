@@ -116,6 +116,7 @@ def _scene_entry(
         "normalized_semantic_contract": normalized_contract,
         "contract_required_fields_missing": missing_fields,
         "scene_intent": scene.get("scene_intent"),
+        "scene_event": scene.get("scene_event"),
         "coverage_review": scene.get("coverage_review"),
         "handoff_to_next_scene": scene.get("handoff_to_next_scene"),
         "terminal_resolution": scene.get("terminal_resolution"),
@@ -144,7 +145,8 @@ def _cut_entry(
     selector = _text(cut.get("selector"), default=_cut_selector(scene_id, cut_id))
     blueprint = _dict_value(cut.get("cut_blueprint"))
     scene_contract = _dict_value(cut.get("scene_contract"))
-    semantic_contract = cut.get("semantic_contract") or scene_contract or _contract_from_blueprint(blueprint)
+    cut_contract = _dict_value(cut.get("cut_contract"))
+    semantic_contract = cut.get("semantic_contract") or cut_contract or scene_contract or _contract_from_blueprint(blueprint)
     normalized_contract = _normalize_cut_contract(cut, semantic_contract, blueprint, scene_contract)
     missing_fields = _missing_required_fields(
         normalized_contract,
@@ -169,6 +171,9 @@ def _cut_entry(
                 or cut.get("visual_beat")
             ),
             "semantic_contract": semantic_contract,
+            "cut_contract": cut_contract or None,
+            "source_event_contract": _dict_value(cut_contract.get("source_event_contract")) or None,
+            "event_context_for_cut": _event_context_for_cut(scene, cut),
             "semantic_contract_present": bool(semantic_contract),
             "semantic_contract_missing": bool(missing_fields),
             "normalized_semantic_contract": normalized_contract,
@@ -205,7 +210,10 @@ def _scene_semantic_contract(scene: dict[str, Any]) -> Any:
         return scene.get("scene_contract")
 
     intent = _dict_value(scene.get("scene_intent"))
+    scene_event = _dict_value(scene.get("scene_event"))
     contract: dict[str, Any] = {}
+    if scene_event:
+        contract["scene_event"] = scene_event
     for key in ("dramatic_question", "value_shift", "causal_turn", "done_when"):
         if intent.get(key):
             contract[key] = intent[key]
@@ -219,8 +227,10 @@ def _normalize_scene_contract(scene: dict[str, Any], semantic_contract: Any) -> 
     contract = _dict_value(semantic_contract)
     scene_contract = _dict_value(scene.get("scene_contract"))
     intent = _dict_value(scene.get("scene_intent"))
+    scene_event = _dict_value(scene.get("scene_event"))
     return _without_empty_values(
         {
+            "scene_event": contract.get("scene_event") or scene_event,
             "dramatic_question": contract.get("dramatic_question")
             or scene_contract.get("dramatic_question")
             or intent.get("dramatic_question"),
@@ -238,16 +248,25 @@ def _normalize_cut_contract(
     scene_contract: dict[str, Any],
 ) -> dict[str, Any]:
     contract = _dict_value(semantic_contract)
+    cut_contract = _dict_value(cut.get("cut_contract"))
+    source_event_contract = _dict_value(cut_contract.get("source_event_contract"))
+    viewer_contract = _dict_value(cut_contract.get("viewer_contract"))
     return _without_empty_values(
         {
-            "target_beat": contract.get("target_beat")
+            "source_event_contract": source_event_contract,
+            "primary_event_beat_id": source_event_contract.get("primary_event_beat_id"),
+            "source_event_beat_ids": source_event_contract.get("source_event_beat_ids"),
+            "event_facts_to_preserve": source_event_contract.get("event_facts_to_preserve"),
+            "event_facts_not_to_invent": source_event_contract.get("event_facts_not_to_invent"),
+            "target_beat": viewer_contract.get("target_beat")
+            or contract.get("target_beat")
             or scene_contract.get("target_beat")
             or blueprint.get("target_beat")
             or cut.get("target_beat")
             or cut.get("visual_beat"),
-            "must_show": contract.get("must_show") or scene_contract.get("must_show") or blueprint.get("must_show"),
-            "must_avoid": contract.get("must_avoid") or scene_contract.get("must_avoid") or blueprint.get("must_avoid"),
-            "done_when": contract.get("done_when") or scene_contract.get("done_when") or blueprint.get("done_when"),
+            "must_show": viewer_contract.get("must_show") or contract.get("must_show") or scene_contract.get("must_show") or blueprint.get("must_show"),
+            "must_avoid": viewer_contract.get("must_avoid") or contract.get("must_avoid") or scene_contract.get("must_avoid") or blueprint.get("must_avoid"),
+            "done_when": viewer_contract.get("done_when") or contract.get("done_when") or scene_contract.get("done_when") or blueprint.get("done_when"),
         }
     )
 
@@ -269,14 +288,57 @@ def _cut_summary(*, scene_id: str, cut: dict[str, Any], cut_index: int) -> dict[
     selector = _text(cut.get("selector"), default=_cut_selector(scene_id, cut_id))
     blueprint = _dict_value(cut.get("cut_blueprint"))
     scene_contract = _dict_value(cut.get("scene_contract"))
+    cut_contract = _dict_value(cut.get("cut_contract"))
+    source_event_contract = _dict_value(cut_contract.get("source_event_contract"))
+    viewer_contract = _dict_value(cut_contract.get("viewer_contract"))
     return _without_empty_values(
         {
             "selector": selector,
             "cut_id": cut_id,
-            "target_beat": blueprint.get("target_beat") or scene_contract.get("target_beat"),
+            "primary_event_beat_id": source_event_contract.get("primary_event_beat_id"),
+            "source_event_beat_ids": source_event_contract.get("source_event_beat_ids"),
+            "target_beat": viewer_contract.get("target_beat") or blueprint.get("target_beat") or scene_contract.get("target_beat"),
             "visual_beat": blueprint.get("visual_beat") or cut.get("visual_beat"),
             "must_show": blueprint.get("must_show") or scene_contract.get("must_show"),
             "semantic_contract": cut.get("semantic_contract") or scene_contract or _contract_from_blueprint(blueprint),
+        }
+    )
+
+
+def _event_context_for_cut(scene: dict[str, Any], cut: dict[str, Any]) -> dict[str, Any]:
+    scene_event = _dict_value(scene.get("scene_event"))
+    sequence = [beat for beat in _list_value(scene_event.get("event_sequence")) if isinstance(beat, dict)]
+    cut_contract = _dict_value(cut.get("cut_contract"))
+    source_contract = _dict_value(cut_contract.get("source_event_contract"))
+    primary_id = _text(source_contract.get("primary_event_beat_id"))
+    source_ids = [_text(item) for item in _list_value(source_contract.get("source_event_beat_ids")) if _text(item)]
+    if primary_id and primary_id not in source_ids:
+        source_ids = [primary_id, *source_ids]
+    by_id = {_text(beat.get("beat_id")): beat for beat in sequence if _text(beat.get("beat_id"))}
+    if not by_id:
+        return {}
+    neighbor_ids: list[str] = []
+    for source_id in source_ids:
+        for index, beat in enumerate(sequence):
+            if _text(beat.get("beat_id")) != source_id:
+                continue
+            for neighbor_index in (index - 1, index + 1):
+                if 0 <= neighbor_index < len(sequence):
+                    neighbor_id = _text(sequence[neighbor_index].get("beat_id"))
+                    if neighbor_id and neighbor_id not in source_ids and neighbor_id not in neighbor_ids:
+                        neighbor_ids.append(neighbor_id)
+    reveal_constraints = _dict_value(cut_contract.get("viewer_contract")).get("reveal_constraints")
+    if not reveal_constraints:
+        reveal_constraints = _dict_value(scene.get("scene_intent")).get("reveal_constraints")
+    return _without_empty_values(
+        {
+            "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+            "editable": False,
+            "primary_event_beat": by_id.get(primary_id),
+            "source_event_beats": [by_id[source_id] for source_id in source_ids if source_id in by_id],
+            "neighboring_event_beats": [by_id[neighbor_id] for neighbor_id in neighbor_ids if neighbor_id in by_id],
+            "forbidden_event_changes": scene_event.get("forbidden_event_changes"),
+            "reveal_constraints_for_this_cut": reveal_constraints,
         }
     )
 

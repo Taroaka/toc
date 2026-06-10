@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
 from toc.harness import append_state_snapshot, now_iso
+from toc.cut_design_logging import scene_design_log_relpath, write_scene_design_placeholder
 
 
 MANIFEST_TEMPLATE = Path("workflow/video-manifest-template.md")
@@ -138,6 +139,13 @@ def main() -> None:
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
+    write_scene_design_placeholder(
+        run_dir,
+        topic=topic_raw,
+        flow="toc-run",
+        now=now_iso(),
+        reason="standard toc-run scaffold has not authored scene_event yet",
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -149,6 +157,8 @@ def main() -> None:
             "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
             "artifact.script": str((run_dir / "script.md").resolve()),
             "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+            "runtime.cut_design.status": "not_generated",
+            "runtime.cut_design.latest_context": scene_design_log_relpath("latest_generation_context.json"),
         },
     )
 

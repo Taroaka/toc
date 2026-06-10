@@ -185,6 +185,67 @@ scenes:
           story_specific_terms: []
           specificity_note: "固有名詞、道具、関係、場所、行為のうち複数を入れて抽象語を避ける"
 
+    scene_event:
+      schema_version: "scene_event_v1"
+      event_logline: "sceneで実際に起きる出来事。演出語ではなく物語事実を書く"
+      start_situation: "scene開始時の人物・場所・物・関係の状態"
+      source_story_beat_ids: []
+      event_sequence:
+        - beat_id: "scene1_event_setup"
+          beat_function: "setup"
+          source_story_beat_ids: []
+          what_happens: ""
+          visible_action: ""
+          visible_reaction: ""
+          immediate_consequence: ""
+          emotional_pressure: ""
+          required_visual_evidence: []
+          story_information_revealed_ids: []
+        - beat_id: "scene1_event_pressure"
+          beat_function: "pressure"
+          source_story_beat_ids: []
+          what_happens: ""
+          visible_action: ""
+          visible_reaction: ""
+          immediate_consequence: ""
+          emotional_pressure: ""
+          required_visual_evidence: []
+          story_information_revealed_ids: []
+        - beat_id: "scene1_event_turn"
+          beat_function: "turn"
+          source_story_beat_ids: []
+          what_happens: ""
+          visible_action: ""
+          visible_reaction: ""
+          immediate_consequence: ""
+          emotional_pressure: ""
+          required_visual_evidence: []
+          story_information_revealed_ids: []
+        - beat_id: "scene1_event_payoff"
+          beat_function: "payoff"
+          source_story_beat_ids: []
+          what_happens: ""
+          visible_action: ""
+          visible_reaction: ""
+          immediate_consequence: ""
+          emotional_pressure: ""
+          required_visual_evidence: []
+          story_information_revealed_ids: []
+      turning_event:
+        source_event_beat_id: "scene1_event_turn"
+        causal_turn_ref: "scene_intent.causal_turn"
+        irreversible_change: ""
+      end_situation:
+        value_shift_to_ref: "scene_intent.value_shift.to"
+        outcome: ""
+        character_position: ""
+        object_state: ""
+        relationship_state: ""
+        new_pressure: ""
+        visible_evidence_refs: ["scene1_event_payoff"]
+      offscreen_context: []
+      forbidden_event_changes: []
+
     grounding:
       research_refs:
         fact_ids: []
@@ -247,6 +308,10 @@ scenes:
           - "reviewer が完了判断できる条件"
         first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
         motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+        narrative_position: "opening|middle|ending"
+        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+        visual_distance_policy: "stay_close|contextual|meaning_first|silent"
+        pronunciation_targets: []
         narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
         narration_text: "<必要ならナレーション。silent cut は空文字>"
         asset_dependency_hint:

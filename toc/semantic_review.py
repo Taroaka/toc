@@ -17,13 +17,9 @@ SEMANTIC_REVIEW_STAGES = {
     "scene_detail",
     "cut_blueprint",
     "asset_plan",
-    "asset_output",
     "image_prompt",
-    "scene_image",
     "narration",
     "video_motion",
-    "video_clip",
-    "render",
 }
 
 

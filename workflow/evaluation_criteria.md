@@ -39,6 +39,10 @@ ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
 - renderable scene / cut の存在
 - `1 cut = 1 narration`
 - narration text field の存在
+- `audio.narration.text` / `audio.narration.tts_text` に `TODO` / `TBD` / 制作メモが残っていないこと
+- `audio.narration.authoring_status` が `missing|draft|approved|silent` のいずれかであること
+- `audio.narration.contract.schema_version: narration_contract_v2` と story role / visual distance / TTS readiness の最低限の記録
+- p720 で pronunciation candidates と scene-level narration arc が確認されていること
 - cut duration 上限
 - `character_ids` / `object_ids` の明示
 - immersive の invariant（experience / no on-screen text）
@@ -63,6 +67,7 @@ ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
   - coverage
   - rationale の有無
   - gate の未解決状態
+  - narration visual distance / voice function / pronunciation unresolved / arc warning
 
 各 stage score は `passed_checks / total_checks` とする。
 

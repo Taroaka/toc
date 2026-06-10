@@ -1,11 +1,11 @@
-# Cut Blueprint Template v2.2
+# Cut Blueprint Template v3.0
 # p420 creates this structure, then materializes it into script.md and video_manifest.md.
 
-cut_blueprint_version: "2.2"
+cut_blueprint_version: "3.0"
 legacy_compatibility:
-  copy_to_scene_contract: true
+  copy_to_scene_contract: false
   copy_legacy_cut_blueprint_fields: true
-  note: "cut_contract is canonical. Copy core fields to scene_contract/cut_blueprint while legacy readers exist."
+  note: "cut_contract.source_event_contract is canonical. scene_contract/cut_blueprint are legacy read-only projections and must not satisfy V3 gates."
 
 source_scene:
   scene_id: "1"
@@ -43,14 +43,66 @@ source_scene:
     anti_redundancy_policy: "同じ story fact を別 cut で繰り返すだけなら cut 追加ではなく既存 cut を補強する"
     static_first_frame_rules:
       - "motion を説明せず、動画開始前後の静止状態で cut の証拠を見せる"
+  scene_event_snapshot:
+    schema_version: "scene_event_v1"
+    event_logline: ""
+    start_situation: ""
+    source_story_beat_ids: []
+    event_sequence:
+      - beat_id: "scene1_event_setup"
+        beat_function: "setup"
+        what_happens: ""
+        visible_action: ""
+        visible_reaction: ""
+        immediate_consequence: ""
+        emotional_pressure: ""
+        required_visual_evidence: []
+      - beat_id: "scene1_event_pressure"
+        beat_function: "pressure"
+        what_happens: ""
+        visible_action: ""
+        visible_reaction: ""
+        immediate_consequence: ""
+        emotional_pressure: ""
+        required_visual_evidence: []
+      - beat_id: "scene1_event_turn"
+        beat_function: "turn"
+        what_happens: ""
+        visible_action: ""
+        visible_reaction: ""
+        immediate_consequence: ""
+        emotional_pressure: ""
+        required_visual_evidence: []
+      - beat_id: "scene1_event_payoff"
+        beat_function: "payoff"
+        what_happens: ""
+        visible_action: ""
+        visible_reaction: ""
+        immediate_consequence: ""
+        emotional_pressure: ""
+        required_visual_evidence: []
+    turning_event:
+      source_event_beat_id: "scene1_event_turn"
+      causal_turn_ref: "scene_intent.causal_turn"
+    end_situation:
+      value_shift_to_ref: "scene_intent.value_shift.to"
+      visible_evidence_refs: ["scene1_event_payoff"]
+    forbidden_event_changes: []
 
-coverage_plan:
-  coverage_strategy: "reverse_from_scene_obligations"
+scene_cut_coverage_plan:
+  coverage_strategy: "reverse_from_scene_event"
+  source_schema_version: "scene_event_v1"
   min_cut_count:
     by_importance: 3
     by_duration: 3
-    selected: 3
+    by_event_beats: 4
+    selected: 4
     exception_reason: ""
+  event_beat_inventory:
+    - beat_id: "scene1_event_setup"
+      beat_function: "setup"
+      must_be_seen: true
+      assigned_cut_ids: []
   candidate_function_labels:
     - setup
     - pressure
@@ -66,7 +118,7 @@ coverage_plan:
       evidence: []
     - source: causal_turn
       evidence: ""
-    - source: story_event_obligations
+    - source: story_event_obligations_legacy_projection
       evidence:
         - event_id: ""
           source_events: []
@@ -82,7 +134,10 @@ coverage_plan:
     - cut_index: 1
       obligation_id: ""
       cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
-      assigned_story_event_ids: []
+      event_assignment:
+        source_event_contract:
+          primary_event_beat_id: ""
+          source_event_beat_ids: []
       target_beat: ""
       visual_proof: ""
       audience_knowledge_delta: ""
@@ -96,7 +151,21 @@ cuts:
     cut_status: "active" # active|deleted
     deletion_reason: ""
     cut_contract:
-      schema_version: "2.2"
+      schema_version: "3.0"
+      source_event_contract:
+        primary_event_beat_id: "scene1_event_setup"
+        source_event_beat_ids: ["scene1_event_setup"]
+        event_beat_function: "setup"
+        event_time_position: "before_trigger"
+        source_event_summary: ""
+        source_visible_action: ""
+        source_visible_reaction: ""
+        source_required_visual_evidence: []
+        event_facts_to_preserve: []
+        event_facts_not_to_invent: []
+        allowed_reveal_info_ids: []
+        forbidden_reveal_info_ids: []
+        must_not_change: []
       cut_role: "main" # main|sub|transition|reaction|visual_payoff
       cut_function: "setup" # setup|pressure|threshold|turn|payoff|reaction|handoff
       intent_budget:
@@ -120,20 +189,18 @@ cuts:
         causal_proof: ""
         visual_evidence: []
         required_roles: []
-        assigned_story_event_ids: []
         anti_redundancy_key: ""
         emotional_micro_shift:
           from: ""
           to: ""
         audience_information: []
         withheld_information: []
-        reveal_constraints: []
-        visual_proof: ""
-        reveal_constraints:
+        reveal_context:
           inherited_from_scene: []
           allowed_reveals_in_this_cut: []
           forbidden_until_later_cut: []
           forbidden_until_later_scene: []
+        visual_proof: ""
         must_show: []
         must_avoid: []
         done_when: []
@@ -189,6 +256,10 @@ cuts:
       first_frame_contract:
         imageable: true
         image_role: "video_first_frame_candidate"
+        source_event_beat_id: "scene1_event_setup"
+        event_time_position: "before_trigger"
+        event_fact_visible_in_still: ""
+        not_yet_happened_in_still: []
         first_frame_brief: ""
         visible_start_state:
           character_state: ""
@@ -214,6 +285,10 @@ cuts:
         still_done_when: []
       motion_contract:
         movable: true
+        source_event_beat_id: "scene1_event_setup"
+        starts_from_first_frame: true
+        must_not_advance_to_event_beat_ids: []
+        must_not_resolve_scene_turn_unless_primary_event_is_turn: true
         motion_brief: ""
         camera_motion: "static|slow_push|slow_pull|pan|tilt|tracking|handheld_subtle"
         subject_motion: ""
@@ -224,7 +299,44 @@ cuts:
         end_frame_brief: ""
         must_not_add: []
       narration_contract:
+        schema_version: "narration_contract_v2"
         speakable_or_silent: true
+        source_event_beat_ids: ["scene1_event_setup"]
+        allowed_info_ids: []
+        forbidden_info_ids: []
+        must_not_advance_to_event_beat_ids: []
+        must_not_explain_visible_action_as_caption: true
+        narration_event_boundary: "same_event_only"
+        story_role:
+          narrative_position: "opening|middle|ending"
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+          audience_state_before: ""
+          audience_state_after: ""
+          must_cover: []
+          must_not_reveal: []
+          done_when: []
+        visual_distance:
+          distance_policy: "stay_close|contextual|meaning_first|silent"
+          visible_facts_in_frame: []
+          narration_should_add: []
+          must_not_caption_visible_action: true
+          visual_overlap_allowed: false
+          visual_overlap_reason: ""
+        rhythm_and_timing:
+          target_speech_seconds: 0
+          min_speech_seconds: 0
+          max_speech_seconds: 0
+          start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+          end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+          pause_intent: []
+          audio_visual_sync_point: ""
+        tts_readiness:
+          normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+          pronunciation_targets: []
+          max_sentence_chars: 42
+          tts_text_must_differ_from_text_when_needed: true
+        # compatibility aliases for older readers
         role: "setup" # setup|fact|emotion|contrast|aftertaste|silent
         target_function: ""
         must_cover: []
@@ -268,6 +380,11 @@ cuts:
           first_frame_must_avoid: []
         p700_narration:
           narration_requirements: []
+          narrative_position: "opening|middle|ending"
+          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+          voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+          visual_distance_policy: "stay_close|contextual|meaning_first|silent"
+          pronunciation_targets: []
           role: "setup|fact|emotion|contrast|aftertaste|silent"
           must_not_caption_visible_content: true
         p800_video:
@@ -286,7 +403,7 @@ cuts:
       causal_proof: "<cut_contract.viewer_contract.causal_proof>"
       visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
       required_roles: "<cut_contract.viewer_contract.required_roles>"
-      assigned_story_event_ids: "<cut_contract.viewer_contract.assigned_story_event_ids>"
+      source_event_contract: "<cut_contract.source_event_contract>"
       anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
       visual_beat: "<cut_contract.viewer_contract.visual_proof>"
       first_frame_brief: "<cut_contract.first_frame_contract.first_frame_brief>"

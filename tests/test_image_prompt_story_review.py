@@ -33,41 +33,139 @@ def _load_export_module(repo_root: Path):
 
 
 def _structured_prompt(scene_lines: str) -> str:
-    return f"""[全体 / 不変条件]
-実写映画調、画像内テキストなし。横長16:9の落ち着いた映画画面として、人物と場所と小道具の関係が一目で読めるようにする。
+    return f"""[参照画像の使い方]
+人物参照: 浦島太郎の顔、体格、衣服の質感を維持する。
+場所参照: 浜辺の砂、波打ち際、水平線を背景の基準にする。
 
-[登場人物]
-浦島太郎。顔の表情、視線、手の位置、肩の緊張、衣服の布目まで見える。必要な場合は海亀との距離感が分かるように配置する。
+[このcutの開始状態]
+source_event_beat_id: scene01_event_setup
+event_beat_function: setup
+event_time_position: before_trigger
+what_happens: {scene_lines}
+event_fact_visible_in_still: 浦島太郎が浜辺で立ち止まり、視線と手元の緊張が見える。
+not_yet_happened_in_still: 海亀をまだ助け終えていない。次の出来事へ進んでいない。
+action_completion_state: pre_action
+forbidden_future_event_beat_ids: scene01_event_turn
+
+[単一瞬間ルール]
+visible_moment: 浦島太郎が波打ち際へ手を伸ばす直前に立ち止まる単一の瞬間。
+must_not_mix: before_event / during_event / after_event / montage
+この画像は1つの瞬間だけを描く。出来事の前・途中・後を同じ画像内に混ぜない。モンタージュにしない。
+
+[画面に必ず見えるもの]
+primary_visual_anchor: 波打ち際へ注意を向ける浦島太郎の姿勢と手元。
+secondary_visual_anchors: 浜辺、波打ち際、濡れた砂、視線の先。
+location_anchor: 水平線と波打ち際。
+light_anchor: 海辺の自然光。
+required_story_evidence: 助ける行為が始まる直前の手元の緊張。
+
+[画面に入れてはいけないもの]
+forbidden_later_events: 海亀を助け終えた結果、竜宮へ向かう結果。
+forbidden_reveals: 後続cutの結末、未承認の追加人物。
+forbidden_character_states: 助け終えた後の安堵。
+forbidden_object_states: 竜宮、玉手箱、後続sceneの証拠。
+unapproved_extra_subjects: ロゴ、字幕、ウォーターマーク、群衆。
+
+[人物状態]
+costume_state: 参照画像と同じ衣服。濡れた砂浜の自然光に合う布目。
+pose: 立ち止まり、片手が少し前に出る直前。
+gaze: 波打ち際へ向く。
+expression: 緊張とためらい。
+hand_position: 片手が波打ち際へ伸びる直前。
+foot_position: 片足に重心が残り、まだ踏み出しきっていない。
+emotional_state: 助ける前の不安と決意。
 
 [小道具 / 舞台装置]
-海亀、浜辺。濡れた砂、波打ち際の水滴、石や貝殻、遠くの水平線を画面内の実物として置く。
+object_id: beach
+object_state: 浜辺、波、濡れた砂、石や貝殻。
+visibility: 浜辺は clearly_visible、海亀が必要な場合は partially_visible。
+relation_to_character: 浦島太郎の視線と手元が波打ち際の証拠へ向く。
+relation_to_event: 助ける行為が始まる直前。
+story_meaning_in_this_cut: 助ける行為が始まる直前の場所の証拠。
+required_screen_position: foreground
 
-[シーン]
-{scene_lines} 前景に砂と水滴、中景に浦島太郎の姿勢、背景に浜辺と海を置き、次の動きへ入る直前の静かな緊張を作る。
+[構図]
+aspect_ratio: 16:9
+shot_size: medium wide
+camera_angle: 低すぎない目線の高さ
+camera_height: 目線より少し低い高さ
+lens_feel: 自然な遠近感
+foreground: 濡れた砂と足元
+midground: 浦島太郎の姿勢と手元
+background: 波打ち際と水平線
+subject_priority: primary は浦島太郎、secondary は浜辺の物理的証拠。
+negative_space: 手が伸びる方向に余白を残す。
+gaze_path: 浦島太郎の視線が波打ち際へ流れる。
+frame_edge_handoff: 波打ち際側の画面端に動き出しの余白を残す。
 
-[連続性]
-前後カットと衣装・天候・位置関係を維持する。斜め横からの構図、柔らかい朝の光、足元の影、人物と海亀の向きが矛盾しない。
+[光 / 質感]
+light_source: 海辺の自然光
+light_direction: 横から柔らかく入る光
+light_quality: 湿った海辺の柔らかい光
+dominant_materials: 濡れた砂、水滴、布、石、貝殻
+air_quality: 海風で少し湿った空気
+floor_or_ground_texture: 濡れた砂の粒と足跡。
+scene_specific_texture: 波の泡、濡れた砂、布の湿り。
+
+[動画化のための開始余地]
+movable_subject: 浦島太郎の手、衣服の裾、波
+movement_vector: 手は波打ち際へ近づく方向。身体はまだ踏み出しきっていない。
+motion_should_start_from: 立ち止まった初期姿勢
+must_not_resolve_in_image: 助け終えた結果まで進めない。
+motion_ceiling: 海亀を助け終える前で止める。
 
 [禁止]
-ロゴ、字幕、ウォーターマーク。
+text, subtitles, logos, watermark, anime, illustration, distorted anatomy, extra unapproved characters, wrong costume state, later event reveal.
 """
 
 
 def _thin_structured_prompt(scene_lines: str) -> str:
-    return f"""[全体 / 不変条件]
-実写映画調、画像内テキストなし。
+    return f"""[参照画像の使い方]
+人物参照: 浦島太郎。
 
-[登場人物]
-浦島太郎。
+[このcutの開始状態]
+source_event_beat_id: scene01_event_setup
+event_beat_function: setup
+event_time_position: before_trigger
+what_happens: {scene_lines}
+event_fact_visible_in_still: 浦島太郎がいる。
+not_yet_happened_in_still: 次へ進んでいない。
+action_completion_state: pre_action
+
+[単一瞬間ルール]
+visible_moment: 浦島太郎がいる。
+must_not_mix: before_event / during_event / after_event / montage
+
+[画面に必ず見えるもの]
+primary_visual_anchor: 浦島太郎。
+required_story_evidence: 浜辺。
+
+[画面に入れてはいけないもの]
+ロゴ。
+
+[人物状態]
+pose: 立つ。
+gaze: 海を見る。
 
 [小道具 / 舞台装置]
-海亀、浜辺。
+object_state: 浜辺。
+visibility: clearly_visible。
 
-[シーン]
-{scene_lines}
+[構図]
+foreground: 砂。
+midground: 人物。
+background: 海。
+subject_priority: 浦島太郎。
+frame_edge_handoff: 余白。
 
-[連続性]
-前後カットと衣装・天候・位置関係を維持する。
+[光 / 質感]
+light_source: 自然光。
+scene_specific_texture: 砂。
+
+[動画化のための開始余地]
+movable_subject: 手。
+movement_vector: 前。
+motion_ceiling: 終えない。
 
 [禁止]
 ロゴ、字幕、ウォーターマーク。
@@ -125,7 +223,8 @@ class TestImagePromptStoryReview(unittest.TestCase):
             script_text="",
         )
         findings = [finding.message for outcome in results for finding in outcome.findings if finding.code == "missing_required_prompt_block"]
-        self.assertIn("prompt is missing required block `[全体 / 不変条件]`.", findings)
+        self.assertIn("prompt is missing required block `[参照画像の使い方]`.", findings)
+        self.assertIn("prompt is missing required block `[このcutの開始状態]`.", findings)
         self.assertIn("prompt is missing required block `[禁止]`.", findings)
 
     def test_review_flags_nonvisual_story_scene_metadata(self) -> None:
@@ -901,7 +1000,7 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)
 
-        prompt_collection = """# Image Prompt Collection
+        prompt_collection = f"""# Image Prompt Collection
 
 件数: `1`
 
@@ -912,23 +1011,7 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
 - rationale: `anchor`
 
 ```text
-[全体 / 不変条件]
-実写映画調、画像内テキストなし。
-
-[登場人物]
-浦島太郎が静かに立つ。
-
-[小道具 / 舞台装置]
-浜辺、玉手箱。
-
-[シーン]
-浦島太郎が浜辺に立つ。
-
-[連続性]
-前後カットと衣装・天候・位置関係を維持する。
-
-[禁止]
-群衆、花火、煙、ロゴ、字幕、ウォーターマーク、派手な光、夜景、回転。
+{_structured_prompt("浦島太郎が浜辺で玉手箱の横に立つ。")}
 ```
 """
         manifest = {
@@ -973,15 +1056,12 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
             script_text="",
         )
         findings = [finding.code for outcome in results for finding in outcome.findings]
-        self.assertIn("image_contract_must_avoid_violated", findings)
         self.assertIn("image_contract_target_focus_unmet", findings)
-        self.assertIn("image_prompt_production_readiness_weak", findings)
         self.assertTrue(all(mod.is_soft_finding(finding) for outcome in results for finding in outcome.findings))
 
         updated = mod.apply_review_statuses(entries, results)
         self.assertTrue(updated[0].agent_review_ok)
-        self.assertIn("image_contract_must_avoid_violated", updated[0].agent_review_reason_keys)
-        self.assertIn("image_prompt_production_readiness_weak", updated[0].agent_review_reason_keys)
+        self.assertIn("image_contract_target_focus_unmet", updated[0].agent_review_reason_keys)
 
         report = mod.render_report(results, manifest_path=Path("video_manifest.md"))
         self.assertIn("- status: `WARN`", report)
@@ -1033,9 +1113,9 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
             script_text="",
         )
         block_messages = [finding.message for outcome in results for finding in outcome.findings if finding.code == "missing_required_prompt_block"]
-        self.assertIn("prompt is missing required block `[全体 / 不変条件]`.", block_messages)
-        self.assertIn("prompt is missing required block `[登場人物]`.", block_messages)
-        self.assertIn("prompt is missing required block `[連続性]`.", block_messages)
+        self.assertIn("prompt is missing required block `[参照画像の使い方]`.", block_messages)
+        self.assertIn("prompt is missing required block `[人物状態]`.", block_messages)
+        self.assertIn("prompt is missing required block `[動画化のための開始余地]`.", block_messages)
 
     def test_required_prompt_block_detection_accepts_fully_structured_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -1140,8 +1220,62 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
         )
 
         findings = [finding.code for outcome in results for finding in outcome.findings]
-        self.assertIn("image_prompt_prompt_craft_weak", findings)
-        self.assertTrue(all(mod.is_soft_finding(finding) for outcome in results for finding in outcome.findings))
+        self.assertIn("image_prompt_not_yet_state_too_generic", findings)
+        self.assertIn("image_prompt_time_mixed", findings)
+        self.assertTrue(any(mod.is_hard_finding(finding) for outcome in results for finding in outcome.findings))
+
+    def test_first_frame_story_structure_gates_flag_abstract_or_incomplete_prompt(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        prompt = """[参照画像の使い方]
+参照画像を維持する。
+
+[このcutの開始状態]
+source_event_beat_id: scene01_event_setup
+event_beat_function: setup
+event_time_position: before_trigger
+what_happens: 主人公の価値変化を見せる。
+event_fact_visible_in_still: 変化の兆し。
+not_yet_happened_in_still: まだ起きていない。
+
+[単一瞬間ルール]
+1つの瞬間。
+
+[画面に必ず見えるもの]
+主人公の制限と場所の圧力。
+
+[画面に入れてはいけないもの]
+後続の結果。
+
+[人物状態]
+pose: 立つ。
+
+[小道具 / 舞台装置]
+object_state: 証明。
+
+[構図]
+foreground: 人物。
+midground: 背景。
+background: 場所。
+
+[光 / 質感]
+light_source: 自然光。
+
+[動画化のための開始余地]
+movable_subject: 主人公。
+
+[禁止]
+ロゴ、字幕。
+"""
+        codes = [finding.code for finding in mod.prompt_structural_contract_issues(prompt)]
+
+        self.assertIn("image_prompt_visual_translation_missing", codes)
+        self.assertIn("image_prompt_action_completion_state_missing", codes)
+        self.assertIn("image_prompt_primary_visual_anchor_missing", codes)
+        self.assertIn("image_prompt_motion_affordance_weak", codes)
+        self.assertIn("image_prompt_motion_ceiling_missing", codes)
+        self.assertIn("image_prompt_not_yet_state_too_generic", codes)
 
     def test_export_preserves_reason_keys_and_messages(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

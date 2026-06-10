@@ -711,11 +711,8 @@ asset_generation_manifest:
     (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
     _write_semantic_review_passed(run_dir, "asset_plan")
-    _write_semantic_review_passed(run_dir, "asset_output")
     _write_semantic_review_passed(run_dir, "narration")
     _write_semantic_review_passed(run_dir, "video_motion")
-    _write_semantic_review_passed(run_dir, "video_clip")
-    _write_semantic_review_passed(run_dir, "render")
 
 
 def _write_image_request(run_dir: Path, *, selector: str, output: str, reference: str = "assets/characters/momotaro_seed.png") -> None:
@@ -768,7 +765,6 @@ def _write_image_requests_from_manifest(run_dir: Path, *, reference: str = "asse
     (run_dir / "image_generation_requests.md").write_text("\n".join(sections), encoding="utf-8")
     _write_semantic_judgment_pack(run_dir)
     _write_semantic_review_passed(run_dir, "image_prompt")
-    _write_semantic_review_passed(run_dir, "scene_image")
 
 
 def _write_semantic_judgment_pack(run_dir: Path, *, status: str = "passed", entry_count: int = 1, placeholder: bool = False) -> None:
@@ -871,16 +867,25 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- internal_pressure: pressure escalates before the turn\n"
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
+                "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
+                "- end_situation_alignment: end_situation matches scene_intent.value_shift.to\n"
                 "- neighbor_handoff: neighboring handoffs are checked\n\n"
             )
         elif stage_focus:
             scene_count_gate = (
                 "## Cut Blueprint Gate\n\n"
                 "- cut_intent_isolation: passed\n"
-                "- beat_ladder_coverage: passed\n"
+                "- scene_event_coverage: passed\n"
+                "- event_beat_reference_integrity: passed\n"
                 "- first_frame_motion_readiness: passed\n"
-                "- multimodal_contract_coverage: passed\n"
-                "- story_event_obligation_coverage: passed\n"
+                "- event_first_frame_alignment: passed\n"
+                "- multimodal_event_boundary_coverage: passed\n"
+                "- source_event_preservation: passed\n"
+                "- no_unapproved_event_invention: passed\n"
+                "- event_motion_boundary: passed\n"
+                "- event_narration_boundary: passed\n"
+                "- event_context_for_cut_ready: passed\n"
                 "- causal_proof_coverage: passed\n"
                 "- role_coverage: passed\n"
                 "- audience_knowledge_delta_coverage: passed\n"
@@ -984,6 +989,81 @@ def _valid_scene_intent_dict(topic: str, scene_idx: int, *, terminal: bool) -> d
     return parsed["scene_intent"]
 
 
+def _valid_scene_event_dict(topic: str, scene_idx: int) -> dict:
+    return {
+        "schema_version": "scene_event_v1",
+        "event_logline": f"{topic}が村道で迷いを越え、次へ進む証拠を残す",
+        "start_situation": f"{topic}は村道で旅立ちをためらい、村人の視線を受けている",
+        "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+        "event_sequence": [
+            {
+                "beat_id": f"scene{scene_idx}_event_setup",
+                "beat_function": "setup",
+                "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+                "what_happens": f"{topic}が村道に立ち、腰の袋と伸びる道が見える",
+                "visible_action": f"{topic}が村道の入口で足を止める",
+                "visible_reaction": "村人が黙って見守る",
+                "immediate_consequence": "旅立ちの圧力が画面に生まれる",
+                "emotional_pressure": "ためらいと責務が同時に見える",
+                "required_visual_evidence": ["村道", "旅袋", "村人の視線"],
+                "story_information_revealed_ids": ["departure_pressure"],
+            },
+            {
+                "beat_id": f"scene{scene_idx}_event_pressure",
+                "beat_function": "pressure",
+                "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+                "what_happens": f"霧の道と沈黙が{topic}に後戻りできない圧力をかける",
+                "visible_action": f"{topic}が袋を握る手に力を入れる",
+                "visible_reaction": "道端の子どもが息をのむ",
+                "immediate_consequence": "迷いが行為へ変わり始める",
+                "emotional_pressure": "見えない敵への不安が高まる",
+                "required_visual_evidence": ["握られた袋", "霧", "止まった足"],
+                "story_information_revealed_ids": ["choice_pressure"],
+            },
+            {
+                "beat_id": f"scene{scene_idx}_event_turn",
+                "beat_function": "turn",
+                "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+                "what_happens": f"{topic}が袋を握り直し、村道を越える決断を行動にする",
+                "visible_action": f"{topic}が最初の一歩を前へ出す",
+                "visible_reaction": "村人の視線が足跡へ集まる",
+                "immediate_consequence": "後戻りできない足跡が残る",
+                "emotional_pressure": "不安が決意へ変わる",
+                "required_visual_evidence": ["一歩", "足跡", "握られた袋"],
+                "story_information_revealed_ids": ["departure_decision"],
+            },
+            {
+                "beat_id": f"scene{scene_idx}_event_payoff",
+                "beat_function": "payoff",
+                "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+                "what_happens": f"{topic}の足跡と前を向く姿が次の場面の理由になる",
+                "visible_action": f"{topic}が霧の先へ進む",
+                "visible_reaction": "村道に残った足跡が見える",
+                "immediate_consequence": "次の移動が避けられなくなる",
+                "emotional_pressure": "責務が継続する",
+                "required_visual_evidence": ["足跡", "前を向く姿", "霧の先の道"],
+                "story_information_revealed_ids": ["departure_handoff"],
+            },
+        ],
+        "turning_event": {
+            "source_event_beat_id": f"scene{scene_idx}_event_turn",
+            "causal_turn_ref": "scene_intent.causal_turn",
+            "irreversible_change": f"{topic}が旅立ちを身体行為として確定する",
+        },
+        "end_situation": {
+            "value_shift_to_ref": "scene_intent.value_shift.to",
+            "outcome": f"{topic}は次の責務へ踏み出した状態になる",
+            "character_position": "村道の先へ進んでいる",
+            "object_state": "袋は握られ、旅の証拠になる",
+            "relationship_state": "村との関係が保護から責務へ変わる",
+            "new_pressure": "足跡が次の移動を要求する",
+            "visible_evidence_refs": [f"scene{scene_idx}_event_payoff"],
+        },
+        "offscreen_context": ["鬼との決着はまだ起きていない"],
+        "forbidden_event_changes": ["鬼との決着をこのsceneで起こさない", "勝利の証拠を見せない"],
+    }
+
+
 def _p400_coverage_review() -> dict:
     return {
         "audience_information_covered": True,
@@ -1011,10 +1091,12 @@ def _verify_triangulation_review() -> dict:
 def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[str]) -> dict:
     obligation_ids = ["dramatic_question_01", "value_shift_01", "causal_turn_01", "handoff_01"]
     functions = ["setup", "pressure", "turn", "handoff"]
+    event_functions = ["setup", "pressure", "turn", "payoff"]
     return {
-        "coverage_strategy": "reverse_from_scene_obligations",
+        "coverage_strategy": "reverse_from_scene_event",
+        "source_schema_version": "scene_event_v1",
         "minimum_cut_count": len(selectors),
-        "min_cut_count": {"by_importance": 3, "by_duration": len(selectors), "selected": len(selectors), "exception_reason": ""},
+        "min_cut_count": {"by_importance": 3, "by_duration": len(selectors), "by_event_beats": len(selectors), "selected": len(selectors), "exception_reason": ""},
         "scene_obligations": [
             {
                 "obligation_id": "dramatic_question_01",
@@ -1047,7 +1129,12 @@ def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[
                 "cut_selector": selector,
                 "obligation_ids": [obligation_ids[min(index - 1, len(obligation_ids) - 1)]],
                 "cut_function": functions[min(index - 1, len(functions) - 1)],
-                "assigned_story_event_ids": [f"scene_obligation:{obligation_ids[min(index - 1, len(obligation_ids) - 1)]}"],
+                "event_assignment": {
+                    "source_event_contract": {
+                        "primary_event_beat_id": f"scene{scene_idx}_event_{event_functions[min(index - 1, len(event_functions) - 1)]}",
+                        "source_event_beat_ids": [f"scene{scene_idx}_event_{event_functions[min(index - 1, len(event_functions) - 1)]}"],
+                    }
+                },
                 "target_beat": topic,
                 "visual_proof": f"{topic}が画面で読める",
                 "audience_knowledge_delta": f"{topic}の状態変化を理解する",
@@ -1074,8 +1161,58 @@ def _verify_cut_contract(
 ) -> dict:
     obligation_ids = ["dramatic_question_01", "value_shift_01", "causal_turn_01", "handoff_01"]
     functions = ["setup", "pressure", "turn", "handoff"]
+    event_functions = ["setup", "pressure", "turn", "payoff"]
     obligation_id = obligation_ids[min(cut_idx - 1, len(obligation_ids) - 1)]
     cut_function = functions[min(cut_idx - 1, len(functions) - 1)]
+    event_records = [
+        {
+            "beat_id": f"scene{scene_idx}_event_setup",
+            "beat_function": "setup",
+            "what_happens": f"{topic}が村道に立ち、腰の袋と伸びる道が見える",
+            "visible_action": f"{topic}が村道の入口で足を止める",
+            "visible_reaction": "村人が黙って見守る",
+            "required_visual_evidence": ["村道", "旅袋", "村人の視線"],
+        },
+        {
+            "beat_id": f"scene{scene_idx}_event_pressure",
+            "beat_function": "pressure",
+            "what_happens": f"霧の道と沈黙が{topic}に後戻りできない圧力をかける",
+            "visible_action": f"{topic}が袋を握る手に力を入れる",
+            "visible_reaction": "道端の子どもが息をのむ",
+            "required_visual_evidence": ["握られた袋", "霧", "止まった足"],
+        },
+        {
+            "beat_id": f"scene{scene_idx}_event_turn",
+            "beat_function": "turn",
+            "what_happens": f"{topic}が袋を握り直し、村道を越える決断を行動にする",
+            "visible_action": f"{topic}が最初の一歩を前へ出す",
+            "visible_reaction": "村人の視線が足跡へ集まる",
+            "required_visual_evidence": ["一歩", "足跡", "握られた袋"],
+        },
+        {
+            "beat_id": f"scene{scene_idx}_event_payoff",
+            "beat_function": "payoff",
+            "what_happens": f"{topic}の足跡と前を向く姿が次の場面の理由になる",
+            "visible_action": f"{topic}が霧の先へ進む",
+            "visible_reaction": "村道に残った足跡が見える",
+            "required_visual_evidence": ["足跡", "前を向く姿", "霧の先の道"],
+        },
+    ]
+    event_index = min(cut_idx - 1, len(event_records) - 1)
+    event_record = event_records[event_index]
+    event_function = str(event_record["beat_function"])
+    event_beat_id = str(event_record["beat_id"])
+    source_event_beat_ids = [event_beat_id]
+    blocked_future_event_beat_ids = [
+        str(record["beat_id"])
+        for record in event_records
+        if record["beat_id"] not in source_event_beat_ids and record["beat_function"] in {"turn", "payoff"}
+    ]
+    neighboring_event_beats = []
+    for neighbor_index in (event_index - 1, event_index + 1):
+        if 0 <= neighbor_index < len(event_records):
+            neighboring_event_beats.append(event_records[neighbor_index])
+    forbidden_event_changes = ["鬼との決着をこのsceneで起こさない", "勝利の証拠を見せない"]
     previous_selector = f"scene{scene_idx}_cut{cut_idx - 1}" if cut_idx > 1 else ""
     next_selector = f"scene{scene_idx}_cut{cut_idx + 1}" if cut_idx < total_cuts else ""
     incoming_anchor = f"{previous_selector}_to_{selector}" if previous_selector else f"scene{scene_idx}_incoming"
@@ -1083,7 +1220,21 @@ def _verify_cut_contract(
     narration_role = "silent" if silent else "emotion"
     narration_requirements = ["無音で視覚報酬を保持"] if silent else ["決意を補う"]
     return {
-        "schema_version": "2.2",
+        "schema_version": "3.0",
+        "source_event_contract": {
+            "primary_event_beat_id": event_beat_id,
+            "source_event_beat_ids": source_event_beat_ids,
+            "event_beat_function": event_function,
+            "event_time_position": "before_trigger",
+            "source_event_summary": event_record["what_happens"],
+            "source_visible_action": event_record["visible_action"],
+            "source_visible_reaction": event_record["visible_reaction"],
+            "source_required_visual_evidence": event_record["required_visual_evidence"],
+            "event_facts_to_preserve": [event_record["what_happens"]],
+            "event_facts_not_to_invent": forbidden_event_changes,
+            "allowed_reveal_info_ids": [],
+            "forbidden_reveal_info_ids": ["勝利の証拠"],
+        },
         "cut_function": cut_function,
         "intent_budget": {
             "primary_intent": f"{topic} cut {cut_idx}",
@@ -1100,7 +1251,6 @@ def _verify_cut_contract(
             "causal_proof": f"{topic}が画面にいて前へ進む",
             "visual_evidence": [topic],
             "required_roles": ["protagonist"],
-            "assigned_story_event_ids": [f"scene_obligation:{obligation_id}"],
             "anti_redundancy_key": f"scene{scene_idx}:cut{cut_idx}",
             "visual_proof": f"{topic}が見える",
             "must_show": [topic],
@@ -1138,7 +1288,11 @@ def _verify_cut_contract(
         },
         "first_frame_contract": {
             "imageable": True,
-            "first_frame_brief": f"{topic}が村道に立つ",
+            "source_event_beat_id": event_beat_id,
+            "event_time_position": "before_trigger",
+            "event_fact_visible_in_still": event_record["visible_action"],
+            "not_yet_happened_in_still": ["鬼との決着"],
+            "first_frame_brief": event_record["visible_action"],
             "visible_start_state": {
                 "character_state": "歩く前",
                 "prop_state": "袋が見える",
@@ -1153,6 +1307,9 @@ def _verify_cut_contract(
         },
         "motion_contract": {
             "movable": True,
+            "source_event_beat_id": event_beat_id,
+            "starts_from_first_frame": True,
+            "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
             "motion_brief": f"{topic}が前へ進む",
             "start_from_visible_state": "first_frame_contract.visible_start_state",
             "end_state": f"{topic}が次へ向く",
@@ -1160,6 +1317,12 @@ def _verify_cut_contract(
             "must_not_add": ["新しい人物"],
         },
         "narration_contract": {
+            "source_event_beat_ids": [event_beat_id],
+            "allowed_info_ids": [],
+            "forbidden_info_ids": ["勝利の証拠"],
+            "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
+            "must_not_explain_visible_action_as_caption": True,
+            "narration_event_boundary": "same_event_only",
             "role": narration_role,
             "target_function": "絵を説明せず決意を補う",
             "must_avoid": ["映像のキャプション化"],
@@ -1209,6 +1372,22 @@ def _verify_cut_contract(
             "carries_to_next_cut": [topic],
             "carries_to_next_scene": [],
         },
+        "event_context_for_cut": {
+            "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+            "editable": False,
+            "primary_event_beat": {
+                "beat_id": event_beat_id,
+                "beat_function": event_function,
+                "what_happens": event_record["what_happens"],
+                "visible_action": event_record["visible_action"],
+                "visible_reaction": event_record["visible_reaction"],
+                "required_visual_evidence": event_record["required_visual_evidence"],
+            },
+            "source_event_beats": [event_record],
+            "neighboring_event_beats": neighboring_event_beats,
+            "forbidden_event_changes": forbidden_event_changes,
+            "reveal_constraints_for_this_cut": [],
+        },
     }
 
 
@@ -1231,6 +1410,7 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
             "estimated_duration_seconds": 30,
             "coverage_review": _p400_coverage_review(),
             "scene_intent": _valid_scene_intent_dict(topic, scene_idx, terminal=terminal),
+            "scene_event": _valid_scene_event_dict(topic, scene_idx),
             "scene_cut_coverage_plan": coverage_plan,
         }
         if terminal:

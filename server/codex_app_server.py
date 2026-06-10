@@ -14,7 +14,7 @@ import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class CodexAppServerError(RuntimeError):
@@ -380,6 +380,8 @@ class CodexAppServerClient:
         local_images: list[Path] | None = None,
         skills: list[Path] | None = None,
         timeout_seconds: int = 900,
+        reset_timeout_on_notification: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = [{"type": "text", "text": text}]
         for skill in skills or []:
@@ -402,6 +404,10 @@ class CodexAppServerClient:
             except asyncio.TimeoutError as exc:
                 raise CodexAppServerTransportError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
             transcript.append(notification)
+            if progress_callback is not None:
+                progress_callback(notification)
+            if reset_timeout_on_notification:
+                deadline = time.monotonic() + max(1, timeout_seconds)
             params = notification.get("params") or {}
             if turn_id and params.get("turnId") not in {None, turn_id}:
                 continue

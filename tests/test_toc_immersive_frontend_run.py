@@ -4,10 +4,23 @@ import tempfile
 import unittest
 import re
 import json
+import importlib.util
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_frontend_run_module():
+    spec = importlib.util.spec_from_file_location(
+        "toc_immersive_frontend_run_under_test",
+        REPO_ROOT / "scripts" / "toc-immersive-frontend-run.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def parse_state(path: Path) -> dict[str, str]:
@@ -22,6 +35,45 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
+    def test_cut_design_failure_writes_context_log_and_state(self) -> None:
+        module = load_frontend_run_module()
+        original_coverage_plan = module._scene_cut_coverage_plan
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_run_failure_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+
+            def fail_coverage_plan(*args, **kwargs):
+                raise RuntimeError("synthetic cut design failure")
+
+            module._scene_cut_coverage_plan = fail_coverage_plan
+            try:
+                with self.assertRaisesRegex(RuntimeError, "synthetic cut design failure"):
+                    module.materialize_run("シンデレラ", "シンデレラ", run_dir, "p650")
+            finally:
+                module._scene_cut_coverage_plan = original_coverage_plan
+
+            latest_context_path = run_dir / "logs" / "scene_design" / "latest_generation_context.json"
+            failure_path = run_dir / "logs" / "scene_design" / "cut_contract_failure.json"
+            self.assertTrue(latest_context_path.exists())
+            self.assertTrue(failure_path.exists())
+            latest_context = json.loads(latest_context_path.read_text(encoding="utf-8"))
+            failure = json.loads(failure_path.read_text(encoding="utf-8"))
+            self.assertEqual(latest_context["schema_version"], "cut_design_generation_context_v1")
+            self.assertEqual(latest_context["phase"], "scene_cut_coverage_planning")
+            self.assertEqual(latest_context["scene_context"]["scene_id"], 10)
+            self.assertEqual(failure["schema_version"], "cut_design_failure_v1")
+            self.assertEqual(failure["phase"], "build_script_and_manifest")
+            self.assertEqual(failure["error"]["type"], "RuntimeError")
+            self.assertIn("synthetic cut design failure", failure["error"]["message"])
+            self.assertIn("scene_event_input", failure["partial_artifacts"])
+
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.stage"], "cut_design_failed")
+            self.assertEqual(state["runtime.cut_design.status"], "failed")
+            self.assertEqual(state["runtime.cut_design.failure_log"], "logs/scene_design/cut_contract_failure.json")
+            self.assertEqual(state["slot.p420.status"], "failed")
+
     def test_materialize_only_reaches_frontend_p680_text_contract(self) -> None:
         output_root = REPO_ROOT / "output"
         output_root.mkdir(exist_ok=True)
@@ -65,9 +117,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "logs/review/semantic/scene_detail.collection.md",
                 "logs/review/semantic/cut_blueprint.collection.md",
                 "logs/review/semantic/asset_plan.collection.md",
-                "logs/review/semantic/asset_output.collection.md",
                 "logs/review/semantic/image_prompt.collection.md",
-                "logs/review/semantic/scene_image.collection.md",
+                "logs/scene_design/scene_event_input.json",
+                "logs/scene_design/scene_event_output.json",
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
                 "image_generation_requests.md",
@@ -90,15 +142,25 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(state["review.image.status"], "pending")
             self.assertEqual(state["gate.image_review"], "required")
             self.assertEqual(state["review.image_prompt.judgment.status"], "pending")
-            self.assertEqual(state["review.image_prompt.judgment.entry_count"], "58")
             self.assertEqual(state["review.semantic.asset_plan.entry_count"], "14")
-            for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt", "scene_image"):
+            for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
                 self.assertEqual(state[f"review.semantic.{stage}.status"], "pending")
                 self.assertIn(f"review.semantic.{stage}.entry_count", state)
+            self.assertNotIn("review.semantic.asset_output.status", state)
+            self.assertNotIn("review.semantic.scene_image.status", state)
             scope = json.loads((run_dir / "logs/review/image_prompt.review_scope.json").read_text(encoding="utf-8"))
-            self.assertEqual(scope["entry_count"], 58)
+            self.assertGreaterEqual(scope["entry_count"], 40)
+            self.assertEqual(state["review.image_prompt.judgment.entry_count"], str(scope["entry_count"]))
             generic_scope = json.loads((run_dir / "logs/review/semantic/image_prompt.scope.json").read_text(encoding="utf-8"))
-            self.assertEqual(generic_scope["entry_count"], 58)
+            self.assertEqual(generic_scope["entry_count"], scope["entry_count"])
+            scene_event_input = json.loads((run_dir / "logs/scene_design/scene_event_input.json").read_text(encoding="utf-8"))
+            scene_event_output = json.loads((run_dir / "logs/scene_design/scene_event_output.json").read_text(encoding="utf-8"))
+            self.assertEqual(scene_event_input["schema_version"], "scene_event_log_v1")
+            self.assertEqual(scene_event_output["schema_version"], "scene_event_log_v1")
+            self.assertEqual(scene_event_input["scene_count"], scene_event_output["scene_count"])
+            self.assertEqual(scene_event_output["scenes"][0]["scene_event"]["schema_version"], "scene_event_v1")
+            self.assertIn("source_event_contract", scene_event_output["scenes"][0]["cut_contracts"][0])
+            self.assertIn("event_context_for_cut", scene_event_output["scenes"][0]["cut_contracts"][0])
 
             asset_request_text = (run_dir / "asset_generation_requests.md").read_text(encoding="utf-8")
             self.assertGreaterEqual(len(re.findall(r"^##\s+", asset_request_text, flags=re.MULTILINE)), 10)
@@ -142,19 +204,24 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("ロゴ、マーク、署名、ウォーターマーク", midnight_stair_section)
 
             scene_request_text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
-            self.assertIn("[cut契約からの可視要件]", scene_request_text)
-            self.assertIn("初期状態:", scene_request_text)
-            self.assertIn("観客理解の増分:", scene_request_text)
-            self.assertIn("因果の証明:", scene_request_text)
-            self.assertIn("画面に置く証拠:", scene_request_text)
-            self.assertIn("必要な役割:", scene_request_text)
-            self.assertIn("静止画ルール:", scene_request_text)
+            self.assertNotIn("[cut契約からの可視要件]", scene_request_text)
+            self.assertIn("[このcutの開始状態]", scene_request_text)
+            self.assertIn("event_time_position:", scene_request_text)
+            self.assertIn("not_yet_happened_in_still:", scene_request_text)
+            self.assertIn("[単一瞬間ルール]", scene_request_text)
+            self.assertIn("[構図]", scene_request_text)
+            self.assertIn("[動画化のための開始余地]", scene_request_text)
+            self.assertNotIn("観客理解の増分:", scene_request_text)
+            self.assertNotIn("因果の証明:", scene_request_text)
+            self.assertNotIn("必要な役割:", scene_request_text)
             self.assertNotIn("motion_brief:", scene_request_text)
             first_scene = scene_request_text.split("## scene10_cut2", 1)[0]
             self.assertIn("assets/characters/cinderella_fullbody.png", first_scene)
             self.assertIn("assets/locations/", first_scene)
             self.assertNotIn("glass_slipper", first_scene)
-            self.assertNotIn("ガラスの靴", first_scene)
+            self.assertIn("[画面に入れてはいけないもの]", first_scene)
+            self.assertIn("ガラスの靴", first_scene)
+            self.assertNotRegex(first_scene.split("[画面に入れてはいけないもの]", 1)[0], r"^.*ガラスの靴.*$", re.MULTILINE)
             manifest_text = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             self.assertIn("scene_cut_coverage_plan:", manifest_text)
             self.assertIn("scene_obligations:", manifest_text)
@@ -163,7 +230,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("causal_proof:", manifest_text)
             self.assertIn("role_coverage:", manifest_text)
             self.assertIn("visual_evidence:", manifest_text)
-            self.assertIn("assigned_story_event_ids:", manifest_text)
+            self.assertIn("source_event_contract:", manifest_text)
+            self.assertIn("event_context_for_cut:", manifest_text)
+            self.assertIn("editable: false", manifest_text)
+            self.assertNotIn("assigned_story_event_ids:", manifest_text)
             self.assertIn("static_first_frame_rule:", manifest_text)
             self.assertIn("must_be_static_evidence_not_motion: true", manifest_text)
             self.assertIn("coverage_obligation_id:", manifest_text)
@@ -175,38 +245,41 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("reaction_after_change", manifest_text)
             self.assertNotIn("reveal_protection", manifest_text)
             self.assertIn("time_or_deadline_pressure", manifest_text)
-            pre_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
-            loss_scene70 = scene_request_text.split("## scene70_cut6", 1)[1].split("## scene70_cut7", 1)[0]
-            post_loss_scene70 = scene_request_text.split("## scene70_cut7", 1)[1].split("## scene70_cut8", 1)[0]
-            self.assertNotIn("階段に残るガラスの靴", pre_loss_scene70)
-            self.assertIn("階段に残るガラスの靴", loss_scene70)
+            scene70_text = scene_request_text.split("## scene70_cut1", 1)[1].split("## scene80_cut1", 1)[0]
+            post_loss_scene70 = scene_request_text.split("## scene70_cut8", 1)[1].split("## scene80_cut1", 1)[0]
+            self.assertIn("ガラスの靴", scene70_text)
+            self.assertIn("脱げて階段に残", scene70_text)
+            self.assertIn("逃走", scene70_text)
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
+            pre_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
             self.assertIn("このsceneの前半6cutまでは舞踏会ドレス姿", pre_loss_scene70)
             self.assertIn("質素な服、普段着、魔法が解けた後の服を出さない", pre_loss_scene70)
             self.assertIn("後半の反応cut以降だけ、魔法が解けた後の質素な服へ変わる", post_loss_scene70)
+            scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
+            self.assertIn("source_event_contract:", scene70_manifest)
+            self.assertIn("event_context_for_cut:", scene70_manifest)
+            self.assertIn("cut_contract.source_event_contract", scene70_manifest)
 
             transformation_scene = scene_request_text.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
             self.assertIn("reference_count: `2`", transformation_scene)
             self.assertNotIn("glass_slipper", transformation_scene)
             transformation_reveal = scene_request_text.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
-            self.assertIn("ガラスの靴の初出", transformation_reveal)
+            self.assertIn("変身で初めて現れる", transformation_reveal)
             self.assertIn("glass_slipper", transformation_reveal)
             self.assertIn("cinderella_transformed_fullbody", transformation_reveal)
 
             departure_scene = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene50_cut1", 1)[0]
-            self.assertIn("glass_slipper", departure_scene)
             self.assertIn("pumpkin_carriage", departure_scene)
-            self.assertIn("馬車へ乗り込み", departure_scene)
+            self.assertIn("馬車", departure_scene)
             self.assertNotIn("ガラスの靴はこのsceneでは見せない", departure_scene)
             departure_pressure = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene40_cut2", 1)[0]
             departure_proof = scene_request_text.split("## scene40_cut3", 1)[1].split("## scene40_cut4", 1)[0]
             self.assertNotIn("glass_slipper", departure_pressure)
-            self.assertIn("glass_slipper", departure_proof)
+            self.assertIn("pumpkin_carriage", departure_proof)
 
             palace_stair_scene = scene_request_text.split("## scene50_cut3", 1)[1].split("## scene50_cut4", 1)[0]
             self.assertIn("宮殿の階段", palace_stair_scene)
             self.assertIn("location_05", palace_stair_scene)
-            self.assertIn("glass_slipper", palace_stair_scene)
             self.assertNotIn("location_01", palace_stair_scene)
             palace_pressure = scene_request_text.split("## scene50_cut1", 1)[1].split("## scene50_cut2", 1)[0]
             self.assertNotIn("glass_slipper", palace_pressure)
@@ -214,7 +287,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             ballroom_scene = scene_request_text.split("## scene60_cut3", 1)[1].split("## scene60_cut4", 1)[0]
             self.assertIn("舞踏会の大広間", ballroom_scene)
             self.assertIn("location_06", ballroom_scene)
-            self.assertIn("glass_slipper", ballroom_scene)
             self.assertIn("prince_dance_partner", ballroom_scene)
             self.assertNotIn("location_02", ballroom_scene)
             ballroom_pressure = scene_request_text.split("## scene60_cut1", 1)[1].split("## scene60_cut2", 1)[0]
@@ -223,8 +295,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             final_scene_manifest = re.split(r"\n-\s+scene_id:\s+'?80'?", manifest_text, maxsplit=1)[1]
             self.assertIn("物語を閉じる", final_scene_manifest)
             self.assertIn("終結", final_scene_manifest)
-            self.assertIn("靴合わせの動作", final_scene_manifest)
-            self.assertIn("足に合うガラスの靴", final_scene_manifest)
+            self.assertIn("靴合わせが行われる部屋", final_scene_manifest)
+            self.assertIn("ガラスの靴", final_scene_manifest)
+            self.assertIn("主人公の価値を証明", final_scene_manifest)
             self.assertIn("出口ではなくシンデレラとガラスの靴へ収束する", final_scene_manifest)
             self.assertIn("carries_to_next_scene: []", final_scene_manifest)
             self.assertNotIn("次の場所へ進む証拠が生まれる", final_scene_manifest)
@@ -298,6 +371,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 ]
             )
             self.assertIn("cut_contract:", request_text)
+            self.assertIn("source_event_contract:", request_text)
+            self.assertIn("event_context_for_cut:", request_text)
             self.assertIn("first_frame_contract:", request_text)
             self.assertIn("motion_contract:", request_text)
             self.assertIn("story_event_obligations:", request_text)

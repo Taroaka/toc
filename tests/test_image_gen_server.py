@@ -315,7 +315,7 @@ scenes:
         "status: passed\nreviewed_entries: [scene10_cut1, scene10_cut2, scene10_cut3]\nblocked_entries: []\nfindings: []\nnotes: []\n",
         encoding="utf-8",
     )
-    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt"):
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
         write_semantic_review_artifacts(run_dir, stage, entry_count=3 if stage == "image_prompt" else 1)
     return run_dir
 
@@ -343,8 +343,62 @@ def write_valid_p680_artifacts(root: Path, run_id: str) -> Path:
         "# Run Index\n\np680 まで到達した frontend create run の索引です。asset と scene 画像生成が完了し、画像レビューはフロントで承認待ちです。state、request、review gate の状態を確認できます。\n",
         encoding="utf-8",
     )
-    write_semantic_review_artifacts(run_dir, "scene_image", entry_count=3)
     return run_dir
+
+
+def mark_manifest_narration_ready(run_dir: Path, *, silent: set[str] | None = None) -> None:
+    silent_items = set(silent or set())
+    manifest_path = run_dir / "video_manifest.md"
+    original_text = manifest_path.read_text(encoding="utf-8")
+    data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
+    for target in image_gen_app._manifest_scene_targets(data):
+        selector = str(target["selector"])
+        node = target["cut"]
+        audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
+        narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+        if selector in silent_items:
+            narration.update(
+                {
+                    "tool": "silent",
+                    "status": "audio_ready",
+                    "text": "",
+                    "tts_text": "",
+                    "output": "",
+                    "silence_contract": {
+                        "intentional": True,
+                        "confirmed_by_human": True,
+                        "kind": "intentional_silence",
+                        "reason": "test confirmed silence",
+                    },
+                    "review": {
+                        "status": "approved",
+                        "human_review_ok": True,
+                        "approved_at": "test",
+                    },
+                }
+            )
+        else:
+            output = str(narration.get("output") or f"assets/audio/{selector}/{selector}_narration.mp3")
+            audio_path = image_gen_app.resolve_run_relative(run_dir, output)
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(b"fake-audio-" + selector.encode("utf-8"))
+            narration.update(
+                {
+                    "tool": "elevenlabs",
+                    "status": "audio_ready",
+                    "text": f"{selector} narration",
+                    "tts_text": f"{selector} narration.",
+                    "output": output,
+                    "review": {
+                        "status": "approved",
+                        "human_review_ok": True,
+                        "approved_at": "test",
+                    },
+                }
+            )
+        audio["narration"] = narration
+        node["audio"] = audio
+    image_gen_app._write_manifest_data(manifest_path, original_text, data)
 
 
 class ImageGenParserTests(unittest.TestCase):
@@ -1192,6 +1246,39 @@ class ImageGenParserTests(unittest.TestCase):
         source = inspect.getsource(image_gen_app._run_create_job)
         self.assertIn("_run_toc_immersive_frontend_cli_helper", source)
         self.assertNotIn("_run_toc_skill_helper_until_stop_target", source)
+
+    def test_frontend_create_cli_helper_persists_stdout_and_stderr_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260606_1200"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+
+            class FakeProcess:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"frontend stdout\n", b"frontend stderr\n"
+
+            async def fake_create_subprocess_exec(*_args, **_kwargs):
+                return FakeProcess()
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.asyncio.create_subprocess_exec", fake_create_subprocess_exec),
+            ):
+                stdout = asyncio.run(
+                    image_gen_app._run_toc_immersive_frontend_cli_helper(
+                        topic="桃太郎",
+                        source="鬼退治",
+                        run_id=run_id,
+                        stop_target="p680",
+                    )
+                )
+
+            self.assertEqual(stdout, "frontend stdout")
+            self.assertEqual((run_dir / "logs/frontend_create_cli/stdout.log").read_text(encoding="utf-8"), "frontend stdout\n")
+            self.assertEqual((run_dir / "logs/frontend_create_cli/stderr.log").read_text(encoding="utf-8"), "frontend stderr\n")
 
     def test_wait_for_generated_image_after_returns_stable_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2138,7 +2225,7 @@ base b prompt
         self.assertIn("review.asset_visual_gate.status=needs_frontend_review", state)
         self.assertIn("review.asset_visual_gate.attempts=10", state)
 
-    def test_generate_create_images_continues_media_generation_when_semantic_review_fails(self) -> None:
+    def test_generate_create_images_blocks_media_generation_when_semantic_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
@@ -2170,19 +2257,63 @@ base b prompt
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
                     patch("server.image_gen_app._mark_image_generation_review_ready", mark_ready),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
 
-        self.assertEqual(generated_kinds, ["asset", "scene"])
-        self.assertEqual(state["review.image.status"], "needs_semantic_review")
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
+        self.assertEqual(generated_kinds, [])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_media_generation")
+        self.assertEqual(state["review.semantic.create_media_generated"], "false")
+        self.assertEqual(state["review.semantic.create_blocking_stage"], "scene_set")
         self.assertEqual(state["slot.p410.status"], "failed")
-        self.assertEqual(state["slot.p640.status"], "failed")
-        self.assertEqual(state["slot.p660.status"], "done")
-        self.assertEqual(state["slot.p670.status"], "failed")
-        self.assertEqual(state["slot.p680.status"], "pending")
+        self.assertNotIn("slot.p660.status", state)
+        mark_ready.assert_not_called()
+
+    def test_generate_create_images_blocks_media_generation_when_semantic_transport_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            generated_kinds: list[str] = []
+            mark_ready = Mock()
+
+            async def fake_generate_request_outputs(*, run_dir: Path, kind: str) -> None:
+                generated_kinds.append(kind)
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "scene_detail":
+                    raise CodexAppServerTransportError("turn timed out")
+                slot = image_gen_app.SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+                if slot:
+                    image_gen_app.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"slot.{slot}.status": "done",
+                            f"slot.{slot}.note": f"contextless semantic {stage} review passed",
+                        },
+                    )
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._mark_image_generation_review_ready", mark_ready),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review blocked by Codex app-server transport failure"):
+                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(generated_kinds, [])
+        self.assertEqual(state["review.semantic.scene_detail.transport.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_detail.loop.status"], "blocked_transport")
+        self.assertEqual(state["runtime.stage"], "app_server_transport_failed")
+        self.assertEqual(state["slot.p410.status"], "failed")
+        self.assertNotIn("review.semantic.create_media_generated", state)
+        self.assertNotIn("slot.p660.status", state)
         mark_ready.assert_not_called()
 
     def test_semantic_review_failure_invokes_producer_repair_then_rereviews(self) -> None:
@@ -2468,7 +2599,7 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertFalse(repair_prompt_exists)
 
-    def test_semantic_review_hard_timeout_blocks_as_transport(self) -> None:
+    def test_semantic_review_no_progress_timeout_blocks_as_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "output" / "sample_run"
             run_dir.mkdir(parents=True)
@@ -2479,7 +2610,8 @@ base b prompt
 
             with (
                 patch("server.image_gen_app._run_semantic_review_once", never_finishes),
-                patch("server.image_gen_app._semantic_review_once_hard_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app._semantic_review_no_progress_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.01),
             ):
                 with self.assertRaisesRegex(CodexAppServerTransportError, "timed out"):
                     asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
@@ -2489,7 +2621,35 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.transport.error_kind"], "timeout")
+        self.assertEqual(state["review.semantic.scene_set.watchdog.status"], "no_progress_timeout")
         self.assertEqual(state["runtime.app_server.transport.status"], "failed")
+
+    def test_semantic_review_progress_resets_no_progress_watchdog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_set"
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            (run_dir / paths["report"]).parent.mkdir(parents=True, exist_ok=True)
+
+            async def progressing_review(*_args, **_kwargs):
+                for index in range(4):
+                    (run_dir / paths["report"]).write_text(f"status: pending\nprogress: {index}\n", encoding="utf-8")
+                    if index < 3:
+                        await asyncio.sleep(0.015)
+                return image_gen_app.SemanticReviewStatus(status="passed", entry_count=1, errors=())
+
+            with (
+                patch("server.image_gen_app._run_semantic_review_once", progressing_review),
+                patch("server.image_gen_app._semantic_review_no_progress_timeout_seconds", lambda: 0.03),
+                patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.005),
+            ):
+                asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=1))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_set.watchdog.status"], "completed")
 
     def test_semantic_review_repair_transport_failure_blocks_without_semantic_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2613,7 +2773,7 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.repair.changed_artifacts_detected"], "script.md")
         self.assertNotIn("runtime.app_server.transport.status", state)
 
-    def test_semantic_review_rereviews_after_repair_hard_timeout_when_source_changed(self) -> None:
+    def test_semantic_review_rereviews_after_repair_no_progress_timeout_when_source_changed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "output" / "sample_run"
             run_dir.mkdir(parents=True)
@@ -2644,7 +2804,8 @@ base b prompt
             with (
                 patch("server.image_gen_app._run_semantic_review_once", fake_run_once),
                 patch("server.image_gen_app._run_semantic_review_producer_repair", slow_repair),
-                patch("server.image_gen_app._semantic_repair_once_hard_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app._semantic_repair_no_progress_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.01),
             ):
                 asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=2))
 
@@ -2908,6 +3069,9 @@ base b prompt
 
             self.assertIn("Run dir:", output)
             self.assertTrue((run_dir / "video_manifest.md").exists())
+            self.assertTrue((run_dir / "logs/scene_design/scene_event_input.json").exists())
+            self.assertIn("Run dir:", (run_dir / "logs/toc_run_cli/stdout.log").read_text(encoding="utf-8"))
+            self.assertEqual((run_dir / "logs/toc_run_cli/stderr.log").read_text(encoding="utf-8"), "")
             self.assertIn("runtime.review_policy=drafts", state)
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -4112,6 +4276,7 @@ keep existing request
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
             (run_dir / "video_generation_requests.md").write_text("keep existing requests\n", encoding="utf-8")
             manifest_before = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             calls: list[dict[str, Any]] = []
@@ -4174,6 +4339,35 @@ keep existing request
         self.assertEqual(calls[0]["prompt"], "slow dolly forward")
         self.assertEqual(calls[0]["aspect_ratio"], "9:16")
         self.assertEqual(calls[0]["resolution"], "720p")
+
+    def test_video_generate_rejects_missing_narration_ready_before_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p650_artifacts(root, "sample_run")
+
+            class FakeKlingClient:
+                def __init__(self, *_args, **_kwargs):
+                    raise AssertionError("provider must not be constructed before narration is ready")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "KLING_API_KEY": "fake-key"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.KlingClient", FakeKlingClient),
+                ):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": "slow dolly forward",
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("requires audio files or silent approvals for all cuts", response.text)
 
     def test_video_generate_rejects_invalid_reference_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4253,6 +4447,41 @@ scenes:
         self.assertEqual(payload["items"][0]["videoPrompt"], "slow move")
         self.assertEqual(payload["items"][0]["videoQuality"], "720p")
 
+    def test_narration_drafts_create_preserves_existing_review_without_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "sample_run")
+            manifest_path = run_dir / "video_manifest.md"
+            original_text = manifest_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
+            first_cut = data["scenes"][0]["cuts"][0]
+            first_cut["audio"] = {
+                "narration": {
+                    "status": "review_pending",
+                    "text": "既存レビュー中の文面",
+                    "tts_text": "既存レビュー中の文面。",
+                    "output": "assets/audio/scene10_cut1/custom.mp3",
+                }
+            }
+            image_gen_app._write_manifest_data(manifest_path, original_text, data)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/narration-drafts/create",
+                            json={"run_id": "sample_run", "replace": False},
+                        )
+
+            updated_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_path.read_text(encoding="utf-8")))
+            cuts = updated_data["scenes"][0]["cuts"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("scene10_cut1", response.json()["skipped"])
+        self.assertEqual(cuts[0]["audio"]["narration"]["text"], "既存レビュー中の文面")
+        self.assertEqual(cuts[1]["audio"]["narration"]["status"], "review_pending")
+        self.assertIn("scene_narration_plan", updated_data["scenes"][0])
+
     def test_narration_generate_updates_manifest_and_duration_minimum(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4315,6 +4544,7 @@ scenes:
             )
             (run_dir / "assets" / "audio").mkdir(parents=True, exist_ok=True)
             (run_dir / "assets" / "audio" / "scene10_cut1.mp3").write_bytes(b"fake")
+            mark_manifest_narration_ready(run_dir)
             calls: list[dict[str, Any]] = []
 
             class FakeKlingClient:
@@ -4430,6 +4660,58 @@ scenes:
         self.assertIn("scene10_cut1.mp3", narration_text)
         self.assertEqual(cut["render"]["narration_offset_seconds"], 1.5)
         self.assertEqual(cut["video_generation"]["duration_seconds"], 6)
+
+    def test_render_inputs_freeze_materializes_confirmed_silence_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            videos_dir = run_dir / "assets" / "scenes"
+            videos_dir.mkdir(parents=True, exist_ok=True)
+            (videos_dir / "scene10_cut1.mp4").write_bytes(MP4_BYTES)
+            manifest_path = run_dir / "video_manifest.md"
+            original_text = manifest_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
+            data["scenes"][0]["cuts"] = [data["scenes"][0]["cuts"][0]]
+            image_gen_app._write_manifest_data(manifest_path, original_text, data)
+            mark_manifest_narration_ready(run_dir, silent={"scene10_cut1"})
+
+            def fake_write_silence(path: Path, _duration_seconds: float) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fake-silence")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._write_silence_audio", fake_write_silence),
+                    patch("server.image_gen_app._prepare_render_video_clip", lambda _run_dir, source, _item: source),
+                    patch("server.image_gen_app._prepare_render_narration", lambda _run_dir, source, _item: source),
+                    patch("server.image_gen_app._probe_media_duration_seconds", lambda _path: None),
+                ):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/render-inputs/freeze",
+                            json={
+                                "run_id": "sample_run",
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "video_path": "assets/scenes/scene10_cut1.mp4",
+                                        "narration_path": None,
+                                        "video_duration_seconds": 4,
+                                    }
+                                ],
+                            },
+                        )
+
+            updated_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_path.read_text(encoding="utf-8")))
+            narration_output = updated_data["scenes"][0]["cuts"][0]["audio"]["narration"]["output"]
+            narration_text = (run_dir / "video_narration_list.txt").read_text(encoding="utf-8")
+            silent_file_exists = (run_dir / narration_output).is_file()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("intentional_silence", narration_output)
+        self.assertTrue(silent_file_exists)
+        self.assertIn("intentional_silence", narration_text)
 
     def test_regenerate_prompts_updates_request_file_after_all_items_succeed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

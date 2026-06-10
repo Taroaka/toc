@@ -11,7 +11,7 @@ from toc.harness import load_structured_document
 
 ASSET_PLAN_STAGE = "asset_plan"
 ASSET_OUTPUT_STAGE = "asset_output"
-ASSET_STAGES = {ASSET_PLAN_STAGE, ASSET_OUTPUT_STAGE}
+ASSET_STAGES = {ASSET_PLAN_STAGE}
 ASSET_CATEGORY_USAGE_KEYS = {
     "character_ids": "characters",
     "object_ids": "objects",

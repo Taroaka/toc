@@ -23,6 +23,22 @@ def write_manifest(run_dir: Path) -> None:
                 "          causal_proof: 灰と台所の配置で原因と結果が読める",
                 "          visual_evidence: [灰, 台所, 姿勢]",
                 "          required_roles: [protagonist, opponent]",
+                "    scene_event:",
+                "      schema_version: scene_event_v1",
+                "      event_logline: 灰の台所で名前を奪われる",
+                "      start_situation: 灰の台所にいる",
+                "      source_story_beat_ids: [story_scene10]",
+                "      event_sequence:",
+                "        - beat_id: scene10_event_setup",
+                "          beat_function: setup",
+                "          what_happens: 灰の台所に立つ",
+                "        - beat_id: scene10_event_pressure",
+                "          beat_function: pressure",
+                "          what_happens: 名前を奪われる",
+                "        - beat_id: scene10_event_turn",
+                "          beat_function: turn",
+                "          what_happens: 希望を保つ",
+                "      forbidden_event_changes: [ガラスの靴を見せない]",
                 "      role_coverage:",
                 "        required_roles: [protagonist, opponent]",
                 "      audience_knowledge_plan: [観客は名前を奪われた事実を理解する]",
@@ -33,6 +49,9 @@ def write_manifest(run_dir: Path) -> None:
                 "        rule: 同じ意味を繰り返さない",
                 "      static_first_frame_rules: [静止画で証拠を見せる]",
                 "    scene_cut_coverage_plan:",
+                "      coverage_strategy: reverse_from_scene_event",
+                "      source_schema_version: scene_event_v1",
+                "      min_cut_count: {by_importance: 2, by_duration: 2, by_event_beats: 2, selected: 2}",
                 "      minimum_cut_count: 2",
                 "      selected_cut_count: 2",
                 "      scene_obligations:",
@@ -47,6 +66,77 @@ def write_manifest(run_dir: Path) -> None:
                 "    cuts:",
                 "      - cut_id: '01'",
                 "        selector: scene10_cut01",
+                "        cut_contract:",
+                "          schema_version: '3.0'",
+                "          source_event_contract:",
+                "            primary_event_beat_id: scene10_event_pressure",
+                "            source_event_beat_ids: [scene10_event_pressure]",
+                "            event_beat_function: pressure",
+                "            event_time_position: before_trigger",
+                "            source_event_summary: 名前を奪われる",
+                "            source_visible_action: 名前を奪われる姿勢が見える",
+                "            source_visible_reaction: 顔が伏せられる",
+                "            event_facts_to_preserve: [名前を奪われる]",
+                "            event_facts_not_to_invent: [ガラスの靴を見せない]",
+                "            allowed_reveal_info_ids: []",
+                "            forbidden_reveal_info_ids: [ガラスの靴]",
+                "          viewer_contract:",
+                "            target_beat: 灰の台所の導入",
+                "            audience_knowledge_delta: 観客は灰の台所で名前を奪われたことを理解する",
+                "            causal_proof: 灰、台所、人物の姿勢で原因と結果が読める",
+                "            visual_evidence: [灰, 台所, 姿勢]",
+                "            required_roles: [protagonist, opponent]",
+                "            anti_redundancy_key: dramatic_question:scene_pressure",
+                "            visual_proof: 灰の台所の姿勢",
+                "            must_show: [シンデレラ, 灰の台所]",
+                "            must_avoid: [ロゴ]",
+                "            done_when: [人物と場所が一枚で読める]",
+                "          first_frame_contract:",
+                "            source_event_beat_id: scene10_event_pressure",
+                "            event_time_position: before_trigger",
+                "            event_fact_visible_in_still: 名前を奪われる姿勢",
+                "            not_yet_happened_in_still: [ガラスの靴]",
+                "            first_frame_brief: 灰の台所でシンデレラが立つ",
+                "            static_first_frame_rule: 動作ではなく静止した証拠として見せる",
+                "          motion_contract:",
+                "            source_event_beat_id: scene10_event_pressure",
+                "            starts_from_first_frame: true",
+                "            must_not_advance_to_event_beat_ids: [scene10_event_turn]",
+                "            motion_brief: 伏せた顔が少し上がる",
+                "          narration_contract:",
+                "            source_event_beat_ids: [scene10_event_pressure]",
+                "            allowed_info_ids: []",
+                "            forbidden_info_ids: [ガラスの靴]",
+                "            must_not_advance_to_event_beat_ids: [scene10_event_turn]",
+                "            must_not_explain_visible_action_as_caption: true",
+                "            narration_event_boundary: same_event_only",
+                "          event_context_for_cut:",
+                "            derived_from: [\"scene_event.event_sequence[]\", \"cut_contract.source_event_contract\"]",
+                "            editable: false",
+                "            primary_event_beat:",
+                "              beat_id: scene10_event_pressure",
+                "              beat_function: pressure",
+                "              what_happens: 名前を奪われる",
+                "            neighboring_event_beats: []",
+                "            forbidden_event_changes: [ガラスの靴を見せない]",
+                "            reveal_constraints_for_this_cut: []",
+                "          viewer_contract:",
+                "            target_beat: 灰の台所の導入",
+                "            audience_knowledge_delta: 観客は灰の台所で名前を奪われたことを理解する",
+                "            causal_proof: 灰、台所、人物の姿勢で原因と結果が読める",
+                "            visual_evidence: [灰, 台所, 姿勢]",
+                "            required_roles: [protagonist, opponent]",
+                "            anti_redundancy_key: dramatic_question:scene_pressure",
+                "            assigned_story_event_ids: [scene01_story_event]",
+                "            visual_proof: 灰の台所の導入",
+                "            must_show: [シンデレラ, 灰の台所]",
+                "            must_avoid: [ロゴ]",
+                "            done_when: [人物と場所が一枚で読める]",
+                "          first_frame_contract:",
+                "            static_first_frame_rule: 動作ではなく静止した証拠として見せる",
+                "          continuity_contract:",
+                "            start_state:",
+                "              spatial_state: 灰の台所",
                 "        still_image_plan:",
                 "          mode: generate_still",
                 "          rationale: 導入の静止画",
@@ -142,6 +232,17 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["review_scope"], "all_entries")
             self.assertEqual(entry["selector"], "scene10_cut01")
             self.assertEqual(entry["output"], "assets/scenes/scene10_cut01.png")
+            self.assertIn("prompt_blocks", entry)
+            self.assertIn("image_prompt_gate_focus", entry)
+            self.assertIn("first_frame_visual_plan", entry)
+            self.assertEqual(entry["first_frame_visual_plan"]["schema_version"], "first_frame_visual_plan_v1")
+            self.assertFalse(entry["first_frame_visual_plan"]["editable"])
+            self.assertEqual(
+                entry["first_frame_visual_plan"]["source_grounding"]["source_event_beat_id"],
+                "scene10_event_pressure",
+            )
+            self.assertIn("temporal_boundary", entry["first_frame_visual_plan"])
+            self.assertIn("motion_affordance", entry["first_frame_visual_plan"])
             self.assertEqual(entry["references"], ["assets/characters/cinderella.png", "assets/locations/kitchen.png"])
             self.assertEqual(entry["character_ids"], ["cinderella"])
             self.assertEqual(entry["location_ids"], ["kitchen"])
@@ -159,8 +260,10 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["semantic_contract"]["causal_proof"], "灰、台所、人物の姿勢で原因と結果が読める")
             self.assertEqual(entry["semantic_contract"]["visual_evidence"], ["灰", "台所", "姿勢"])
             self.assertEqual(entry["semantic_contract"]["required_roles"], ["protagonist", "opponent"])
-            self.assertEqual(entry["semantic_contract"]["assigned_story_event_ids"], ["scene01_story_event"])
             self.assertEqual(entry["semantic_contract"]["static_first_frame_rule"], "動作ではなく静止した証拠として見せる")
+            self.assertEqual(entry["semantic_contract"]["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
+            self.assertEqual(entry["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertNotIn("scene_event", entry)
             self.assertFalse(entry["semantic_contract_missing"])
             self.assertEqual(entry["contract_required_fields_missing"], [])
             character_context = entry["asset_reference_context"]["character_ids"]["cinderella"]
@@ -186,90 +289,31 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(composite["scene_cut_coverage_plan"]["selected_cut_count"], 2)
             self.assertEqual(composite["story_event_obligations"][0]["event_id"], "scene01_story_event")
             self.assertEqual(composite["role_coverage"]["required_roles"], ["protagonist", "opponent"])
-            self.assertEqual(composite["cut_entries"][0]["assigned_story_event_ids"], ["scene01_story_event"])
+            self.assertNotIn("scene_event", composite["scene_contract"])
+            self.assertEqual(composite["scene_event"]["schema_version"], "scene_event_v1")
+            self.assertEqual(composite["cut_entries"][0]["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertEqual(composite["cut_entries"][0]["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
             self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
-            self.assertIn("story_event_obligation_unassigned", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("event_beat_reference_integrity", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("audience_knowledge_delta_missing", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("role_coverage_missing", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_cut_coverage_plan", composite["scene_composite_gate"]["must_judge"][0])
 
-    def test_collect_scene_image_entries_includes_outputs_logs_and_contact_sheet(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
-            run_dir = Path(td)
-            write_manifest(run_dir)
-            write_asset_plan(run_dir)
-            output_path = run_dir / "assets" / "scenes" / "scene10_cut01.png"
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"\x89PNG\r\n\x1a\n")
-            contact_sheet = run_dir / "logs" / "review" / "semantic" / "scene_image.contact_sheet.md"
-            contact_sheet.parent.mkdir(parents=True, exist_ok=True)
-            contact_sheet.write_text("# Contact Sheet\n", encoding="utf-8")
-            log_path = run_dir / "logs" / "app_server" / "image_gen" / "scene10_cut01.json"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(
-                json.dumps(
-                    {
-                        "destination": "assets/scenes/scene10_cut01.png",
-                        "savedPath": "/tmp/generated/scene10_cut01.png",
-                        "source": "codex_builtin_image",
-                        "status": "completed",
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-
-            entries = collect_entries("scene_image", run_dir)
-
-            self.assertEqual(len(entries), 3)
-            first = entries[0]
-            self.assertEqual(first["stage"], "scene_image")
-            self.assertEqual(first["review_scope"], "all_entries")
-            self.assertEqual(first["selector"], "scene10_cut01")
-            self.assertTrue(first["output_exists"])
-            self.assertEqual(
-                first["final_output_provenance"],
-                {
-                    "declared_output": "assets/scenes/scene10_cut01.png",
-                    "resolved_output_path": str(output_path.resolve()),
-                    "output_exists": True,
-                    "saved_path": "/tmp/generated/scene10_cut01.png",
-                    "source": "codex_builtin_image",
-                    "status": "completed",
-                    "debug_log": "logs/app_server/image_gen/scene10_cut01.json",
-                },
-            )
-            self.assertEqual(first["generated_image_path"], "/tmp/generated/scene10_cut01.png")
-            self.assertEqual(first["generation_source"], "codex_builtin_image")
-            self.assertEqual(first["debug_log"], "logs/app_server/image_gen/scene10_cut01.json")
-            self.assertTrue(first["contact_sheet_required"])
-            self.assertFalse(first["contact_sheet_missing"])
-            self.assertEqual(first["contact_sheet_refs"], ["logs/review/semantic/scene_image.contact_sheet.md"])
-            self.assertEqual(first["semantic_contract"]["must_include"], ["シンデレラ", "灰の台所"])
-            self.assertFalse(first["semantic_contract_missing"])
-            second = entries[1]
-            self.assertEqual(second["selector"], "scene10_cut02")
-            self.assertFalse(second["output_exists"])
-            self.assertEqual(second["review_scope"], "all_entries")
-            self.assertTrue(second["semantic_contract_missing"])
-            self.assertEqual(second["contract_required_fields_missing"], ["target_focus", "must_include", "done_when"])
-            composite = entries[2]
-            self.assertEqual(composite["review_scope"], "scene_composite")
-            self.assertEqual(composite["stage"], "scene_image")
-            self.assertIn("scene_cut_coverage_plan", composite)
-            self.assertEqual(composite["cut_entries"][0]["image_output_exists"], True)
-            self.assertEqual(composite["cut_entries"][1]["image_output_exists"], False)
-
-    def test_collect_scene_image_entries_marks_missing_contact_sheet(self) -> None:
+    def test_scene_image_semantic_stage_is_removed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
             run_dir = Path(td)
             write_manifest(run_dir)
 
-            entries = collect_entries("scene_image", run_dir)
+            with self.assertRaisesRegex(ValueError, "unsupported image semantic stage"):
+                collect_entries("scene_image", run_dir)
 
-            self.assertTrue(entries[0]["contact_sheet_required"])
-            self.assertTrue(entries[0]["contact_sheet_missing"])
-            self.assertEqual(entries[0]["contact_sheet_refs"], [])
+    def test_scene_image_stage_is_not_collected_for_missing_contact_sheet(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
+            run_dir = Path(td)
+            write_manifest(run_dir)
+
+            with self.assertRaisesRegex(ValueError, "unsupported image semantic stage"):
+                collect_entries("scene_image", run_dir)
 
     def test_grouped_asset_plan_shapes_feed_reference_context(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:

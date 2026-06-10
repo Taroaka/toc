@@ -550,13 +550,13 @@ p400 の内部 slot:
   - agent 指摘による scene 追加/削除/統合/分割/順序変更、scene intent 修正、transition 補強は担当 `p400` L2 supervisor が自動適用する
 - `p420`: cut blueprints
   - 各 scene を production 用 cut に分解する
-  - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` を持つ
+  - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` に加えて、`cut_contract.source_event_contract.primary_event_beat_id` / `source_event_beat_ids` で `scene_event.event_sequence[].beat_id` を参照する。coverage plan 側の assignment 表示が必要な場合も `event_assignment.source_event_contract` の derived 表示にし、top-level authoring field にはしない
   - semantic QA: 各 cut は scene の意味を映像単位に翻訳する。場所移動、感情転換、証拠提示、reveal、reaction、handoff を件数合わせで混ぜず、1 cut の viewer-facing intent を明確にする
   - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
   - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
   - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は担当 `p400` L2 supervisor / bucket single writer が行う
-  - p420 cut review は critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
-  - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame と motion の責務分離、multimodal contract、duration / handoff が説明できる場合だけ passed を返す
+  - p420 cut review は critic_1=`cut_intent_isolation`, critic_2=`scene_event_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_event_boundary_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする。critic_2/4 は `event_beat_reference_integrity`, `source_event_preservation`, `event_context_for_cut_ready`, `no_unapproved_event_invention` を blocking gate として扱う
+  - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、scene_event beat coverage、未承認 event invention 禁止、beat ladder coverage、first frame と motion の責務分離、multimodal contract、duration / handoff が説明できる場合だけ passed を返す
   - agent review loop は `eval.cut_blueprint.loop.*` / `cut_blueprint_review.md` に記録する
   - human review は `gate.script_cut_review` / `review.script.cut.status` で required|optional|skipped を切り替える
 - `p430`: script review handoff
@@ -582,7 +582,7 @@ Canonical p400 done 条件:
 - `script.md` と `video_manifest.md` の scene/cut selector が完全一致している
 - `scene_set_review.md` / `scene_detail_review.md` / `cut_blueprint_review.md` / `script_review.md` / `production_readiness_review.md` が required section と passed status を持つ
 - p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p410b aggregate は `Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate`、p410c aggregate は `Scene Detail Gate`、p420 aggregate は `Cut Blueprint Gate`、p435 は `Design Owner Patch Brief` を持つ。required gate の値が `TODO` / `TBD` / `pending` / `changes_requested` / `failed` / `missing` / `unclear` / `none` / `null` / `n/a` / `なし` / `不明` / `未定` / `不足` のままなら p400 readiness は落ちる
-- 各 scene が `scene_intent` 相当の情報を持つ
+- 各 scene が `scene_intent` と `scene_event` を持つ。正本順序は `scene_intent = なぜ必要か`、`scene_event = 何が起きるか`、`cut_contract = どう見せるか`
   - story purpose
   - audience information
   - withheld information / reveal constraint
@@ -590,6 +590,9 @@ Canonical p400 done 条件:
   - visual value source
   - source grounding / creative boundary
   - story_specificity: non-compressible beat, scene promotion reason, unique responsibility, actor forces, meaning ladder, concrete handoff, anti-template language
+- `scene_event` は `schema_version: "scene_event_v1"` を持ち、`event_logline`, `start_situation`, `source_story_beat_ids`, `event_sequence[]`, `turning_event`, `end_situation`, `offscreen_context`, `forbidden_event_changes` を必須とする
+- `scene_event.event_sequence[]` は scene 内で一意な `beat_id` を持ち、`setup`, `pressure`, `turn`, `payoff` を必ず含む。`cut_id`, `camera`, `shot`, `lens`, `framing`, `image_prompt`, `video_prompt`, `motion_prompt` は入れない
+- `story_event_obligations` は互換 projection として残す。新規生成の正本は `scene_event.event_sequence[]`
 - 各 renderable scene が `cuts[]` を持ち、各 cut が正本 `cut_contract` 相当の完了条件を持つ。`scene_contract` は旧 reader 用 alias であり、scene-level 正本ではない
 - 各 cut が narration の役割を持つ。無音 cut の場合は、p700 へ渡せる `silence_contract` の必要性が明示されている
 - asset が必要そうな character / object / location / reusable still は、p500 用の dependency hint として列挙されている
@@ -871,7 +874,7 @@ p500 slot contract:
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
-- `p570` semantic QA: 生成済み asset の主対象が asset category と story purpose に一致するかを確認する。path が存在しても、人物 asset が背景だけ、object asset が読めない抽象形、location asset が人物中心なら continuity anchor として合格しない。
+- `p570`: 生成済み asset の主対象が asset category と story purpose に一致するかは、deterministic output validator と frontend human review で確認する。`asset_output` semantic review stage は持たない。
 
 `asset_inventory.md` の最低限:
 
@@ -1083,15 +1086,17 @@ location の例外ルール:
 
 ### 5.0 Semantic QA contract
 
-semantic QA は p200 から p900 までの横断契約であり、schema / file existence / count の代替ではない。各 stage は、上流 artifact の意味が下流 artifact に正しく翻訳されていることを説明できる状態で handoff する。
+semantic QA は生成前の設計 artifact に対する横断契約であり、schema / file existence / count の代替ではない。各設計 stage は、上流 artifact の意味が下流 artifact に正しく翻訳されていることを説明できる状態で handoff する。
 
 運用分担:
 
 - 構造、存在、schema、参照 path、count、必須 field は関数 verifier が判定する
 - subject / location / object / timeline / reveal order / cut function などの意味判定は contextless semantic review agent が判定する
 - verifier は semantic review agent の report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする
-- frontend create flow では、人間レビュー以外の全経路で semantic review agent report が `status: passed` になることを必須にする。p680 までの create では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `asset_output`, `image_prompt`, `scene_image` を省略しない
+- frontend create flow では、生成前設計 stage の semantic review agent report が `status: passed` になることを必須にする。p680 までの create では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない
+- 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。実画像・動画・最終 render の良否は deterministic output validator と frontend human review / final QA が判定する
 - semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
+- semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
 
 Canonical semantic review stages:
 
@@ -1099,13 +1104,9 @@ Canonical semantic review stages:
 - `scene_detail`
 - `cut_blueprint`
 - `asset_plan`
-- `asset_output`
 - `image_prompt`
-- `scene_image`
 - `narration`
 - `video_motion`
-- `video_clip`
-- `render`
 
 Canonical semantic review artifacts:
 
@@ -1116,6 +1117,7 @@ Canonical semantic review artifacts:
 - state keys: `review.semantic.<stage>.collection`, `review.semantic.<stage>.scope`, `review.semantic.<stage>.prompt`, `review.semantic.<stage>.report`, `review.semantic.<stage>.status`, `review.semantic.<stage>.entry_count`, `review.semantic.<stage>.error_count`
 - repair-loop artifacts: `logs/review/semantic/<stage>.repair_round_<NN>.prompt.md`, `logs/review/semantic/<stage>.repair_round_<NN>.producer_report.md`
 - repair-loop state keys: `review.semantic.<stage>.loop.status`, `review.semantic.<stage>.loop.attempt`, `review.semantic.<stage>.loop.max_attempts`, `review.semantic.<stage>.repair.status`, `review.semantic.<stage>.repair.round`, `review.semantic.<stage>.repair.prompt`, `review.semantic.<stage>.repair.report`
+- watchdog state keys: `review.semantic.<stage>.watchdog.status`, `review.semantic.<stage>.watchdog.operation`, `review.semantic.<stage>.watchdog.no_progress_timeout_seconds`, `review.semantic.<stage>.watchdog.last_progress_at`, `review.semantic.<stage>.watchdog.completed_at`
 
 Legacy-compatible p640 image prompt aliases remain available for existing tooling:
 
@@ -1131,6 +1133,7 @@ Pack / runner commands:
 - `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
 
 `scripts/run-semantic-review.py` は既定で repair loop を有効にする。単発レビューだけを実行したい検証用途では `--no-repair-loop` を使う。最大試行回数は `--max-attempts` または `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` で指定できる。
+`--timeout-seconds` と `--repair-timeout-seconds` は総作業時間の上限ではなく、semantic report、repair report、source artifact、app-server activity marker が更新されない場合の no-progress watchdog として扱う。改善中の artifact 更新や app-server 通知が観測されている間は semantic loop を継続し、無進捗の場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` を state に残して停止する。
 
 実装者の責務:
 
@@ -1139,13 +1142,13 @@ Pack / runner commands:
 - `asset_inventory.md` / `asset_plan.md` は、物語で使われる人物、物語固有アイテム、場所、舞台装置を意味単位で網羅し、asset 種別と prompt が一致する
 - `video_manifest.md` の scene/cut は、参照する character/object/location id が cut の意味に合っている。round-robin や件数合わせで場所・小道具・人物を割り当てない
 - 画像生成 request は、参照画像の path だけでなく、その参照が何の意味を固定するかを prompt / contract で読める
-- 生成済み画像、動画、音声、最終 render は、上流の意味契約を満たすかを確認してから次 stage に渡す
+- 生成済み画像、動画、音声、最終 render は、frontend human review / final QA と deterministic validator で確認してから次 stage に渡す
 
 レビュワーの責務:
 
 - artifact が存在するかだけでなく、成果物として意味が通るかを見る
 - scene/cut の設計段階で、因果、場所、人物、主役アイテム、reveal 順序、情報量、handoff が成立しているかを見る
-- asset 画像では、asset id / asset_type / story_purpose と実画像の主対象が一致するかを見る
+- asset / scene 画像、動画、最終 render はフロントで実物を見て、上流の意味契約を満たしているかを人間が判定する
 - scene 画像では、参照 asset が正しいだけでなく、cut の場所・時点・小道具・人物状態が正しいかを見る
 - video / narration では、motion や語りが上流の cut function を説明だけで代替していないかを見る
 
@@ -1162,7 +1165,6 @@ Canonical semantic reason keys:
 - `semantic_reveal_order_mismatch`
 - `semantic_narration_mismatch`
 - `semantic_motion_mismatch`
-- `semantic_render_meaning_loss`
 
 各 `scenes[].image_generation.review` または `scenes[].cuts[].image_generation.review` は、少なくとも次の review field を持つ。
 
@@ -1306,15 +1308,55 @@ subagent review は上記 6 block を必須 criterion とする。1 つでも欠
 
 音声生成前 gate の review 状態は `video_manifest.md` の各 renderable narration node に直接保持する。
 
-各 narration node は review の前提として `audio.narration.contract` を持てる。
+各 narration node は review の前提として `audio.narration.contract` を持てる。`text` / `tts_text` には `TODO` / `TBD` / `REPLACE_ME` / 制作メモを入れない。未記入は空文字と `authoring_status` で表す。
 
 ```yaml
-contract:
-  target_function: "opening_setup|middle_complication|ending_resolution|time|causality|inner_state|viewpoint|rule|meaning"
-  must_cover: []
-  must_avoid: []
-  done_when: []
+audio:
+  narration:
+    authoring_status: "missing|draft|approved|silent"
+    missing_reason: "p700_narration_not_written_yet"
+    text: ""
+    tts_text: ""
+    contract:
+      schema_version: "narration_contract_v2"
+      story_role:
+        narrative_position: "opening|middle|ending"
+        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+        audience_state_before: ""
+        audience_state_after: ""
+        must_cover: []
+        must_not_reveal: []
+        done_when: []
+      visual_distance:
+        distance_policy: "stay_close|contextual|meaning_first|silent"
+        visible_facts_in_frame: []
+        narration_should_add: []
+        must_not_caption_visible_action: true
+        visual_overlap_allowed: false
+        visual_overlap_reason: ""
+      rhythm_and_timing:
+        target_speech_seconds: 0
+        min_speech_seconds: 0
+        max_speech_seconds: 0
+        start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+        end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+        pause_intent: []
+        audio_visual_sync_point: ""
+      tts_readiness:
+        normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+        pronunciation_targets: []
+        max_sentence_chars: 42
+        tts_text_must_differ_from_text_when_needed: true
+      # compatibility aliases for older readers; new authoring should fill story_role first.
+      role: "setup|fact|emotion|contrast|aftertaste|silent"
+      target_function: ""
+      must_cover: []
+      must_avoid: []
+      done_when: []
 ```
+
+Required core fields for new p700 authoring are `schema_version`, `story_role.narrative_position`, `story_role.cut_function`, `story_role.voice_function`, `visual_distance.distance_policy`, `visual_distance.narration_should_add`, and `tts_readiness.pronunciation_targets`. Compatibility aliases may remain during migration, but they do not replace the v2 fields in new design review.
 
 各 `scenes[].audio.narration.review` または `scenes[].cuts[].audio.narration.review` は、少なくとも次の review field を持つ。
 
@@ -1326,6 +1368,13 @@ human_review_ok: true|false
 human_review_reason: ""
 rubric_scores: {}
 overall_score: 0.0-1.0
+pronunciation_review:
+  candidates: []
+  unresolved: []
+narration_arc_review:
+  agent_review_ok: true|false
+  reason_keys: []
+  rubric_scores: {}
 human_review:
   status: "pending|approved|changes_requested"
   notes: ""
@@ -1357,13 +1406,35 @@ Semantics:
   - criterion ごとの score
 - `overall_score`
   - weighted overall score
+- `pronunciation_review`
+  - p720 で見つけた固有名詞・人名・地名・専門語の読み替え候補
+  - `unresolved` が残る場合は p730 前に `tts_text` のかな寄せ、`config/tts-pronunciation-aliases.tsv`、または official pronunciation dictionary locator のどれで処理するかを決める
+- `narration_arc_review`
+  - cut 単体では見つからない voice continuity / emotional curve / information flow / repetition control の軽量 review
+  - 初期運用では scene-level warning から始め、full-run blocking gate 化は運用が安定してから行う
 
 Canonical reason key:
 
+- `narration_authoring_status_missing`
+- `narration_authoring_status_inconsistent`
+- `narration_placeholder_detected`
 - `narration_contract_missing`
 - `narration_contract_must_cover_unmet`
 - `narration_contract_must_avoid_violated`
 - `narration_contract_target_function_unmet`
+- `narration_visual_distance_policy_missing`
+- `narration_visual_distance_violation`
+- `narration_arc_discontinuity`
+- `narration_handoff_missing`
+- `narrator_voice_drift`
+- `emotional_curve_flat`
+- `emotional_jump_unearned`
+- `information_overload_sequence`
+- `repeated_sentence_pattern`
+- `repeated_abstract_wording_across_cuts`
+- `opening_overexplains`
+- `middle_lacks_causal_pressure`
+- `ending_aftertaste_underpowered`
 - `narration_empty`
 - `narration_tts_text_missing`
 - `narration_contains_meta_marker`
@@ -1371,11 +1442,34 @@ Canonical reason key:
 - `needs_text_normalization`
 - `sentence_too_long_for_tts`
 - `missing_pause_punctuation`
+- `pronunciation_candidates_unresolved`
 - `visual_direction_leaked_into_narration`
 - `narration_story_role_mismatch`
 - `narration_too_visual_redundant`
 - `narration_pacing_mismatch`
 - `narration_spoken_japanese_weak`
+
+p720 L3 critic assignment:
+
+- critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
+- critic 2 `visual_distance`: visual captioning, image / motion distance, camera / prompt term leakage
+- critic 3 `tts_delivery`: `tts_text`, pause, sentence length, audio tag, pronunciation candidates
+- critic 4 `arc_and_pacing`: cut handoff, scene voice arc, duration density, ending aftertaste
+- critic 5 `spoken_japanese`: spoken naturalness, abstract AI wording, metaphor overload, monotonous endings
+
+Pronunciation candidate artifact:
+
+```text
+logs/eval/narration/round_01/pronunciation_candidates.tsv
+```
+
+TSV columns:
+
+```tsv
+surface	reading	selector	reason	status
+```
+
+`status` is `proposed|applied_tts_text|applied_alias_file|applied_official_dictionary|rejected`.
 
 Intentional silent cut contract:
 
@@ -1572,13 +1666,95 @@ Canonical reason key:
 - `dotted_selector_invalid`
 - `renumber_trace_missing`
 
-## Cut Contract v2.2
+## Cut Contract v3.0
 
-`video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。既存 runtime が `scene_contract` を読む場合は、`cut_contract` の主要 field を `scene_contract` に複写する。
+`video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。V3 の event beat 正本は `cut_contract.source_event_contract` であり、top-level `primary_event_beat_id` / `source_event_beat_ids` / `assigned_story_event_ids` や `scene_contract` alias だけでは V3 gate を pass しない。
+
+## Scene Event v1
+
+`video_manifest.md.scenes[].scene_event` / `script.md.scenes[].scene_event` を scene の出来事正本とする。`scene_intent` は scene が必要な理由、`scene_event` は実際に起きる出来事、`cut_contract` はその出来事をどう見せるかを表す。画像生成はステートレスなので、downstream には scene 全体を推測させず、cut が参照する beat だけを `event_context_for_cut` として渡す。
+
+```yaml
+scene_event:
+  schema_version: "scene_event_v1"
+  event_logline: ""
+  start_situation: ""
+  source_story_beat_ids: []
+  event_sequence:
+    - beat_id: "scene1_event_setup"
+      beat_function: "setup"
+      source_story_beat_ids: []
+      what_happens: ""
+      visible_action: ""
+      visible_reaction: ""
+      immediate_consequence: ""
+      emotional_pressure: ""
+      required_visual_evidence: []
+      story_information_revealed_ids: []
+    - beat_id: "scene1_event_pressure"
+      beat_function: "pressure"
+      source_story_beat_ids: []
+      what_happens: ""
+      visible_action: ""
+      visible_reaction: ""
+      immediate_consequence: ""
+      emotional_pressure: ""
+      required_visual_evidence: []
+      story_information_revealed_ids: []
+    - beat_id: "scene1_event_turn"
+      beat_function: "turn"
+      source_story_beat_ids: []
+      what_happens: ""
+      visible_action: ""
+      visible_reaction: ""
+      immediate_consequence: ""
+      emotional_pressure: ""
+      required_visual_evidence: []
+      story_information_revealed_ids: []
+    - beat_id: "scene1_event_payoff"
+      beat_function: "payoff"
+      source_story_beat_ids: []
+      what_happens: ""
+      visible_action: ""
+      visible_reaction: ""
+      immediate_consequence: ""
+      emotional_pressure: ""
+      required_visual_evidence: []
+      story_information_revealed_ids: []
+  turning_event:
+    source_event_beat_id: "scene1_event_turn"
+    causal_turn_ref: "scene_intent.causal_turn"
+    irreversible_change: ""
+  end_situation:
+    value_shift_to_ref: "scene_intent.value_shift.to"
+    outcome: ""
+    character_position: ""
+    object_state: ""
+    relationship_state: ""
+    new_pressure: ""
+    visible_evidence_refs: ["scene1_event_payoff"]
+  offscreen_context: []
+  forbidden_event_changes: []
+```
+
+deterministic gate は `script.scene_event_exists`, `script.scene_event_sequence_complete`, `script.scene_event_visible_actions_complete`, `script.scene_event_no_forbidden_directing_fields`, `script.scene_event_beat_ids_unique`, `script.scene_event_turning_event_ref_valid`, `script.scene_event_end_situation_ref_valid`, `script.scene_event_reveal_constraints_respected`, `script.cut_event_beat_refs_valid`, `script.event_beat_reference_integrity`, `script.source_event_preservation`, `script.event_first_frame_alignment`, `script.event_motion_boundary`, `script.event_narration_boundary`, `script.event_context_for_cut_ready`, `script.cuts_cover_scene_event_sequence`, `script.turn_and_payoff_event_beats_have_cuts` を持つ。自然文の意味一致は scene_detail / cut_blueprint reviewer gate で判定する。
 
 ```yaml
 cut_contract:
-  schema_version: "2.2"
+  schema_version: "3.0"
+  source_event_contract:
+    primary_event_beat_id: "scene1_event_setup"
+    source_event_beat_ids: ["scene1_event_setup"]
+    event_beat_function: "setup"
+    event_time_position: "before_trigger"
+    source_event_summary: ""
+    source_visible_action: ""
+    source_visible_reaction: ""
+    source_required_visual_evidence: []
+    event_facts_to_preserve: []
+    event_facts_not_to_invent: []
+    allowed_reveal_info_ids: []
+    forbidden_reveal_info_ids: []
   cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff|custom"
   intent_budget:
     primary_intent: ""
@@ -1596,7 +1772,6 @@ cut_contract:
     causal_proof: ""
     visual_evidence: []
     required_roles: []
-    assigned_story_event_ids: []
     anti_redundancy_key: ""
     reveal_constraints:
       inherited_from_scene: []
@@ -1632,6 +1807,10 @@ cut_contract:
       expected_next_cut_selector: ""
   first_frame_contract:
     imageable: true
+    source_event_beat_id: "scene1_event_setup"
+    event_time_position: "before_trigger"
+    event_fact_visible_in_still: ""
+    not_yet_happened_in_still: []
     first_frame_brief: ""
     visible_start_state:
       character_state: ""
@@ -1648,13 +1827,53 @@ cut_contract:
     must_be_static_evidence_not_motion: true
   motion_contract:
     movable: true
+    source_event_beat_id: "scene1_event_setup"
+    starts_from_first_frame: true
+    must_not_advance_to_event_beat_ids: []
     motion_brief: ""
     start_from_visible_state: ""
     end_state: ""
     end_frame_brief: ""
     must_not_add: []
   narration_contract:
+    schema_version: "narration_contract_v2"
+    source_event_beat_ids: ["scene1_event_setup"]
+    allowed_info_ids: []
+    forbidden_info_ids: []
+    must_not_advance_to_event_beat_ids: []
+    must_not_explain_visible_action_as_caption: true
+    narration_event_boundary: "same_event_only"
     speakable_or_silent: true
+    story_role:
+      narrative_position: "opening|middle|ending"
+      cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+      voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+      audience_state_before: ""
+      audience_state_after: ""
+      must_cover: []
+      must_not_reveal: []
+      done_when: []
+    visual_distance:
+      distance_policy: "stay_close|contextual|meaning_first|silent"
+      visible_facts_in_frame: []
+      narration_should_add: []
+      must_not_caption_visible_action: true
+      visual_overlap_allowed: false
+      visual_overlap_reason: ""
+    rhythm_and_timing:
+      target_speech_seconds: 0
+      min_speech_seconds: 0
+      max_speech_seconds: 0
+      start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+      end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+      pause_intent: []
+      audio_visual_sync_point: ""
+    tts_readiness:
+      normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+      pronunciation_targets: []
+      max_sentence_chars: 42
+      tts_text_must_differ_from_text_when_needed: true
+    # compatibility aliases for older readers
     role: "setup|fact|emotion|contrast|aftertaste|silent"
     target_function: ""
     must_cover: []
@@ -1733,6 +1952,31 @@ Additional cut review reason keys:
 - cut_count_below_coverage_plan
 - coverage_plan_selected_below_floor
 - prompt_leaks_motion_brief
+- image_prompt_action_window_missing
+- image_prompt_missing_not_yet_state
+- image_prompt_time_mixed
+- image_prompt_reveal_boundary_conflict
+- image_prompt_reference_usage_missing
+- image_prompt_character_state_gate_missing
+- image_prompt_object_visibility_missing
+- image_prompt_camera_composition_weak
+- image_prompt_scene_material_pack_missing
+- image_prompt_design_meta_leaked
+- image_prompt_visual_translation_missing
+- image_prompt_primary_visual_anchor_missing
+- image_prompt_motion_affordance_weak
+- image_prompt_motion_ceiling_missing
+- image_prompt_future_event_leak
+- image_prompt_object_visibility_conflict
+- image_prompt_reference_binding_weak
+- image_prompt_subject_priority_missing
+- image_prompt_scene_material_too_generic
+- image_prompt_action_completion_state_missing
+- image_prompt_start_state_not_drawable
+- image_prompt_overpacked_visual_intent
+- image_prompt_frame_edge_handoff_missing
+- image_prompt_character_pose_too_generic
+- image_prompt_not_yet_state_too_generic
 - scene_composite_review_missing
 - triangulation_review_missing
 - handoff_image_motion_mismatch
@@ -1743,3 +1987,75 @@ Additional cut review reason keys:
 - handoff_end_state_missing
 - handoff_audio_visual_conflict
 ```
+
+## First Frame Visual Plan v1
+
+`first_frame_visual_plan` は p600 image prompt 本文ではなく、`scene_event` と `cut_contract` を「動画冒頭に使える描画可能な1枚」へ変換するための中間契約である。正本は `scene_event.event_sequence[]` と `cut_contract.source_event_contract` で、`first_frame_visual_plan` は `editable: false` の derived artifact として request preview / semantic pack / log に残す。
+
+```yaml
+first_frame_visual_plan:
+  schema_version: "first_frame_visual_plan_v1"
+  derived_from:
+    - scene_event.event_sequence[]
+    - cut_contract.source_event_contract
+    - cut_contract.first_frame_contract
+    - cut_contract.motion_contract
+    - cut_contract.event_context_for_cut
+  editable: false
+  source_grounding:
+    scene_id: ""
+    cut_id: ""
+    source_event_beat_id: ""
+    source_event_beat_ids: []
+    event_beat_function: ""
+    cut_function: ""
+    what_happens: ""
+    visible_action: ""
+    visible_reaction: ""
+    event_facts_to_preserve: []
+    event_facts_not_to_invent: []
+    allowed_reveal_info_ids: []
+    forbidden_reveal_info_ids: []
+  temporal_boundary:
+    event_time_position: "before_trigger|trigger_moment|early_action|mid_action|consequence|reaction_after|handoff_after"
+    first_visible_moment: ""
+    action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
+    event_fact_visible_in_still: ""
+    not_yet_happened_in_still: []
+    forbidden_future_event_beat_ids: []
+    forbidden_future_outcomes: []
+    still_must_not_show_completion: true
+    one_visible_moment_rule: true
+  visual_translation:
+    concrete_visible_evidence: []
+    nonvisual_terms_to_exclude_from_prompt: []
+    imageable_causal_proof: ""
+  subject_binding:
+    primary_subject: {}
+    secondary_subjects: []
+    background_subjects: []
+  object_visibility_gate:
+    objects: []
+  spatial_composition:
+    foreground: ""
+    midground: ""
+    background: ""
+    subject_priority_order: []
+    frame_edge_handoff: ""
+  scene_material_pack:
+    light_source: ""
+    dominant_materials: []
+    story_specific_texture: ""
+  motion_affordance:
+    movable_subjects: []
+    must_not_resolve_in_image: []
+    motion_ceiling:
+      must_stop_before_event_beat_ids: []
+      must_not_complete_outcomes: []
+  prompt_rendering_policy:
+    render_only_drawable_information: true
+    do_not_render_design_meta: true
+    do_not_render_future_motion_as_action: true
+```
+
+11 block の最終 image prompt はこの plan から描画可能な情報だけをレンダリングする。prompt 本文には `first_frame_visual_plan` / `source_event_contract` / `event_context_for_cut` / `motion_brief` / `p600` / `p800` / `scene_event` 全体を出さない。ただし trace 用の `source_event_beat_id` と `forbidden_future_event_beat_ids` は `[このcutの開始状態]` に残してよい。

@@ -37,23 +37,11 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
         "artifacts": ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "video_manifest.md"],
         "focus": "character/object/location coverage, asset category, story purpose, and prompt contract",
     },
-    "asset_output": {
-        "slot": "p570",
-        "owner": "asset output producer",
-        "artifacts": ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "assets/**"],
-        "focus": "generated asset subject, category, story role, contact sheet evidence, and reusable reference quality",
-    },
     "image_prompt": {
         "slot": "p640",
         "owner": "image prompt producer",
         "artifacts": ["image_generation_requests.md", "video_manifest.md", "asset_plan.md"],
         "focus": "prompt-to-cut contract, reference choice, location/object/character correctness, and first-frame meaning",
-    },
-    "scene_image": {
-        "slot": "p670",
-        "owner": "scene image producer",
-        "artifacts": ["image_generation_requests.md", "assets/scenes/**", "video_manifest.md"],
-        "focus": "generated scene stills, referenced assets, cut meaning, location/time state, and contact sheet evidence",
     },
     "narration": {
         "slot": "p720",
@@ -66,18 +54,6 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
         "owner": "video motion producer",
         "artifacts": ["video_generation_requests.md", "video_manifest.md"],
         "focus": "motion prompt, first-frame contract, subject/environment movement, and end state",
-    },
-    "video_clip": {
-        "slot": "p850",
-        "owner": "video clip producer",
-        "artifacts": ["video_generation_requests.md", "assets/scenes/**/*.mp4", "video_manifest.md"],
-        "focus": "generated clip frames, motion continuity, no unintended additions, and cut end state",
-    },
-    "render": {
-        "slot": "p930",
-        "owner": "render producer",
-        "artifacts": ["video.mp4", "run_report.md", "eval_report.json", "video_manifest.md"],
-        "focus": "final render continuity, narration/video alignment, scene ordering, and approved upstream meaning",
     },
 }
 

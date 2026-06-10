@@ -1,9 +1,17 @@
-# Cut Handoff Matrix Template v2.1
+# Cut Handoff Matrix Template v3.0
 
-cut_handoff_matrix_version: "2.1"
+cut_handoff_matrix_version: "3.0"
 scene_id: "1"
 scene_selector: "scene1"
-scene_obligations:
+scene_event:
+  schema_version: "scene_event_v1"
+  event_sequence:
+    - beat_id: ""
+      beat_function: ""
+      visible_action: ""
+      visible_reaction: ""
+      required_visual_evidence: []
+scene_obligations_legacy_projection:
   dramatic_question: ""
   value_shift_visible_evidence: []
   causal_turn: ""
@@ -19,9 +27,15 @@ scene_obligations:
 
 cuts:
   - selector: "scene1_cut1"
+    source_event_contract:
+      primary_event_beat_id: ""
+      source_event_beat_ids: []
+      event_beat_function: ""
+      event_time_position: ""
+      event_facts_to_preserve: []
+      event_facts_not_to_invent: []
     cut_function: "setup"
     target_beat: ""
-    assigned_story_event_ids: []
     audience_knowledge_delta: ""
     causal_proof: ""
     visual_evidence: []
@@ -43,6 +57,9 @@ cuts:
       prop_state: ""
       spatial_state: ""
     downstream:
+      event_context_for_cut:
+        derived_from: "scene_event.event_sequence + cut_contract.source_event_contract"
+        editable: false
       p500_asset:
         required_assets: []
         missing_assets: []
@@ -50,6 +67,13 @@ cuts:
         first_frame_requirements: []
         must_not_show: []
       p700_narration:
+        narrative_position: "opening|middle|ending"
+        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+        visual_distance_policy: "stay_close|contextual|meaning_first|silent"
+        narration_should_add: []
+        pronunciation_targets: []
+        # compatibility alias
         role: "setup|fact|emotion|contrast|aftertaste|silent"
         must_cover: []
         must_avoid: []
@@ -66,7 +90,9 @@ cuts:
 
 scene_level_review:
   all_scene_obligations_covered: false
-  story_event_obligation_coverage: false
+  scene_event_coverage: false
+  event_beat_reference_integrity: false
+  source_event_preservation: false
   causal_proof_coverage: false
   role_coverage: false
   audience_knowledge_delta_coverage: false

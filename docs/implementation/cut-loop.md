@@ -8,8 +8,9 @@ p420 does not split a scene into short summaries. It designs the beats the audie
 
 p420 is complete only when every production scene has:
 
-- a `coverage_plan` that assigns the scene's dramatic question, visible value shift, causal turn, reveal constraints, and handoff to concrete cuts;
-- `story_event_obligations` assigned to the cut or cuts that visually prove the irreversible story event;
+- a `scene_cut_coverage_plan` that assigns `scene_event.event_sequence[]` beats and scene-intent obligations to concrete cuts;
+- every cut referencing its event beat through `cut_contract.source_event_contract`;
+- `event_context_for_cut` generated as a downstream projection from `scene_event` and `source_event_contract`, not hand-authored;
 - enough cuts for the scene importance and duration;
 - one viewer-facing intent per cut;
 - a concrete `audience_knowledge_delta`, `causal_proof`, role coverage, and anti-redundancy key per cut;
@@ -20,7 +21,7 @@ p420 is complete only when every production scene has:
 
 ## Cut Count
 
-Use the larger of the importance floor and the duration floor.
+Use the larger of the importance floor, duration floor, and event-beat floor.
 
 ```text
 min_by_importance:
@@ -30,7 +31,8 @@ min_by_importance:
   critical: 7
 
 min_by_duration = ceil(target_duration_seconds / 8)
-min_cut_count = max(min_by_importance, min_by_duration)
+min_by_event_beats = required visible scene_event beats plus required splits for turn/payoff/reaction/handoff density
+min_cut_count = max(min_by_importance, min_by_duration, min_by_event_beats)
 ```
 
 Reference stills, title cards, and pure transitions may use fewer cuts only with an explicit exception reason. A cut longer than 12 seconds needs a `duration_exception.reason`.
@@ -41,34 +43,31 @@ Do not choose a cut count by a fixed template. First list the scene's visual obl
 
 ### p420a Coverage Planning
 
-Create `coverage_plan` before writing cuts.
+Create `scene_cut_coverage_plan` before writing cuts.
 
 ```yaml
 scene_cut_coverage_plan:
-  coverage_strategy: "reverse_from_scene_obligations"
+  coverage_strategy: "reverse_from_scene_event"
+  source_schema_version: "scene_event_v1"
   min_cut_count:
     by_importance: 3
     by_duration: 3
+    by_event_beats: 4
     selected: 3
     exception_reason: ""
-  scene_obligations:
-    - source: dramatic_question
-      evidence: ""
-    - source: story_event_obligations
-      evidence:
-        - event_id: ""
-          source_events: []
-          audience_knowledge_delta: ""
-          causal_proof: ""
-          visual_evidence: []
-          required_roles: []
-    - source: role_coverage.required_roles
-      evidence: []
+  event_beat_inventory:
+    - beat_id: "scene1_event_turn"
+      beat_function: "turn"
+      must_be_seen: true
+      assigned_cut_ids: []
   cut_assignments:
     - cut_index: 1
       obligation_id: ""
       cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
-      assigned_story_event_ids: []
+      event_assignment:
+        source_event_contract:
+          primary_event_beat_id: ""
+          source_event_beat_ids: []
       target_beat: ""
 ```
 
@@ -76,16 +75,18 @@ The important question is not "which of the standard slots is this cut?" but "wh
 
 ### p420b Cut Contract Drafting
 
-Each cut should materialize a `cut_contract`. `scene_contract` may remain as a compatibility alias for older readers, but `cut_contract` is the semantic source of truth.
+Each cut should materialize `cut_contract.schema_version: "3.0"`. `source_event_contract` is the event-beat source of truth. `scene_contract` may remain as a compatibility alias for older readers, but it is not a V3 pass condition.
 
 Required areas:
 
-- `viewer_contract`: target beat, screen question, dramatic job, audience knowledge delta, causal proof, visual evidence, required roles, assigned story event ids, anti-redundancy key, visual proof, must-show, must-avoid, done-when.
+- `source_event_contract`: primary/source event beat ids, beat function, event time position, source action/reaction, facts to preserve, facts not to invent, reveal boundary.
+- `viewer_contract`: target beat, screen question, dramatic job, audience knowledge delta, causal proof, visual evidence, required roles, anti-redundancy key, visual proof, must-show, must-avoid, done-when.
 - `cinematic_contract`: camera purpose, shot size, subject priority, foreground/midground/background, screen direction.
 - `continuity_contract`: start state, end state, carry-forward items, continuity risks.
 - `first_frame_contract`: p600-only still requirement, action completion state, and static first-frame rule. It must be an imageable state, not a motion description.
 - `motion_contract`: p800-only movement, end state, and things motion must not add.
 - `narration_contract`: p700 role or silent reason.
+- `event_context_for_cut`: non-editable derived projection for p600/p700/p800.
 - `downstream_handoff`: what each downstream stage receives.
 
 ### p420c Review
@@ -95,10 +96,16 @@ The review is a gate, not advice. The aggregate report must include:
 ```text
 ## Cut Blueprint Gate
 cut_intent_isolation
-beat_ladder_coverage
+scene_event_coverage
+event_beat_reference_integrity
 first_frame_motion_readiness
-multimodal_contract_coverage
-story_event_obligation_coverage
+event_first_frame_alignment
+multimodal_event_boundary_coverage
+source_event_preservation
+no_unapproved_event_invention
+event_motion_boundary
+event_narration_boundary
+event_context_for_cut_ready
 causal_proof_coverage
 role_coverage
 audience_knowledge_delta_coverage
@@ -121,7 +128,7 @@ Build a handoff matrix that checks what each cut receives from the previous cut,
 
 Materialize the approved cut contracts into `video_manifest.md.scenes[].cuts[]`.
 
-New manifests should write `cut_contract`. During migration, also copy the core fields into `scene_contract` for compatibility.
+New manifests should write V3 `cut_contract`. Legacy readers may read `scene_contract`, but V3 gates must not pass from `scene_contract`, top-level event refs, or `assigned_story_event_ids`.
 
 ## Blocking Reason Keys
 

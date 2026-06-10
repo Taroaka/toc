@@ -129,20 +129,30 @@ scenes:
     # - 同じ story fact の繰り返しなら cut 追加ではなく既存 cut の prompt/contract を厚くする。
     # - cut_contract が正本。legacy_scene_contract_alias / scene_contract は既存 reader 向け互換 alias。
     scene_cut_coverage_plan:
-      coverage_strategy: "reverse_from_scene_obligations"
+      coverage_strategy: "reverse_from_scene_event"
+      source_schema_version: "scene_event_v1"
       min_cut_count:
         by_importance: 3
         by_duration: 4
+        by_event_beats: 4
         selected: 4
         exception_reason: ""
+      event_beat_inventory:
+        - beat_id: "scene1_event_setup"
+          beat_function: "setup"
+          must_be_seen: true
+          assigned_cut_ids: []
       scene_obligations:
-        - source: "dramatic_question|story_event_obligations|value_shift.visible_evidence|causal_turn|reveal_constraints|handoff_to_next_scene"
+        - source: "dramatic_question|scene_event.event_sequence|value_shift.visible_evidence|causal_turn|reveal_constraints|handoff_to_next_scene"
           evidence: []
       cut_assignments:
         - cut_index: 1
           obligation_id: ""
           cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
-          assigned_story_event_ids: []
+          event_assignment:
+            source_event_contract:
+              primary_event_beat_id: "scene1_event_setup"
+              source_event_beat_ids: ["scene1_event_setup"]
           target_beat: ""
           visual_proof: ""
           audience_knowledge_delta: ""
@@ -154,7 +164,21 @@ scenes:
         cut_role: "main"
         cut_status: "active"
         cut_contract:
-          schema_version: "2.2"
+          schema_version: "3.0"
+          source_event_contract:
+            primary_event_beat_id: "scene1_event_setup"
+            source_event_beat_ids: ["scene1_event_setup"]
+            event_beat_function: "setup"
+            event_time_position: "before_trigger"
+            source_event_summary: ""
+            source_visible_action: ""
+            source_visible_reaction: ""
+            no_reaction_required_reason: ""
+            source_required_visual_evidence: []
+            event_facts_to_preserve: []
+            event_facts_not_to_invent: []
+            allowed_reveal_info_ids: []
+            forbidden_reveal_info_ids: []
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           intent_budget:
             primary_intent: ""
@@ -171,7 +195,6 @@ scenes:
             causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
             visual_evidence: []
             required_roles: []
-            assigned_story_event_ids: []
             anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
             reveal_constraints:
               inherited_from_scene: []
@@ -205,6 +228,10 @@ scenes:
               expected_next_cut_selector: ""
           first_frame_contract:
             imageable: true
+            source_event_beat_id: "scene1_event_setup"
+            event_time_position: "before_trigger"
+            event_fact_visible_in_still: ""
+            not_yet_happened_in_still: []
             first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
             visible_start_state:
               character_state: ""
@@ -221,13 +248,53 @@ scenes:
             must_be_static_evidence_not_motion: true
           motion_contract:
             movable: true
+            source_event_beat_id: "scene1_event_setup"
+            starts_from_first_frame: true
+            must_not_advance_to_event_beat_ids: []
             motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
             start_from_visible_state: ""
             end_state: "次 cut へ渡す最後の状態"
             end_frame_brief: ""
             must_not_add: []
           narration_contract:
+            schema_version: "narration_contract_v2"
             speakable_or_silent: true
+            source_event_beat_ids: ["scene1_event_setup"]
+            allowed_info_ids: []
+            forbidden_info_ids: []
+            must_not_advance_to_event_beat_ids: []
+            must_not_explain_visible_action_as_caption: true
+            narration_event_boundary: "same_event_only"
+            story_role:
+              narrative_position: "opening|middle|ending"
+              cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+              voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+              audience_state_before: ""
+              audience_state_after: ""
+              must_cover: []
+              must_not_reveal: []
+              done_when: []
+            visual_distance:
+              distance_policy: "stay_close|contextual|meaning_first|silent"
+              visible_facts_in_frame: []
+              narration_should_add: []
+              must_not_caption_visible_action: true
+              visual_overlap_allowed: false
+              visual_overlap_reason: ""
+            rhythm_and_timing:
+              target_speech_seconds: 0
+              min_speech_seconds: 0
+              max_speech_seconds: 0
+              start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+              end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+              pause_intent: []
+              audio_visual_sync_point: ""
+            tts_readiness:
+              normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+              pronunciation_targets: []
+              max_sentence_chars: 42
+              tts_text_must_differ_from_text_when_needed: true
+            # compatibility aliases for older readers
             role: "setup|fact|emotion|contrast|aftertaste|silent"
             target_function: "この声が cut で果たす役割"
             must_cover: []
@@ -273,6 +340,17 @@ scenes:
               must_not_add: []
             carries_to_next_cut: []
             carries_to_next_scene: []
+          event_context_for_cut:
+            derived_from: "scene_event.event_sequence + cut_contract.source_event_contract"
+            editable: false
+            primary_event_beat:
+              beat_id: "scene1_event_setup"
+              beat_function: "setup"
+            neighboring_event_beats: []
+            forbidden_event_changes: []
+            reveal_constraints_for_this_cut:
+              allowed_reveal_info_ids: []
+              forbidden_reveal_info_ids: []
         legacy_scene_contract_alias:
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
           target_beat: "この cut で伝える1つのこと"
@@ -282,7 +360,7 @@ scenes:
           causal_proof: "<cut_contract.viewer_contract.causal_proof>"
           visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
           required_roles: "<cut_contract.viewer_contract.required_roles>"
-          assigned_story_event_ids: "<cut_contract.viewer_contract.assigned_story_event_ids>"
+          source_event_contract: "<cut_contract.source_event_contract>"
           anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
           visual_beat: "画として何が見えるか"
           first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
@@ -382,13 +460,26 @@ scenes:
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
           narration:
+            authoring_status: "missing|draft|approved|silent"
+            missing_reason: "p700_narration_not_written_yet"
             contract:
-              target_function: "setup|fact|emotion|contrast|aftertaste|silent"
+              schema_version: "narration_contract_v2"
+              story_role:
+                narrative_position: "opening|middle|ending"
+                cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+                voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+              visual_distance:
+                distance_policy: "stay_close|contextual|meaning_first|silent"
+                narration_should_add: []
+              tts_readiness:
+                pronunciation_targets: []
+              # compatibility alias
+              target_function: ""
               must_cover: []
               must_avoid: []
               done_when: []
             draft:
-              text: "TODO: 任意の下書き。p700で最終text/tts_textへ昇格する。"
+              text: ""
               status: "optional_draft|approved_by_human|superseded_by_p700"
             text: ""
             tts_text: ""

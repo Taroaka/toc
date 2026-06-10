@@ -109,12 +109,15 @@
 - 入力: `story.md` / `script.md` / `video_manifest.md`
 - 出力: `video_manifest.md` の `audio.narration.text` と `audio.narration.tts_text`
 - 原則:
+  - `audio.narration.contract.schema_version: narration_contract_v2` を前提に、`story_role.narrative_position` / `cut_function` / `voice_function` と `visual_distance.distance_policy` を先に確定する
   - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
   - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
   - `voice_tags` は bracket なしの生タグで保持し、`tts_text` では順番通りに `[]` を付ける
-  - どちらにも `TODO:` 等のメタ情報を書かない（空文字は可。未記入は生成時にエラー）
+  - `text` / `tts_text` には `TODO:` 等のメタ情報を書かない。未記入は空文字 + `authoring_status: missing` と `missing_reason` で表す
+  - 誤読しそうな語は `tts_readiness.pronunciation_targets` と p720 の pronunciation candidate に出す
 - 品質基準:
   - narration は cut の物語上の役割に従う
+  - 映像と声の距離は `stay_close|contextual|meaning_first|silent` で明示し、画面説明だけで終わらせない
   - opening では、導入として安定した説明を優先し、scene/script に忠実であることを重視する
   - middle では、進展 / トラブル / 揺れを支える
   - ending では、解決 / 帰結 / 余韻を支える
@@ -155,9 +158,9 @@
 - 出力: 観点別 critic report。canonical artifact は編集しない
 - 役割:
   - critic_1 `cut_intent_isolation`: 1 cut = 1 intent が守られ、場所移動/reveal/感情反転/説明/反応を詰め込んでいないかを見る
-  - critic_2 `beat_ladder_coverage`: 固定順の cut_function 列ではなく、scene の story_event_obligations / dramatic_question / value_shift / causal_turn が cut 群に割り当てられているかを見る
+  - critic_2 `scene_event_coverage`: 固定順の cut_function 列ではなく、scene_event.event_sequence の beat と scene_intent の問い・価値変化・因果 turn が cut 群に割り当てられているかを見る。`cut_contract.source_event_contract` を正本とし、legacy projection だけでは pass しない
   - critic_3 `first_frame_motion_readiness`: first_frame_brief が p600 still の入力として完結し、motion_brief が p800 専用入力として分離されているかを見る
-  - critic_4 `multimodal_contract_coverage`: target_beat / audience_knowledge_delta / causal_proof / visual_evidence / required_roles / must_show / must_avoid / done_when が image / narration / motion へ渡せるかを見る
+  - critic_4 `multimodal_event_boundary_coverage`: `event_context_for_cut` と各 contract だけで image / narration / motion へ渡せるか、p600 に `motion_brief` や scene_event 全体が混入していないかを見る
   - critic_5 `duration_density_and_handoff`: 重要度・尺・cut数・最終cutのhandoffが十分か、同じ意味のcut反復を追加cutではなくprompt補強に回しているかを見る
   - aggregator は各 critic を統合し、`Cut Blueprint Gate` の全項目が説明できる場合だけ pass を返す
 

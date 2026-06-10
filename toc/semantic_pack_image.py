@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - exercised only in minimal envs
     yaml = None
 
 
-IMAGE_STAGES = {"image_prompt", "scene_image"}
+IMAGE_STAGES = {"image_prompt"}
 DEFAULT_MODE_FILTER = "generate_still"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 EXPECTED_ROLE_BY_ID_GROUP = {
@@ -28,6 +28,161 @@ EXPECTED_ROLE_BY_ID_GROUP = {
     "object_ids": "object",
     "location_ids": "location",
 }
+IMAGE_PROMPT_BLOCK_LABELS = (
+    "参照画像の使い方",
+    "このcutの開始状態",
+    "単一瞬間ルール",
+    "画面に必ず見えるもの",
+    "画面に入れてはいけないもの",
+    "人物状態",
+    "小道具 / 舞台装置",
+    "構図",
+    "光 / 質感",
+    "動画化のための開始余地",
+    "禁止",
+)
+
+
+def _prompt_block_labels(prompt: str) -> list[str]:
+    labels: list[str] = []
+    for raw in (prompt or "").splitlines():
+        match = re.fullmatch(r"\[(?P<label>.+?)\]", raw.strip())
+        if not match:
+            continue
+        label = match.group("label").strip()
+        if label in IMAGE_PROMPT_BLOCK_LABELS:
+                labels.append(label)
+    return labels
+
+
+def build_first_frame_visual_plan(scene: dict[str, Any], cut: dict[str, Any]) -> dict[str, Any]:
+    """Build the review-side derived plan that turns event intent into a drawable still."""
+
+    explicit = _dict(cut.get("first_frame_visual_plan"))
+    if explicit:
+        return explicit
+    image_generation = _dict(cut.get("image_generation"))
+    contract = _cut_semantic_contract(cut, image_generation=image_generation)
+    source = _dict(contract.get("source_event_contract"))
+    event_context = _event_context_for_cut(scene, cut)
+    primary_beat = _dict(event_context.get("primary_event_beat"))
+    first_frame = _dict(_dict(cut.get("cut_contract")).get("first_frame_contract"))
+    motion = _dict(_dict(cut.get("cut_contract")).get("motion_contract"))
+    cinematic = _dict(_dict(cut.get("cut_contract")).get("cinematic_contract"))
+    geography = _dict(cinematic.get("screen_geography"))
+    ids = {
+        "character_ids": _as_str_list(image_generation.get("character_ids")),
+        "object_ids": _as_str_list(image_generation.get("object_ids")),
+        "location_ids": _as_str_list(image_generation.get("location_ids")),
+    }
+    primary_id = _as_str(source.get("primary_event_beat_id") or primary_beat.get("beat_id"))
+    source_ids = _as_str_list(source.get("source_event_beat_ids"))
+    if primary_id and primary_id not in source_ids:
+        source_ids = [primary_id, *source_ids]
+    event_time_position = _as_str(source.get("event_time_position") or first_frame.get("event_time_position") or "before_trigger")
+    visible_fact = _as_str(
+        first_frame.get("event_fact_visible_in_still")
+        or first_frame.get("first_frame_brief")
+        or primary_beat.get("visible_action")
+        or contract.get("visual_beat")
+        or image_generation.get("prompt")
+    )
+    not_yet = (
+        _as_str_list(first_frame.get("not_yet_happened_in_still"))
+        or _as_str_list(source.get("event_facts_not_to_invent"))
+        or _as_str_list(event_context.get("forbidden_event_changes"))
+    )
+    if not not_yet:
+        not_yet = ["このcutの後続結果、次sceneの解決、未承認のrevealをまだ見せない。"]
+    primary_anchor = (
+        _as_str(_dict(cinematic.get("subject_priority")).get("primary"))
+        or (ids["object_ids"] + ids["character_ids"] + ids["location_ids"] + _as_str_list(contract.get("must_include")) or [""])[0]
+        or visible_fact
+    )
+    return {
+        "schema_version": "first_frame_visual_plan_v1",
+        "derived_from": [
+            "scene_event.event_sequence[]",
+            "cut_contract.source_event_contract",
+            "cut_contract.first_frame_contract",
+            "cut_contract.motion_contract",
+            "cut_contract.event_context_for_cut",
+        ],
+        "editable": False,
+        "source_grounding": {
+            "scene_id": _as_str(scene.get("scene_id")),
+            "cut_id": _as_str(cut.get("cut_id")),
+            "source_event_beat_id": primary_id,
+            "source_event_beat_ids": source_ids,
+            "event_beat_function": _as_str(source.get("event_beat_function") or primary_beat.get("beat_function")),
+            "cut_function": _as_str(contract.get("cut_function")),
+            "what_happens": _as_str(primary_beat.get("what_happens") or contract.get("target_beat")),
+            "visible_action": _as_str(primary_beat.get("visible_action")),
+            "visible_reaction": _as_str(primary_beat.get("visible_reaction")),
+            "event_facts_to_preserve": _as_str_list(source.get("event_facts_to_preserve")),
+            "event_facts_not_to_invent": _as_str_list(source.get("event_facts_not_to_invent")),
+            "allowed_reveal_info_ids": _as_str_list(source.get("allowed_reveal_info_ids")),
+            "forbidden_reveal_info_ids": _as_str_list(source.get("forbidden_reveal_info_ids")),
+        },
+        "temporal_boundary": {
+            "event_time_position": event_time_position,
+            "first_visible_moment": visible_fact,
+            "action_completion_state": _as_str(first_frame.get("action_completion_state") or "hold"),
+            "event_fact_visible_in_still": visible_fact,
+            "not_yet_happened_in_still": not_yet,
+            "forbidden_future_event_beat_ids": _as_str_list(motion.get("must_not_advance_to_event_beat_ids")),
+            "forbidden_future_outcomes": not_yet,
+            "still_must_not_show_completion": True,
+            "one_visible_moment_rule": True,
+        },
+        "visual_translation": {
+            "concrete_visible_evidence": [{"visible_substitute": visible_fact, "must_be_drawn_as": visible_fact}],
+            "nonvisual_terms_to_exclude_from_prompt": ["価値変化", "場所の圧力", "観客理解", "因果の証明"],
+            "imageable_causal_proof": _as_str(contract.get("causal_proof") or contract.get("visual_beat") or visible_fact),
+        },
+        "subject_binding": {
+            "primary_subject": {"id": primary_anchor, "name": primary_anchor, "role": "primary_visual_anchor", "screen_priority": 1},
+            "secondary_subjects": [{"id": item, "name": item, "role": "secondary_visual_anchor", "screen_priority": index + 2} for index, item in enumerate((ids["character_ids"] + ids["object_ids"] + ids["location_ids"])[1:])],
+            "background_subjects": [{"id": item, "name": item, "role": "location_anchor", "visibility": "clearly_visible"} for item in ids["location_ids"]],
+        },
+        "object_visibility_gate": {
+            "objects": [
+                {
+                    "object_id": object_id,
+                    "visibility_in_this_cut": "clearly_visible",
+                    "relation_to_event": visible_fact,
+                    "story_meaning_in_this_cut": _as_str(contract.get("visual_beat") or contract.get("causal_proof")),
+                }
+                for object_id in ids["object_ids"]
+            ]
+        },
+        "spatial_composition": {
+            "aspect_ratio": _as_str(image_generation.get("aspect_ratio") or "16:9"),
+            "foreground": _as_str(geography.get("foreground")),
+            "midground": _as_str(geography.get("midground")),
+            "background": _as_str(geography.get("background")),
+            "subject_priority_order": [primary_anchor, *ids["character_ids"], *ids["object_ids"], *ids["location_ids"]],
+            "frame_edge_handoff": _as_str(geography.get("frame_edge_handoff")),
+        },
+        "scene_material_pack": {
+            "location_id": ids["location_ids"][0] if ids["location_ids"] else "",
+            "light_source": _as_str(first_frame.get("light_source") or "scene固有の光源"),
+            "dominant_materials": _as_str_list(first_frame.get("dominant_materials")),
+        },
+        "motion_affordance": {
+            "movable_subjects": [{"subject_id": primary_anchor, "movement_vector": _as_str(motion.get("subject_motion") or "静止画の姿勢から自然に動き出す方向")}],
+            "must_not_resolve_in_image": not_yet,
+            "motion_ceiling": {
+                "must_stop_before_event_beat_ids": _as_str_list(motion.get("must_not_advance_to_event_beat_ids")),
+                "must_not_complete_outcomes": not_yet,
+            },
+        },
+        "prompt_rendering_policy": {
+            "render_only_drawable_information": True,
+            "do_not_render_design_meta": True,
+            "do_not_render_future_motion_as_action": True,
+        },
+    }
 
 
 def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -38,11 +193,8 @@ def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None =
     resolved_run_dir = Path(run_dir).resolve()
     data = manifest if isinstance(manifest, dict) else load_manifest(resolved_run_dir / "video_manifest.md")
     asset_context = asset_context_by_id(resolved_run_dir)
-    if stage == "image_prompt":
-        entries = collect_image_prompt_entries(data, asset_context=asset_context)
-        return entries + collect_scene_composite_entries(data, stage=stage)
-    entries = collect_scene_image_entries(resolved_run_dir, data, asset_context=asset_context)
-    return entries + collect_scene_composite_entries(data, stage=stage, run_dir=resolved_run_dir)
+    entries = collect_image_prompt_entries(data, asset_context=asset_context)
+    return entries + collect_scene_composite_entries(data, stage=stage)
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -77,6 +229,8 @@ def collect_image_prompt_entries(
         review = _dict(image_generation.get("review"))
         contract = _cut_semantic_contract(cut, image_generation=image_generation, review=review)
         semantic_contract = semantic_contract_payload(contract)
+        event_context = _event_context_for_cut(scene, cut)
+        first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
         ids = {
             "character_ids": _as_str_list(image_generation.get("character_ids")),
             "object_ids": _as_str_list(image_generation.get("object_ids")),
@@ -91,12 +245,23 @@ def collect_image_prompt_entries(
                 "cut_id": cut.get("cut_id"),
                 "output": _as_str(image_generation.get("output")),
                 "prompt": _as_str(image_generation.get("prompt")),
+                "prompt_blocks": _prompt_block_labels(_as_str(image_generation.get("prompt"))),
+                "image_prompt_gate_focus": [
+                    "旧 [cut契約からの可視要件] や 場面の核/観客理解/因果の証明 などの設計メタが本文に残っていないか",
+                    "source_event_contract と event_context_for_cut から event_time_position / event_fact_visible_in_still / not_yet_happened_in_still が具体化されているか",
+                    "小道具の reveal boundary が must_include / must_not_include と矛盾していないか",
+                    "参照画像の使い方、人物状態、小道具 visibility、構図、光/質感、動画化の開始余地が描画可能な具体語になっているか",
+                    "motion_brief や後続の出来事が画像promptに混入していないか",
+                    "first_frame_visual_plan が poster 的な雰囲気画像ではなく、cutの出来事が始まる1つの瞬間へ変換されているか",
+                ],
                 "references": _as_str_list(image_generation.get("references")),
                 **ids,
                 "asset_reference_context": reference_context(ids, asset_context),
                 "reference_count": _as_int(image_generation.get("reference_count")),
                 "narration": narration_text(cut),
                 "rationale": _as_str(plan.get("rationale")),
+                "event_context_for_cut": event_context,
+                "first_frame_visual_plan": first_frame_visual_plan,
                 "semantic_contract": semantic_contract,
                 "semantic_contract_missing": semantic_contract_missing(semantic_contract),
                 "contract_required_fields_missing": missing_contract_fields(semantic_contract),
@@ -198,6 +363,7 @@ def collect_scene_composite_entries(
             video_generation = _dict(cut.get("video_generation"))
             contract = _cut_semantic_contract(cut, image_generation=image_generation)
             semantic_contract = semantic_contract_payload(contract)
+            first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
             output = _as_str(image_generation.get("output"))
             output_exists = None
             if run_dir is not None and output:
@@ -206,6 +372,7 @@ def collect_scene_composite_entries(
                 {
                     "selector": cut_selector(scene, cut),
                     "cut_function": _as_str(contract.get("cut_function")),
+                    "source_event_contract": _dict(contract.get("source_event_contract")),
                     "target_focus": semantic_contract.get("target_focus", ""),
                     "screen_question": _as_str(contract.get("screen_question")),
                     "dramatic_job": _as_str(contract.get("dramatic_job")),
@@ -214,7 +381,6 @@ def collect_scene_composite_entries(
                     "visual_evidence": _as_str_list(contract.get("visual_evidence")),
                     "required_roles": _as_str_list(contract.get("required_roles")),
                     "anti_redundancy_key": _as_str(contract.get("anti_redundancy_key")),
-                    "assigned_story_event_ids": _as_str_list(contract.get("assigned_story_event_ids")),
                     "visual_proof": _as_str(contract.get("visual_beat") or contract.get("visual_proof")),
                     "first_frame_brief": _as_str(contract.get("first_frame_brief")),
                     "static_first_frame_rule": _as_str(contract.get("static_first_frame_rule")),
@@ -224,12 +390,21 @@ def collect_scene_composite_entries(
                     "video_motion_prompt": _as_str(video_generation.get("motion_prompt")),
                     "motion_brief": _as_str(contract.get("motion_brief")),
                     "narration": narration_text(cut),
+                    "event_context_for_cut": _event_context_for_cut(scene, cut),
+                    "first_frame_visual_plan": first_frame_visual_plan,
                     "semantic_contract": semantic_contract,
                 }
             )
+        scene_intent = _dict(scene.get("scene_intent"))
+        scene_event = _dict(scene.get("scene_event"))
         scene_contract = {
             "scene_id": scene.get("scene_id"),
-            "scene_intent": _dict(scene.get("scene_intent")),
+            "scene_intent": scene_intent,
+            "role_coverage": _dict(scene_intent.get("role_coverage")) or _dict(scene.get("role_coverage")) or _dict(scene_event.get("role_coverage")),
+            "audience_knowledge_plan": _audience_knowledge_items(scene_intent) or _as_str_list(scene.get("audience_knowledge_plan")) or _as_str_list(scene_event.get("audience_knowledge_plan")),
+            "visual_proof_obligations": _list(scene_intent.get("visual_proof_obligations")) or _list(scene.get("visual_proof_obligations")) or _list(scene_event.get("visual_proof_obligations")),
+            "anti_redundancy_policy": _dict(scene_intent.get("anti_redundancy_policy")) or _dict(scene.get("anti_redundancy_policy")) or _dict(scene_event.get("anti_redundancy_policy")),
+            "static_first_frame_rules": _as_str_list(scene_intent.get("static_first_frame_rules")) or _as_str_list(scene.get("static_first_frame_rules")) or _as_str_list(scene_event.get("static_first_frame_rules")),
             "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
             "handoff_to_next_scene": _as_str(scene.get("handoff_to_next_scene")),
             "terminal_resolution": _as_str(scene.get("terminal_resolution")),
@@ -245,14 +420,15 @@ def collect_scene_composite_entries(
                 "selector": f"scene{scene.get('scene_id')}",
                 "scene_id": scene.get("scene_id"),
                 "scene_contract": scene_contract,
+                "scene_event": scene_event,
                 "scene_cut_coverage_plan": scene_cut_coverage_plan,
-                "story_event_obligations": _list(_dict(scene.get("scene_intent")).get("story_event_obligations")),
-                "role_coverage": _dict(_dict(scene.get("scene_intent")).get("role_coverage")),
-                "audience_knowledge_delta": _dict(_dict(scene.get("scene_intent")).get("audience_knowledge_delta")),
-                "audience_knowledge_plan": _audience_knowledge_items(_dict(scene.get("scene_intent"))),
-                "visual_proof_obligations": _list(_dict(scene.get("scene_intent")).get("visual_proof_obligations")),
-                "anti_redundancy_policy": _dict(_dict(scene.get("scene_intent")).get("anti_redundancy_policy")),
-                "static_first_frame_rules": _as_str_list(_dict(scene.get("scene_intent")).get("static_first_frame_rules")),
+                "story_event_obligations": _list(scene_intent.get("story_event_obligations")) or _list(scene.get("story_event_obligations")),
+                "role_coverage": _dict(scene_intent.get("role_coverage")) or _dict(scene.get("role_coverage")) or _dict(scene_event.get("role_coverage")),
+                "audience_knowledge_delta": _dict(scene_intent.get("audience_knowledge_delta")) or _dict(scene.get("audience_knowledge_delta")) or _dict(scene_event.get("audience_knowledge_delta")),
+                "audience_knowledge_plan": _audience_knowledge_items(scene_intent) or _as_str_list(scene.get("audience_knowledge_plan")) or _as_str_list(scene_event.get("audience_knowledge_plan")),
+                "visual_proof_obligations": _list(scene_intent.get("visual_proof_obligations")) or _list(scene.get("visual_proof_obligations")) or _list(scene_event.get("visual_proof_obligations")),
+                "anti_redundancy_policy": _dict(scene_intent.get("anti_redundancy_policy")) or _dict(scene.get("anti_redundancy_policy")) or _dict(scene_event.get("anti_redundancy_policy")),
+                "static_first_frame_rules": _as_str_list(scene_intent.get("static_first_frame_rules")) or _as_str_list(scene.get("static_first_frame_rules")) or _as_str_list(scene_event.get("static_first_frame_rules")),
                 "cut_count": len(cut_entries),
                 "cut_entries": cut_entries,
                 "scene_composite_gate": {
@@ -260,7 +436,9 @@ def collect_scene_composite_entries(
                     "minimum_cut_count": _coverage_minimum_cut_count(scene_cut_coverage_plan),
                     "must_judge": [
                         "scene_cut_coverage_plan の scene_obligations が cut_entries に割り当てられているか",
-                        "story_event_obligations の不可逆な物語出来事が cut 群の audience_knowledge_delta / causal_proof に割り当てられているか",
+                        "cut_contract.source_event_contract の primary_event_beat_id / source_event_beat_ids が scene_event.event_sequence の beat_id を参照し、setup/pressure/turn/payoff を網羅しているか",
+                        "event_context_for_cut が source_event_contract から生成された downstream 用 projection として primary beat だけを渡しているか",
+                        "first_frame_visual_plan が source_event_contract / event_context_for_cut / first_frame_contract / motion_contract から派生し、物語意味を描画可能な開始静止画へ変換しているか",
                         "role_coverage.required_roles にある妨害者・助力者・証人・共同体などが、必要なsceneで主人公単独に潰されていないか",
                         "cutごとの差異が番号差分や同義反復ではなく、sceneを再現するために必要な視覚要件の分担になっているか",
                         "各cutの first_frame_brief が motion ではなく静止画として読める causal proof を持つか",
@@ -274,7 +452,23 @@ def collect_scene_composite_entries(
                         "scene_video_handoff_weak",
                         "scene_requires_more_cuts",
                         "cut_prompt_requires_reinforcement",
-                        "story_event_obligation_unassigned",
+                        "event_beat_reference_integrity",
+                        "source_event_preservation",
+                        "event_first_frame_alignment",
+                        "event_motion_boundary",
+                        "event_narration_boundary",
+                        "event_context_for_cut_not_derived",
+                        "first_frame_visual_plan_missing",
+                        "first_frame_is_story_event_start_not_poster",
+                        "first_frame_has_action_potential",
+                        "first_frame_preserves_scene_event_boundary",
+                        "first_frame_does_not_resolve_cut_too_early",
+                        "first_frame_does_not_show_later_reveal",
+                        "first_frame_contains_specific_story_evidence",
+                        "first_frame_has_cinematic_subject_hierarchy",
+                        "first_frame_is_not_generic_mood_image",
+                        "first_frame_can_connect_to_motion_prompt",
+                        "first_frame_can_connect_to_narration_without_captioning",
                         "audience_knowledge_delta_missing",
                         "causal_proof_weak",
                         "role_coverage_missing",
@@ -450,6 +644,8 @@ def _cut_semantic_contract(
         return explicit
     cut_contract = _dict(cut.get("cut_contract"))
     if cut_contract:
+        legacy_scene_contract = _dict(cut.get("scene_contract"))
+        source_event = _dict(cut_contract.get("source_event_contract"))
         viewer = _dict(cut_contract.get("viewer_contract"))
         first_frame = _dict(cut_contract.get("first_frame_contract"))
         motion = _dict(cut_contract.get("motion_contract"))
@@ -460,6 +656,18 @@ def _cut_semantic_contract(
         start_state = _dict(continuity.get("start_state"))
         return {
             "cut_function": _as_str(cut_contract.get("cut_function")),
+            "source_event_contract": {
+                "primary_event_beat_id": _as_str(source_event.get("primary_event_beat_id")),
+                "source_event_beat_ids": _as_str_list(source_event.get("source_event_beat_ids")),
+                "event_beat_function": _as_str(source_event.get("event_beat_function")),
+                "event_time_position": _as_str(source_event.get("event_time_position")),
+                "event_facts_to_preserve": _as_str_list(source_event.get("event_facts_to_preserve")),
+                "event_facts_not_to_invent": _as_str_list(source_event.get("event_facts_not_to_invent")),
+                "allowed_reveal_info_ids": _as_str_list(source_event.get("allowed_reveal_info_ids")),
+                "forbidden_reveal_info_ids": _as_str_list(source_event.get("forbidden_reveal_info_ids")),
+            },
+            "event_facts_to_preserve": _as_str_list(source_event.get("event_facts_to_preserve")),
+            "event_facts_not_to_invent": _as_str_list(source_event.get("event_facts_not_to_invent")),
             "target_focus": _as_str(viewer.get("target_beat") or cut_contract.get("target_beat")),
             "target_beat": _as_str(viewer.get("target_beat") or cut_contract.get("target_beat")),
             "screen_question": _as_str(viewer.get("screen_question")),
@@ -469,23 +677,31 @@ def _cut_semantic_contract(
             "visual_evidence": _as_str_list(viewer.get("visual_evidence")),
             "required_roles": _as_str_list(viewer.get("required_roles")),
             "anti_redundancy_key": _as_str(viewer.get("anti_redundancy_key")),
-            "assigned_story_event_ids": _as_str_list(viewer.get("assigned_story_event_ids") or cut_contract.get("assigned_story_event_ids")),
             "visual_beat": _as_str(viewer.get("visual_proof") or cut_contract.get("visual_beat")),
             "must_include": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
             "must_show": _as_str_list(viewer.get("must_show") or first_frame.get("must_include")),
             "must_avoid": _as_str_list(viewer.get("must_avoid") or first_frame.get("must_avoid")),
             "done_when": _as_str_list(viewer.get("done_when")),
+            "not_yet_visible": _as_str_list(viewer.get("not_yet_visible") or legacy_scene_contract.get("not_yet_visible")),
+            "only_after_scene": _as_str(viewer.get("only_after_scene") or legacy_scene_contract.get("only_after_scene")),
             "first_frame_brief": _as_str(first_frame.get("first_frame_brief")),
             "static_first_frame_rule": _as_str(first_frame.get("static_first_frame_rule")),
             "motion_brief": _as_str(motion.get("motion_brief")),
-            "primary_location": _as_str(geography.get("background") or (location_ids[0] if location_ids else "")),
-            "continuity_from_previous": _as_str(start_state.get("spatial_state") or start_state.get("character_state")),
+            "primary_location": _as_str(geography.get("background") or legacy_scene_contract.get("primary_location") or (location_ids[0] if location_ids else "")),
+            "emotional_state": _as_str(first_frame.get("emotional_state") or legacy_scene_contract.get("emotional_state")),
+            "continuity_from_previous": _as_str(legacy_scene_contract.get("continuity_from_previous") or start_state.get("spatial_state") or start_state.get("character_state")),
         }
     return _dict(cut.get("scene_contract"))
 
 
 def semantic_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:
+    source_event_contract = _dict(contract.get("source_event_contract"))
     return {
+        "source_event_contract": source_event_contract,
+        "primary_event_beat_id": _as_str(source_event_contract.get("primary_event_beat_id")),
+        "source_event_beat_ids": _as_str_list(source_event_contract.get("source_event_beat_ids")),
+        "event_facts_to_preserve": _as_str_list(contract.get("event_facts_to_preserve")),
+        "event_facts_not_to_invent": _as_str_list(contract.get("event_facts_not_to_invent")),
         "target_focus": _as_str(contract.get("target_focus") or contract.get("target_beat")),
         "must_include": _as_str_list(contract.get("must_include") or contract.get("must_show")),
         "must_avoid": _as_str_list(contract.get("must_avoid")),
@@ -501,7 +717,43 @@ def semantic_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:
         "required_roles": _as_str_list(contract.get("required_roles")),
         "static_first_frame_rule": _as_str(contract.get("static_first_frame_rule")),
         "anti_redundancy_key": _as_str(contract.get("anti_redundancy_key")),
-        "assigned_story_event_ids": _as_str_list(contract.get("assigned_story_event_ids")),
+    }
+
+
+def _event_context_for_cut(scene: dict[str, Any], cut: dict[str, Any]) -> dict[str, Any]:
+    scene_event = _dict(scene.get("scene_event"))
+    sequence = [beat for beat in _list(scene_event.get("event_sequence")) if isinstance(beat, dict)]
+    if not scene_event or not sequence:
+        return {}
+    by_id = {str(beat.get("beat_id") or "").strip(): beat for beat in sequence if str(beat.get("beat_id") or "").strip()}
+    contract = _dict(cut.get("cut_contract"))
+    source_contract = _dict(contract.get("source_event_contract"))
+    primary_id = _as_str(source_contract.get("primary_event_beat_id"))
+    source_ids = _as_str_list(source_contract.get("source_event_beat_ids"))
+    if primary_id and primary_id not in source_ids:
+        source_ids = [primary_id, *source_ids]
+    primary_beat = by_id.get(primary_id) if primary_id else None
+    neighbor_ids: set[str] = set()
+    for source_id in source_ids:
+        for index, beat in enumerate(sequence):
+            if str(beat.get("beat_id") or "").strip() != source_id:
+                continue
+            for neighbor_index in (index - 1, index + 1):
+                if 0 <= neighbor_index < len(sequence):
+                    neighbor_id = str(sequence[neighbor_index].get("beat_id") or "").strip()
+                    if neighbor_id and neighbor_id not in source_ids:
+                        neighbor_ids.add(neighbor_id)
+    reveal_constraints = _dict(contract.get("viewer_contract")).get("reveal_constraints")
+    if not reveal_constraints:
+        reveal_constraints = _dict(scene.get("scene_intent")).get("reveal_constraints")
+    return {
+        "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+        "editable": False,
+        "primary_event_beat": primary_beat or {},
+        "source_event_beats": [by_id[source_id] for source_id in source_ids if source_id in by_id],
+        "neighboring_event_beats": [by_id[beat_id] for beat_id in sorted(neighbor_ids) if beat_id in by_id],
+        "forbidden_event_changes": _as_str_list(scene_event.get("forbidden_event_changes")),
+        "reveal_constraints_for_this_cut": reveal_constraints if isinstance(reveal_constraints, list) else _as_str_list(reveal_constraints),
     }
 
 

@@ -14,7 +14,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml
 try:
@@ -72,9 +72,10 @@ from .codex_app_server import (
 from toc.env import load_env_files
 from toc.http import HttpError
 from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id, selector_aliases
-from toc.harness import append_state_snapshot, parse_state_file
+from toc.harness import append_state_snapshot, now_iso, parse_state_file
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
+from toc.script_narration import materialize_elevenlabs_tts_text
 from toc.semantic_review import (
     IMAGE_PROMPT_JUDGMENT_REPORT,
     SemanticReviewStatus,
@@ -89,6 +90,7 @@ from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
     semantic_loop_state_updates,
     semantic_repair_state_updates,
+    semantic_repair_relpaths,
     semantic_repair_timeout_seconds,
     semantic_review_max_attempts,
     semantic_review_timeout_seconds,
@@ -106,6 +108,7 @@ from .image_gen import (
     list_candidate_items,
     list_runs,
     load_request_items,
+    output_root,
     prompt_setting_targets,
     reference_to_api,
     reserve_run_dir,
@@ -357,6 +360,18 @@ class VideoPromptCreateRequest(BaseModel):
     items: list[FrontendReviewItem] = Field(min_length=1, max_length=256)
     note: str | None = Field(default=None, max_length=2000)
     replace_all: bool = True
+
+
+class NarrationDraftCreateRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
+    replace: bool = False
+
+
+class NarrationSilentOkRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    item_id: str = Field(min_length=1, max_length=200)
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class VideoGenerateItem(BaseModel):
@@ -818,8 +833,6 @@ def _validate_p650_run_core(
         ]
         if missing_asset_outputs:
             raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
-    if require_semantic_reviews:
-        _validate_semantic_reviews(run_dir, ("asset_output",))
 
     state = parse_state_file(run_dir / "state.txt")
     if state.get("runtime.scaffold.content_status") == "placeholder":
@@ -858,7 +871,7 @@ def _validate_materialized_p650_run(run_id: str) -> None:
 def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
     _validate_p650_run(run_id)
     run_dir = safe_run_dir(run_id, ROOT)
-    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "asset_output", "image_prompt", "scene_image"))
+    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
     if strict_visual_quality:
@@ -921,7 +934,26 @@ def _cleanup_unscaffolded_run(run_id: str) -> None:
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def _write_cli_process_logs(run_dir: Path, log_name: str, stdout: bytes, stderr: bytes) -> None:
+    log_dir = run_dir / "logs" / log_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "stdout.log").write_text(stdout.decode("utf-8", errors="replace"), encoding="utf-8")
+    (log_dir / "stderr.log").write_text(stderr.decode("utf-8", errors="replace"), encoding="utf-8")
+
+
+def _ensure_cli_run_dir(run_id: str) -> Path:
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    base = output_root(ROOT).resolve()
+    run_dir = (base / run_id).resolve()
+    if base not in run_dir.parents and run_dir != base:
+        raise ValueError("run_id escapes output root")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 async def _run_toc_run_helper(*, topic: str, run_id: str) -> str:
+    run_dir = _ensure_cli_run_dir(run_id)
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(ROOT / "scripts" / "toc-run.py"),
@@ -935,7 +967,14 @@ async def _run_toc_run_helper(*, topic: str, run_id: str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+    except asyncio.TimeoutError:
+        proc.kill()
+        stdout, stderr = await proc.communicate()
+        _write_cli_process_logs(run_dir, "toc_run_cli", stdout, stderr)
+        raise
+    _write_cli_process_logs(run_dir, "toc_run_cli", stdout, stderr)
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"toc-run exited with status {proc.returncode}")
@@ -966,6 +1005,7 @@ async def _run_toc_immersive_frontend_cli_helper(
         cmd.append("--materialize-only")
     env = dict(os.environ)
     env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
+    run_dir = safe_run_dir(run_id, ROOT)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(ROOT),
@@ -973,7 +1013,14 @@ async def _run_toc_immersive_frontend_cli_helper(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        proc.kill()
+        stdout, stderr = await proc.communicate()
+        _write_cli_process_logs(run_dir, "frontend_create_cli", stdout, stderr)
+        raise
+    _write_cli_process_logs(run_dir, "frontend_create_cli", stdout, stderr)
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"toc-immersive-frontend-run exited with status {proc.returncode}")
@@ -1303,6 +1350,8 @@ def _validate_run_relative_video_path(run_dir: Path, value: str, *, must_exist: 
 def _validate_run_relative_audio_path(run_dir: Path, value: str | None, *, must_exist: bool = False) -> str | None:
     raw = (value or "").strip()
     if not raw:
+        if must_exist:
+            raise ValueError("audio path is required")
         return None
     if any(char in raw for char in "\r\n`"):
         raise ValueError("audio paths must be markdown-safe")
@@ -1705,6 +1754,21 @@ async def _generate_video_candidates(run_dir: Path, req: VideoGenerateItem) -> d
     }
 
 
+def _validate_video_request_reference_paths(run_dir: Path, req: VideoGenerateItem) -> None:
+    for field, values in (
+        ("first_reference", [req.first_reference]),
+        ("last_reference", [req.last_reference]),
+        ("references", req.references),
+    ):
+        for value in values:
+            if not value:
+                continue
+            try:
+                _validate_run_relative_image_path(run_dir, value, must_exist=True)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{field}: {exc}") from exc
+
+
 def _require_markdown_scalar(value: str, *, field: str) -> str:
     text = value.strip()
     if not text or any(char in text for char in "\r\n`"):
@@ -1899,6 +1963,460 @@ def _default_narration_output_for_target(target: dict[str, Any]) -> str:
     return f"assets/audio/{selector}/{selector}_narration.mp3"
 
 
+def _json_hash(value: Any) -> str:
+    text = json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in _list_value(value) if str(item).strip()]
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _cut_narration_contract(node: dict[str, Any]) -> dict[str, Any]:
+    cut_contract = _dict_value(node.get("cut_contract"))
+    narration = _dict_value(cut_contract.get("narration_contract"))
+    if narration:
+        return narration
+    audio = _dict_value(node.get("audio"))
+    narration = _dict_value(audio.get("narration_contract"))
+    if narration:
+        return narration
+    return _dict_value(node.get("narration_contract"))
+
+
+def _scene_logline(scene: dict[str, Any]) -> str:
+    scene_event = _dict_value(scene.get("scene_event"))
+    scene_contract = _dict_value(scene.get("scene_contract") or scene.get("contract"))
+    return _first_non_empty(
+        scene.get("logline"),
+        scene.get("title"),
+        scene.get("scene_title"),
+        scene_event.get("logline"),
+        scene_contract.get("screen_question"),
+        scene_contract.get("dramatic_job"),
+    )
+
+
+def _cut_summary(node: dict[str, Any]) -> str:
+    cut_contract = _dict_value(node.get("cut_contract"))
+    scene_contract = _dict_value(node.get("scene_contract"))
+    source_event = _dict_value(cut_contract.get("source_event_contract"))
+    first_frame = _dict_value(cut_contract.get("first_frame_contract"))
+    return _first_non_empty(
+        scene_contract.get("visual_beat"),
+        scene_contract.get("target_beat"),
+        source_event.get("source_event_summary"),
+        first_frame.get("event_fact_visible_in_still"),
+        node.get("description"),
+    )
+
+
+def _is_silent_role(contract: dict[str, Any]) -> bool:
+    role = str(contract.get("role") or "").strip().lower()
+    speakable = contract.get("speakable_or_silent")
+    return role == "silent" or speakable is False
+
+
+def _fallback_narration_text(node: dict[str, Any], contract: dict[str, Any]) -> str:
+    explicit = _first_non_empty(contract.get("text"), contract.get("narration"), node.get("narration_text"))
+    if explicit:
+        return explicit
+    role = _first_non_empty(contract.get("role"), "emotion")
+    target = _first_non_empty(contract.get("target_function"), _cut_summary(node), "このcutの物語上の意味を補う")
+    return f"{target}。"
+
+
+def _narration_contract_payload(contract: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
+    cut_contract = _dict_value(node.get("cut_contract"))
+    source_event = _dict_value(cut_contract.get("source_event_contract"))
+    event_context = _dict_value(cut_contract.get("event_context_for_cut"))
+    source_event_ids = _string_list(contract.get("source_event_beat_ids") or source_event.get("source_event_beat_ids"))
+    must_cover = _string_list(contract.get("must_cover"))
+    if not must_cover:
+        must_cover = [item for item in [contract.get("target_function"), event_context.get("scene_event_logline"), _cut_summary(node)] if str(item or "").strip()]
+    must_avoid = _string_list(contract.get("must_avoid"))
+    forbidden = _string_list(contract.get("forbidden_info_ids") or event_context.get("forbidden_event_changes"))
+    return {
+        "role": _first_non_empty(contract.get("role"), "emotion"),
+        "allowed_info_ids": _string_list(contract.get("allowed_info_ids")),
+        "forbidden_info_ids": forbidden,
+        "must_cover": must_cover,
+        "must_avoid": must_avoid,
+        "boundary": _first_non_empty(contract.get("narration_event_boundary"), "same_event_only"),
+        "target_function": _first_non_empty(contract.get("target_function"), "映像を説明せず、物語上の意味だけを補う"),
+        "source_event_beat_ids": source_event_ids,
+        "must_not_advance_to_event_beat_ids": _string_list(contract.get("must_not_advance_to_event_beat_ids")),
+        "must_not_explain_visible_action_as_caption": contract.get("must_not_explain_visible_action_as_caption") is not False,
+        "done_when": _string_list(contract.get("done_when")) or ["映像の説明ではなく、このcutの感情・因果・余韻を補っている"],
+    }
+
+
+def _elevenlabs_prompt_payload(*, text: str, scene: dict[str, Any], node: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    spoken_context = _first_non_empty(
+        _scene_logline(scene),
+        _dict_value(_dict_value(node.get("cut_contract")).get("event_context_for_cut")).get("scene_event_logline"),
+    )
+    role = str(contract.get("role") or "").strip().lower()
+    if role in {"emotion", "aftertaste"}:
+        voice_tags = ["softly"]
+    elif role in {"contrast", "fact"}:
+        voice_tags = ["calm"]
+    else:
+        voice_tags = ["narration"]
+    materialized = materialize_elevenlabs_tts_text(
+        spoken_context=spoken_context,
+        voice_tags=voice_tags,
+        spoken_body=text,
+    )
+    return {
+        "spoken_context": spoken_context,
+        "voice_tags": voice_tags,
+        "spoken_body": text,
+        "stability": "creative",
+        "materialized": materialized,
+    }
+
+
+def _silence_contract_payload(contract: dict[str, Any], *, confirmed_by_human: bool = False, reason: str | None = None) -> dict[str, Any]:
+    silence_reason = _first_non_empty(reason, contract.get("silence_reason"), "このcutは映像だけで意味が成立するため")
+    return {
+        "intentional": True,
+        "confirmed_by_human": bool(confirmed_by_human),
+        "kind": "intentional_silence",
+        "reason": silence_reason,
+    }
+
+
+def _build_scene_narration_plan(scene: dict[str, Any], targets: list[dict[str, Any]]) -> dict[str, Any]:
+    roles: list[dict[str, str]] = []
+    for target in targets:
+        node = target["cut"]
+        contract = _cut_narration_contract(node)
+        role = _first_non_empty(contract.get("role"), "emotion")
+        roles.append(
+            {
+                "cut_id": str(target["selector"]),
+                "role": role,
+                "reason": _first_non_empty(contract.get("target_function"), _cut_summary(node), "scene全体の語りの一部を担当する"),
+            }
+        )
+    role_names = {item["role"] for item in roles}
+    if role_names == {"silent"}:
+        density = "silent_sparse"
+    elif "silent" in role_names or len(roles) <= 2:
+        density = "sparse"
+    elif len(roles) >= 5:
+        density = "dense"
+    else:
+        density = "balanced"
+    first_role = roles[0]["role"] if roles else "setup"
+    last_role = roles[-1]["role"] if roles else "aftertaste"
+    forbidden: list[str] = []
+    for target in targets:
+        contract = _cut_narration_contract(target["cut"])
+        forbidden.extend(_string_list(contract.get("forbidden_info_ids")))
+        forbidden.extend(_string_list(contract.get("must_not_advance_to_event_beat_ids")))
+    return {
+        "scene_id": str(scene.get("scene_id") or ""),
+        "narration_throughline": _first_non_empty(_scene_logline(scene), "scene全体の意味を、映像説明ではなく感情と因果でつなぐ"),
+        "narration_density": density,
+        "tone_arc": {
+            "from": first_role,
+            "to": last_role,
+        },
+        "silence_strategy": "画面で読める行為は説明せず、沈黙が余韻や緊張を作るcutでは無音を許可する",
+        "reveal_boundary_summary": " / ".join(dict.fromkeys(forbidden)) if forbidden else "scene_eventとcut_contractのreveal boundaryを超えない",
+        "cut_narration_roles": roles,
+    }
+
+
+def _has_existing_narration_review(narration: dict[str, Any]) -> bool:
+    if not narration:
+        return False
+    status = str(narration.get("status") or "").strip().lower()
+    review = _dict_value(narration.get("review"))
+    review_status = str(review.get("status") or "").strip().lower()
+    if status in {"review_pending", "pending", "approved", "audio_ready"}:
+        return True
+    if review_status in {"pending", "approved", "awaiting_approval"}:
+        return True
+    meaningful_keys = (
+        "text",
+        "tts_text",
+        "text_draft",
+        "output",
+        "tool",
+        "contract",
+        "elevenlabs_prompt",
+        "silence_contract",
+        "review",
+    )
+    for key in meaningful_keys:
+        value = narration.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _validate_scene_image_outputs_ready(run_dir: Path, data: dict[str, Any]) -> None:
+    missing: list[str] = []
+    for target in _manifest_scene_targets(data):
+        node = target["cut"]
+        image_generation = _dict_value(node.get("image_generation"))
+        output = str(image_generation.get("output") or "").strip()
+        if not output:
+            missing.append(f"{target['selector']}:image_generation.output")
+            continue
+        try:
+            _validate_run_relative_image_path(run_dir, output, must_exist=True)
+        except ValueError:
+            missing.append(f"{target['selector']}:{output}")
+            continue
+        if not resolve_run_relative(run_dir, output).is_file():
+            missing.append(f"{target['selector']}:{output}")
+    if missing:
+        raise ValueError("narration drafts require image outputs for all scene cuts: " + ", ".join(missing[:20]))
+
+
+def _write_narration_authoring_report(run_dir: Path, *, updated: list[str], skipped: list[str], replace: bool) -> Path:
+    path = run_dir / "narration_authoring_report.md"
+    lines = [
+        "# Narration Authoring Report",
+        "",
+        f"- created_at: `{_now_stamp()}`",
+        f"- replace: `{str(replace).lower()}`",
+        f"- updated_count: `{len(updated)}`",
+        f"- skipped_count: `{len(skipped)}`",
+        "",
+        "## Updated Cuts",
+        "",
+    ]
+    lines.extend(f"- `{item}`" for item in updated) if updated else lines.append("- none")
+    lines.extend(["", "## Skipped Cuts", ""])
+    lines.extend(f"- `{item}`" for item in skipped) if skipped else lines.append("- none")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dict[str, Any]:
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    targets = _manifest_scene_targets(data)
+    if not targets:
+        raise ValueError("video_manifest.md has no scene cuts")
+    _validate_scene_image_outputs_ready(run_dir, data)
+    _backup_run_file(run_dir, "video_manifest.md", label="before_narration_drafts_create")
+    targets_by_scene: dict[int, list[dict[str, Any]]] = {}
+    for target in targets:
+        targets_by_scene.setdefault(int(target["scene_index"]), []).append(target)
+    for scene_targets in targets_by_scene.values():
+        scene = scene_targets[0]["scene"]
+        if replace or not _dict_value(scene.get("scene_narration_plan")):
+            scene["scene_narration_plan"] = _build_scene_narration_plan(scene, scene_targets)
+
+    updated: list[str] = []
+    skipped: list[str] = []
+    for target in targets:
+        node = target["cut"]
+        scene = target["scene"]
+        audio = _dict_value(node.get("audio"))
+        previous = _dict_value(audio.get("narration"))
+        if not replace and _has_existing_narration_review(previous):
+            skipped.append(str(target["selector"]))
+            continue
+        contract = _cut_narration_contract(node)
+        cut_contract = _dict_value(node.get("cut_contract"))
+        source_event_contract = _dict_value(cut_contract.get("source_event_contract"))
+        event_context = _dict_value(cut_contract.get("event_context_for_cut"))
+        is_silent = _is_silent_role(contract)
+        text = "" if is_silent else _fallback_narration_text(node, contract)
+        elevenlabs_prompt = _elevenlabs_prompt_payload(text=text, scene=scene, node=node, contract=contract) if not is_silent else {
+            "spoken_context": _scene_logline(scene),
+            "voice_tags": [],
+            "spoken_body": "",
+            "stability": "creative",
+            "materialized": "",
+        }
+        tts_text = "" if is_silent else _first_non_empty(contract.get("tts_text"), elevenlabs_prompt.get("materialized"), text)
+        output = str(previous.get("output") or _default_narration_output_for_target(target)).strip()
+        narration = {
+            **previous,
+            "status": "review_pending",
+            "source": "p710_p720_narration_drafts_create",
+            "source_cut_contract_version": str(cut_contract.get("schema_version") or ""),
+            "source_event_contract_hash": _json_hash(source_event_contract),
+            "event_context_hash": _json_hash(event_context),
+            "cut_contract_hash": _json_hash(cut_contract),
+            "contract": _narration_contract_payload(contract, node),
+            "text": text,
+            "tts_text": tts_text,
+            "text_draft": text,
+            "elevenlabs_prompt": elevenlabs_prompt,
+            "silence_contract": _silence_contract_payload(contract, confirmed_by_human=False) if is_silent else {
+                "intentional": False,
+                "confirmed_by_human": False,
+                "kind": "spoken",
+                "reason": "",
+            },
+            "tool": "silent" if is_silent else str(previous.get("tool") or "elevenlabs"),
+            "output": "" if is_silent else output,
+            "review": {
+                "status": "pending",
+                "human_review_ok": False,
+                "approved_at": "",
+                "note": "frontend review required before p800",
+            },
+            "normalize_to_scene_duration": False,
+        }
+        audio["narration"] = narration
+        node["audio"] = audio
+        updated.append(str(target["selector"]))
+
+    _write_manifest_data(manifest_path, original_text, data)
+    report_path = _write_narration_authoring_report(run_dir, updated=updated, skipped=skipped, replace=replace)
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "status": "P720",
+            "runtime.stage": "narration_text_ready_for_frontend_review",
+            "slot.p710.status": "done",
+            "slot.p710.note": "narration grounding and scene_narration_plan created from video_manifest",
+            "slot.p720.status": "awaiting_approval",
+            "slot.p720.note": "narration text drafts ready for frontend TTS review",
+            "slot.p730.status": "pending",
+            "slot.p740.status": "pending",
+            "slot.p750.status": "pending",
+            "stage.narration.status": "awaiting_frontend_review",
+            "review.narration.status": "pending",
+            "gate.narration_review": "required",
+            "artifact.narration_authoring_report": report_path.relative_to(run_dir).as_posix(),
+        },
+    )
+    return {"updated": updated, "skipped": skipped, "reportPath": report_path.relative_to(run_dir).as_posix()}
+
+
+def _narration_silent_ok(run_dir: Path, *, item_id: str, reason: str | None = None) -> dict[str, Any]:
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    target = _target_by_item_id(data, item_id)
+    if target is None:
+        raise ValueError(f"video manifest target not found: {item_id}")
+    _backup_run_file(run_dir, "video_manifest.md", label="before_narration_silent_ok")
+    node = target["cut"]
+    contract = _cut_narration_contract(node)
+    audio = _dict_value(node.get("audio"))
+    narration = _dict_value(audio.get("narration"))
+    narration.update(
+        {
+            "tool": "silent",
+            "status": "audio_ready",
+            "text": "",
+            "tts_text": "",
+            "output": "",
+            "silence_contract": _silence_contract_payload(contract, confirmed_by_human=True, reason=reason),
+            "review": {
+                **_dict_value(narration.get("review")),
+                "status": "approved",
+                "human_review_ok": True,
+                "approved_at": _now_stamp(),
+                "note": "frontend marked this cut as intentional silence",
+            },
+        }
+    )
+    audio["narration"] = narration
+    node["audio"] = audio
+    _write_manifest_data(manifest_path, original_text, data)
+    return {"itemId": str(target["selector"]), "status": "silent_ok"}
+
+
+def _narration_audio_readiness(run_dir: Path) -> dict[str, Any]:
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    ready: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = []
+    for target in _manifest_scene_targets(data):
+        selector = str(target["selector"])
+        node = target["cut"]
+        audio = _dict_value(node.get("audio"))
+        narration = _dict_value(audio.get("narration"))
+        if _narration_has_confirmed_silence(narration):
+            ready.append({"itemId": selector, "kind": "silent_ok"})
+            continue
+        narration_status = str(narration.get("status") or "").strip().lower()
+        review_status = str(_dict_value(narration.get("review")).get("status") or "").strip().lower()
+        output = str(narration.get("output") or "").strip()
+        if output and (narration_status in {"audio_ready", "approved"} or review_status == "approved"):
+            try:
+                _validate_run_relative_audio_path(run_dir, output, must_exist=True)
+                if resolve_run_relative(run_dir, output).is_file():
+                    ready.append({"itemId": selector, "kind": "audio_file"})
+                    continue
+            except ValueError:
+                pass
+        missing.append({"itemId": selector, "reason": "missing_audio_file_or_silent_ok"})
+    return {"ready": not missing and bool(ready), "readyItems": ready, "missingItems": missing}
+
+
+def _narration_has_confirmed_silence(narration: dict[str, Any]) -> bool:
+    tool = str(narration.get("tool") or "").strip().lower()
+    silence_contract = _dict_value(narration.get("silence_contract"))
+    return (
+        tool == "silent"
+        and silence_contract.get("intentional") is True
+        and silence_contract.get("confirmed_by_human") is True
+        and bool(str(silence_contract.get("kind") or "").strip())
+        and bool(str(silence_contract.get("reason") or "").strip())
+    )
+
+
+def _append_narration_review_approved_if_ready(run_dir: Path) -> dict[str, Any]:
+    readiness = _narration_audio_readiness(run_dir)
+    if not readiness["ready"]:
+        return readiness
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "slot.p720.status": "done",
+            "slot.p720.note": "frontend narration text review completed through TTS/silent review",
+            "slot.p730.status": "done",
+            "slot.p730.note": "all cuts have audio files or intentional silence approvals",
+            "slot.p740.status": "done",
+            "slot.p740.note": "audio readiness accepted before video generation",
+            "slot.p750.status": "approved",
+            "slot.p750.note": "frontend audio QA cleared before p800",
+            "stage.narration.status": "approved",
+            "review.narration.status": "approved",
+            "gate.narration_review": "cleared",
+        },
+    )
+    return readiness
+
+
+def _require_narration_ready_for_video(run_dir: Path) -> dict[str, Any]:
+    readiness = _append_narration_review_approved_if_ready(run_dir)
+    if readiness["ready"]:
+        return readiness
+    missing = ", ".join(item["itemId"] for item in readiness["missingItems"][:20])
+    raise ValueError("video generation requires audio files or silent approvals for all cuts: " + (missing or "none"))
+
+
 def _default_video_output_for_target(target: dict[str, Any]) -> str:
     node = target["cut"]
     image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
@@ -1928,10 +2446,18 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
         audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
         narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
         render = node.get("render") if isinstance(node.get("render"), dict) else {}
-        narration_output = str(narration.get("output") or _default_narration_output_for_target(target)).strip()
+        narration_tool = str(narration.get("tool") or "elevenlabs").strip()
+        silence_contract = narration.get("silence_contract") if isinstance(narration.get("silence_contract"), dict) else {}
+        narration_silent_ok = (
+            narration_tool == "silent"
+            and silence_contract.get("intentional") is True
+            and silence_contract.get("confirmed_by_human") is True
+        )
+        raw_narration_output = str(narration.get("output") or "").strip()
+        narration_output = raw_narration_output or ("" if narration_silent_ok else _default_narration_output_for_target(target))
         video_output = str(video_generation.get("output") or _default_video_output_for_target(target)).strip()
         candidate_output = _candidate_video_output_for_item(run_dir, selector)
-        resolved_audio = resolve_run_relative(run_dir, narration_output)
+        resolved_audio = resolve_run_relative(run_dir, narration_output) if narration_output else run_dir / "__missing_narration__"
         resolved_video = resolve_run_relative(run_dir, candidate_output or video_output)
         audio_duration = _probe_media_duration_seconds(resolved_audio)
         video_duration = _probe_media_duration_seconds(resolved_video)
@@ -1960,8 +2486,11 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
                 "videoReferences": list(video_generation.get("references") or []) if isinstance(video_generation.get("references"), list) else [],
                 "narrationText": str(narration.get("text") or ""),
                 "narrationTtsText": str(narration.get("tts_text") or ""),
-                "narrationOutput": narration_output,
-                "narrationTool": str(narration.get("tool") or "elevenlabs"),
+                "narrationOutput": narration_output or None,
+                "narrationTool": narration_tool,
+                "narrationStatus": str(narration.get("status") or ""),
+                "narrationReviewStatus": str((narration.get("review") if isinstance(narration.get("review"), dict) else {}).get("status") or ""),
+                "narrationSilentOk": narration_silent_ok,
                 "narrationExists": resolved_audio.is_file(),
                 "narrationDurationSeconds": audio_duration,
                 "renderNarrationOffsetSeconds": float(
@@ -2063,7 +2592,46 @@ def _apply_audio_duration_to_manifest(run_dir: Path, durations_by_item: dict[str
             updated.append(item_id)
     if updated:
         _backup_run_file(run_dir, "video_manifest.md", label="before_audio_duration_sync")
-        _write_manifest_data(manifest_path, original_text, data)
+    _write_manifest_data(manifest_path, original_text, data)
+    return updated
+
+
+def _mark_manifest_narration_audio_ready(run_dir: Path, results: list[dict[str, Any]]) -> list[str]:
+    completed = [result for result in results if result.get("status") == "completed" and result.get("itemId")]
+    if not completed:
+        return []
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    updated: list[str] = []
+    for result in completed:
+        item_id = str(result["itemId"])
+        target = _target_by_item_id(data, item_id)
+        if target is None:
+            continue
+        node = target["cut"]
+        audio = _dict_value(node.get("audio"))
+        narration = _dict_value(audio.get("narration"))
+        if result.get("path"):
+            narration["output"] = str(result["path"])
+        narration["status"] = "audio_ready"
+        review = _dict_value(narration.get("review"))
+        review.update(
+            {
+                "status": "approved",
+                "human_review_ok": True,
+                "approved_at": _now_stamp(),
+                "note": "frontend generated and accepted this narration audio",
+            }
+        )
+        narration["review"] = review
+        if str(narration.get("tool") or "").strip().lower() == "silent":
+            silence_contract = _dict_value(narration.get("silence_contract"))
+            if silence_contract:
+                silence_contract["confirmed_by_human"] = True
+                narration["silence_contract"] = silence_contract
+        audio["narration"] = narration
+        node["audio"] = audio
+        updated.append(str(target["selector"]))
+    _write_manifest_data(manifest_path, original_text, data)
     return updated
 
 
@@ -2256,6 +2824,20 @@ def _prepare_render_narration(run_dir: Path, source: Path, item: RenderInputItem
     return output if output.is_file() else source
 
 
+def _silent_render_narration_path(run_dir: Path, item: RenderInputItem) -> str:
+    safe_id = _safe_artifact_id(item.item_id)
+    duration_cs = int(round(max(1.0, float(item.video_duration_seconds)) * 100))
+    rel = f"assets/audio/{safe_id}/{safe_id}_intentional_silence_{duration_cs:04d}.mp3"
+    _validate_run_relative_audio_path(run_dir, rel, must_exist=False)
+    destination = resolve_run_relative(run_dir, rel)
+    if not destination.is_file():
+        try:
+            _write_silence_audio(destination, max(1.0, float(item.video_duration_seconds)))
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+    return rel
+
+
 def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_id: str | None = None) -> dict[str, Any]:
     _validate_run_relative_render_output(run_dir, req.output)
     manifest_path, original_text, data = _read_manifest_data(run_dir)
@@ -2275,6 +2857,11 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         video_path = item.video_path or _candidate_video_output_for_item(run_dir, item.item_id) or str(video_generation.get("output") or "")
         narration_path = item.narration_path or str(narration.get("output") or "")
         _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
+        if _narration_has_confirmed_silence(narration) and not narration_path:
+            narration_path = _silent_render_narration_path(run_dir, item)
+            narration["output"] = narration_path
+            audio["narration"] = narration
+            node["audio"] = audio
         _validate_run_relative_audio_path(run_dir, narration_path, must_exist=True)
         video_source = resolve_run_relative(run_dir, video_path)
         narration_source = resolve_run_relative(run_dir, narration_path)
@@ -3484,8 +4071,8 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
             "runtime.stage": "scene_images_ready_for_review",
             "slot.p660.status": "done",
             "slot.p660.note": "scene images generated",
-            "slot.p670.status": "done",
-            "slot.p670.note": "scene image semantic QA passed; frontend human review is next",
+            "slot.p670.status": "skipped",
+            "slot.p670.note": "scene image semantic QA removed; frontend human review is next",
             "slot.p680.status": "awaiting_approval",
             "slot.p680.note": "scene image human review ready in frontend",
             "stage.scene_implementation.status": "awaiting_approval",
@@ -3582,11 +4169,6 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                 },
             )
             break
-    await _set_create_job(job_id, {"message": "素材出力をsemantic QA中"})
-    failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="asset_output")
-    if failure:
-        semantic_failures.append(failure)
-        failed_semantic_stages.add("asset_output")
     await _set_create_job(job_id, {"message": "画像プロンプトをsemantic QA中"})
     failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="image_prompt")
     if failure:
@@ -3594,18 +4176,13 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
         failed_semantic_stages.add("image_prompt")
     await _set_create_job(job_id, {"message": "シーン画像を生成中"})
     await _generate_request_outputs(run_dir=run_dir, kind="scene")
-    await _set_create_job(job_id, {"message": "シーン画像出力をsemantic QA中"})
-    failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="scene_image")
-    if failure:
-        semantic_failures.append(failure)
-        failed_semantic_stages.add("scene_image")
     if semantic_failures:
         failure_updates = {
             "runtime.stage": "semantic_review_failed_after_media_generation",
             "slot.p660.status": "done",
             "slot.p660.note": "scene images generated; semantic gate still failed",
-            "slot.p670.status": "failed",
-            "slot.p670.note": "scene image semantic QA or upstream semantic QA failed",
+            "slot.p670.status": "skipped",
+            "slot.p670.note": "scene image semantic QA removed; upstream semantic QA failed",
             "slot.p680.status": "pending",
             "review.image.status": "needs_semantic_review",
             "review.semantic.create_media_generated": "true",
@@ -3649,6 +4226,15 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                     "runtime.app_server.transport.error_kind": transport_kind,
                 },
             )
+            slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+            if slot:
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"slot.{slot}.status": "failed",
+                        f"slot.{slot}.note": f"contextless semantic {stage} review blocked by app-server transport",
+                    },
+                )
             raise RuntimeError(f"{stage} semantic review blocked by Codex app-server transport failure: {exc}") from exc
         message = f"{stage}: {type(exc).__name__}: {exc}"
         state_updates = semantic_state_updates(
@@ -3657,10 +4243,17 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             entry_count=None,
             error_count=1,
         )
+        state_updates.update(
+            {
+                "runtime.stage": "semantic_review_failed_before_media_generation",
+                "review.semantic.create_media_generated": "false",
+                "review.semantic.create_blocking_stage": stage,
+            }
+        )
         slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
         if slot:
             state_updates[f"slot.{slot}.status"] = "failed"
-            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed; media generation continued"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed; media generation blocked"
         state_updates[f"review.semantic.{stage}.last_error"] = str(exc)[:2000]
         append_state_snapshot(run_dir / "state.txt", state_updates)
         write_app_server_debug_log(
@@ -3672,7 +4265,7 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             response={"failureContext": _codex_failure_context(exc)},
             error=message,
         )
-        return message
+        raise RuntimeError(f"{stage} semantic review failed before media generation: {exc}") from exc
 
 
 SEMANTIC_REVIEW_SLOT_BY_STAGE = {
@@ -3680,13 +4273,9 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
     "scene_detail": "p410",
     "cut_blueprint": "p420",
     "asset_plan": "p540",
-    "asset_output": "p570",
     "image_prompt": "p640",
-    "scene_image": "p670",
     "narration": "p720",
     "video_motion": "p820",
-    "video_clip": "p850",
-    "render": "p930",
 }
 
 
@@ -3711,7 +4300,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
             semantic_loop_state_updates(stage, status="reviewing", attempt=attempt, max_attempts=attempts),
         )
         try:
-            result = await asyncio.wait_for(
+            result = await _await_semantic_operation_with_progress_watchdog(
                 _run_semantic_review_once(
                     job_id,
                     run_dir=run_dir,
@@ -3720,7 +4309,11 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                     max_attempts=attempts,
                     final_attempt=attempt >= attempts,
                 ),
-                timeout=_semantic_review_once_hard_timeout_seconds(),
+                run_dir=run_dir,
+                stage=stage,
+                operation="review",
+                timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
+                fingerprint=lambda: _semantic_review_progress_fingerprint(run_dir, stage),
             )
         except asyncio.TimeoutError as exc:
             _record_semantic_review_hard_timeout(
@@ -3728,10 +4321,10 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 stage,
                 attempt=attempt,
                 max_attempts=attempts,
-                timeout_seconds=_semantic_review_once_hard_timeout_seconds(),
+                timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
             )
             raise CodexAppServerTransportError(
-                f"{stage} semantic review timed out before report reached a terminal status"
+                f"{stage} semantic review timed out after no observable progress"
             ) from exc
         last_result = result
         if result.passed:
@@ -3748,7 +4341,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
             raise RuntimeError(f"{stage} semantic review failed after {attempts} attempt(s): " + "; ".join(result.errors))
         repair_source_fingerprint_before = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
         try:
-            await asyncio.wait_for(
+            await _await_semantic_operation_with_progress_watchdog(
                 _run_semantic_review_producer_repair(
                     job_id,
                     run_dir=run_dir,
@@ -3757,7 +4350,11 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                     max_attempts=attempts,
                     errors=result.errors,
                 ),
-                timeout=_semantic_repair_once_hard_timeout_seconds(),
+                run_dir=run_dir,
+                stage=stage,
+                operation="producer_repair",
+                timeout_seconds=_semantic_repair_no_progress_timeout_seconds(),
+                fingerprint=lambda: _semantic_repair_progress_fingerprint(run_dir, stage, attempt),
             )
         except asyncio.TimeoutError as exc:
             repair_source_fingerprint_after = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
@@ -3769,7 +4366,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                     round_number=attempt,
                     max_attempts=attempts,
                     error_count=len(result.errors),
-                    timeout_seconds=_semantic_repair_once_hard_timeout_seconds(),
+                    timeout_seconds=_semantic_repair_no_progress_timeout_seconds(),
                     changed_artifacts=changed_artifacts,
                 )
                 write_app_server_debug_log(
@@ -3788,7 +4385,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                         "changedArtifacts": changed_artifacts,
                         "note": "producer repair changed source artifacts before the outer hard timeout; rerunning semantic review instead of failing transport",
                     },
-                    error=f"TimeoutError: semantic producer repair hard timeout after {_semantic_repair_once_hard_timeout_seconds():.0f}s",
+                    error=f"TimeoutError: semantic producer repair no-progress timeout after {_semantic_repair_no_progress_timeout_seconds():.0f}s",
                 )
                 continue
             _record_semantic_repair_hard_timeout(
@@ -3797,10 +4394,10 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 round_number=attempt,
                 max_attempts=attempts,
                 error_count=len(result.errors),
-                timeout_seconds=_semantic_repair_once_hard_timeout_seconds(),
+                timeout_seconds=_semantic_repair_no_progress_timeout_seconds(),
             )
             raise CodexAppServerTransportError(
-                f"{stage} semantic producer repair timed out before report reached a terminal status"
+                f"{stage} semantic producer repair timed out after no observable progress"
             ) from exc
     if last_result is not None and not last_result.passed:
         raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(last_result.errors))
@@ -3957,12 +4554,127 @@ def _record_reused_semantic_review(
     append_state_snapshot(run_dir / "state.txt", state_updates)
 
 
+def _semantic_review_no_progress_timeout_seconds() -> float:
+    return float(semantic_review_timeout_seconds())
+
+
+def _semantic_repair_no_progress_timeout_seconds() -> float:
+    return float(semantic_repair_timeout_seconds())
+
+
 def _semantic_review_once_hard_timeout_seconds() -> float:
-    return float(semantic_review_timeout_seconds()) + CODEX_APP_SERVER_START_TIMEOUT_SECONDS + SEMANTIC_TURN_COMPLETION_GRACE_SECONDS + 30.0
+    return _semantic_review_no_progress_timeout_seconds()
 
 
 def _semantic_repair_once_hard_timeout_seconds() -> float:
-    return float(semantic_repair_timeout_seconds()) + CODEX_APP_SERVER_START_TIMEOUT_SECONDS + SEMANTIC_TURN_COMPLETION_GRACE_SECONDS + 30.0
+    return _semantic_repair_no_progress_timeout_seconds()
+
+
+def _semantic_review_progress_fingerprint(run_dir: Path, stage: str) -> dict[str, str]:
+    relpaths = semantic_review_relpaths(stage)
+    activity_relpath = _semantic_turn_activity_relpath(relpaths["report"])
+    return {
+        relpaths["report"].as_posix(): _semantic_repair_artifact_signature(run_dir / relpaths["report"]),
+        activity_relpath.as_posix(): _semantic_repair_artifact_signature(run_dir / activity_relpath),
+    }
+
+
+def _semantic_repair_progress_fingerprint(run_dir: Path, stage: str, round_number: int) -> dict[str, str]:
+    fingerprint = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+    repair_paths = semantic_repair_relpaths(stage, round_number)
+    activity_relpath = _semantic_turn_activity_relpath(repair_paths["report"])
+    fingerprint[repair_paths["report"].as_posix()] = _semantic_repair_artifact_signature(run_dir / repair_paths["report"])
+    fingerprint[activity_relpath.as_posix()] = _semantic_repair_artifact_signature(run_dir / activity_relpath)
+    return fingerprint
+
+
+def _semantic_turn_activity_relpath(report_relpath: Path) -> Path:
+    return report_relpath.with_name(f"{report_relpath.name}.app_server_activity.json")
+
+
+def _write_semantic_turn_activity_marker(report_path: Path, notification: dict[str, Any]) -> None:
+    path = report_path.with_name(f"{report_path.name}.app_server_activity.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": now_iso(),
+        "method": str(notification.get("method") or ""),
+    }
+    params = notification.get("params")
+    if isinstance(params, dict):
+        turn_id = params.get("turnId")
+        if turn_id:
+            payload["turn_id"] = str(turn_id)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+async def _await_semantic_operation_with_progress_watchdog(
+    awaitable,
+    *,
+    run_dir: Path,
+    stage: str,
+    operation: str,
+    timeout_seconds: float,
+    fingerprint: Callable[[], dict[str, str]],
+):
+    task = asyncio.create_task(awaitable)
+    last_fingerprint = fingerprint()
+    last_progress_at = time.monotonic()
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            f"review.semantic.{stage}.watchdog.status": "monitoring",
+            f"review.semantic.{stage}.watchdog.operation": operation,
+            f"review.semantic.{stage}.watchdog.no_progress_timeout_seconds": f"{timeout_seconds:.0f}",
+            f"review.semantic.{stage}.watchdog.started_at": now_iso(),
+        },
+    )
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=SEMANTIC_TURN_ARTIFACT_POLL_SECONDS)
+            if task in done:
+                result = await task
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.watchdog.status": "completed",
+                        f"review.semantic.{stage}.watchdog.operation": operation,
+                        f"review.semantic.{stage}.watchdog.completed_at": now_iso(),
+                    },
+                )
+                return result
+            current_fingerprint = fingerprint()
+            if current_fingerprint != last_fingerprint:
+                last_fingerprint = current_fingerprint
+                last_progress_at = time.monotonic()
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.watchdog.status": "progress_observed",
+                        f"review.semantic.{stage}.watchdog.operation": operation,
+                        f"review.semantic.{stage}.watchdog.last_progress_at": now_iso(),
+                        f"review.semantic.{stage}.watchdog.fingerprint": _json_hash(current_fingerprint),
+                    },
+                )
+            if time.monotonic() - last_progress_at >= timeout_seconds:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.watchdog.status": "no_progress_timeout",
+                        f"review.semantic.{stage}.watchdog.operation": operation,
+                        f"review.semantic.{stage}.watchdog.last_progress_at": now_iso(),
+                        f"review.semantic.{stage}.watchdog.no_progress_timeout_seconds": f"{timeout_seconds:.0f}",
+                    },
+                )
+                raise asyncio.TimeoutError
+    except Exception:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        raise
 
 
 def _record_semantic_review_hard_timeout(
@@ -3984,7 +4696,7 @@ def _record_semantic_review_hard_timeout(
         {
             f"review.semantic.{stage}.transport.status": "failed",
             f"review.semantic.{stage}.transport.error_kind": "timeout",
-            f"review.semantic.{stage}.transport.error": f"semantic review hard timeout after {timeout_seconds:.0f}s",
+            f"review.semantic.{stage}.transport.error": f"semantic review no-progress timeout after {timeout_seconds:.0f}s",
             "runtime.stage": "app_server_transport_failed",
             "runtime.app_server.transport.status": "failed",
             "runtime.app_server.transport.error_kind": "timeout",
@@ -3993,7 +4705,7 @@ def _record_semantic_review_hard_timeout(
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
         updates[f"slot.{slot}.status"] = "failed"
-        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review blocked by app-server timeout"
+        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review blocked by no-progress timeout"
     append_state_snapshot(run_dir / "state.txt", updates)
 
 
@@ -4026,7 +4738,7 @@ def _record_semantic_repair_hard_timeout(
         {
             f"review.semantic.{stage}.transport.status": "failed",
             f"review.semantic.{stage}.transport.error_kind": "timeout",
-            f"review.semantic.{stage}.transport.error": f"semantic producer repair hard timeout after {timeout_seconds:.0f}s",
+            f"review.semantic.{stage}.transport.error": f"semantic producer repair no-progress timeout after {timeout_seconds:.0f}s",
             f"review.semantic.{stage}.repair.transport.status": "failed",
             f"review.semantic.{stage}.repair.transport.error_kind": "timeout",
             "runtime.stage": "app_server_transport_failed",
@@ -4037,7 +4749,7 @@ def _record_semantic_repair_hard_timeout(
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
         updates[f"slot.{slot}.status"] = "failed"
-        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by app-server timeout"
+        updates[f"slot.{slot}.note"] = f"contextless semantic {stage} producer repair blocked by no-progress timeout"
     append_state_snapshot(run_dir / "state.txt", updates)
 
 
@@ -4062,7 +4774,7 @@ def _record_semantic_repair_salvaged_after_source_change(
         {
             f"review.semantic.{stage}.repair.transport.status": "salvaged_after_source_artifact_change",
             f"review.semantic.{stage}.repair.transport.error_kind": "timeout",
-            f"review.semantic.{stage}.repair.transport.error": f"semantic producer repair hard timeout after {timeout_seconds:.0f}s",
+            f"review.semantic.{stage}.repair.transport.error": f"semantic producer repair no-progress timeout after {timeout_seconds:.0f}s",
             f"review.semantic.{stage}.repair.changed_artifacts_detected": ", ".join(changed_artifacts)[:2000],
         }
     )
@@ -4286,6 +4998,8 @@ async def _run_turn_until_semantic_artifact_completed(
             text=text,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
+            reset_timeout_on_notification=True,
+            progress_callback=lambda notification: _write_semantic_turn_activity_marker(report_path, notification),
         )
     )
     try:
@@ -5045,6 +5759,39 @@ async def api_candidates(run_id: str, item_id: str = Query(min_length=1, max_len
     return {"itemId": item_id, "candidates": list_candidate_items(run_dir, item_id)}
 
 
+@router.post("/api/image-gen/narration-drafts/create")
+async def api_create_narration_drafts(req: NarrationDraftCreateRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            result = _create_narration_drafts_in_manifest(run_dir, replace=req.replace)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "runId": req.run_id,
+        "status": "completed",
+        **result,
+        "progress": read_run_progress(run_dir),
+    }
+
+
+@router.post("/api/image-gen/narration-silent-ok")
+async def api_narration_silent_ok(req: NarrationSilentOkRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            result = _narration_silent_ok(run_dir, item_id=req.item_id, reason=req.reason)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "runId": req.run_id,
+        **result,
+        "progress": read_run_progress(run_dir),
+    }
+
+
 @router.post("/api/image-gen/narration-generate")
 async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
@@ -5057,28 +5804,30 @@ async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any
     result = await _generate_narration_one(run_dir, item)
     durations = {result["itemId"]: float(result["durationSeconds"])} if result.get("durationSeconds") else {}
     async with _serialized_run_write(run_dir, "run_artifacts"):
+        audio_ready_updates = _mark_manifest_narration_audio_ready(run_dir, [result])
         duration_updates = _apply_audio_duration_to_manifest(run_dir, durations)
         append_state_snapshot(
             run_dir / "state.txt",
             {
                 "status": "P750" if result.get("status") == "completed" else "P730",
-                "runtime.stage": "narration_ready_for_review" if result.get("status") == "completed" else "narration_generation_failed",
+                "runtime.stage": "narration_audio_frontend_review_in_progress" if result.get("status") == "completed" else "narration_generation_failed",
                 "slot.p710.status": "done",
                 "slot.p710.note": "frontend narration grounding loaded from video_manifest",
-                "slot.p720.status": "done",
-                "slot.p720.note": "frontend narration text saved to manifest",
+                "slot.p720.status": "done" if result.get("status") == "completed" else "awaiting_approval",
+                "slot.p720.note": "frontend narration text reviewed through TTS generation",
                 "slot.p730.status": "done" if result.get("status") == "completed" else "failed",
                 "slot.p730.note": "narration audio generated from frontend",
                 "slot.p740.status": "done" if duration_updates or result.get("status") == "completed" else "pending",
                 "slot.p740.note": "video duration minimum synced from generated narration",
                 "slot.p750.status": "awaiting_approval" if result.get("status") == "completed" else "pending",
-                "slot.p750.note": "narration audio review ready in frontend",
+                "slot.p750.note": "narration audio review is complete per-cut when every cut has audio or silent ok",
             },
         )
     return {
         "runId": req.run_id,
         "status": result.get("status"),
         "updated": update_result["updated"],
+        "audioReadyUpdated": audio_ready_updates,
         "durationUpdated": duration_updates,
         "item": result,
         "progress": read_run_progress(run_dir),
@@ -5103,28 +5852,30 @@ async def api_narration_generate_bulk(req: BulkNarrationGenerateRequest) -> dict
     durations = {str(result["itemId"]): float(result["durationSeconds"]) for result in results if result.get("durationSeconds")}
     failed = [result for result in results if result.get("status") != "completed"]
     async with _serialized_run_write(run_dir, "run_artifacts"):
+        audio_ready_updates = _mark_manifest_narration_audio_ready(run_dir, results)
         duration_updates = _apply_audio_duration_to_manifest(run_dir, durations)
         append_state_snapshot(
             run_dir / "state.txt",
             {
                 "status": "P750" if not failed else "P730",
-                "runtime.stage": "narration_ready_for_review" if not failed else "narration_generation_partial_failure",
+                "runtime.stage": "narration_audio_frontend_review_in_progress" if not failed else "narration_generation_partial_failure",
                 "slot.p710.status": "done",
                 "slot.p710.note": "frontend narration grounding loaded from video_manifest",
                 "slot.p720.status": "done",
-                "slot.p720.note": "frontend narration text saved to manifest",
+                "slot.p720.note": "frontend narration text reviewed through TTS generation",
                 "slot.p730.status": "done" if not failed else "failed",
                 "slot.p730.note": f"generated {len(results) - len(failed)}/{len(results)} narration files",
                 "slot.p740.status": "done" if durations else "pending",
                 "slot.p740.note": "video duration minimum synced from generated narration",
                 "slot.p750.status": "awaiting_approval" if not failed else "pending",
-                "slot.p750.note": "narration audio review ready in frontend",
+                "slot.p750.note": "narration audio review is complete when every cut has audio or silent ok",
             },
         )
     return {
         "runId": req.run_id,
         "status": "completed" if not failed else "partial_failure",
         "updated": update_result["updated"],
+        "audioReadyUpdated": audio_ready_updates,
         "durationUpdated": duration_updates,
         "results": results,
         "progress": read_run_progress(run_dir),
@@ -5135,12 +5886,25 @@ async def api_narration_generate_bulk(req: BulkNarrationGenerateRequest) -> dict
 async def api_video_generate(req: VideoGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     item = VideoGenerateItem.model_validate(req.model_dump(exclude={"run_id"}))
+    _validate_video_request_reference_paths(run_dir, item)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            _require_narration_ready_for_video(run_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return await _generate_video_candidates(run_dir, item)
 
 
 @router.post("/api/image-gen/video-generate-bulk")
 async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
+    for item in req.items:
+        _validate_video_request_reference_paths(run_dir, item)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            _require_narration_ready_for_video(run_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     total_candidates = sum(item.candidate_count for item in req.items)
     if total_candidates > 96:
         raise HTTPException(status_code=400, detail="bulk video generation is limited to 96 total candidates")

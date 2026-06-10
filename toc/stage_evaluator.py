@@ -18,6 +18,16 @@ from toc.review_loop import (
     SCENE_SET_GATE_MARKERS,
 )
 
+EVENT_TIME_POSITION_VALUES = {
+    "before_trigger",
+    "trigger_moment",
+    "early_action",
+    "mid_action",
+    "consequence",
+    "reaction_after",
+    "handoff_after",
+}
+
 
 STAGE_RUBRIC_WEIGHTS = {
     "research": {
@@ -164,6 +174,17 @@ TRIANGULATION_REQUIRED_KEYS: tuple[str, ...] = (
     "continuity_preserved",
     "handoff_visible_or_audible",
 )
+REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS: tuple[str, ...] = ("setup", "pressure", "turn", "payoff")
+FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS: tuple[str, ...] = (
+    "cut_id",
+    "camera",
+    "shot",
+    "lens",
+    "framing",
+    "image_prompt",
+    "video_prompt",
+    "motion_prompt",
+)
 
 
 def has_todo(text: str) -> bool:
@@ -277,22 +298,45 @@ def _node_cut_contract(node: dict[str, Any], *, allow_legacy: bool = True) -> di
 def _cut_contract_complete(contract: dict[str, Any]) -> bool:
     if not isinstance(contract, dict) or not contract:
         return False
+    source_contract = _cut_source_event_contract(contract)
     return (
         non_empty(_contract_string(contract, "cut_function"))
+        and non_empty(_contract_string(source_contract, "primary_event_beat_id"))
         and non_empty(_contract_string(contract, "target_beat", "viewer_contract.target_beat"))
         and non_empty(_contract_string(contract, "visual_beat", "viewer_contract.visual_proof"))
         and non_empty(_contract_string(contract, "first_frame_brief", "first_frame_contract.first_frame_brief"))
         and non_empty(_contract_string(contract, "motion_brief", "motion_contract.motion_brief"))
         and non_empty(_contract_string(contract, "narration_role", "narration_contract.role"))
+        and bool(_contract_list_paths(source_contract, "source_event_beat_ids"))
         and bool(_contract_list_paths(contract, "must_show", "viewer_contract.must_show"))
         and bool(_contract_list_paths(contract, "done_when", "viewer_contract.done_when"))
     )
+
+
+def _cut_source_event_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(contract, dict) or _contract_string(contract, "schema_version") != "3.0":
+        return {}
+    nested = as_dict(contract.get("source_event_contract"))
+    return nested
+
+
+def _cut_primary_event_beat_id(contract: dict[str, Any]) -> str:
+    return _contract_string(_cut_source_event_contract(contract), "primary_event_beat_id")
+
+
+def _cut_source_event_beat_ids(contract: dict[str, Any]) -> list[str]:
+    return _contract_list_paths(_cut_source_event_contract(contract), "source_event_beat_ids")
 
 
 def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     if not isinstance(contract, dict) or not contract:
         return ["cut_contract:missing"]
+    source_contract = _cut_source_event_contract(contract)
+    if _contract_string(contract, "schema_version") != "3.0":
+        issues.append("schema_version:3.0")
+    if not source_contract:
+        issues.append("source_event_contract")
     required_strings = (
         ("cut_function", "cut_function"),
         ("viewer_contract.target_beat", "target_beat", "viewer_contract.target_beat"),
@@ -303,9 +347,13 @@ def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
         ("viewer_contract.anti_redundancy_key", "anti_redundancy_key", "viewer_contract.anti_redundancy_key"),
         ("viewer_contract.visual_proof", "visual_beat", "viewer_contract.visual_proof"),
         ("first_frame_contract.first_frame_brief", "first_frame_brief", "first_frame_contract.first_frame_brief"),
+        ("first_frame_contract.source_event_beat_id", "first_frame_contract.source_event_beat_id"),
+        ("first_frame_contract.event_time_position", "first_frame_contract.event_time_position"),
+        ("first_frame_contract.event_fact_visible_in_still", "first_frame_contract.event_fact_visible_in_still"),
         ("first_frame_contract.action_completion_state", "action_completion_state", "first_frame_contract.action_completion_state"),
         ("first_frame_contract.static_first_frame_rule", "static_first_frame_rule", "first_frame_contract.static_first_frame_rule"),
         ("motion_contract.motion_brief", "motion_brief", "motion_contract.motion_brief"),
+        ("motion_contract.source_event_beat_id", "motion_contract.source_event_beat_id"),
         ("motion_contract.end_state", "motion_end_state", "motion_contract.end_state"),
         ("narration_contract.role", "narration_role", "narration_contract.role"),
         ("narration_contract.target_function", "narration_target_function", "narration_contract.target_function"),
@@ -317,27 +365,52 @@ def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
     required_lists = (
         ("viewer_contract.visual_evidence", "visual_evidence", "viewer_contract.visual_evidence"),
         ("viewer_contract.required_roles", "required_roles", "viewer_contract.required_roles"),
-        ("viewer_contract.assigned_story_event_ids", "assigned_story_event_ids", "viewer_contract.assigned_story_event_ids"),
         ("viewer_contract.must_show", "must_show", "viewer_contract.must_show"),
         ("viewer_contract.done_when", "done_when", "viewer_contract.done_when"),
         ("motion_contract.must_not_add", "motion_contract.must_not_add"),
+        ("narration_contract.source_event_beat_ids", "narration_contract.source_event_beat_ids"),
         ("narration_contract.must_avoid", "narration_contract.must_avoid"),
     )
+    allow_empty_list_labels = {
+        "motion_contract.must_not_advance_to_event_beat_ids",
+        "narration_contract.must_not_advance_to_event_beat_ids",
+    }
     for label, *paths in required_lists:
-        if not _contract_list_paths(contract, *paths):
+        if label in allow_empty_list_labels:
+            if not any(isinstance(nested_get(contract, path.split(".")), list) for path in paths):
+                issues.append(label)
+        elif not _contract_list_paths(contract, *paths):
             issues.append(label)
+    for label in ("primary_event_beat_id", "event_beat_function", "event_time_position", "source_event_summary", "source_visible_action"):
+        if not non_empty(source_contract.get(label)):
+            issues.append(f"source_event_contract.{label}")
+    if not non_empty(source_contract.get("source_visible_reaction")) and not non_empty(source_contract.get("no_reaction_required_reason")):
+        issues.append("source_event_contract.source_visible_reaction")
+    if not _contract_list_paths(source_contract, "source_event_beat_ids"):
+        issues.append("source_event_contract.source_event_beat_ids")
+    if _contract_string(source_contract, "event_time_position") not in EVENT_TIME_POSITION_VALUES:
+        issues.append("source_event_contract.event_time_position.enum")
+    for label in ("source_required_visual_evidence", "event_facts_to_preserve", "event_facts_not_to_invent", "allowed_reveal_info_ids", "forbidden_reveal_info_ids"):
+        if label not in source_contract or not isinstance(source_contract.get(label), list):
+            issues.append(f"source_event_contract.{label}")
 
     first_frame = as_dict(contract.get("first_frame_contract"))
     if first_frame.get("imageable") is not True:
         issues.append("first_frame_contract.imageable")
     if first_frame.get("must_be_static_evidence_not_motion") is not True:
         issues.append("first_frame_contract.must_be_static_evidence_not_motion")
+    if _contract_string(first_frame, "event_time_position") not in EVENT_TIME_POSITION_VALUES:
+        issues.append("first_frame_contract.event_time_position.enum")
     if not isinstance(first_frame.get("visible_start_state"), dict) or not first_frame.get("visible_start_state"):
         issues.append("first_frame_contract.visible_start_state")
     if not isinstance(first_frame.get("motion_start_affordance"), dict) or not first_frame.get("motion_start_affordance"):
         issues.append("first_frame_contract.motion_start_affordance")
 
     motion_contract = as_dict(contract.get("motion_contract"))
+    if motion_contract.get("starts_from_first_frame") is not True:
+        issues.append("motion_contract.starts_from_first_frame")
+    if "must_not_advance_to_event_beat_ids" not in motion_contract or not isinstance(motion_contract.get("must_not_advance_to_event_beat_ids"), list):
+        issues.append("motion_contract.must_not_advance_to_event_beat_ids")
     if not non_empty(motion_contract.get("start_from_visible_state")):
         issues.append("motion_contract.start_from_visible_state")
     if not non_empty(motion_contract.get("end_frame_brief")):
@@ -346,6 +419,14 @@ def _cut_contract_structure_issues(contract: dict[str, Any]) -> list[str]:
     role = _contract_string(contract, "narration_contract.role", "narration_role").lower()
     if role == "silent" and not non_empty(_contract_string(contract, "narration_contract.silence_reason", "silence_reason")):
         issues.append("narration_contract.silence_reason")
+    narration = as_dict(contract.get("narration_contract"))
+    for key in ("allowed_info_ids", "forbidden_info_ids", "must_not_advance_to_event_beat_ids"):
+        if key not in narration or not isinstance(narration.get(key), list):
+            issues.append(f"narration_contract.{key}")
+    if narration.get("must_not_explain_visible_action_as_caption") is not True:
+        issues.append("narration_contract.must_not_explain_visible_action_as_caption")
+    if _contract_string(narration, "narration_event_boundary") not in {"same_event_only", "may_bridge_previous", "may_bridge_next_without_reveal"}:
+        issues.append("narration_contract.narration_event_boundary")
 
     downstream = as_dict(contract.get("downstream_handoff"))
     downstream_required = {
@@ -1313,6 +1394,353 @@ def _scene_intent_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
     return {key: values for key, values in issues.items() if values}
 
 
+def _iter_mapping_keys_recursive(value: Any, *, prefix: str = "") -> list[str]:
+    keys: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            keys.append(path)
+            keys.extend(_iter_mapping_keys_recursive(child, prefix=path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            keys.extend(_iter_mapping_keys_recursive(child, prefix=f"{prefix}[{index}]" if prefix else f"[{index}]"))
+    return keys
+
+
+def _scene_event(scene: dict[str, Any]) -> dict[str, Any]:
+    return as_dict(scene.get("scene_event"))
+
+
+def _scene_event_sequence(scene: dict[str, Any]) -> list[dict[str, Any]]:
+    event = _scene_event(scene)
+    return [beat for beat in as_list(event.get("event_sequence")) if isinstance(beat, dict)]
+
+
+def _scene_event_beat_id(beat: dict[str, Any]) -> str:
+    return str(beat.get("beat_id") or "").strip()
+
+
+def _scene_event_beat_function(beat: dict[str, Any]) -> str:
+    return str(beat.get("beat_function") or beat.get("function") or "").strip().lower()
+
+
+def _scene_event_beat_ids(scene: dict[str, Any]) -> list[str]:
+    return [_scene_event_beat_id(beat) for beat in _scene_event_sequence(scene) if _scene_event_beat_id(beat)]
+
+
+def _scene_event_source_story_beat_refs(scene_event: dict[str, Any]) -> list[str]:
+    refs = scene_event.get("source_story_beat_ids")
+    return [str(item).strip() for item in refs if str(item).strip()] if isinstance(refs, list) else []
+
+
+def _forbidden_reveal_ids_from_scene_intent(scene: dict[str, Any]) -> set[str]:
+    intent = as_dict(scene.get("scene_intent"))
+    forbidden: set[str] = set()
+    delta = as_dict(intent.get("audience_knowledge_delta"))
+    for item in as_list(delta.get("forbidden_early_reveals")):
+        if isinstance(item, dict):
+            for key in ("info_id", "reveal_id", "id"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    forbidden.add(value)
+        else:
+            text = str(item).strip()
+            if text and text.isascii() and " " not in text:
+                forbidden.add(text)
+    for constraint in as_list(intent.get("reveal_constraints")):
+        if not isinstance(constraint, dict):
+            text = str(constraint).strip()
+            if text and text.isascii() and " " not in text:
+                forbidden.add(text)
+            continue
+        for key in ("forbidden_info_ids", "forbidden_reveal_ids"):
+            for value in as_list(constraint.get(key)):
+                text = str(value).strip()
+                if text:
+                    forbidden.add(text)
+    return forbidden
+
+
+def _scene_event_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
+    scene_id = _scene_id_for_issue(scene)
+    issues: dict[str, list[str]] = {
+        "exists": [],
+        "sequence_complete": [],
+        "visible_actions_complete": [],
+        "no_forbidden_directing_fields": [],
+        "beat_ids_unique": [],
+        "turning_event_ref_valid": [],
+        "end_situation_ref_valid": [],
+        "reveal_constraints_respected": [],
+    }
+    event = _scene_event(scene)
+    if not event:
+        issues["exists"].append(f"scene{scene_id}:scene_event")
+        return {key: values for key, values in issues.items() if values}
+
+    if str(event.get("schema_version") or "").strip() != "scene_event_v1":
+        issues["exists"].append(f"scene{scene_id}:scene_event.schema_version")
+    for key in ("event_logline", "start_situation", "turning_event", "end_situation"):
+        if key not in event or not non_empty(event.get(key)):
+            issues["exists"].append(f"scene{scene_id}:scene_event.{key}")
+    for key in ("offscreen_context", "forbidden_event_changes"):
+        if key not in event or not isinstance(event.get(key), list):
+            issues["exists"].append(f"scene{scene_id}:scene_event.{key}")
+    if not _scene_event_source_story_beat_refs(event):
+        issues["exists"].append(f"scene{scene_id}:scene_event.source_story_beat_ids")
+
+    forbidden_fields = set(FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS)
+    forbidden_paths = [
+        path
+        for path in _iter_mapping_keys_recursive(event)
+        if path.rsplit(".", 1)[-1] in forbidden_fields or path.rsplit("[", 1)[-1].rstrip("]") in forbidden_fields
+    ]
+    if forbidden_paths:
+        issues["no_forbidden_directing_fields"].extend(f"scene{scene_id}:scene_event.{path}" for path in forbidden_paths[:8])
+
+    sequence = _scene_event_sequence(scene)
+    if not sequence:
+        issues["sequence_complete"].append(f"scene{scene_id}:scene_event.event_sequence")
+    functions = {_scene_event_beat_function(beat) for beat in sequence}
+    for required in REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS:
+        if required not in functions:
+            issues["sequence_complete"].append(f"scene{scene_id}:scene_event.event_sequence.{required}")
+
+    beat_ids: list[str] = []
+    source_story_beat_ids = set(_scene_event_source_story_beat_refs(event))
+    for index, beat in enumerate(sequence, start=1):
+        beat_id = _scene_event_beat_id(beat)
+        if not beat_id:
+            issues["beat_ids_unique"].append(f"scene{scene_id}:scene_event.event_sequence[{index}].beat_id")
+        else:
+            beat_ids.append(beat_id)
+        if not _scene_event_beat_function(beat):
+            issues["sequence_complete"].append(f"scene{scene_id}:{beat_id or index}.beat_function")
+        source_ids = [str(item).strip() for item in as_list(beat.get("source_story_beat_ids")) if str(item).strip()]
+        if not source_ids:
+            issues["sequence_complete"].append(f"scene{scene_id}:{beat_id or index}.source_story_beat_ids")
+        elif source_story_beat_ids and any(source_id not in source_story_beat_ids for source_id in source_ids):
+            issues["sequence_complete"].append(f"scene{scene_id}:{beat_id or index}.source_story_beat_ids.ref")
+        for key in ("what_happens", "visible_action", "visible_reaction", "immediate_consequence", "emotional_pressure"):
+            if not non_empty(beat.get(key)):
+                issues["visible_actions_complete"].append(f"scene{scene_id}:{beat_id or index}.{key}")
+        if not as_list(beat.get("required_visual_evidence")):
+            issues["visible_actions_complete"].append(f"scene{scene_id}:{beat_id or index}.required_visual_evidence")
+
+    duplicate_ids = sorted({beat_id for beat_id in beat_ids if beat_ids.count(beat_id) > 1})
+    if duplicate_ids:
+        issues["beat_ids_unique"].extend(f"scene{scene_id}:{beat_id}.duplicate" for beat_id in duplicate_ids)
+
+    beat_id_set = set(beat_ids)
+    turn_ids = {_scene_event_beat_id(beat) for beat in sequence if _scene_event_beat_function(beat) == "turn"}
+    turning_event = as_dict(event.get("turning_event"))
+    turning_ref = str(turning_event.get("source_event_beat_id") or turning_event.get("event_beat_id") or "").strip()
+    if not turning_ref or turning_ref not in beat_id_set:
+        issues["turning_event_ref_valid"].append(f"scene{scene_id}:scene_event.turning_event.source_event_beat_id")
+    elif turn_ids and turning_ref not in turn_ids:
+        issues["turning_event_ref_valid"].append(f"scene{scene_id}:scene_event.turning_event.source_event_beat_id.not_turn")
+    if str(turning_event.get("causal_turn_ref") or "").strip() != "scene_intent.causal_turn":
+        issues["turning_event_ref_valid"].append(f"scene{scene_id}:scene_event.turning_event.causal_turn_ref")
+
+    end_situation = as_dict(event.get("end_situation"))
+    if str(end_situation.get("value_shift_to_ref") or "").strip() != "scene_intent.value_shift.to":
+        issues["end_situation_ref_valid"].append(f"scene{scene_id}:scene_event.end_situation.value_shift_to_ref")
+    for key in ("outcome", "character_position", "object_state", "relationship_state", "new_pressure"):
+        if not non_empty(end_situation.get(key)):
+            issues["end_situation_ref_valid"].append(f"scene{scene_id}:scene_event.end_situation.{key}")
+    visible_refs = [str(item).strip() for item in as_list(end_situation.get("visible_evidence_refs")) if str(item).strip()]
+    if visible_refs and any(ref not in beat_id_set for ref in visible_refs):
+        issues["end_situation_ref_valid"].append(f"scene{scene_id}:scene_event.end_situation.visible_evidence_refs")
+
+    forbidden_reveals = _forbidden_reveal_ids_from_scene_intent(scene)
+    if forbidden_reveals:
+        for beat in sequence:
+            beat_id = _scene_event_beat_id(beat) or "?"
+            revealed = {str(item).strip() for item in as_list(beat.get("story_information_revealed_ids")) if str(item).strip()}
+            if revealed & forbidden_reveals:
+                issues["reveal_constraints_respected"].append(f"scene{scene_id}:{beat_id}.forbidden_reveal:{','.join(sorted(revealed & forbidden_reveals))}")
+
+    return {key: values for key, values in issues.items() if values}
+
+
+def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
+    scene_id = _scene_id_for_issue(scene)
+    issues: dict[str, list[str]] = {
+        "refs_valid": [],
+        "reference_integrity": [],
+        "source_event_preservation": [],
+        "first_frame_alignment": [],
+        "motion_boundary": [],
+        "narration_boundary": [],
+        "event_context_ready": [],
+        "sequence_covered": [],
+        "turn_payoff_have_cuts": [],
+    }
+    sequence = _scene_event_sequence(scene)
+    beat_ids = {_scene_event_beat_id(beat) for beat in sequence if _scene_event_beat_id(beat)}
+    if not beat_ids:
+        issues["refs_valid"].append(f"scene{scene_id}:scene_event.event_sequence")
+        return {key: values for key, values in issues.items() if values}
+
+    beat_functions = {_scene_event_beat_id(beat): _scene_event_beat_function(beat) for beat in sequence if _scene_event_beat_id(beat)}
+    beat_by_id = {_scene_event_beat_id(beat): beat for beat in sequence if _scene_event_beat_id(beat)}
+    sequence_ids = [_scene_event_beat_id(beat) for beat in sequence if _scene_event_beat_id(beat)]
+    forbidden_event_changes = {str(item).strip() for item in as_list(_scene_event(scene).get("forbidden_event_changes")) if str(item).strip()}
+    covered: set[str] = set()
+    for cut in as_list(scene.get("cuts")):
+        if not isinstance(cut, dict) or str(cut.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "?")
+        contract = _node_cut_contract(cut, allow_legacy=False)
+        if not contract:
+            issues["refs_valid"].append(f"{selector}:cut_contract")
+            continue
+        source_contract = _cut_source_event_contract(contract)
+        if not source_contract:
+            issues["refs_valid"].append(f"{selector}:cut_contract.source_event_contract")
+            continue
+        primary = str(source_contract.get("primary_event_beat_id") or "").strip()
+        refs = [str(item).strip() for item in as_list(source_contract.get("source_event_beat_ids")) if str(item).strip()]
+        if not primary:
+            issues["refs_valid"].append(f"{selector}:source_event_contract.primary_event_beat_id")
+        elif primary not in beat_ids:
+            issues["refs_valid"].append(f"{selector}:source_event_contract.primary_event_beat_id.ref")
+        if not refs:
+            issues["refs_valid"].append(f"{selector}:source_event_contract.source_event_beat_ids")
+        elif any(ref not in beat_ids for ref in refs):
+            issues["refs_valid"].append(f"{selector}:source_event_contract.source_event_beat_ids.ref")
+        if primary and refs and primary not in refs:
+            issues["reference_integrity"].append(f"{selector}:source_event_contract.primary_event_beat_id.not_in_source_event_beat_ids")
+        declared_function = str(source_contract.get("event_beat_function") or "").strip()
+        if primary and declared_function != beat_functions.get(primary):
+            issues["reference_integrity"].append(f"{selector}:source_event_contract.event_beat_function")
+        if str(source_contract.get("event_time_position") or "").strip() not in EVENT_TIME_POSITION_VALUES:
+            issues["reference_integrity"].append(f"{selector}:source_event_contract.event_time_position")
+        if not non_empty(source_contract.get("source_visible_reaction")) and not non_empty(source_contract.get("no_reaction_required_reason")):
+            issues["source_event_preservation"].append(f"{selector}:source_event_contract.source_visible_reaction")
+        for key in ("event_facts_to_preserve", "event_facts_not_to_invent", "allowed_reveal_info_ids", "forbidden_reveal_info_ids"):
+            if key not in source_contract or not isinstance(source_contract.get(key), list):
+                if key in {"event_facts_to_preserve", "event_facts_not_to_invent"}:
+                    issues["refs_valid"].append(f"{selector}:source_event_contract.{key}")
+                issues["source_event_preservation"].append(f"{selector}:source_event_contract.{key}")
+        ref_beats = [beat_by_id[ref] for ref in refs if ref in beat_by_id]
+        primary_beat = beat_by_id.get(primary)
+        expected_facts = {str(beat.get("what_happens") or "").strip() for beat in ref_beats if str(beat.get("what_happens") or "").strip()}
+        declared_preserve = {str(item).strip() for item in as_list(source_contract.get("event_facts_to_preserve")) if str(item).strip()}
+        if expected_facts and not expected_facts.issubset(declared_preserve):
+            issues["source_event_preservation"].append(f"{selector}:source_event_contract.event_facts_to_preserve.mismatch")
+        expected_not_invent = forbidden_event_changes
+        declared_not_invent = {str(item).strip() for item in as_list(source_contract.get("event_facts_not_to_invent")) if str(item).strip()}
+        if expected_not_invent and not expected_not_invent.issubset(declared_not_invent):
+            issues["source_event_preservation"].append(f"{selector}:source_event_contract.event_facts_not_to_invent.mismatch")
+        if primary_beat:
+            expected_action = str(primary_beat.get("visible_action") or "").strip()
+            if expected_action and str(source_contract.get("source_visible_action") or "").strip() != expected_action:
+                issues["source_event_preservation"].append(f"{selector}:source_event_contract.source_visible_action.mismatch")
+            expected_evidence = {str(item).strip() for item in as_list(primary_beat.get("required_visual_evidence")) if str(item).strip()}
+            declared_evidence = {str(item).strip() for item in as_list(source_contract.get("source_required_visual_evidence")) if str(item).strip()}
+            if expected_evidence and not expected_evidence.issubset(declared_evidence):
+                issues["source_event_preservation"].append(f"{selector}:source_event_contract.source_required_visual_evidence.mismatch")
+        first_frame = as_dict(contract.get("first_frame_contract"))
+        if str(first_frame.get("source_event_beat_id") or "").strip() != primary:
+            issues["first_frame_alignment"].append(f"{selector}:first_frame_contract.source_event_beat_id")
+        if str(first_frame.get("event_time_position") or "").strip() not in EVENT_TIME_POSITION_VALUES:
+            issues["first_frame_alignment"].append(f"{selector}:first_frame_contract.event_time_position")
+        if not non_empty(first_frame.get("event_fact_visible_in_still")):
+            issues["first_frame_alignment"].append(f"{selector}:first_frame_contract.event_fact_visible_in_still")
+        motion = as_dict(contract.get("motion_contract"))
+        if str(motion.get("source_event_beat_id") or "").strip() != primary:
+            issues["motion_boundary"].append(f"{selector}:motion_contract.source_event_beat_id")
+        if motion.get("starts_from_first_frame") is not True:
+            issues["motion_boundary"].append(f"{selector}:motion_contract.starts_from_first_frame")
+        if "must_not_advance_to_event_beat_ids" not in motion or not isinstance(motion.get("must_not_advance_to_event_beat_ids"), list):
+            issues["motion_boundary"].append(f"{selector}:motion_contract.must_not_advance_to_event_beat_ids")
+        expected_blocked = [
+            beat_id
+            for beat_id in sequence_ids
+            if beat_id not in refs and beat_functions.get(beat_id) in {"turn", "payoff"}
+        ]
+        motion_blocked = {str(item).strip() for item in as_list(motion.get("must_not_advance_to_event_beat_ids")) if str(item).strip()}
+        if expected_blocked and not set(expected_blocked).issubset(motion_blocked):
+            issues["motion_boundary"].append(f"{selector}:motion_contract.must_not_advance_to_event_beat_ids.incomplete")
+        narration = as_dict(contract.get("narration_contract"))
+        narration_refs = [str(item).strip() for item in as_list(narration.get("source_event_beat_ids")) if str(item).strip()]
+        if not narration_refs or any(ref not in refs for ref in narration_refs):
+            issues["narration_boundary"].append(f"{selector}:narration_contract.source_event_beat_ids")
+        if narration.get("must_not_explain_visible_action_as_caption") is not True:
+            issues["narration_boundary"].append(f"{selector}:narration_contract.must_not_explain_visible_action_as_caption")
+        if str(narration.get("narration_event_boundary") or "").strip() not in {"same_event_only", "may_bridge_previous", "may_bridge_next_without_reveal"}:
+            issues["narration_boundary"].append(f"{selector}:narration_contract.narration_event_boundary")
+        narration_blocked = {str(item).strip() for item in as_list(narration.get("must_not_advance_to_event_beat_ids")) if str(item).strip()}
+        if expected_blocked and not set(expected_blocked).issubset(narration_blocked):
+            issues["narration_boundary"].append(f"{selector}:narration_contract.must_not_advance_to_event_beat_ids.incomplete")
+        event_context = as_dict(contract.get("event_context_for_cut"))
+        context_primary = as_dict(event_context.get("primary_event_beat"))
+        if not event_context:
+            issues["event_context_ready"].append(f"{selector}:event_context_for_cut")
+        else:
+            derived_from = {str(item).strip() for item in as_list(event_context.get("derived_from")) if str(item).strip()}
+            if not {"scene_event.event_sequence[]", "cut_contract.source_event_contract"}.issubset(derived_from):
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.derived_from")
+            if event_context.get("editable") is not False:
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.editable")
+            if str(context_primary.get("beat_id") or "").strip() != primary:
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.primary_event_beat.beat_id")
+            context_source_ids = {
+                str(as_dict(beat).get("beat_id") or "").strip()
+                for beat in as_list(event_context.get("source_event_beats"))
+                if str(as_dict(beat).get("beat_id") or "").strip()
+            }
+            if set(refs) != context_source_ids:
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.source_event_beats")
+            expected_neighbor_ids: set[str] = set()
+            for ref in refs:
+                if ref not in sequence_ids:
+                    continue
+                index = sequence_ids.index(ref)
+                for neighbor_index in (index - 1, index + 1):
+                    if 0 <= neighbor_index < len(sequence_ids):
+                        neighbor_id = sequence_ids[neighbor_index]
+                        if neighbor_id not in refs:
+                            expected_neighbor_ids.add(neighbor_id)
+            context_neighbor_ids = {
+                str(as_dict(beat).get("beat_id") or "").strip()
+                for beat in as_list(event_context.get("neighboring_event_beats"))
+                if str(as_dict(beat).get("beat_id") or "").strip()
+            }
+            if expected_neighbor_ids != context_neighbor_ids:
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.neighboring_event_beats")
+            context_forbidden = {str(item).strip() for item in as_list(event_context.get("forbidden_event_changes")) if str(item).strip()}
+            if forbidden_event_changes and not forbidden_event_changes.issubset(context_forbidden):
+                issues["event_context_ready"].append(f"{selector}:event_context_for_cut.forbidden_event_changes")
+        covered.update(ref for ref in refs if ref in beat_ids)
+
+    required_beats = {beat_id for beat_id, function in beat_functions.items() if function in set(REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS)}
+    missing_required = sorted(required_beats - covered)
+    if missing_required:
+        issues["sequence_covered"].extend(f"scene{scene_id}:{beat_id}.uncovered" for beat_id in missing_required)
+    missing_turn_payoff = sorted(beat_id for beat_id in missing_required if beat_functions.get(beat_id) in {"turn", "payoff"})
+    if missing_turn_payoff:
+        issues["turn_payoff_have_cuts"].extend(f"scene{scene_id}:{beat_id}.uncovered" for beat_id in missing_turn_payoff)
+
+    return {key: values for key, values in issues.items() if values}
+
+
+def _scene_event_readiness_issues(scenes: list[Any], *, prefix: str = "script") -> list[str]:
+    issues: list[str] = []
+    for scene in scenes:
+        if not isinstance(scene, dict) or str(scene.get("kind") or "").strip() == "reference":
+            continue
+        for issue_key, values in _scene_event_issue_map(scene).items():
+            if values:
+                issues.append(f"{prefix}.scene_event.{issue_key}")
+        for issue_key, values in _cut_event_ref_issue_map(scene).items():
+            if values:
+                issues.append(f"{prefix}.cut_event.{issue_key}")
+    return list(dict.fromkeys(issues))
+
+
 def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
     contract = _node_cut_contract(cut)
     if contract and _cut_contract_complete(contract):
@@ -1382,7 +1810,8 @@ def _coverage_minimum_cut_count(plan: dict[str, Any]) -> int:
         return selected
     by_importance = as_int(min_cut_count.get("by_importance")) or 0
     by_duration = as_int(min_cut_count.get("by_duration")) or 0
-    return max(by_importance, by_duration, 2)
+    by_event_beats = as_int(min_cut_count.get("by_event_beats")) or 0
+    return max(by_importance, by_duration, by_event_beats, 2)
 
 
 def _scene_cut_selector(scene_id: str, cut: dict[str, Any]) -> str:
@@ -1428,9 +1857,16 @@ def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cut
     min_cut_count = as_dict(plan.get("min_cut_count"))
     by_importance = as_int(min_cut_count.get("by_importance")) or 0
     by_duration = as_int(min_cut_count.get("by_duration")) or 0
+    by_event_beats = as_int(min_cut_count.get("by_event_beats")) or 0
     selected = as_int(min_cut_count.get("selected")) or as_int(plan.get("minimum_cut_count")) or 0
-    if selected and selected < max(by_importance, by_duration):
+    if selected and selected < max(by_importance, by_duration, by_event_beats):
         issues.append(f"scene{scene_id}:coverage_plan_selected_below_floor")
+    strategy = str(plan.get("coverage_strategy") or "").strip()
+    if strategy and strategy != "reverse_from_scene_event":
+        issues.append(f"scene{scene_id}:coverage_strategy")
+    source_schema_version = str(plan.get("source_schema_version") or "").strip()
+    if source_schema_version and source_schema_version != "scene_event_v1":
+        issues.append(f"scene{scene_id}:source_schema_version")
 
     obligations = as_list(plan.get("scene_obligations"))
     if not obligations:
@@ -1690,6 +2126,74 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
             message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
             kind="rubric",
         )
+
+    scene_event_issues: dict[str, list[str]] = {
+        "exists": [],
+        "sequence_complete": [],
+        "visible_actions_complete": [],
+        "no_forbidden_directing_fields": [],
+        "beat_ids_unique": [],
+        "turning_event_ref_valid": [],
+        "end_situation_ref_valid": [],
+        "reveal_constraints_respected": [],
+    }
+    cut_event_issues: dict[str, list[str]] = {
+        "refs_valid": [],
+        "reference_integrity": [],
+        "source_event_preservation": [],
+        "first_frame_alignment": [],
+        "motion_boundary": [],
+        "narration_boundary": [],
+        "event_context_ready": [],
+        "sequence_covered": [],
+        "turn_payoff_have_cuts": [],
+    }
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        for key, values in _scene_event_issue_map(scene).items():
+            scene_event_issues.setdefault(key, []).extend(values)
+        for key, values in _cut_event_ref_issue_map(scene).items():
+            cut_event_issues.setdefault(key, []).extend(values)
+    scene_event_checks = (
+        ("script.scene_event_exists", "exists", "all scenes include canonical scene_event with scene_event_v1 fields"),
+        ("script.scene_event_sequence_complete", "sequence_complete", "scene_event.event_sequence includes setup, pressure, turn, payoff beats with source story refs"),
+        ("script.scene_event_visible_actions_complete", "visible_actions_complete", "each scene_event beat declares what happens, visible action/reaction, consequence, pressure, and visual evidence"),
+        ("script.scene_event_no_forbidden_directing_fields", "no_forbidden_directing_fields", "scene_event contains story events only and no directing or prompt fields"),
+        ("script.scene_event_beat_ids_unique", "beat_ids_unique", "scene_event beat_id values are present and unique per scene"),
+        ("script.scene_event_turning_event_ref_valid", "turning_event_ref_valid", "scene_event.turning_event references the turn beat and scene_intent.causal_turn"),
+        ("script.scene_event_end_situation_ref_valid", "end_situation_ref_valid", "scene_event.end_situation references scene_intent.value_shift.to and declared event evidence"),
+        ("script.scene_event_reveal_constraints_respected", "reveal_constraints_respected", "scene_event does not fully reveal forbidden reveal IDs"),
+    )
+    for check_id, issue_key, message in scene_event_checks:
+        issue_values = scene_event_issues.get(issue_key, [])
+        add_check(
+            checks,
+            check_id,
+            not issue_values,
+            message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
+            kind="rubric",
+        )
+    cut_event_checks = (
+        ("script.cut_event_beat_refs_valid", "refs_valid", "all cut_contract entries reference valid scene_event beat ids"),
+        ("script.event_beat_reference_integrity", "reference_integrity", "cut_contract.source_event_contract matches the primary scene_event beat and enum policy"),
+        ("script.source_event_preservation", "source_event_preservation", "cut_contract.source_event_contract preserves source event facts and reveal boundaries"),
+        ("script.event_first_frame_alignment", "first_frame_alignment", "first_frame_contract aligns with the primary source event beat"),
+        ("script.event_motion_boundary", "motion_boundary", "motion_contract starts from the first frame and does not cross forbidden event beat boundaries"),
+        ("script.event_narration_boundary", "narration_boundary", "narration_contract stays within allowed event and reveal boundaries"),
+        ("script.event_context_for_cut_ready", "event_context_ready", "event_context_for_cut is a non-editable derived projection matching source_event_contract"),
+        ("script.cuts_cover_scene_event_sequence", "sequence_covered", "cuts cover every required scene_event setup/pressure/turn/payoff beat"),
+        ("script.turn_and_payoff_event_beats_have_cuts", "turn_payoff_have_cuts", "turn and payoff event beats are assigned to at least one cut"),
+    )
+    for check_id, issue_key, message in cut_event_checks:
+        issue_values = cut_event_issues.get(issue_key, [])
+        add_check(
+            checks,
+            check_id,
+            not issue_values,
+            message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
+            kind="rubric",
+        )
     scenes_agent_passed = sum(
         1
         for scene in scenes
@@ -1785,6 +2289,7 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
     _append_grounding_checks(checks, run_dir=run_dir, stage="script")
 
     all_no_todo = True
+    scene_event_issues: list[str] = []
     for path in script_paths:
         if not path.exists():
             all_no_todo = False
@@ -1792,8 +2297,22 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
         text = path.read_text(encoding="utf-8")
         if profile == "standard" and has_todo(text):
             all_no_todo = False
+        _scene_text, data = load_structured_document(path)
+        scene_data = data.get("scene") if isinstance(data.get("scene"), dict) else data
+        scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+        if not scenes and isinstance(scene_data, dict):
+            scenes = [scene_data]
+        scene_event_issues.extend(_scene_event_readiness_issues(scenes, prefix="script.scene_series"))
     if profile == "standard":
         add_check(checks, "script.scene_no_todo", all_no_todo, "scene scripts do not contain TODO/TBD markers", kind="rubric")
+    add_check(
+        checks,
+        "script.scene_series_scene_event_contract",
+        not scene_event_issues,
+        "scene-series scripts satisfy scene_event v1 and cut event beat contracts"
+        + (f" (issues: {', '.join(scene_event_issues[:8])})" if scene_event_issues else ""),
+        kind="rubric",
+    )
 
     updates = {"eval.script.score": f"{score_from_checks(checks):.4f}"}
     return make_stage("script", "scenes/*/script.md", checks, details={"scene_count": len(scene_dirs)}), updates
@@ -1954,6 +2473,7 @@ def _script_readiness_issues_from_run(run_dir: Path) -> list[str]:
         issues.append("script.scenes:missing")
     readiness_issues = _scene_readiness_issues(scenes)
     issues.extend(readiness_issues)
+    issues.extend(_scene_event_readiness_issues(scenes, prefix="script"))
     if _review_status(data, "cut_blueprint_review") not in {"approved", "passed"}:
         issues.append("script.cut_blueprint_review_approved")
     renderable_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
@@ -2511,6 +3031,8 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         manifest_selectors = _manifest_selectors(data)
         selector_mismatch = sorted((script_selectors - manifest_selectors) | (manifest_selectors - script_selectors))
         script_readiness_issues = _script_readiness_issues_from_run(run_dir)
+        manifest_scene_event_issues = _scene_event_readiness_issues(as_list(data.get("scenes")), prefix="manifest")
+        script_readiness_issues.extend(manifest_scene_event_issues)
         add_check(
             checks,
             "p400.script_readiness_contract",

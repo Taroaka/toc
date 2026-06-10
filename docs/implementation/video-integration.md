@@ -118,12 +118,17 @@ generator の既定参照順:
 運用（例）:
 1) `video_manifest.md` を cuts 前提で書く（`scenes[].cuts[]` でも、sceneをカットとして扱ってもよい）
    - `audio.narration.text` / `audio.narration.tts_text` は **空文字**でよい（未記入）。`TODO:` のようなメタ情報は入れない（TTSで喋られて事故る）
+   - 未記入は `audio.narration.authoring_status: "missing"` と `missing_reason: "p700_narration_not_written_yet"` で表す
 2) Narration Writer が `audio.narration.text` と `audio.narration.tts_text` を確定する
   - 先に `audio.narration.contract` を定義する
-    - `target_function`: この cut で narration が主に担う役割
-    - `must_cover`: 必ず触れる概念
-    - `must_avoid`: 直接言わない語や避けたい説明
-    - `done_when`: evaluator と共有する完了条件
+    - `story_role.narrative_position`: `opening|middle|ending`
+    - `story_role.cut_function`: `setup|pressure|threshold|turn|payoff|reaction|handoff`
+    - `story_role.voice_function`: `information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence`
+    - `visual_distance.distance_policy`: `stay_close|contextual|meaning_first|silent`
+    - `visual_distance.narration_should_add`: 映像だけでは言えない情報・内面・因果・余韻
+    - `rhythm_and_timing`: 話し始め、終わり、pause、目標 speech 秒
+    - `tts_readiness.pronunciation_targets`: 誤読しそうな語
+    - `target_function` / `role` / `must_cover` / `must_avoid` は旧 reader 用の互換 alias として残してよいが、新規設計では上記 v2 fields を優先する
   - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
   - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
   - `voice_tags` は bracket なしの生タグで保持し、materialize 時に `[]` を付ける
@@ -149,9 +154,21 @@ generator の既定参照順:
     - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
     - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
     - 言葉の薄さ: `フォーマット` / `フレーム` / `フェーズ` / `構造` / `観点` のような抽象語を連発せず、次文で具体的な人物・行動・場所・物へ落とす
+  - p720 L3 critic は次の 5 役を標準割当とする
+    - critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
+    - critic 2 `visual_distance`: 映像説明の重複、image / motion との距離、camera / prompt 語の混入
+    - critic 3 `tts_delivery`: `tts_text`, pause, sentence length, audio tag, pronunciation candidates
+    - critic 4 `arc_and_pacing`: cut 間接続、scene voice arc、duration density、ending 余韻
+    - critic 5 `spoken_japanese`: 聞いたときの自然さ、AI っぽい抽象語、比喩過多、文末の単調さ
+  - p720 は `logs/eval/narration/round_01/pronunciation_candidates.tsv` を作れる
+    - columns: `surface`, `reading`, `selector`, `reason`, `status`
+    - p730 前に unresolved candidate を `tts_text` / alias file / official pronunciation dictionary / rejected のいずれかへ解決する
   - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
   - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
   - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
+  - aggregator は cut 単体の finding に加えて、軽量な `narration_arc_review` を持てる
+    - 初期運用では scene-level の voice continuity / emotional curve / information flow / repetition control を warning として扱う
+    - full-run blocking gate 化は運用が安定してから行う
   - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
   - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
    - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
@@ -172,6 +189,61 @@ generator の既定参照順:
    - `cinematic_story` は既定で 300 秒以上を target にする
    - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
    - gate を超えた run だけが video generation / render に進む
+
+### Narration Role Matrix
+
+`story_role.voice_function` は「この cut で声が何を達成するか」を示す。位置や雰囲気ではなく、聞いた人の理解・感情・次 cut への準備をどう変えるかで選ぶ。
+
+| voice_function | 使う場面 | 書くべきこと | 避けること | 文の型 |
+| --- | --- | --- | --- | --- |
+| `information` | 世界観、ルール、状況理解 | 映像だけでは分からない前提 | 画面説明 | `ここでは、XだけがYを決めます。` |
+| `emotion` | 表情だけでは内面が不足 | 迷い、後悔、決意、恐れ | 感情語の連打 | `彼はまだ、Xを選べずにいます。` |
+| `causality` | 次 cut / 次 scene への接続 | なぜ次が起きるか | 先の展開の説明しすぎ | `その小さな選択が、後のXを呼び込みます。` |
+| `time` | 省略、回想、長い移動 | 時間の圧縮 | 年表口調 | `それから三日、村には同じ朝が来ませんでした。` |
+| `viewpoint` | 誰の見方かが重要 | 認識の偏り | 神視点の説明過多 | `彼には、それが助けに見えていました。` |
+| `world_rule` | 異界、禁忌、伝承 | 行動を縛るルール | 設定資料風 | `この場所では、振り返ることが別れを意味します。` |
+| `contrast` | 映像と意味をずらす | 見えているものの裏の意味 | 難解な比喩 | `祝福の声の中で、彼だけが沈黙を聞いていました。` |
+| `meaning` | scene の意味を受け渡す | いま残すべき解釈 | 抽象語だけの総括 | `その沈黙が、彼の答えでした。` |
+| `aftertaste` | 終盤、余韻 | 何が残ったか | 教訓の押しつけ | `残ったのは、名前を呼ぶ声だけでした。` |
+| `silence` | 視覚報酬、反応、間 | 無音の理由 | 書き忘れ | `silence_contract` に理由を書く |
+
+### Visual Distance Policy
+
+`visual_distance.distance_policy` は、映像と声の距離を p720 で判定するための contract である。
+
+- `stay_close`: opening / 場所認知 / 非日常エリア導入。多少の視覚 overlap を許容するが、完全なキャプション化は禁止。
+- `contextual`: 標準。見えている事実を土台に、因果・内面・時間・意味を足す。
+- `meaning_first`: turn / payoff / ending。映像説明より、見たあとに残る意味を優先する。
+- `silent`: 視覚報酬、反応、緊張、余韻。`silence_contract` が必要。
+
+p720 rule:
+
+- `distance_policy` が missing なら warning。
+- `meaning_first` なのに映像説明だけなら blocking。
+- `stay_close` は opening / 非日常導入で説明寄りを許容する。
+- `visual_overlap_allowed: true` の場合も、理由が空なら finding。
+
+### Bad / Good Examples
+
+映像キャプション化:
+
+- bad: `主人公は森の中を歩いています。`
+- good: `その森では、進むほどに帰り道の音が遠ざかっていきます。`
+
+AI っぽい抽象語:
+
+- bad: `彼は新しいフェーズに入り、物語の構造が変化します。`
+- good: `彼は初めて、助けを待つ側ではなく、選ぶ側に立ちます。`
+
+情報過多:
+
+- bad: `この村には古くから、夜に鐘が三度鳴ると森の神が目覚め、名前を呼ばれた者は戻れなくなるという伝承がありました。`
+- good: `この村では、夜の鐘が三度鳴ったあと、名前を呼ばれてはいけません。`
+
+TTS に弱い文:
+
+- bad: `彼は、まだ誰にも知られていないはずの、しかし村の古い記録には何度も現れているその名前を、聞いた気がしました。`
+- good: `彼は、その名前を聞いた気がしました。まだ誰にも、知られていないはずの名前でした。`
 
 render unit の扱い:
 

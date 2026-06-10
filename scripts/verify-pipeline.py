@@ -1349,15 +1349,6 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         "generated p500 asset images are photorealistic/live-action candidates and not vector-like/low-detail",
         kind="rubric",
     )
-    append_semantic_review_check(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="asset_output",
-        required=target_number >= 570,
-        check_id="asset.output_semantic_review_subagent_passed",
-    )
-
     request_text = requests.read_text(encoding="utf-8") if requests.exists() else ""
     request_sections = _request_sections_by_asset_id(request_text) if request_text else {}
     metadata_failures: list[str] = []
@@ -1582,15 +1573,6 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
         required=target_number >= 640,
         check_id="image.semantic_review_subagent_passed",
     )
-    append_semantic_review_check(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="scene_image",
-        required=target_number >= 680,
-        check_id="image.scene_image_semantic_review_subagent_passed",
-    )
-
     updates["eval.image.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("image", "image_generation_requests.md / assets/scenes/**", checks, details=details), updates
 
@@ -1711,22 +1693,6 @@ def check_video_single(run_dir: Path, *, target_slot: str = "p930") -> tuple[dic
         required=target_number >= 820,
         check_id="video.motion_semantic_review_subagent_passed",
     )
-    append_semantic_review_check(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="video_clip",
-        required=target_number >= 850,
-        check_id="video.clip_semantic_review_subagent_passed",
-    )
-    append_semantic_review_check(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="render",
-        required=target_number >= 930,
-        check_id="video.render_semantic_review_subagent_passed",
-    )
     return make_stage("video", "video.mp4", checks, details=details), {}
 
 
@@ -1740,8 +1706,6 @@ def check_video_scene_series(run_dir: Path, *, target_slot: str = "p930") -> tup
     add_check(checks, "video.scene_files", all(path.exists() for path in video_paths), "each scene has video.mp4")
     append_grounding_checks(checks, run_dir=run_dir, stage="video")
     append_semantic_review_check(checks, details, run_dir=run_dir, stage="video_motion", required=target_number >= 820)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="video_clip", required=target_number >= 850)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="render", required=target_number >= 930)
     return make_stage("video", "scenes/*/video.mp4", checks, details=details), {}
 
 

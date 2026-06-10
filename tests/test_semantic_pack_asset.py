@@ -217,22 +217,13 @@ class TestSemanticPackAsset(unittest.TestCase):
             self.assertEqual(unplanned["used_by_selectors"], ["scene04_cut01"])
             self.assertEqual(unplanned["suggested_fix_targets"], ["asset_inventory.md", "asset_plan.md", "video_manifest.md"])
 
-    def test_collect_asset_output_entries_include_outputs_requests_and_contact_sheets(self) -> None:
+    def test_asset_output_semantic_stage_is_removed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_asset_") as td:
             run_dir = Path(td)
             _write_asset_fixture(run_dir)
 
-            entries = collect_entries("asset_output", run_dir)
-            by_id = {entry["asset_id"]: entry for entry in entries}
-
-            self.assertEqual(by_id["cinderella_fullbody"]["stage"], "asset_output")
-            self.assertTrue(by_id["cinderella_fullbody"]["generated_outputs"][0]["exists"])
-            self.assertFalse(by_id["glass_slipper"]["generated_outputs"][0]["exists"])
-            self.assertEqual(by_id["glass_slipper"]["request_metadata"]["asset_type"], "object_reference")
-            self.assertEqual(by_id["glass_slipper"]["generation_manifest_item"]["status"], "requested")
-            self.assertEqual(by_id["cinderella_fullbody"]["contact_sheets"], ["logs/review/semantic/asset_output.contact_sheet.png"])
-            self.assertIn("asset_generation_requests.md", by_id["cinderella_fullbody"]["source_paths"])
-            self.assertTrue(by_id["pumpkin_carriage"]["used_but_unplanned"])
+            with self.assertRaisesRegex(ValueError, "unsupported asset semantic stage"):
+                collect_entries("asset_output", run_dir)
 
     def test_inventory_only_plan_fallback(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_asset_") as td:

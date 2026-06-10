@@ -153,6 +153,63 @@ scenes:
                 ["target_function", "must_cover", "must_avoid", "done_when"],
             )
 
+    def test_collects_v3_cut_contract_narration_boundary(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_pack_narration_v3_") as td:
+            run_dir = Path(td)
+            manifest = {
+                "scenes": [
+                    {
+                        "scene_id": 10,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "cut_contract": {
+                                    "source_event_contract": {
+                                        "primary_event_beat_id": "scene10_event_pressure",
+                                        "source_event_beat_ids": ["scene10_event_pressure"],
+                                    },
+                                    "narration_contract": {
+                                        "source_event_beat_ids": ["scene10_event_pressure"],
+                                        "target_function": "emotion",
+                                        "must_cover": ["圧力だけを語る"],
+                                        "must_avoid": ["次のturnを先取りしない"],
+                                        "done_when": ["同じevent内に留まる"],
+                                        "must_not_advance_to_event_beat_ids": ["scene10_event_turn"],
+                                        "narration_event_boundary": "same_event_only",
+                                    },
+                                    "event_context_for_cut": {
+                                        "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+                                        "editable": False,
+                                        "primary_event_beat": {"beat_id": "scene10_event_pressure"},
+                                    },
+                                },
+                                "audio": {
+                                    "narration": {
+                                        "tool": "elevenlabs",
+                                        "text": "圧力だけが残る。",
+                                        "tts_text": "圧力だけが残る。",
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            entries = collect_entries("narration", run_dir, manifest)
+
+            self.assertEqual(len(entries), 1)
+            entry = entries[0]
+            self.assertEqual(entry["semantic_contract"]["source_event_beat_ids"], ["scene10_event_pressure"])
+            self.assertEqual(entry["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
+            self.assertEqual(entry["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertEqual(
+                entry["semantic_review_inputs"]["event_context_for_cut"]["derived_from"],
+                ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
+            )
+            self.assertFalse(entry["semantic_contract_missing"])
+            self.assertEqual(entry["contract_required_fields_missing"], [])
+
     def test_rejects_non_narration_stage(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_narration_") as td:
             with self.assertRaises(ValueError):

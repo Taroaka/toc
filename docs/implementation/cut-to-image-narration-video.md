@@ -36,19 +36,45 @@ Narration is not a caption for the image. It should do one of these jobs:
 
 ```yaml
 narration_contract:
+  schema_version: "narration_contract_v2"
+  story_role:
+    narrative_position: "opening|middle|ending"
+    cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+    voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+    audience_state_before: ""
+    audience_state_after: ""
+    must_cover: []
+    must_not_reveal: []
+    done_when: []
+  visual_distance:
+    distance_policy: "stay_close|contextual|meaning_first|silent"
+    visible_facts_in_frame: []
+    narration_should_add: []
+    must_not_caption_visible_action: true
+    visual_overlap_allowed: false
+    visual_overlap_reason: ""
+  rhythm_and_timing:
+    target_speech_seconds: 0
+    start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+    end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+    pause_intent: []
+    audio_visual_sync_point: ""
+  tts_readiness:
+    normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+    pronunciation_targets: []
+    max_sentence_chars: 42
+  # compatibility aliases
   role: "setup|fact|emotion|contrast|aftertaste|silent"
   target_function: ""
   must_cover: []
   must_avoid: []
-  timing:
-    start: "early|mid|late|none"
-    end: "before_turn|on_cut_end|after_visual|none"
   text: ""
   tts_text: ""
   silence_reason: ""
 ```
 
 If `role: silent`, `silence_reason` is required.
+If `story_role.voice_function: silence` or `visual_distance.distance_policy: silent`, `silence_contract` is required on the runtime `audio.narration` node.
 
 ## p800 Video
 

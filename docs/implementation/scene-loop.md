@@ -141,6 +141,10 @@ cut ごとに次を固定する。
 - `visual_beat`
 - `first_frame_brief`
 - `motion_brief`
+- `narrative_position`
+- `voice_function`
+- `visual_distance_policy`
+- `pronunciation_targets`
 - `narration_role`
 - `asset_dependency_hint`
 
@@ -172,9 +176,9 @@ p420 の cut blueprint review は、標準 5 critic + aggregator で gate 化す
 critic は canonical artifact を編集せず、担当観点の finding と修正方針だけを report に残す。
 
 - `critic_1 / cut_intent_isolation`: 1 cut = 1 intent を確認する。場所移動、reveal、感情反転、説明、反応を 1 cut に詰め込んでいれば blocking finding にする。
-- `critic_2 / beat_ladder_coverage`: cut_function 列が scene_spine を進め、重要 beat が setup / pressure or threshold / turn or payoff / reaction / handoff に分解されているかを見る。
+- `critic_2 / scene_event_coverage`: cut_function の固定列ではなく、`scene_event.event_sequence[]` の setup / pressure / turn / payoff と追加 beat が `cut_contract.source_event_contract` に割り当てられ、未承認イベントを発明していないかを見る。
 - `critic_3 / first_frame_motion_readiness`: `first_frame_brief` が p600 still の入力として完結し、`motion_brief` が p800 専用入力として分離されているかを見る。
-- `critic_4 / multimodal_contract_coverage`: `target_beat` / `must_show` / `must_avoid` / `done_when` が p600 image、p700 narration、p800 motion のどこで回収されるかを見る。
+- `critic_4 / multimodal_event_boundary_coverage`: `event_context_for_cut` と各 contract だけで p600 image、p700 narration、p800 motion に渡せるか、各 stage が event boundary を越えていないかを見る。
 - `critic_5 / duration_density_and_handoff`: scene 重要度、target_duration、cut 数、最終 cut の handoff が十分かを見る。
 - `aggregator`: 各 critic の finding を統合し、`Cut Blueprint Gate` の全項目が説明できる場合だけ `approved` を返す。
 

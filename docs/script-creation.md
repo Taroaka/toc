@@ -182,7 +182,7 @@ p400 は次の順で進める。
    - spectacle / transformation / emotional reversal / proof reveal は 1 cut に圧縮しない。ただし `setup / pressure / threshold / turn / payoff / reaction / handoff` は候補ラベルであり、scene ごとの必要性に従って使う
    - cut ごとに `target_beat`, `audience_knowledge_delta`, `causal_proof`, `visual_evidence`, `required_roles`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `first_frame_brief`, `narration role`, `asset dependency hint` を書く
    - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
-   - cut blueprint review は、critic_1=`cut_intent_isolation`, critic_2=`beat_ladder_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_contract_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
+   - cut blueprint review は、critic_1=`cut_intent_isolation`, critic_2=`scene_event_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_event_boundary_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
    - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame / motion readiness、multimodal contract、duration / handoff が説明できる場合だけ `approved` にする
    - human review は `gate.script_cut_review=required|optional|skipped` に従う
 3. `p430 script review`
@@ -304,7 +304,11 @@ cut_blueprint:
   causal_proof: "原因と結果が画面上でどう同時に読めるか"
   visual_evidence: ["因果を証明する画面内証拠"]
   required_roles: ["protagonist|opponent|helper|witness|authority_or_community"]
-  assigned_story_event_ids: []
+  source_event_contract:
+    primary_event_beat_id: "scene1_event_setup"
+    source_event_beat_ids: ["scene1_event_setup"]
+    event_beat_function: "setup"
+    event_time_position: "before_trigger"
   anti_redundancy_key: "同義反復を検出するための意味キー"
   must_show: ["画・音・動きのどこかで必ず見せるもの"]
   must_avoid: ["drift / reveal 破り / 説明過多など"]
@@ -313,6 +317,10 @@ cut_blueprint:
   first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文には制作メタを書かない"
   static_first_frame_rule: "動きではなく静止画として何を証明するか"
   motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+  narrative_position: "opening|middle|ending"
+  voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+  visual_distance_policy: "stay_close|contextual|meaning_first|silent"
+  pronunciation_targets: []
   narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
   asset_dependency_hint:
     character_ids: []
@@ -1693,29 +1701,36 @@ production_notes:
 
 ```yaml
 scene_cut_coverage_plan:
-  coverage_strategy: "reverse_from_scene_obligations"
+  coverage_strategy: "reverse_from_scene_event"
+  source_schema_version: "scene_event_v1"
   min_cut_count:
     by_importance: 3
     by_duration: 3
-    selected: 3
+    by_event_beats: 4
+    selected: 4
     exception_reason: ""
+  event_beat_inventory:
+    - beat_id: "scene1_event_setup"
+      beat_function: "setup"
+      must_be_seen: true
+      assigned_cut_ids: []
   scene_obligations:
-    - obligation_id: "story_event_obligations_01"
-      source: "story_event_obligations"
+    - obligation_id: "scene_event_sequence_01"
+      source: "scene_event.event_sequence"
       evidence:
-        - event_id: ""
-          source_events: []
-          audience_knowledge_delta: ""
-          causal_proof: ""
-          visual_evidence: []
-          required_roles: []
+        - beat_id: "scene1_event_setup"
+          beat_function: "setup"
+          required_visual_evidence: []
       assigned_cut_ids: []
   cut_assignments:
     - cut_index: 1
       cut_selector: ""
       obligation_ids: []
       cut_function: ""
-      assigned_story_event_ids: []
+      event_assignment:
+        source_event_contract:
+          primary_event_beat_id: "scene1_event_setup"
+          source_event_beat_ids: ["scene1_event_setup"]
       target_beat: ""
       visual_proof: ""
       audience_knowledge_delta: ""
@@ -1731,7 +1746,21 @@ scene_cut_coverage_plan:
 
 ```yaml
 cut_contract:
-  schema_version: "2.2"
+  schema_version: "3.0"
+  source_event_contract:
+    primary_event_beat_id: "scene1_event_setup"
+    source_event_beat_ids: ["scene1_event_setup"]
+    event_beat_function: "setup"
+    event_time_position: "before_trigger"
+    source_event_summary: ""
+    source_visible_action: ""
+    source_visible_reaction: ""
+    no_reaction_required_reason: ""
+    source_required_visual_evidence: []
+    event_facts_to_preserve: []
+    event_facts_not_to_invent: []
+    allowed_reveal_info_ids: []
+    forbidden_reveal_info_ids: []
   cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff|custom"
   intent_budget:
     primary_intent: ""
@@ -1745,7 +1774,6 @@ cut_contract:
     causal_proof: ""
     visual_evidence: []
     required_roles: []
-    assigned_story_event_ids: []
     anti_redundancy_key: ""
     reveal_constraints:
       inherited_from_scene: []
@@ -1779,6 +1807,32 @@ cut_contract:
     end_frame_brief: ""
     must_not_add: []
   narration_contract:
+    schema_version: "narration_contract_v2"
+    story_role:
+      narrative_position: "opening|middle|ending"
+      cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+      voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+      audience_state_before: ""
+      audience_state_after: ""
+      must_cover: []
+      must_not_reveal: []
+      done_when: []
+    visual_distance:
+      distance_policy: "stay_close|contextual|meaning_first|silent"
+      visible_facts_in_frame: []
+      narration_should_add: []
+      must_not_caption_visible_action: true
+      visual_overlap_allowed: false
+      visual_overlap_reason: ""
+    rhythm_and_timing:
+      target_speech_seconds: 0
+      start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
+      end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+      pause_intent: []
+    tts_readiness:
+      pronunciation_targets: []
+      max_sentence_chars: 42
+    # compatibility aliases for older readers
     role: "setup|fact|emotion|contrast|aftertaste|silent"
     target_function: ""
     must_avoid: []
@@ -1813,6 +1867,11 @@ cut_contract:
       first_frame_must_avoid: []
     p700_narration:
       narration_requirements: []
+      narrative_position: "opening|middle|ending"
+      cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+      voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+      visual_distance_policy: "stay_close|contextual|meaning_first|silent"
+      pronunciation_targets: []
       role: "setup|fact|emotion|contrast|aftertaste|silent"
       must_not_caption_visible_content: true
     p800_video:

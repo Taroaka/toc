@@ -65,7 +65,7 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
     "scene_detail": {
         1: (
             "scene_detail_structure",
-            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, and independent dramatic question/value shift/causal turn within the maximal scene set.",
+            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, independent dramatic question/value shift/causal turn, and scene_event setup/pressure/turn/payoff sequence within the maximal scene set.",
         ),
         2: (
             "scene_detail_density",
@@ -77,7 +77,7 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         ),
         4: (
             "scene_detail_reveal_order",
-            "Verify that this scene neither reveals future information too early nor omits information the audience needs here.",
+            "Verify that scene_event reveal constraints neither reveal future information too early nor omit information the audience needs here.",
         ),
         5: (
             "scene_detail_visual_production",
@@ -132,6 +132,9 @@ SCENE_DETAIL_GATE_MARKERS: tuple[str, ...] = (
     "internal_pressure",
     "value_shift_visibility",
     "causal_turn_visibility",
+    "scene_event_sequence",
+    "turning_event_alignment",
+    "end_situation_alignment",
     "neighbor_handoff",
 )
 
@@ -141,16 +144,16 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
         "Verify that each cut carries exactly one viewer-facing intent and does not combine location move, reveal, emotional reversal, explanation, reaction, and next-scene handoff in one cut.",
     ),
     2: (
-        "beat_ladder_coverage",
-        "Verify that scene obligations are assigned by visual necessity, not a fixed cut_function sequence: dramatic question, story_event_obligations, value_shift.visible_evidence, causal_turn, reveal constraints, reaction, and handoff.",
+        "scene_event_coverage",
+        "Verify that cuts cover scene_event.event_sequence by visual necessity through cut_contract.source_event_contract, not top-level legacy refs or a fixed cut_function sequence.",
     ),
     3: (
         "first_frame_motion_readiness",
-        "Verify that first_frame_contract is a startable p600 still input, action_completion_state is not an unintended aftermath, and motion_contract remains a p800-only input instead of leaking into image prompt authoring.",
+        "Verify that first_frame_contract aligns with source_event_contract, remains a startable p600 still input, and motion_contract remains p800-only without crossing event beat boundaries.",
     ),
     4: (
-        "multimodal_contract_coverage",
-        "Verify that cut_contract.viewer/cinematic/continuity/narration/downstream fields are concrete, including audience_knowledge_delta, causal_proof, visual_evidence, required_roles, assigned_story_event_ids, and anti_redundancy_key.",
+        "multimodal_event_boundary_coverage",
+        "Verify that viewer/cinematic/continuity/narration/downstream fields are concrete and all p600/p700/p800 handoffs use the derived event_context_for_cut from source_event_contract.",
     ),
     5: (
         "duration_density_and_handoff",
@@ -161,10 +164,16 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
 CUT_BLUEPRINT_GATE_MARKERS: tuple[str, ...] = (
     "## Cut Blueprint Gate",
     "cut_intent_isolation",
-    "beat_ladder_coverage",
+    "scene_event_coverage",
+    "event_beat_reference_integrity",
     "first_frame_motion_readiness",
-    "multimodal_contract_coverage",
-    "story_event_obligation_coverage",
+    "event_first_frame_alignment",
+    "multimodal_event_boundary_coverage",
+    "source_event_preservation",
+    "no_unapproved_event_invention",
+    "event_motion_boundary",
+    "event_narration_boundary",
+    "event_context_for_cut_ready",
     "causal_proof_coverage",
     "role_coverage",
     "audience_knowledge_delta_coverage",
@@ -585,8 +594,11 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
                 For p410c scene-detail review, do not repeat the scene count gate.
                 This review must pass a `Scene Detail Gate` for each concrete scene:
                 scene_necessity, internal_pressure, value_shift_visibility,
-                causal_turn_visibility, and neighbor_handoff. Treat these as blocking
-                gate items, not optional reviewer advice.
+                causal_turn_visibility, scene_event_sequence, turning_event_alignment,
+                end_situation_alignment, and neighbor_handoff. The scene_event checks
+                must verify that turning_event semantically matches scene_intent.causal_turn
+                and end_situation semantically matches scene_intent.value_shift.to.
+                Treat these as blocking gate items, not optional reviewer advice.
                 """
             ).strip()
         elif stage == "cut_blueprint":
@@ -595,7 +607,9 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
                 Stage-specific aggregation rule:
                 {roles}
                 For p420 cut review, do not pass until the cut blueprint gate is explicit:
-                each cut has one intent, story_event_obligations are assigned from scene necessity,
+                each cut has one intent, every cut references scene_event beat ids,
+                cuts cover setup/pressure/turn/payoff through cut_contract.source_event_contract,
+                no cut invents unapproved events, story_event_obligations are legacy projection only,
                 audience_knowledge_delta and causal_proof are concrete, required roles are not
                 collapsed into protagonist-only imagery, anti-redundancy is checked, first_frame_contract
                 and motion_contract are separated, viewer/cinematic/continuity/narration/downstream
@@ -625,8 +639,8 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
         - scene_specificity_gate: for scene_set include non_compressible_beat_inventory, scene_promotion_rule, unique_scene_responsibility, actor_force_coverage, object_meaning_ladder, concrete_handoff_chain, and anti_template_language
         - reveal_order_gate: for scene_set include reveal_order_preserved, withheld_information_preserved, and early_reveal_risk_resolved
         - handoff_chain_gate: for scene_set include handoff_chain_coverage, incoming_outgoing_anchor_ids, and terminal_resolution_checked
-        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, and neighbor_handoff
-        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, beat_ladder_coverage, first_frame_motion_readiness, multimodal_contract_coverage, story_event_obligation_coverage, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
+        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, scene_event_sequence, turning_event_alignment, end_situation_alignment, and neighbor_handoff
+        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, scene_event_coverage, event_beat_reference_integrity, first_frame_motion_readiness, event_first_frame_alignment, multimodal_event_boundary_coverage, source_event_preservation, no_unapproved_event_invention, event_motion_boundary, event_narration_boundary, event_context_for_cut_ready, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
         - rejected_suggestions[]
@@ -719,6 +733,9 @@ def render_aggregated_review(
                 "- internal_pressure: each scene has visible pressure that escalates before the turn",
                 "- value_shift_visibility: value_shift.from/to is proven by visible evidence",
                 "- causal_turn_visibility: the irreversible turn is visible or audibly grounded",
+                "- scene_event_sequence: scene_event has setup, pressure, turn, and payoff as concrete story events",
+                "- turning_event_alignment: turning_event semantically matches scene_intent.causal_turn",
+                "- end_situation_alignment: end_situation semantically matches scene_intent.value_shift.to",
                 "- neighbor_handoff: incoming and outgoing handoffs connect to adjacent scenes",
                 "",
             ]
@@ -729,10 +746,16 @@ def render_aggregated_review(
                 "## Cut Blueprint Gate",
                 "",
                 "- cut_intent_isolation: each cut has one viewer-facing intent",
-                "- beat_ladder_coverage: scene obligations are assigned from visual necessity rather than fixed slot order",
+                "- scene_event_coverage: scene_event beats are assigned from visual necessity through source_event_contract",
+                "- event_beat_reference_integrity: primary_event_beat_id, source_event_beat_ids, event_beat_function, and event_time_position match scene_event",
                 "- first_frame_motion_readiness: first_frame_contract is static p600 evidence and motion_contract remains p800-only",
-                "- multimodal_contract_coverage: viewer/cinematic/continuity/narration/downstream fields are concrete",
-                "- story_event_obligation_coverage: irreversible story events are assigned to cut contracts or explicitly merged into a stronger cut",
+                "- event_first_frame_alignment: first_frame_contract.source_event_beat_id and event_fact_visible_in_still match the primary event beat",
+                "- multimodal_event_boundary_coverage: viewer/cinematic/continuity/narration/downstream fields are concrete and p600/p700/p800 event boundaries are respected",
+                "- source_event_preservation: source_event_contract preserves event facts and reveal boundaries",
+                "- no_unapproved_event_invention: cuts preserve event_facts_to_preserve and do not invent event_facts_not_to_invent",
+                "- event_motion_boundary: motion starts from the first frame and does not advance to forbidden event beat ids",
+                "- event_narration_boundary: narration stays within event and reveal boundaries",
+                "- event_context_for_cut_ready: event_context_for_cut is a non-editable derived projection from source_event_contract",
                 "- causal_proof_coverage: each cut states how cause and result are visible in the frame",
                 "- role_coverage: protagonist, opponent, helper, witness, and community roles are covered when the scene event requires them",
                 "- audience_knowledge_delta_coverage: each cut states what the audience newly understands",

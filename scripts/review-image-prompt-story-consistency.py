@@ -125,41 +125,47 @@ REVIEW_SKIP_KEYS = {
     "sources",
 }
 
-REQUIRED_PROMPT_BLOCKS = (
-    "GLOBAL / INVARIANTS",
-    "CHARACTERS",
-    "PROPS / SETPIECES",
-    "SCENE",
-    "CONTINUITY",
+REQUIRED_PROMPT_BLOCKS = [
+    "REFERENCE_USAGE",
+    "CUT_START_STATE",
+    "SINGLE_MOMENT_RULE",
+    "MUST_INCLUDE",
+    "MUST_NOT_INCLUDE",
+    "CHARACTER_STATE",
+    "PROPS_SETPIECES",
+    "COMPOSITION",
+    "LIGHT_MATERIAL",
+    "MOTION_START_AFFORDANCE",
     "AVOID",
-)
+]
 
 PROMPT_BLOCK_ALIASES = {
-    "GLOBAL / INVARIANTS": ["GLOBAL / INVARIANTS", "全体 / 不変条件", "全体/不変条件", "グローバル / 不変条件"],
-    "CHARACTERS": ["CHARACTERS", "登場人物", "キャラクター"],
-    "PROPS / SETPIECES": ["PROPS / SETPIECES", "小道具 / 舞台装置", "小道具/舞台装置", "プロップ / 舞台装置"],
-    "SCENE": ["SCENE", "シーン"],
-    "CONTINUITY": ["CONTINUITY", "連続性", "つながり"],
-    "AVOID": ["AVOID", "禁止", "避けること", "NG"],
+    "REFERENCE_USAGE": ["参照画像の使い方", "REFERENCE USAGE"],
+    "CUT_START_STATE": ["このcutの開始状態", "このカットの開始状態", "CUT START STATE"],
+    "SINGLE_MOMENT_RULE": ["単一瞬間ルール", "SINGLE MOMENT RULE"],
+    "MUST_INCLUDE": ["画面に必ず見えるもの", "MUST INCLUDE"],
+    "MUST_NOT_INCLUDE": ["画面に入れてはいけないもの", "MUST NOT INCLUDE"],
+    "CHARACTER_STATE": ["人物状態", "CHARACTER STATE"],
+    "PROPS_SETPIECES": ["小道具 / 舞台装置", "小道具/舞台装置", "PROPS / SETPIECES"],
+    "COMPOSITION": ["構図", "COMPOSITION"],
+    "LIGHT_MATERIAL": ["光 / 質感", "光/質感", "LIGHT / MATERIAL"],
+    "MOTION_START_AFFORDANCE": ["動画化のための開始余地", "MOTION START AFFORDANCE"],
+    "AVOID": ["禁止", "AVOID"],
 }
 
 PROMPT_BLOCK_LABELS = {
-    "GLOBAL / INVARIANTS": "全体 / 不変条件",
-    "CHARACTERS": "登場人物",
-    "PROPS / SETPIECES": "小道具 / 舞台装置",
-    "SCENE": "シーン",
-    "CONTINUITY": "連続性",
+    "REFERENCE_USAGE": "参照画像の使い方",
+    "CUT_START_STATE": "このcutの開始状態",
+    "SINGLE_MOMENT_RULE": "単一瞬間ルール",
+    "MUST_INCLUDE": "画面に必ず見えるもの",
+    "MUST_NOT_INCLUDE": "画面に入れてはいけないもの",
+    "CHARACTER_STATE": "人物状態",
+    "PROPS_SETPIECES": "小道具 / 舞台装置",
+    "COMPOSITION": "構図",
+    "LIGHT_MATERIAL": "光 / 質感",
+    "MOTION_START_AFFORDANCE": "動画化のための開始余地",
     "AVOID": "禁止",
 }
-
-REQUIRED_PROMPT_BLOCKS = [
-    "GLOBAL / INVARIANTS",
-    "CHARACTERS",
-    "PROPS / SETPIECES",
-    "SCENE",
-    "CONTINUITY",
-    "AVOID",
-]
 
 PROMPT_SELF_CONTAINED_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"scene\d+(?:_cut\d+)?", re.I), "prompt references another scene/cut directly."),
@@ -195,6 +201,25 @@ PROMPT_FIRST_FRAME_METADATA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = 
         re.compile(r"動画(?:の)?(?:開始|冒頭).{0,12}フレーム"),
         "prompt describes its production role for video instead of the concrete visible image.",
     ),
+)
+
+PROMPT_DESIGN_META_LEAK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\[cut契約からの可視要件\]|場面の核:|画面上の問い:|観客理解の増分:|因果の証明:|映像で成立させる証拠:|必要な役割:"),
+        "prompt leaks cut/review design metadata; use concrete visible subjects, blocking, objects, composition, light, and material instead.",
+    ),
+)
+
+PROMPT_ABSTRACT_STORY_TERMS = (
+    "価値変化",
+    "場所の圧力",
+    "場のルール",
+    "証明",
+    "結果を渡す",
+    "観客理解",
+    "因果",
+    "主人公の制限",
+    "変化の兆し",
 )
 
 PROMPT_MOTION_BRIEF_LEAK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -459,10 +484,116 @@ def missing_required_prompt_blocks(prompt: str) -> list[str]:
     return [PROMPT_BLOCK_LABELS[block] for block in REQUIRED_PROMPT_BLOCKS if block not in present]
 
 
+def prompt_block_sections(prompt: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    normalized_aliases = {
+        _normalize_heading_label(alias): canonical
+        for canonical, aliases in PROMPT_BLOCK_ALIASES.items()
+        for alias in aliases
+    }
+    for raw_line in (prompt or "").splitlines():
+        line = raw_line.strip()
+        bracket_match = re.fullmatch(r"\[(?P<label>.+?)\]", line)
+        if bracket_match:
+            current = normalized_aliases.get(_normalize_heading_label(bracket_match.group("label")))
+            if current:
+                sections.setdefault(current, [])
+            continue
+        if current:
+            sections.setdefault(current, []).append(raw_line)
+    return {key: "\n".join(lines).strip() for key, lines in sections.items()}
+
+
+def prompt_drawable_content(prompt: str) -> str:
+    sections = prompt_block_sections(prompt)
+    if not sections:
+        return prompt or ""
+    excluded = {"MUST_NOT_INCLUDE", "AVOID"}
+    return "\n".join(body for key, body in sections.items() if key not in excluded)
+
+
+def prompt_structural_contract_issues(prompt: str) -> list[Finding]:
+    sections = prompt_block_sections(prompt)
+    findings: list[Finding] = []
+    start_state = sections.get("CUT_START_STATE", "")
+    if start_state and "event_time_position" not in start_state:
+        findings.append(Finding(code="image_prompt_action_window_missing", message="start-state block must include `event_time_position`."))
+    if start_state and "not_yet_happened_in_still" not in start_state:
+        findings.append(Finding(code="image_prompt_missing_not_yet_state", message="start-state block must include `not_yet_happened_in_still`."))
+    if start_state and "action_completion_state" not in start_state:
+        findings.append(Finding(code="image_prompt_action_completion_state_missing", message="start-state block must include `action_completion_state`."))
+    if start_state and not any(key in start_state for key in ("event_fact_visible_in_still", "visible_action", "visible_reaction")):
+        findings.append(Finding(code="image_prompt_start_state_not_drawable", message="start-state block must name a drawable visible action, reaction, or still fact."))
+    not_yet_match = re.search(r"not_yet_happened_in_still\s*:\s*(?P<body>.+)", start_state)
+    if not_yet_match:
+        not_yet_body = not_yet_match.group("body").strip()
+        if len(not_yet_body) < 18 or re.fullmatch(r"(次へ進んでいない|まだ起きていない|未完了|なし)[。.]?", not_yet_body):
+            findings.append(Finding(code="image_prompt_not_yet_state_too_generic", message="not-yet state must name the specific event, reveal, or outcome not yet visible."))
+    single_moment = sections.get("SINGLE_MOMENT_RULE", "")
+    if single_moment and not any(term in single_moment for term in ("1つの瞬間", "単一", "モンタージュにしない", "混ぜない")):
+        findings.append(Finding(code="image_prompt_time_mixed", message="single-moment block must forbid mixed time or montage."))
+    if single_moment and not any(term in single_moment for term in ("visible_moment", "must_not_mix")):
+        findings.append(Finding(code="image_prompt_overpacked_visual_intent", message="single-moment block must declare visible_moment or must_not_mix so one still does not pack multiple beats."))
+    must_include = sections.get("MUST_INCLUDE", "")
+    if must_include and "primary_visual_anchor" not in must_include:
+        findings.append(Finding(code="image_prompt_primary_visual_anchor_missing", message="must-include block must identify `primary_visual_anchor`."))
+    if must_include and not any(term in must_include for term in ("required_story_evidence", "secondary_visual_anchors", "location_anchor")):
+        findings.append(Finding(code="image_prompt_visual_translation_missing", message="must-include block must convert story meaning into concrete visual anchors or evidence."))
+    must_not = sections.get("MUST_NOT_INCLUDE", "")
+    if must_include and must_not:
+        include_tokens = {
+            token.strip()
+            for token in re.split(r"[/、,。\n]", must_include)
+            if len(token.strip()) >= 3 and ":" not in token
+        }
+        conflict_tokens = [token for token in include_tokens if token and token in must_not]
+        if conflict_tokens:
+            findings.append(Finding(code="image_prompt_object_visibility_conflict", message="must-include and must-not blocks appear to conflict: " + ", ".join(conflict_tokens[:5]) + "."))
+    composition = sections.get("COMPOSITION", "")
+    if composition and not all(term in composition for term in ("foreground", "midground", "background")):
+        findings.append(Finding(code="image_prompt_camera_composition_weak", message="composition block must describe foreground, midground, and background."))
+    if composition and "subject_priority" not in composition:
+        findings.append(Finding(code="image_prompt_subject_priority_missing", message="composition block must declare subject_priority."))
+    if composition and "frame_edge_handoff" not in composition:
+        findings.append(Finding(code="image_prompt_frame_edge_handoff_missing", message="composition block should describe frame_edge_handoff or motion handoff space."))
+    light_material = sections.get("LIGHT_MATERIAL", "")
+    if light_material and not any(term in light_material for term in ("light_source", "dominant_materials", "質感", "光")):
+        findings.append(Finding(code="image_prompt_scene_material_pack_missing", message="light/material block must describe cut-specific light or materials."))
+    if light_material and not any(term in light_material for term in ("floor_or_ground_texture", "scene_specific_texture", "story_specific_texture", "dominant_materials")):
+        findings.append(Finding(code="image_prompt_scene_material_too_generic", message="light/material block must include scene-specific texture or material fields."))
+    character_state = sections.get("CHARACTER_STATE", "")
+    if character_state and not any(term in character_state for term in ("costume_state", "pose", "gaze", "expression", "emotional_state")):
+        findings.append(Finding(code="image_prompt_character_state_gate_missing", message="character-state block must describe costume, pose, gaze, expression, or emotion."))
+    if character_state and not all(term in character_state for term in ("pose", "gaze")) and not any(term in character_state for term in ("hand_position", "foot_position")):
+        findings.append(Finding(code="image_prompt_character_pose_too_generic", message="character-state block must specify pose/gaze or hand/foot position, not only generic presence."))
+    props = sections.get("PROPS_SETPIECES", "")
+    if props and not any(term in props for term in ("visibility", "object_state", "hidden", "hinted", "partially_visible", "clearly_visible", "hero_object")):
+        findings.append(Finding(code="image_prompt_object_visibility_missing", message="props/setpieces block must describe object state or visibility boundary."))
+    references = sections.get("REFERENCE_USAGE", "")
+    if references and "参照" in references and not any(term in references for term in ("人物参照", "場所参照", "小道具参照", "対象", "維持")):
+        findings.append(Finding(code="image_prompt_reference_usage_missing", message="reference-usage block must describe what references preserve or target."))
+    motion = sections.get("MOTION_START_AFFORDANCE", "")
+    if motion and not all(term in motion for term in ("movable_subject", "movement_vector")):
+        findings.append(Finding(code="image_prompt_motion_affordance_weak", message="motion-start block must name movable_subject and movement_vector."))
+    if motion and "motion_ceiling" not in motion:
+        findings.append(Finding(code="image_prompt_motion_ceiling_missing", message="motion-start block must include motion_ceiling or must-not-complete outcomes."))
+    drawable = prompt_drawable_content(prompt)
+    abstract_hits = [term for term in PROMPT_ABSTRACT_STORY_TERMS if term in drawable]
+    if abstract_hits:
+        findings.append(Finding(code="image_prompt_visual_translation_missing", message="prompt still contains abstract story terms instead of visible evidence: " + ", ".join(abstract_hits[:6]) + "."))
+    return findings
+
+
 def find_prompt_independence_issues(prompt: str) -> list[str]:
+    checked_prompt = "\n".join(
+        raw
+        for raw in (prompt or "").splitlines()
+        if not raw.strip().startswith(("source_event_beat_id:", "forbidden_future_event_beat_ids:"))
+    )
     issues: list[str] = []
     for pattern, message in PROMPT_SELF_CONTAINED_PATTERNS:
-        if pattern.search(prompt or ""):
+        if pattern.search(checked_prompt):
             issues.append(message)
     return issues
 
@@ -471,6 +602,14 @@ def find_prompt_nonvisual_metadata_issues(prompt: str) -> list[str]:
     issues: list[str] = []
     for pattern, message in PROMPT_NONVISUAL_METADATA_PATTERNS:
         if pattern.search(prompt or ""):
+            issues.append(message)
+    return issues
+
+
+def find_prompt_design_meta_leak_issues(prompt: str) -> list[str]:
+    issues: list[str] = []
+    for pattern, message in PROMPT_DESIGN_META_LEAK_PATTERNS:
+        if pattern.search(prompt):
             issues.append(message)
     return issues
 
@@ -766,8 +905,16 @@ def prompt_craft_detail_issues(prompt: str) -> list[str]:
     compact = "".join((prompt or "").split())
     category_hits = _prompt_visual_category_hits(prompt)
     issues: list[str] = []
+    sections = prompt_block_sections(prompt)
+    thin_sections = [
+        PROMPT_BLOCK_LABELS.get(key, key)
+        for key, body in sections.items()
+        if len("".join(body.split())) < 18
+    ]
     if len(compact) < PROMPT_CRAFT_MIN_CHARS:
         issues.append(f"prompt body is too short for a cinematic scene image ({len(compact)}/{PROMPT_CRAFT_MIN_CHARS} non-space chars).")
+    if len(thin_sections) >= 4:
+        issues.append("prompt has too many thin required blocks without concrete drawable detail: " + ", ".join(thin_sections[:6]) + ".")
     if len(category_hits) < PROMPT_CRAFT_MIN_VISUAL_CATEGORIES:
         missing_count = PROMPT_CRAFT_MIN_VISUAL_CATEGORIES - len(category_hits)
         issues.append(
@@ -1042,6 +1189,7 @@ def review_entries(
         cut_contract = _cut_contract_for_node(cut) if isinstance(cut, dict) else {}
 
         findings: list[Finding] = []
+        drawable_prompt = prompt_drawable_content(entry.prompt)
 
         if not is_reference_entry and cut_contract:
             cut_must_show = _nested_contract_list(cut_contract, "must_show", "viewer_contract.must_show")
@@ -1056,7 +1204,7 @@ def review_entries(
                         message=f"cut contract requires `{item}` but the image prompt does not include it.",
                     )
                 )
-            for item in [item for item in cut_must_avoid if item in entry.prompt]:
+            for item in [item for item in cut_must_avoid if item in drawable_prompt]:
                 findings.append(
                     Finding(
                         code="cut_contract_must_avoid_violated",
@@ -1119,7 +1267,7 @@ def review_entries(
                         message=f"contract requires `{item}` but the prompt does not clearly include it.",
                     )
                 )
-            violated_avoid = [item for item in must_avoid if item in entry.prompt]
+            violated_avoid = [item for item in must_avoid if item in drawable_prompt]
             for item in violated_avoid:
                 findings.append(
                     Finding(
@@ -1144,12 +1292,17 @@ def review_entries(
                     message=f"prompt is missing required block `[{block}]`.",
                 )
             )
+        findings.extend(prompt_structural_contract_issues(entry.prompt))
         craft_detail_issues = prompt_craft_detail_issues(entry.prompt)
         for issue in craft_detail_issues:
             findings.append(Finding(code="image_prompt_prompt_craft_weak", message=issue))
         nonvisual_metadata_issues = find_prompt_nonvisual_metadata_issues(entry.prompt)
         for issue in nonvisual_metadata_issues:
             findings.append(Finding(code="prompt_contains_nonvisual_metadata", message=issue))
+
+        design_meta_leak_issues = find_prompt_design_meta_leak_issues(entry.prompt)
+        for issue in design_meta_leak_issues:
+            findings.append(Finding(code="image_prompt_design_meta_leaked", message=issue))
 
         first_frame_metadata_issues = find_prompt_first_frame_metadata_issues(entry.prompt)
         for issue in first_frame_metadata_issues:
@@ -1160,7 +1313,7 @@ def review_entries(
             findings.append(Finding(code="prompt_leaks_motion_brief", message=issue))
 
         independence_issues = find_prompt_independence_issues(entry.prompt)
-        if nonvisual_metadata_issues or first_frame_metadata_issues or motion_brief_leak_issues:
+        if nonvisual_metadata_issues or design_meta_leak_issues or first_frame_metadata_issues or motion_brief_leak_issues:
             independence_issues = [
                 issue for issue in independence_issues if issue != "prompt references another scene/cut directly."
             ]
@@ -1298,7 +1451,7 @@ def review_entries(
             prompt_terms=prompt_terms,
             missing_source_terms=missing_source_terms,
             missing_blocks=missing_blocks,
-            independence_issues=independence_issues + nonvisual_metadata_issues + first_frame_metadata_issues,
+            independence_issues=independence_issues + nonvisual_metadata_issues + design_meta_leak_issues + first_frame_metadata_issues,
             character_alias_hits=character_alias_hits,
             object_alias_hits=object_alias_hits,
             prompt_character_hits=prompt_character_hits,
