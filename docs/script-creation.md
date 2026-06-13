@@ -1834,8 +1834,13 @@ cut_contract:
       max_sentence_chars: 42
     # compatibility aliases for older readers
     role: "setup|fact|emotion|contrast|aftertaste|silent"
-    target_function: ""
-    must_avoid: []
+    target_function: "derive_from_story_role_voice_function"
+    must_cover:
+      - "derive_from_story_role_must_cover"
+    must_avoid:
+      - "映像のキャプション化"
+    done_when:
+      - "derive_from_story_role_done_when"
     silence_reason: ""
   rhythm_contract:
     expected_duration_seconds: 8

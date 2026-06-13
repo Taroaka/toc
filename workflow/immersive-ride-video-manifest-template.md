@@ -214,14 +214,31 @@ scenes:
           tts_readiness:
             pronunciation_targets: []
           # compatibility alias
-          target_function: ""
-          must_cover: []
-          must_avoid: []
-          done_when: []
+          role: "setup|fact|emotion|contrast|aftertaste|silent"
+          target_function: "derive_from_story_role_voice_function"
+          must_cover:
+            - "derive_from_story_role_must_cover"
+          must_avoid:
+            - "映像のキャプション化"
+          done_when:
+            - "derive_from_story_role_done_when"
         # review metadata は audio.narration.review に保持する。
         text: ""
         tts_text: ""
         tool: "elevenlabs"
+        review:
+          agent_review_ok: false
+          agent_review_reason_keys: []
+          agent_review_reason_messages: []
+          pronunciation_review:
+            candidates: []
+            unresolved: []
+          narration_arc_review:
+            agent_review_ok: false
+            reason_keys: []
+            rubric_scores: {}
+          human_review_ok: false
+          human_review_reason: ""
         output: "assets/audio/scene10_narration.mp3"
         normalize_to_scene_duration: false
 
@@ -289,14 +306,31 @@ scenes:
           tts_readiness:
             pronunciation_targets: []
           # compatibility alias
-          target_function: ""
-          must_cover: []
-          must_avoid: []
-          done_when: []
+          role: "setup|fact|emotion|contrast|aftertaste|silent"
+          target_function: "derive_from_story_role_voice_function"
+          must_cover:
+            - "derive_from_story_role_must_cover"
+          must_avoid:
+            - "映像のキャプション化"
+          done_when:
+            - "derive_from_story_role_done_when"
         # review metadata は audio.narration.review に保持する。
         text: ""
         tts_text: ""
         tool: "elevenlabs"
+        review:
+          agent_review_ok: false
+          agent_review_reason_keys: []
+          agent_review_reason_messages: []
+          pronunciation_review:
+            candidates: []
+            unresolved: []
+          narration_arc_review:
+            agent_review_ok: false
+            reason_keys: []
+            rubric_scores: {}
+          human_review_ok: false
+          human_review_reason: ""
         output: "assets/audio/scene20_narration.mp3"
         normalize_to_scene_duration: false
 

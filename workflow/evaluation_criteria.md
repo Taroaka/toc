@@ -42,7 +42,7 @@ ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
 - `audio.narration.text` / `audio.narration.tts_text` に `TODO` / `TBD` / 制作メモが残っていないこと
 - `audio.narration.authoring_status` が `missing|draft|approved|silent` のいずれかであること
 - `audio.narration.contract.schema_version: narration_contract_v2` と story role / visual distance / TTS readiness の最低限の記録
-- p720 で pronunciation candidates と scene-level narration arc が確認されていること
+- p720 で pronunciation candidates と scene-level narration arc が確認されていること。runner が専用 artifact を materialize しない場合は、aggregator report または human handoff に同等の確認を残す
 - cut duration 上限
 - `character_ids` / `object_ids` の明示
 - immersive の invariant（experience / no on-screen text）

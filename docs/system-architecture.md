@@ -286,7 +286,7 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
 - `p700`: narration / audio runtime
   - `p710`: narration grounding
   - `p720`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-    - standard critic split: story_role / visual_distance / tts_delivery / arc_and_pacing / spoken_japanese
+    - design-target critic split: story_role / visual_distance / tts_delivery / arc_and_pacing / spoken_japanese. Until the runner is v2-aware, these viewpoints may be covered inside generic critic / aggregator artifacts.
   - `p730`: TTS request / generation
   - `p740`: duration fit gate
   - `p750`: audio QA / human review handoff

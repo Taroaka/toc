@@ -98,6 +98,7 @@ from toc.semantic_review_loop import (
 )
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
+    IMAGE_API_PROMPT_POLICY_VERSION,
     IMAGE_SUFFIXES,
     build_zip,
     candidate_path,
@@ -254,7 +255,9 @@ class GenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(asset|scene)$")
     item_id: str = Field(min_length=1, max_length=200)
-    prompt: str = Field(min_length=1, max_length=20000)
+    prompt: str = Field(max_length=20000)
+    prompt_policy_version: str | None = Field(default=None, max_length=100)
+    debug_prompt_source: dict[str, Any] = Field(default_factory=dict)
     references: list[str] = Field(default_factory=list, max_length=16)
     candidate_count: int = Field(default=1, ge=1, le=16)
 
@@ -2461,6 +2464,11 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
         resolved_video = resolve_run_relative(run_dir, candidate_output or video_output)
         audio_duration = _probe_media_duration_seconds(resolved_audio)
         video_duration = _probe_media_duration_seconds(resolved_video)
+        api_prompt_payload = image_generation.get("api_prompt_payload") if isinstance(image_generation.get("api_prompt_payload"), dict) else {}
+        api_prompt_policy = str(api_prompt_payload.get("policy_version") or "").strip()
+        api_prompt = str(api_prompt_payload.get("prompt") or "")
+        legacy_prompt = str(image_generation.get("prompt") or "")
+        prompt = api_prompt if api_prompt_policy == IMAGE_API_PROMPT_POLICY_VERSION else api_prompt or legacy_prompt
         configured_duration = int(
             render.get("video_duration_seconds")
             or video_generation.get("duration_seconds")
@@ -2498,7 +2506,10 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
                     or render.get("narration_start_seconds")
                     or 0
                 ),
-                "prompt": str(image_generation.get("prompt") or ""),
+                "prompt": prompt,
+                "legacyPrompt": legacy_prompt,
+                "promptPolicyVersion": api_prompt_policy,
+                "debugPromptSource": image_generation.get("debug_prompt_source") if isinstance(image_generation.get("debug_prompt_source"), dict) else {},
             }
         )
     return items
@@ -3763,6 +3774,8 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             references=references,
             prompt=item.prompt,
             kind=kind,
+            prompt_policy_version=getattr(item, "prompt_policy_version", None),
+            debug_prompt_source=getattr(item, "debug_prompt_source", None),
             result=result,
         )
         reject_local_raster_image_result(result, item_id=item.id)
@@ -3792,6 +3805,8 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             references=references,
             prompt=item.prompt,
             kind=kind,
+            prompt_policy_version=getattr(item, "prompt_policy_version", None),
+            debug_prompt_source=getattr(item, "debug_prompt_source", None),
             result=result,
             error=str(exc),
         )
@@ -5948,6 +5963,13 @@ async def api_final_render(req: FinalRenderRequest) -> dict[str, Any]:
 
 
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
+    if not req.prompt.strip():
+        detail = (
+            "api_prompt_missing_for_new_prompt_policy"
+            if req.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION
+            else "prompt is required"
+        )
+        raise HTTPException(status_code=400, detail=detail)
     destination = candidate_path(run_dir, req.item_id, index)
     started = time.monotonic()
     references = []
@@ -5975,6 +5997,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "referenceCount": len(references),
             "references": [ref.relative_to(run_dir).as_posix() if ref.is_relative_to(run_dir) else str(ref) for ref in references],
             "promptLength": len(req.prompt),
+            "promptPolicyVersion": req.prompt_policy_version,
+            "debugPromptSource": req.debug_prompt_source,
         },
     )
     async with _generated_images_cutoff_lock:
@@ -6002,6 +6026,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 references=references,
                 prompt=req.prompt,
                 kind=req.kind,
+                prompt_policy_version=req.prompt_policy_version,
+                debug_prompt_source=req.debug_prompt_source,
                 result=result,
             )
         except Exception as exc:
@@ -6013,6 +6039,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 references=references,
                 prompt=req.prompt,
                 kind=req.kind,
+                prompt_policy_version=req.prompt_policy_version,
+                debug_prompt_source=req.debug_prompt_source,
                 result=result,
                 error=str(exc),
             )

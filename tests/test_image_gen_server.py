@@ -1452,6 +1452,79 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(items[1].reference_count, 0)
         self.assertEqual(items[1].execution_lane, "bootstrap_builtin")
 
+    def test_parse_request_markdown_prefers_api_prompt_over_debug_blocks(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene10_cut1
+
+- output: `assets/scenes/scene10_cut01.png`
+- prompt_policy_version: `image_api_prompt_v1`
+- references: `[]`
+
+```debug_prompt_source
+first_frame_visual_plan:
+  source_event_beat_id: scene01_event_setup
+```
+
+```text
+debug text must not be sent
+```
+
+```api_prompt
+[shot / 画角]
+shot_role: insert
+shot_scale: closeup
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            items = image_gen.parse_request_markdown(request_text, kind="scene", run_dir=Path(tmp))
+
+        self.assertEqual(items[0].prompt, "[shot / 画角]\nshot_role: insert\nshot_scale: closeup")
+        self.assertEqual(items[0].prompt_policy_version, "image_api_prompt_v1")
+        self.assertNotIn("first_frame_visual_plan", items[0].prompt)
+        self.assertNotIn("debug text", items[0].prompt)
+
+    def test_parse_request_markdown_fails_v1_when_api_prompt_missing(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene10_cut1
+
+- output: `assets/scenes/scene10_cut01.png`
+- prompt_policy_version: `image_api_prompt_v1`
+
+```text
+legacy prompt must not be used for v1
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "api_prompt_missing_for_new_prompt_policy"):
+                image_gen.parse_request_markdown(request_text, kind="scene", run_dir=Path(tmp))
+
+    def test_image_debug_log_separates_api_prompt_from_debug_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "scenes" / "scene10_cut01.png"
+            destination.parent.mkdir(parents=True)
+
+            log_path = image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="scene10_cut1",
+                index=1,
+                destination=destination,
+                references=[],
+                prompt="[shot / 画角]\nshot_role: insert",
+                kind="scene",
+                prompt_policy_version="image_api_prompt_v1",
+                debug_prompt_source={"first_frame_visual_plan": {"schema_version": "first_frame_visual_plan_v1"}, "send_to_api": False},
+            )
+
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["prompt"], "[shot / 画角]\nshot_role: insert")
+        self.assertEqual(payload["apiPromptPolicyVersion"], "image_api_prompt_v1")
+        self.assertEqual(payload["debugPromptSource"]["send_to_api"], False)
+        self.assertNotIn("first_frame_visual_plan", payload["prompt"])
+
     def test_parse_request_markdown_extracts_inline_prompt_metadata(self) -> None:
         request_text = """# Image Generation Requests
 
@@ -5013,6 +5086,8 @@ scene two prompt
                                         "kind": "asset",
                                         "item_id": "scene1_cut1",
                                         "prompt": "prompt",
+                                        "prompt_policy_version": "image_api_prompt_v1",
+                                        "debug_prompt_source": {"send_to_api": False},
                                         "references": [],
                                         "candidate_count": 1,
                                     }
@@ -5022,9 +5097,38 @@ scene two prompt
                         generated_exists = (
                             parent_run / "assets/test/image_gen_candidates/scene1_cut1/scene1_cut1_candidate_01.png"
                         ).resolve().exists()
+                        debug_log = response.json()["results"][0]["candidates"][0]["debugLog"]
+                        payload = json.loads((parent_run / debug_log).read_text(encoding="utf-8"))
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(generated_exists)
+        self.assertEqual(payload["apiPromptPolicyVersion"], "image_api_prompt_v1")
+        self.assertEqual(payload["debugPromptSource"], {"send_to_api": False})
+
+    def test_generate_rejects_v1_missing_api_prompt_before_app_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "output" / "parent").mkdir(parents=True)
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root), patch("server.image_gen_app.create_codex_app_server_client") as create_client:
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/generate",
+                            json={
+                                "run_id": "parent",
+                                "kind": "scene",
+                                "item_id": "scene1_cut1",
+                                "prompt": "",
+                                "prompt_policy_version": "image_api_prompt_v1",
+                                "debug_prompt_source": {"send_to_api": False},
+                                "references": [],
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "api_prompt_missing_for_new_prompt_policy")
+        create_client.assert_not_called()
 
     def test_insert_bulk_rejects_candidate_when_item_id_does_not_match_output_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

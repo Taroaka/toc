@@ -575,6 +575,170 @@ def _scene_prompt(
     )
 
 
+def _image_api_prompt_payload_for_scaffold(
+    *,
+    selector: str,
+    profile: dict[str, Any],
+    location_spec: dict[str, Any],
+    location_name: str,
+    cut_number: int,
+    cut_plan: dict[str, Any],
+    cut_blueprint: dict[str, Any],
+    cut_contract: dict[str, Any],
+    character_ids: list[str],
+    object_ids: list[str],
+    references: list[str],
+    cut_uses_artifact: bool,
+) -> dict[str, Any]:
+    def visible_text(value: Any, fallback: str = "") -> str:
+        text = str(value or fallback).strip()
+        for term in ("場面の核", "観客理解", "因果の証明", "価値変化", "場所の圧力", "場のルール", "主人公の制限"):
+            text = text.replace(term, "")
+        text = re.sub(r"\s+", " ", text).strip(" 、。:：")
+        return text or fallback
+
+    cut_function = str(cut_blueprint.get("cut_function") or "")
+    if cut_uses_artifact:
+        if cut_number % 3 == 0:
+            shot_role = "insert"
+            shot_scale = "extreme_closeup"
+        elif cut_number % 2 == 0:
+            shot_role = "object_proof"
+            shot_scale = "medium_closeup"
+        else:
+            shot_role = "object_proof"
+            shot_scale = "closeup"
+    elif cut_number == 1:
+        shot_role = "establishing"
+        shot_scale = "medium_wide"
+    elif cut_function in {"reaction", "payoff"}:
+        shot_role = "reaction"
+        shot_scale = "medium_closeup"
+    elif cut_number % 4 == 0:
+        shot_role = "handoff"
+        shot_scale = "medium_wide"
+    elif cut_number % 3 == 0:
+        shot_role = "insert"
+        shot_scale = "closeup"
+    else:
+        shot_role = "character_action"
+        shot_scale = "medium"
+    location_zone = str(cut_plan.get("foreground") or cut_plan.get("midground") or location_name)
+    previous_state = "この場面の最初の画像なので場所と主体を明確に始める。" if cut_number == 1 else "前cutの構図をそのまま繰り返さず、距離、姿勢、場所zoneのどれかを変える。"
+    object_contact_state = "reaching_toward" if cut_uses_artifact else "visible_not_touched"
+    object_display_names = [
+        profile["artifact_name"] if object_id == profile.get("artifact_asset_id") else object_id
+        for object_id in object_ids
+    ]
+    costume_state = "参照画像と同じ衣装状態"
+    if any("transformed" in character_id for character_id in character_ids):
+        costume_state = "舞踏会ドレス姿を維持し、質素な普段着へ戻さない。"
+    elif any("post_midnight" in character_id for character_id in character_ids):
+        costume_state = "魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。"
+    prompt = "\n\n".join(
+        [
+            "[参照画像の使い方]\n"
+            + "\n".join(
+                [
+                    f"人物参照: {character_id} は顔、体格、髪、衣装の主要形状を維持し、pose/gaze/lightingだけをこの画面に合わせる。"
+                    for character_id in character_ids
+                ]
+                + [
+                    f"小道具参照: {object_name} ({object_id}) は形状、材質、縮尺を維持する。"
+                    for object_id, object_name in zip(object_ids, object_display_names)
+                ]
+                + [f"場所参照: {location_spec['asset_id']} は完成構図ではなく、空間の素材、光、配置の一貫性だけに使う。"]
+            ),
+            "[shot / 画角]\n"
+            f"shot_role: {shot_role}\n"
+            f"shot_scale: {shot_scale}\n"
+            f"a_roll_or_b_roll: {'b_roll' if shot_role == 'object_proof' else 'a_roll'}\n"
+            f"camera_position: {cut_plan.get('screen_direction') or 'subject_side'}\n"
+            "camera_height: 人物の手元と顔が読める高さ\n"
+            "lens_feel: 自然な遠近感",
+            "[この1枚に写る瞬間]\n"
+            f"cut_visible_moment: {visible_text(cut_blueprint['visual_beat'], cut_blueprint['first_frame_brief'])}\n"
+            f"action_completion_state: {cut_blueprint['action_completion_state']}\n"
+            "still_must_not_show: 行為完了後、後続reveal、次場面の結果。",
+            "[前cutからの変化]\n"
+            f"previous_cut_state: {previous_state}\n"
+            f"this_cut_delta: {visible_text(cut_blueprint['visual_beat'], cut_blueprint['first_frame_brief'])}\n"
+            "must_not_repeat: same_camera_distance / same_character_pose / same_location_zone",
+            "[人物の状態と配置]\n"
+            f"costume: {costume_state}\n"
+            f"pose: {visible_text(cut_blueprint['first_frame_brief'], '行為が始まる直前の姿勢')}\n"
+            "gaze: 主要な視覚証拠へ向く\n"
+            "expression: この画面の圧力が読める表情\n"
+            f"hand_position: {profile['protagonist_name']}の手元が行為直前の位置にある\n"
+            "foot_position: 足先と重心が次の動きに向く\n"
+            "body_axis: 次の動きに向いた身体軸",
+            "[小道具 / 物体]\n"
+            f"object_visibility: {', '.join(object_display_names) if object_display_names else 'この画面で必要な場所の証拠が見える'}\n"
+            f"object_contact_state: {object_contact_state}\n"
+            "object_position: foreground\n"
+            f"object_story_role: {visible_text(cut_blueprint['causal_proof'] or cut_blueprint['visual_beat'], 'この画面の視覚証拠')}",
+            "[場所の使い方]\n"
+            f"base_location_reference: {location_spec['asset_id']} は完成構図ではなく、素材と光の一貫性として使う。\n"
+            f"location_zone: {location_zone}\n"
+            f"foreground: {cut_plan.get('foreground') or location_zone}\n"
+            f"midground: {cut_plan.get('midground') or profile['protagonist_name']}\n"
+            f"background: {cut_plan.get('background') or location_name}",
+            "[光 / 質感]\n"
+            "light_source: 画面内で方向が読める自然な光源\n"
+            "light_direction: 人物と小道具の形が読める方向\n"
+            f"material_focus: {location_name}の床、壁、衣服、小道具の質感",
+            "[動画開始に向いた静止状態]\n"
+            f"movable_subject: {profile['protagonist_name']}\n"
+            f"movement_vector_visible_as_static_pose: {cut_plan.get('screen_direction') or '次の動きが始まる方向'}\n"
+            "image_must_leave_room_for: 動き出す方向の余白\n"
+            "must_not_resolve: 行為完了後の結果や次場面のreveal",
+            "[禁止]\ntext, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters.",
+        ]
+    )
+    shot_design_contract = {
+        "shot_role": shot_role,
+        "shot_scale": shot_scale,
+        "a_roll_or_b_roll": "b_roll" if shot_role == "object_proof" else "a_roll",
+        "should_show_face": shot_role != "object_proof",
+        "should_show_hands": True,
+        "should_show_object_detail": bool(object_ids),
+    }
+    payload = {
+        "policy_version": "image_api_prompt_v1",
+        "prompt": prompt,
+        "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters",
+        "reference_instructions": "API prompt本文の参照画像の使い方を正本にする。",
+        "reference_images": references,
+        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "shot_design_contract": shot_design_contract,
+        "cut_location_frame_plan": {
+            "base_location_reference_id": location_spec["asset_id"],
+            "use_reference_as": "material_anchor",
+            "location_zone_id": re.sub(r"\s+", "_", location_zone)[:80],
+            "location_zone_description": location_zone,
+        },
+        "cut_visual_delta": {
+            "previous_cut_selector": "" if cut_number == 1 else re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector),
+            "previous_visible_state_summary": previous_state,
+            "this_cut_new_information": visible_text(cut_blueprint["visual_beat"], cut_blueprint["first_frame_brief"]),
+            "cut_delta_visible_in_still": visible_text(cut_blueprint["visual_beat"], cut_blueprint["first_frame_brief"]),
+        },
+        "blocking_and_interaction": {
+            "character_blocking": {
+                "gaze_target": "主要な視覚証拠",
+                "hand_position": {"left": "身体近く", "right": "行為直前の位置"},
+                "foot_position": {"left": "重心を支える", "right": "次の動きに向く"},
+            },
+            "object_interaction": {
+                "object_id": object_ids[0] if object_ids else "",
+                "contact_state": object_contact_state,
+                "object_screen_position": "foreground",
+            },
+        },
+    }
+    return payload
+
+
 def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
     events = [str(event) for event in profile.get("events", []) if str(event).strip()]
     scene_titles = [str(title) for title in profile.get("scene_titles") or []]
@@ -1967,6 +2131,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
         total_duration_seconds += scene_duration_seconds
         cuts: list[dict[str, Any]] = []
         manifest_cuts: list[dict[str, Any]] = []
+        scene_shot_records: list[dict[str, Any]] = []
         for cut_number, cut_plan in enumerate(cut_plans, start=1):
             selector = f"scene{scene_id}_cut{cut_number:02d}"
             selectors.append(selector)
@@ -2308,6 +2473,42 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 source_event_contract=cut_contract["source_event_contract"],
                 reveal_constraints=scene_intent.get("reveal_constraints", []),
             )
+            api_prompt_payload = _image_api_prompt_payload_for_scaffold(
+                selector=selector,
+                profile=profile,
+                location_spec=location_spec,
+                location_name=location_name,
+                cut_number=cut_number,
+                cut_plan=cut_plan,
+                cut_blueprint=cut_blueprint,
+                cut_contract=cut_contract,
+                character_ids=character_ids,
+                object_ids=object_ids,
+                references=references,
+                cut_uses_artifact=cut_uses_artifact,
+            )
+            debug_prompt_source = {
+                "first_frame_contract": cut_contract["first_frame_contract"],
+                "first_frame_visual_plan_source": [
+                    "cut_contract.source_event_contract",
+                    "cut_contract.first_frame_contract",
+                    "cut_contract.cinematic_contract",
+                ],
+                "api_prompt_payload": {
+                    "policy_version": api_prompt_payload["policy_version"],
+                    "sha256": api_prompt_payload["sha256"],
+                },
+                "send_to_api": False,
+            }
+            shot_contract = api_prompt_payload.get("shot_design_contract") if isinstance(api_prompt_payload.get("shot_design_contract"), dict) else {}
+            scene_shot_records.append(
+                {
+                    "selector": selector,
+                    "shot_role": shot_contract.get("shot_role", ""),
+                    "shot_scale": shot_contract.get("shot_scale", ""),
+                    "a_roll_or_b_roll": shot_contract.get("a_roll_or_b_roll", ""),
+                }
+            )
             cuts.append({**script_cut_base, "cut_contract": cut_contract, "scene_contract": {"legacy_note": "旧reader向け alias。cut_contract が正本。", "target_beat": beat, "must_show": must_show, "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"], "done_when": [cut_plan["done_when"]]}})
             manifest_cuts.append(
                 {
@@ -2333,7 +2534,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"],
                         "done_when": [cut_plan["done_when"]],
                     },
-                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "prompt": prompt, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
+                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "prompt": prompt, "prompt_deprecated": True, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
                     "video_generation": {"tool": "kling_3_0_omni", "duration_seconds": 12, "first_frame": f"assets/scenes/{selector}.png", "motion_prompt": cut_plan["motion_brief"], "output": f"assets/scenes/{selector}.mp4"},
                     "audio": {"narration": {"contract_ref": "cut_contract.narration_contract", "text": narration, "tts_text": narration, "tool": "elevenlabs", "status": "approved", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": [], "p700_review": {"role_matches_contract": True, "narration_not_captioning_image": True, "does_not_add_new_story_fact": True, "timing_supports_visual_beat": True}}},
                     "review": {"triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}},
@@ -2348,9 +2549,19 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "causal_turn_visible": True,
             "scene_specificity_gate_passed": True,
         }
-        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_intent": scene_intent, "scene_event": scene_event, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
+        scene_shot_mix_plan = {
+            "policy_version": "scene_shot_mix_v1",
+            "source": "image_generation.api_prompt_payload.shot_design_contract",
+            "shots": scene_shot_records,
+            "gate_requirements": [
+                "scene_shot_mix_plan_exists",
+                "scene_shot_mix_not_all_medium_wide",
+                "no_two_adjacent_cuts_same_shot_role_and_scale",
+            ],
+        }
+        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_intent": scene_intent, "scene_event": scene_event, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
         scene_composite_review = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
-        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "scene_intent": scene_intent, "scene_event": scene_event, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
+        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "scene_intent": scene_intent, "scene_event": scene_event, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
         scene_event_outputs.append(
             {
                 "scene_id": scene_id,

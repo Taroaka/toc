@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import re
 from pathlib import Path
 from typing import Any
 
@@ -788,6 +789,101 @@ def _major_scene_coverage_ok(story_keys: set[str], covered_story_keys: set[str],
 
 def _has_template_placeholder(text: str) -> bool:
     return any(marker in text for marker in ("REPLACE_ME", "EXAMPLE_ONLY", "TEMPLATE_ONLY"))
+
+
+IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
+IMAGE_API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_yaml_field_names",
+        re.compile(
+            r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            re.I,
+        ),
+    ),
+    ("api_prompt_contains_no_boolean_gate_values", re.compile(r"\b(?:true|false|null|none)\b", re.I)),
+    ("api_prompt_contains_no_legacy_additional_description", re.compile(r"追加の具体描写|追加具体描写")),
+    ("api_prompt_contains_no_abstract_story_terms", re.compile(r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限")),
+    ("api_prompt_contains_no_unresolved_generic_placeholders", re.compile(r"\b(?:TODO|TBD|placeholder|approved_story_evidence|primary_visible_object|primary_visible_zone)\b", re.I)),
+)
+IMAGE_API_PROMPT_ABSTRACT_TERM_RE = re.compile(r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限")
+
+
+def _image_api_prompt_payload(image_generation: dict[str, Any]) -> dict[str, Any]:
+    payload = image_generation.get("api_prompt_payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _image_api_prompt_text(image_generation: dict[str, Any]) -> str:
+    payload = _image_api_prompt_payload(image_generation)
+    return str(payload.get("prompt") or image_generation.get("prompt") or "")
+
+
+def _image_api_prompt_policy(image_generation: dict[str, Any]) -> str:
+    payload = _image_api_prompt_payload(image_generation)
+    return str(payload.get("policy_version") or image_generation.get("prompt_policy_version") or "").strip()
+
+
+def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any]) -> list[str]:
+    if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION:
+        return []
+    prompt = str(_image_api_prompt_payload(image_generation).get("prompt") or "").strip()
+    issues: list[str] = []
+    if not prompt:
+        issues.append(f"{selector}:api_prompt_missing_for_new_prompt_policy")
+        return issues
+    for gate_name, pattern in IMAGE_API_PROMPT_FORBIDDEN_GATES:
+        if pattern.search(prompt):
+            issues.append(f"{selector}:{gate_name}")
+    required = {
+        "api_prompt_has_shot_role": "shot_role:",
+        "api_prompt_has_location_zone": "location_zone:",
+        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
+        "api_prompt_has_character_blocking": "hand_position:",
+    }
+    for gate_name, needle in required.items():
+        if needle not in prompt:
+            issues.append(f"{selector}:{gate_name}")
+    if as_list(image_generation.get("object_ids")) and "object_contact_state:" not in prompt:
+        issues.append(f"{selector}:api_prompt_has_object_contact_state_if_object_present")
+    for required_payload in ("shot_design_contract", "cut_location_frame_plan", "cut_visual_delta", "blocking_and_interaction"):
+        if not isinstance(_image_api_prompt_payload(image_generation).get(required_payload), dict):
+            issues.append(f"{selector}:{required_payload}_missing")
+    return issues
+
+
+def _scene_shot_mix_plan_v1_issues(scenes: list[Any]) -> list[str]:
+    issues: list[str] = []
+    for scene_index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        cuts = as_list(scene.get("cuts")) or [scene]
+        v1_shots: list[tuple[str, str, str]] = []
+        for cut_index, cut in enumerate(cuts, start=1):
+            if not isinstance(cut, dict):
+                continue
+            image_generation = cut.get("image_generation") if isinstance(cut.get("image_generation"), dict) else {}
+            if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION:
+                continue
+            scene_id = as_dotted_str(scene.get("scene_id")) or str(scene_index)
+            cut_id = as_dotted_str(cut.get("cut_id")) or str(cut_index)
+            selector = str(cut.get("selector") or make_scene_cut_selector(scene_id, cut_id))
+            shot = _image_api_prompt_payload(image_generation).get("shot_design_contract")
+            shot = shot if isinstance(shot, dict) else {}
+            v1_shots.append((selector, str(shot.get("shot_role") or "").strip(), str(shot.get("shot_scale") or "").strip()))
+        if not v1_shots:
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id")) or str(scene_index)
+        if not isinstance(scene.get("scene_shot_mix_plan"), dict):
+            issues.append(f"scene{scene_id}:scene_shot_mix_plan_exists")
+        scales = [scale for _, _, scale in v1_shots if scale]
+        if scales and all(scale == "medium_wide" for scale in scales):
+            issues.append(f"scene{scene_id}:scene_shot_mix_not_all_medium_wide")
+        for previous, current in zip(v1_shots, v1_shots[1:]):
+            if previous[1:] == current[1:] and previous[1]:
+                issues.append(f"{current[0]}:no_two_adjacent_cuts_same_shot_role_and_scale")
+    return issues
 
 
 def _asset_bible_candidate_count(value: Any) -> int:
@@ -2843,6 +2939,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     narration_text_ok = True
     ids_ok = True
     prompt_motion_leak_issues: list[str] = []
+    api_prompt_v1_issues: list[str] = []
     for node in nodes:
         video_generation = node.get("video_generation") if isinstance(node, dict) else None
         image_generation = node.get("image_generation") if isinstance(node, dict) else None
@@ -2856,9 +2953,10 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
         if isinstance(image_generation, dict):
             if "character_ids" not in image_generation or "object_ids" not in image_generation:
                 ids_ok = False
-            prompt = str(image_generation.get("prompt") or "")
+            selector = str(node.get("selector") or node.get("cut_id") or node.get("scene_id") or "node")
+            prompt = _image_api_prompt_text(image_generation)
+            api_prompt_v1_issues.extend(_image_api_prompt_v1_issues(selector, image_generation))
             if any(token in prompt for token in MOTION_LEAK_TOKENS):
-                selector = str(node.get("selector") or node.get("cut_id") or node.get("scene_id") or "node")
                 prompt_motion_leak_issues.append(selector)
 
         narration = (audio or {}).get("narration") if isinstance(audio, dict) else None
@@ -2898,6 +2996,14 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             + (f" (issues: {', '.join(prompt_motion_leak_issues[:8])})" if prompt_motion_leak_issues else ""),
             kind="rubric",
         )
+        add_check(
+            checks,
+            f"{path_label}.api_prompt_v1_contract",
+            not api_prompt_v1_issues,
+            "image_api_prompt_v1 entries keep API prompts separate from debug/internal fields and include drawable shot/location/delta/blocking contracts"
+            + (f" (issues: {', '.join(api_prompt_v1_issues[:8])})" if api_prompt_v1_issues else ""),
+            kind="rubric",
+        )
 
     if flow == "immersive":
         experience = nested_get(data, ["video_metadata", "experience"])
@@ -2914,6 +3020,15 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             kind="rubric",
         )
         if profile == "standard":
+            shot_mix_issues = _scene_shot_mix_plan_v1_issues(scenes)
+            add_check(
+                checks,
+                f"{path_label}.scene_shot_mix_plan",
+                not shot_mix_issues,
+                "image_api_prompt_v1 scenes declare scene_shot_mix_plan and avoid repetitive adjacent shot role/scale"
+                + (f" (issues: {', '.join(shot_mix_issues[:8])})" if shot_mix_issues else ""),
+                kind="rubric",
+            )
             coverage_issues: list[str] = []
             redundancy_issues: list[str] = []
             handoff_issues: list[str] = []
@@ -3079,9 +3194,10 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
     must_avoid_failed = False
     reveal_failed = False
     for selector, node in nodes_with_selectors:
+        image_generation_for_prompt = (node.get("image_generation") or {}) if isinstance(node.get("image_generation"), dict) else {}
         combined = "\n".join(
             [
-                str(((node.get("image_generation") or {}) if isinstance(node.get("image_generation"), dict) else {}).get("prompt") or ""),
+                _image_api_prompt_text(image_generation_for_prompt),
                 str(((node.get("video_generation") or {}) if isinstance(node.get("video_generation"), dict) else {}).get("motion_prompt") or ""),
                 str(((((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration") or {}) if isinstance(((node.get("audio") or {}) if isinstance(node.get("audio"), dict) else {}).get("narration"), dict) else {}).get("text") or ""),
             ]
@@ -3096,6 +3212,8 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         elif strict_cut_contract:
             contract_missing = True
         must_show = _contract_list_paths(contract, "must_show", "viewer_contract.must_show")
+        if _image_api_prompt_policy(image_generation_for_prompt) == IMAGE_API_PROMPT_POLICY_VERSION:
+            must_show = [term for term in must_show if not IMAGE_API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
         must_avoid = _contract_list_paths(contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
         if must_show and not all(term in combined for term in must_show):
             must_show_failed = True
@@ -3104,7 +3222,7 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         if reveal_constraints:
             image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
             declared_character_ids = set(as_list(image_generation.get("character_ids"))) if isinstance(image_generation, dict) else set()
-            prompt = str(image_generation.get("prompt") or "") if isinstance(image_generation, dict) else ""
+            prompt = _image_api_prompt_text(image_generation) if isinstance(image_generation, dict) else ""
             for constraint in reveal_constraints:
                 if constraint["rule"] != "must_not_appear_before":
                     continue

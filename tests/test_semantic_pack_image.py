@@ -160,6 +160,30 @@ def write_manifest(run_dir: Path) -> None:
                 "        image_generation:",
                 "          output: assets/scenes/scene10_cut01.png",
                 "          prompt: 灰の台所でシンデレラが立つ。画面内テキストなし。",
+                "          api_prompt_payload:",
+                "            policy_version: image_api_prompt_v1",
+                "            prompt: |",
+                "              [shot / 画角]",
+                "              shot_role: character_action",
+                "              shot_scale: medium",
+                "",
+                "              [この1枚に写る瞬間]",
+                "              cut_visible_moment: 灰の台所でシンデレラが立つ",
+                "",
+                "              [前cutからの変化]",
+                "              this_cut_delta: 灰の台所の姿勢が新しく見える",
+                "",
+                "              [人物の状態と配置]",
+                "              hand_position: 両手が灰のついた服の前にある",
+                "",
+                "              [場所の使い方]",
+                "              location_zone: 灰の台所の床と作業台",
+                "",
+                "              [小道具 / 物体]",
+                "              object_contact_state: visible_not_touched",
+                "            negative_prompt: text, logo",
+                "            reference_images: [assets/characters/cinderella.png, assets/locations/kitchen.png]",
+                "            sha256: test-sha",
                 "          references:",
                 "            - assets/characters/cinderella.png",
                 "            - assets/locations/kitchen.png",
@@ -232,7 +256,12 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["review_scope"], "all_entries")
             self.assertEqual(entry["selector"], "scene10_cut01")
             self.assertEqual(entry["output"], "assets/scenes/scene10_cut01.png")
+            self.assertIn("shot_role: character_action", entry["prompt"])
+            self.assertEqual(entry["legacy_prompt"], "灰の台所でシンデレラが立つ。画面内テキストなし。")
+            self.assertEqual(entry["api_prompt_policy_version"], "image_api_prompt_v1")
+            self.assertEqual(entry["api_prompt_payload"]["negative_prompt"], "text, logo")
             self.assertIn("prompt_blocks", entry)
+            self.assertIn("shot / 画角", entry["prompt_blocks"])
             self.assertIn("image_prompt_gate_focus", entry)
             self.assertIn("first_frame_visual_plan", entry)
             self.assertEqual(entry["first_frame_visual_plan"]["schema_version"], "first_frame_visual_plan_v1")
@@ -293,6 +322,8 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(composite["scene_event"]["schema_version"], "scene_event_v1")
             self.assertEqual(composite["cut_entries"][0]["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
             self.assertEqual(composite["cut_entries"][0]["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
+            self.assertIn("shot_role: character_action", composite["cut_entries"][0]["prompt"])
+            self.assertEqual(composite["cut_entries"][0]["api_prompt_policy_version"], "image_api_prompt_v1")
             self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("event_beat_reference_integrity", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("audience_knowledge_delta_missing", composite["scene_composite_gate"]["failure_reason_keys"])

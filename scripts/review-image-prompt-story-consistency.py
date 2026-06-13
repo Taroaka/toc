@@ -36,6 +36,8 @@ PROMPT_ENTRY_RE = re.compile(
     re.M | re.S,
 )
 TEXT_BLOCK_RE = re.compile(r"```text\n(?P<prompt>.*?)\n```", re.S)
+API_PROMPT_BLOCK_RE = re.compile(r"```api_prompt\n(?P<prompt>.*?)\n```", re.S)
+IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 JP_TOKEN_RE = re.compile(r"[一-龯]{1,8}|[ァ-ヶー]{2,16}")
 
 IMPORTANT_SINGLE_KANJI = {
@@ -361,6 +363,8 @@ class PromptEntry:
     overall_score: float
     contract: dict[str, Any]
     prompt: str
+    prompt_policy_version: str | None = None
+    legacy_prompt: str = ""
 
 
 @dataclass
@@ -383,7 +387,17 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
     entries: list[PromptEntry] = []
     for match in PROMPT_ENTRY_RE.finditer(text):
         body = match.group("body")
-        prompt_match = TEXT_BLOCK_RE.search(body)
+        api_prompt_match = API_PROMPT_BLOCK_RE.search(body)
+        text_prompt_match = TEXT_BLOCK_RE.search(body)
+        prompt_policy_version = _extract_backtick_bullet(body, "prompt_policy_version") or _extract_backtick_bullet(body, "policy_version")
+        prompt = ""
+        legacy_prompt = ""
+        if api_prompt_match:
+            prompt = api_prompt_match.group("prompt").strip()
+        if text_prompt_match:
+            legacy_prompt = text_prompt_match.group("prompt").strip()
+            if not prompt and prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
+                prompt = legacy_prompt
         output = _extract_backtick_bullet(body, "output")
         narration = _extract_backtick_bullet(body, "narration")
         rationale = _extract_backtick_bullet(body, "rationale")
@@ -402,7 +416,9 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
                 rubric_scores={},
                 overall_score=0.0,
                 contract={},
-                prompt=(prompt_match.group("prompt").strip() if prompt_match else ""),
+                prompt=prompt,
+                prompt_policy_version=prompt_policy_version or None,
+                legacy_prompt=legacy_prompt,
             )
         )
     return entries
@@ -582,6 +598,50 @@ def prompt_structural_contract_issues(prompt: str) -> list[Finding]:
     abstract_hits = [term for term in PROMPT_ABSTRACT_STORY_TERMS if term in drawable]
     if abstract_hits:
         findings.append(Finding(code="image_prompt_visual_translation_missing", message="prompt still contains abstract story terms instead of visible evidence: " + ", ".join(abstract_hits[:6]) + "."))
+    return findings
+
+
+API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_yaml_field_names",
+        re.compile(
+            r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            re.I,
+        ),
+    ),
+    ("api_prompt_contains_no_boolean_gate_values", re.compile(r"\b(?:true|false|null|none)\b", re.I)),
+    ("api_prompt_contains_no_legacy_additional_description", re.compile(r"追加の具体描写|追加具体描写")),
+    ("api_prompt_contains_no_abstract_story_terms", re.compile(r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限")),
+    ("api_prompt_contains_no_unresolved_generic_placeholders", re.compile(r"\b(?:TODO|TBD|placeholder|approved_story_evidence|primary_visible_object|primary_visible_zone)\b", re.I)),
+)
+API_PROMPT_ABSTRACT_TERM_RE = re.compile(r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限")
+
+
+def api_prompt_structural_contract_issues(prompt: str, *, object_present: bool) -> list[Finding]:
+    findings: list[Finding] = []
+    if not prompt.strip():
+        return [Finding(code="api_prompt_missing_for_new_prompt_policy", message="image_api_prompt_v1 requires ```api_prompt or image_generation.api_prompt_payload.prompt.")]
+    for code, pattern in API_PROMPT_FORBIDDEN_GATES:
+        if pattern.search(prompt):
+            findings.append(Finding(code=code, message=f"API prompt violates v1 gate `{code}`."))
+    required = {
+        "api_prompt_has_shot_role": "shot_role:",
+        "api_prompt_has_location_zone": "location_zone:",
+        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
+        "api_prompt_has_character_blocking": "hand_position:",
+    }
+    for code, needle in required.items():
+        if needle not in prompt:
+            findings.append(Finding(code=code, message=f"API prompt is missing required drawable field `{needle}`."))
+    if object_present and "object_contact_state:" not in prompt:
+        findings.append(
+            Finding(
+                code="api_prompt_has_object_contact_state_if_object_present",
+                message="API prompt must describe object_contact_state when image_generation.object_ids is non-empty.",
+            )
+        )
     return findings
 
 
@@ -845,9 +905,18 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
             image_generation = node.get("image_generation")
             if not isinstance(image_generation, dict):
                 continue
-            prompt = str(image_generation.get("prompt") or "").strip()
+            api_prompt_payload = image_generation.get("api_prompt_payload") if isinstance(image_generation.get("api_prompt_payload"), dict) else {}
+            prompt_policy_version = str(api_prompt_payload.get("policy_version") or image_generation.get("prompt_policy_version") or "").strip()
+            legacy_prompt = str(image_generation.get("prompt") or "").strip()
+            api_prompt = str(api_prompt_payload.get("prompt") or "").strip()
+            if prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION:
+                prompt = api_prompt
+            else:
+                prompt = api_prompt or legacy_prompt
             output = str(image_generation.get("output") or "").strip()
-            if not prompt or not output:
+            if not output:
+                continue
+            if not prompt and prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
                 continue
             still_plan = node.get("still_image_plan") if isinstance(node.get("still_image_plan"), dict) else {}
             mode = str(still_plan.get("mode") or "").strip().lower()
@@ -877,6 +946,8 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
                     overall_score=float(review.get("overall_score") or 0.0),
                     contract=dict(contract),
                     prompt=prompt,
+                    prompt_policy_version=prompt_policy_version or None,
+                    legacy_prompt=legacy_prompt,
                 )
             )
     return entries
@@ -1190,9 +1261,12 @@ def review_entries(
 
         findings: list[Finding] = []
         drawable_prompt = prompt_drawable_content(entry.prompt)
+        is_api_prompt_v1 = entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION
 
         if not is_reference_entry and cut_contract:
             cut_must_show = _nested_contract_list(cut_contract, "must_show", "viewer_contract.must_show")
+            if is_api_prompt_v1:
+                cut_must_show = [term for term in cut_must_show if not API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
             cut_must_avoid = _nested_contract_list(cut_contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
             first_frame_brief = _nested_contract_string(cut_contract, "first_frame_brief", "first_frame_contract.first_frame_brief")
             visual_proof = _nested_contract_string(cut_contract, "visual_beat", "viewer_contract.visual_proof")
@@ -1256,6 +1330,8 @@ def review_entries(
             )
         else:
             must_include = _contract_string_list(contract, "must_include")
+            if is_api_prompt_v1:
+                must_include = [term for term in must_include if not API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
             must_avoid = _contract_string_list(contract, "must_avoid")
             target_focus = str(contract.get("target_focus") or "").strip().lower()
 
@@ -1284,15 +1360,24 @@ def review_entries(
                     )
                 )
 
-        missing_blocks = find_missing_required_blocks(entry.prompt)
-        for block in missing_blocks:
-            findings.append(
-                Finding(
-                    code="missing_required_prompt_block",
-                    message=f"prompt is missing required block `[{block}]`.",
+        missing_blocks: list[str] = []
+        if is_api_prompt_v1:
+            findings.extend(
+                api_prompt_structural_contract_issues(
+                    entry.prompt,
+                    object_present=bool(declared_object_ids),
                 )
             )
-        findings.extend(prompt_structural_contract_issues(entry.prompt))
+        else:
+            missing_blocks = find_missing_required_blocks(entry.prompt)
+            for block in missing_blocks:
+                findings.append(
+                    Finding(
+                        code="missing_required_prompt_block",
+                        message=f"prompt is missing required block `[{block}]`.",
+                    )
+                )
+            findings.extend(prompt_structural_contract_issues(entry.prompt))
         craft_detail_issues = prompt_craft_detail_issues(entry.prompt)
         for issue in craft_detail_issues:
             findings.append(Finding(code="image_prompt_prompt_craft_weak", message=issue))
@@ -1313,6 +1398,12 @@ def review_entries(
             findings.append(Finding(code="prompt_leaks_motion_brief", message=issue))
 
         independence_issues = find_prompt_independence_issues(entry.prompt)
+        if is_api_prompt_v1:
+            independence_issues = [
+                issue
+                for issue in independence_issues
+                if issue != "prompt depends on another shot or prompt instead of being self-contained."
+            ]
         if nonvisual_metadata_issues or design_meta_leak_issues or first_frame_metadata_issues or motion_brief_leak_issues:
             independence_issues = [
                 issue for issue in independence_issues if issue != "prompt references another scene/cut directly."
@@ -1572,6 +1663,8 @@ def render_prompt_collection(entries: list[PromptEntry]) -> str:
         lines.append(f"- rubric_scores: `{entry.rubric_scores}`")
         if entry.contract:
             lines.append(f"- contract: `{entry.contract}`")
+        if entry.prompt_policy_version:
+            lines.append(f"- prompt_policy_version: `{entry.prompt_policy_version}`")
         if entry.agent_review_reason_keys:
             lines.append(f"- agent_review_reason_keys: `{', '.join(entry.agent_review_reason_keys)}`")
         else:
@@ -1581,15 +1674,8 @@ def render_prompt_collection(entries: list[PromptEntry]) -> str:
             lines.extend(f"  - `{message}`" for message in entry.agent_review_reason_messages)
         else:
             lines.append("  - ``")
-        lines.extend(
-            [
-                "",
-                "```text",
-                entry.prompt.rstrip(),
-                "```",
-                "",
-            ]
-        )
+        fence = "api_prompt" if entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION else "text"
+        lines.extend(["", f"```{fence}", entry.prompt.rstrip(), "```", ""])
     return "\n".join(lines)
 
 
@@ -1618,6 +1704,8 @@ def apply_review_statuses(entries: list[PromptEntry], results: list[ReviewOutcom
                 overall_score=outcome.overall_score if outcome else entry.overall_score,
                 contract=dict(entry.contract),
                 prompt=entry.prompt,
+                prompt_policy_version=entry.prompt_policy_version,
+                legacy_prompt=entry.legacy_prompt,
             )
         )
     return updated
@@ -1654,6 +1742,8 @@ def apply_human_review_updates(entries: list[PromptEntry], selectors: list[str],
                 overall_score=entry.overall_score,
                 contract=dict(entry.contract),
                 prompt=entry.prompt,
+                prompt_policy_version=entry.prompt_policy_version,
+                legacy_prompt=entry.legacy_prompt,
             )
         )
     return updated

@@ -30,6 +30,12 @@ EXPECTED_ROLE_BY_ID_GROUP = {
 }
 IMAGE_PROMPT_BLOCK_LABELS = (
     "参照画像の使い方",
+    "shot / 画角",
+    "この1枚に写る瞬間",
+    "前cutからの変化",
+    "人物の状態と配置",
+    "小道具 / 物体",
+    "場所の使い方",
     "このcutの開始状態",
     "単一瞬間ルール",
     "画面に必ず見えるもの",
@@ -41,6 +47,15 @@ IMAGE_PROMPT_BLOCK_LABELS = (
     "動画化のための開始余地",
     "禁止",
 )
+
+
+def _image_api_prompt_payload(image_generation: dict[str, Any]) -> dict[str, Any]:
+    return _dict(image_generation.get("api_prompt_payload"))
+
+
+def _image_api_prompt(image_generation: dict[str, Any]) -> str:
+    payload = _image_api_prompt_payload(image_generation)
+    return _as_str(payload.get("prompt") or image_generation.get("prompt"))
 
 
 def _prompt_block_labels(prompt: str) -> list[str]:
@@ -231,6 +246,8 @@ def collect_image_prompt_entries(
         semantic_contract = semantic_contract_payload(contract)
         event_context = _event_context_for_cut(scene, cut)
         first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
+        api_prompt_payload = _image_api_prompt_payload(image_generation)
+        api_prompt = _image_api_prompt(image_generation)
         ids = {
             "character_ids": _as_str_list(image_generation.get("character_ids")),
             "object_ids": _as_str_list(image_generation.get("object_ids")),
@@ -244,14 +261,20 @@ def collect_image_prompt_entries(
                 "scene_id": scene.get("scene_id"),
                 "cut_id": cut.get("cut_id"),
                 "output": _as_str(image_generation.get("output")),
-                "prompt": _as_str(image_generation.get("prompt")),
-                "prompt_blocks": _prompt_block_labels(_as_str(image_generation.get("prompt"))),
+                "prompt": api_prompt,
+                "legacy_prompt": _as_str(image_generation.get("prompt")),
+                "api_prompt_payload": api_prompt_payload,
+                "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                "debug_prompt_source": _dict(image_generation.get("debug_prompt_source")),
+                "prompt_blocks": _prompt_block_labels(api_prompt),
                 "image_prompt_gate_focus": [
-                    "旧 [cut契約からの可視要件] や 場面の核/観客理解/因果の証明 などの設計メタが本文に残っていないか",
-                    "source_event_contract と event_context_for_cut から event_time_position / event_fact_visible_in_still / not_yet_happened_in_still が具体化されているか",
+                    "api_prompt_payload.prompt が API 送信用正本であり、legacy image_generation.prompt や debug_prompt_source を読んでいないか",
+                    "API prompt が意味説明ではなく、shot / location zone / blocking / object contact / previous cut delta で描ける1枚になっているか",
+                    "旧 [cut契約からの可視要件] や 場面の核/観客理解/因果の証明 などの設計メタが API prompt に残っていないか",
+                    "source_event_contract と event_context_for_cut の ID や event_time_position / what_happens / visible_action が API prompt に漏れていないか",
                     "小道具の reveal boundary が must_include / must_not_include と矛盾していないか",
                     "参照画像の使い方、人物状態、小道具 visibility、構図、光/質感、動画化の開始余地が描画可能な具体語になっているか",
-                    "motion_brief や後続の出来事が画像promptに混入していないか",
+                    "motion_brief や後続の出来事が API prompt に混入していないか",
                     "first_frame_visual_plan が poster 的な雰囲気画像ではなく、cutの出来事が始まる1つの瞬間へ変換されているか",
                 ],
                 "references": _as_str_list(image_generation.get("references")),
@@ -310,6 +333,8 @@ def collect_scene_image_entries(
             "location_ids": _as_str_list(image_generation.get("location_ids")),
         }
         semantic_contract = semantic_contract_payload(_cut_semantic_contract(cut, image_generation=image_generation))
+        api_prompt_payload = _image_api_prompt_payload(image_generation)
+        api_prompt = _image_api_prompt(image_generation)
         entries.append(
             {
                 "stage": "scene_image",
@@ -324,7 +349,10 @@ def collect_scene_image_entries(
                 "generated_image_path": _as_str((matched_provenance or {}).get("savedPath")),
                 "generation_source": _as_str((matched_provenance or {}).get("source")),
                 "debug_log": _as_str((matched_provenance or {}).get("debug_log")),
-                "prompt": _as_str(image_generation.get("prompt")),
+                "prompt": api_prompt,
+                "legacy_prompt": _as_str(image_generation.get("prompt")),
+                "api_prompt_payload": api_prompt_payload,
+                "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
                 "references": _as_str_list(image_generation.get("references")),
                 **ids,
                 "asset_reference_context": reference_context(ids, asset_context),
@@ -364,6 +392,8 @@ def collect_scene_composite_entries(
             contract = _cut_semantic_contract(cut, image_generation=image_generation)
             semantic_contract = semantic_contract_payload(contract)
             first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
+            api_prompt_payload = _image_api_prompt_payload(image_generation)
+            api_prompt = _image_api_prompt(image_generation)
             output = _as_str(image_generation.get("output"))
             output_exists = None
             if run_dir is not None and output:
@@ -384,7 +414,10 @@ def collect_scene_composite_entries(
                     "visual_proof": _as_str(contract.get("visual_beat") or contract.get("visual_proof")),
                     "first_frame_brief": _as_str(contract.get("first_frame_brief")),
                     "static_first_frame_rule": _as_str(contract.get("static_first_frame_rule")),
-                    "prompt": _as_str(image_generation.get("prompt")),
+                    "prompt": api_prompt,
+                    "legacy_prompt": _as_str(image_generation.get("prompt")),
+                    "api_prompt_payload": api_prompt_payload,
+                    "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
                     "image_output": output,
                     "image_output_exists": output_exists,
                     "video_motion_prompt": _as_str(video_generation.get("motion_prompt")),

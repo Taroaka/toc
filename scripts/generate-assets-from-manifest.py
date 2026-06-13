@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -80,6 +81,7 @@ CODEX_BUILTIN_IMAGE_TOOL_ALIASES = {
     "openai_gpt_image_2",
     "openai_gpt-image-2",
 }
+IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 NO_REFERENCE_IMAGE_EXECUTION_LANE = "bootstrap_builtin"
 NO_REFERENCE_IMAGE_EXECUTION_LANE_ALIASES = {"bootstrap_builtin", "no_reference_builtin"}
 DEPRECATED_EXTERNAL_IMAGE_TOOLS = {
@@ -109,6 +111,7 @@ class SceneSpec:
     still_image_plan_mode: str | None
     image_tool: str | None
     image_prompt: str | None
+    image_api_prompt_payload: dict[str, Any]
     image_output: str | None
     image_references: list[str]
     image_character_ids: list[str]
@@ -923,6 +926,7 @@ def _parse_manifest_yaml_minimal(yaml_text: str) -> tuple[dict, list[SceneSpec]]
                 still_image_plan_mode=None,
                 image_tool=None,
                 image_prompt=None,
+                image_api_prompt_payload={},
                 image_output=None,
                 image_references=[],
                 image_character_ids=[],
@@ -1142,6 +1146,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         cut_duration_seconds = None
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
+                image_api_prompt_payload = ig.get("api_prompt_payload") if isinstance(ig.get("api_prompt_payload"), dict) else {}
                 cut_contract = _node_cut_contract(raw_cut)
                 cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
                 still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
@@ -1226,6 +1231,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         still_image_plan_mode=still_image_plan_mode,
                         image_tool=image_tool,
                         image_prompt=image_prompt,
+                        image_api_prompt_payload=dict(image_api_prompt_payload),
                         image_output=image_output,
                         image_references=image_references,
                         image_character_ids=image_character_ids,
@@ -1286,6 +1292,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
 
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
+        image_api_prompt_payload = ig.get("api_prompt_payload") if isinstance(ig.get("api_prompt_payload"), dict) else {}
         cut_contract = _node_cut_contract(raw_scene)
         scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
         still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
@@ -1371,6 +1378,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 still_image_plan_mode=still_image_plan_mode,
                 image_tool=image_tool,
                 image_prompt=image_prompt,
+                image_api_prompt_payload=dict(image_api_prompt_payload),
                 image_output=image_output,
                 image_references=image_references,
                 image_character_ids=image_character_ids,
@@ -1791,15 +1799,31 @@ def _generate_single_image_scene(
         raise SystemExit(_no_reference_image_lane_error(scene=scene, tool=tool))
 
     is_char_ref = bool(out_path and _is_character_ref_path(out_path))
+    is_reference_asset = _scene_is_reference_asset_image(out_path)
 
     if tool == CODEX_BUILTIN_IMAGE_TOOL:
         prefix = (args.image_prompt_prefix or "").strip()
         suffix = (args.image_prompt_suffix or "").strip()
-        prompt = scene.image_prompt.strip()
-        if prefix:
-            prompt = prefix + "\n\n" + prompt
-        if suffix:
-            prompt = prompt + "\n\n" + suffix
+        prompt_policy_version: str | None = None
+        debug_prompt_source: dict[str, Any] = {}
+        if is_reference_asset:
+            prompt = scene.image_prompt.strip()
+            if prefix:
+                prompt = prefix + "\n\n" + prompt
+            if suffix:
+                prompt = prompt + "\n\n" + suffix
+        else:
+            api_prompt_payload = _image_api_prompt_payload_for_scene(scene)
+            prompt = str(api_prompt_payload.get("prompt") or "").strip()
+            prompt_policy_version = str(api_prompt_payload.get("policy_version") or "").strip() or None
+            debug_prompt_source = {
+                "first_frame_visual_plan": _build_first_frame_visual_plan(scene),
+                "api_prompt_payload": {
+                    "policy_version": prompt_policy_version or "",
+                    "sha256": api_prompt_payload.get("sha256", ""),
+                },
+                "send_to_api": False,
+            }
 
         if is_char_ref and (char_views or args.character_reference_strip):
             views_to_generate = [v for v in ("front", "side", "back") if (v == "front" or v in char_views)]
@@ -1826,6 +1850,8 @@ def _generate_single_image_scene(
                 item_id=_scene_selector(scene),
                 aspect_ratio=scene_aspect_ratio,
                 image_size=scene_image_size,
+                prompt_policy_version=prompt_policy_version,
+                debug_prompt_source=debug_prompt_source,
             )
 
             conditioned_refs = list(refs)
@@ -1850,6 +1876,8 @@ def _generate_single_image_scene(
                     item_id=f"{_scene_selector(scene)}_{v}",
                     aspect_ratio=scene_aspect_ratio,
                     image_size=scene_image_size,
+                    prompt_policy_version=prompt_policy_version,
+                    debug_prompt_source=debug_prompt_source,
                 )
 
             if args.character_reference_strip and all(k in view_paths for k in ("front", "side", "back")):
@@ -1878,6 +1906,8 @@ def _generate_single_image_scene(
             item_id=_scene_selector(scene),
             aspect_ratio=scene_aspect_ratio,
             image_size=scene_image_size,
+            prompt_policy_version=prompt_policy_version,
+            debug_prompt_source=debug_prompt_source,
         )
         if args.test_image_variants > 0:
             for variant_index in range(1, args.test_image_variants + 1):
@@ -1906,6 +1936,8 @@ def _generate_single_image_scene(
                     item_id=f"{_scene_selector(scene)}_test_v{variant_index:02d}",
                     aspect_ratio=scene_aspect_ratio,
                     image_size=scene_image_size,
+                    prompt_policy_version=prompt_policy_version,
+                    debug_prompt_source=debug_prompt_source,
                 )
         return
 
@@ -2775,6 +2807,13 @@ def _is_object_ref_path(path: Path) -> bool:
         return False
 
 
+def _is_location_ref_path(path: Path) -> bool:
+    try:
+        return path.parent.name == "locations" and path.parent.parent.name == "assets"
+    except Exception:
+        return False
+
+
 def _derive_character_view_path(front_path: Path, view: str) -> Path:
     """
     Derive a sibling filename for a character reference view.
@@ -3262,6 +3301,8 @@ def generate_codex_builtin_image(
     item_id: str,
     aspect_ratio: str,
     image_size: str,
+    prompt_policy_version: str | None = None,
+    debug_prompt_source: dict[str, Any] | None = None,
 ) -> None:
     if out_path.exists() and not force:
         return
@@ -3296,6 +3337,8 @@ def generate_codex_builtin_image(
                 references=list(reference_images or []),
                 prompt=prompt,
                 kind="manifest",
+                prompt_policy_version=prompt_policy_version,
+                debug_prompt_source=debug_prompt_source,
                 result=result,
             )
             reject_local_raster_image_result(result, item_id=item_id)
@@ -3328,6 +3371,8 @@ def generate_codex_builtin_image(
                 references=list(reference_images or []),
                 prompt=prompt,
                 kind="manifest",
+                prompt_policy_version=prompt_policy_version,
+                debug_prompt_source=debug_prompt_source,
                 result=result,
                 error=str(exc),
             )
@@ -4727,6 +4772,385 @@ def _render_first_frame_image_prompt(plan: dict[str, Any], *, base_prompt: str) 
     return "\n\n".join(blocks)
 
 
+API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_yaml_field_names",
+        re.compile(
+            r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            re.I,
+        ),
+    ),
+    ("api_prompt_contains_no_boolean_gate_values", re.compile(r"\b(?:true|false|null|none)\b", re.I)),
+    ("api_prompt_contains_no_legacy_additional_description", re.compile(r"追加の具体描写|追加具体描写")),
+    ("api_prompt_contains_no_abstract_story_terms", re.compile(r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限")),
+    ("api_prompt_contains_no_unresolved_generic_placeholders", re.compile(r"\b(?:TODO|TBD|placeholder|approved_story_evidence|primary_visible_object|primary_visible_zone)\b", re.I)),
+    ("api_prompt_contains_no_pipeline_stage_terms", re.compile(r"\bp[678]\d\d\b", re.I)),
+)
+API_PROMPT_FORBIDDEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(pattern for _, pattern in API_PROMPT_FORBIDDEN_GATES)
+
+
+def _scene_is_reference_asset_image(out_path: Path | None) -> bool:
+    return bool(out_path and (_is_character_ref_path(out_path) or _is_object_ref_path(out_path) or _is_location_ref_path(out_path)))
+
+
+def _api_prompt_text(value: Any, fallback: str = "") -> str:
+    text = _sanitize_contract_prompt_text(str(value or "")).strip()
+    for pattern in API_PROMPT_FORBIDDEN_PATTERNS:
+        text = pattern.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip(" /。:：\n\t")
+    return text or fallback
+
+
+def _api_prompt_section(title: str, lines: Iterable[Any]) -> str:
+    cleaned = _dedupe_nonempty(_api_prompt_text(line) for line in lines)
+    if not cleaned:
+        cleaned = ["この項目は、他の具体描写と参照画像に矛盾しない範囲で自然に補完する。"]
+    return f"[{title}]\n" + "\n".join(cleaned)
+
+
+def _api_prompt_pair_text(value: Any, fallback: str) -> str:
+    if isinstance(value, dict):
+        left = _api_prompt_text(value.get("left"))
+        right = _api_prompt_text(value.get("right"))
+        if left and right and left != right:
+            return f"left: {left}; right: {right}"
+        return left or right or fallback
+    return _api_prompt_text(value, fallback)
+
+
+def _previous_cut_selector(scene: SceneSpec) -> str:
+    selector = scene.selector or ""
+    cut_id = scene.manifest_cut_id or ""
+    if cut_id.isdigit() and int(cut_id) > 1:
+        previous = str(int(cut_id) - 1)
+        if selector:
+            return re.sub(r"cut0?\d+$", f"cut{previous}", selector)
+        return f"scene{scene.manifest_scene_id}_cut{previous}"
+    return ""
+
+
+def _shot_design_contract_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    source = _dict_value(plan.get("source_grounding"))
+    composition = _dict_value(plan.get("spatial_composition"))
+    objects = _list_value(_dict_value(plan.get("object_visibility_gate")).get("objects"))
+    cut_function = _api_prompt_text(source.get("cut_function"), "character_action")
+    has_specific_object = any(
+        isinstance(item, dict) and _api_prompt_text(item.get("object_id")) not in {"", "approved_story_evidence"}
+        for item in objects
+    )
+    if has_specific_object:
+        shot_role = "object_proof"
+    elif cut_function in {"reaction", "payoff", "handoff"}:
+        shot_role = cut_function
+    elif cut_function in {"setup", "pressure"}:
+        shot_role = "establishing"
+    else:
+        shot_role = "character_action"
+    shot_scale = _api_prompt_text(composition.get("shot_size"), "medium")
+    return {
+        "shot_role": shot_role,
+        "shot_scale": shot_scale,
+        "a_roll_or_b_roll": "b_roll" if shot_role in {"insert", "object_proof", "b_roll"} else "a_roll",
+        "camera_subject": {
+            "primary": _api_prompt_text(_dict_value(_dict_value(plan.get("subject_binding")).get("primary_subject")).get("name"), "primary subject"),
+            "secondary": " / ".join(
+                _api_prompt_text(item.get("name") or item.get("id"))
+                for item in _list_value(_dict_value(plan.get("subject_binding")).get("secondary_subjects"))
+                if isinstance(item, dict)
+            ),
+        },
+        "narrative_use": [shot_role, "motion_start"],
+        "should_show_face": shot_role not in {"insert", "object_proof", "b_roll"},
+        "should_show_hands": shot_role in {"insert", "object_proof", "character_action"},
+        "should_show_object_detail": has_specific_object or shot_role in {"insert", "object_proof"},
+    }
+
+
+def _cut_location_frame_plan_from_plan(scene: SceneSpec, plan: dict[str, Any]) -> dict[str, Any]:
+    composition = _dict_value(plan.get("spatial_composition"))
+    material = _dict_value(plan.get("scene_material_pack"))
+    location_id = _api_prompt_text(material.get("location_id") or (scene.image_location_ids[0] if scene.image_location_ids else ""), "location_reference")
+    zone = _api_prompt_text(composition.get("foreground") or composition.get("background"), "この画面で行為が起きる場所の一部")
+    return {
+        "base_location_reference_id": location_id,
+        "use_reference_as": "material_anchor",
+        "location_zone_id": re.sub(r"\s+", "_", zone)[:80] or "primary_visible_zone",
+        "location_zone_description": zone,
+        "camera_station": _api_prompt_text(composition.get("camera_angle") or composition.get("camera_height"), "subject_side"),
+        "framing_mode": _api_prompt_text(composition.get("shot_size"), "medium"),
+        "foreground_zone": _api_prompt_text(composition.get("foreground"), "foreground action evidence"),
+        "midground_zone": _api_prompt_text(composition.get("midground"), "main subject blocking"),
+        "background_zone": _api_prompt_text(composition.get("background"), "location context"),
+        "set_dressing_delta_from_base": {"add": [], "emphasize": [zone], "hide": []},
+        "location_continuity_to_previous_cut": {
+            "same_base_location": True,
+            "changed_zone": zone,
+            "changed_camera_station": _api_prompt_text(composition.get("camera_angle"), "camera station changes for this cut"),
+            "changed_depth_layer": _api_prompt_text(composition.get("foreground"), "foreground layer changes"),
+        },
+    }
+
+
+def _cut_visual_delta_from_plan(scene: SceneSpec, plan: dict[str, Any]) -> dict[str, Any]:
+    character = _dict_value(plan.get("character_state_gate"))
+    composition = _dict_value(plan.get("spatial_composition"))
+    previous_selector = _previous_cut_selector(scene)
+    current = _api_prompt_text(_dict_value(plan.get("temporal_boundary")).get("event_fact_visible_in_still"), "このcut固有の開始状態")
+    return {
+        "previous_cut_selector": previous_selector,
+                    "previous_visible_state_summary": "前cutの構図をそのまま繰り返さない。" if previous_selector else "この場面の最初の画像なので場所と主体を明確に始める。",
+        "this_cut_new_information": current,
+        "changed_since_previous": {
+            "character_pose": _api_prompt_text(character.get("pose"), "姿勢をこのcutの行為直前に変える"),
+            "character_gaze": _api_prompt_text(character.get("gaze"), "視線の向きをこのcutの証拠へ変える"),
+            "hand_position": _api_prompt_text(character.get("hand_position"), "手元をこのcutの行為直前に置く"),
+            "foot_position": _api_prompt_text(character.get("foot_position"), "足先と重心を次の動きに向ける"),
+            "camera_distance": _api_prompt_text(composition.get("shot_size"), "前cutと異なる距離"),
+            "camera_angle": _api_prompt_text(composition.get("camera_angle"), "前cutと異なる角度"),
+            "location_zone": _api_prompt_text(composition.get("foreground"), "前cutと異なる場所zone"),
+            "emotional_state": _api_prompt_text(character.get("emotional_state"), "感情の変化が姿勢と表情で読める"),
+        },
+        "must_not_repeat_from_previous": ["same_camera_distance", "same_character_pose", "same_location_zone"],
+        "cut_delta_visible_in_still": current,
+    }
+
+
+def _blocking_and_interaction_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    character = _dict_value(plan.get("character_state_gate"))
+    objects = _list_value(_dict_value(plan.get("object_visibility_gate")).get("objects"))
+    primary_object = next((item for item in objects if isinstance(item, dict)), {})
+    object_id = _api_prompt_text(primary_object.get("object_id"), "この画面で確認できる主要な小道具")
+    visible = _api_prompt_text(primary_object.get("visibility_in_this_cut"), "visible_not_touched")
+    contact_state = "not_visible" if visible == "hidden" else "visible_not_touched"
+    if "hand" in _api_prompt_text(character.get("hand_position")).lower() or "手" in _api_prompt_text(character.get("hand_position")):
+        contact_state = "reaching_toward"
+    return {
+        "character_blocking": {
+            "body_axis": _api_prompt_text(character.get("physical_state"), "身体軸は次の動きに向ける"),
+            "head_direction": _api_prompt_text(character.get("gaze"), "視線方向へ頭を向ける"),
+            "gaze_target": _api_prompt_text(character.get("gaze"), "主要な視覚証拠"),
+            "hand_position": {
+                "left": _api_prompt_text(character.get("hand_position"), "左手は身体近く"),
+                "right": _api_prompt_text(character.get("hand_position"), "右手は行為の直前"),
+            },
+            "foot_position": {
+                "left": _api_prompt_text(character.get("foot_position"), "左足に重心"),
+                "right": _api_prompt_text(character.get("foot_position"), "右足は次に動ける向き"),
+            },
+            "weight_shift": _api_prompt_text(character.get("foot_position"), "次の動きに備えた重心"),
+            "distance_to_primary_object": "手を伸ばせる距離だが、まだ完了していない。",
+        },
+        "object_interaction": {
+            "object_id": object_id,
+            "contact_state": contact_state,
+            "object_screen_position": _api_prompt_text(primary_object.get("required_screen_position"), "foreground"),
+            "object_distance_to_character": "人物の視線や手元と関係する距離。",
+            "object_motion_potential": "動画開始後に接触または移動が始まる余地を残す。",
+        },
+    }
+
+
+def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: str | None = None) -> dict[str, Any]:
+    plan = _build_first_frame_visual_plan(scene)
+    shot = _shot_design_contract_from_plan(plan)
+    location = _cut_location_frame_plan_from_plan(scene, plan)
+    delta = _cut_visual_delta_from_plan(scene, plan)
+    blocking = _blocking_and_interaction_from_plan(plan)
+    temporal = _dict_value(plan.get("temporal_boundary"))
+    references = _dict_value(plan.get("reference_binding"))
+    material = _dict_value(plan.get("scene_material_pack"))
+    motion = _dict_value(plan.get("motion_affordance"))
+    character = _dict_value(plan.get("character_state_gate"))
+    objects = _dict_value(plan.get("object_visibility_gate"))
+    movable = next((item for item in _list_value(motion.get("movable_subjects")) if isinstance(item, dict)), {})
+    object_item = next((item for item in _list_value(objects.get("objects")) if isinstance(item, dict)), {})
+
+    character_refs = [
+        f"人物参照: {_api_prompt_text(item.get('target_character_id'))} は顔、体格、髪、衣装の主要形状を維持し、pose/gaze/lightingだけをこのcutに合わせる。"
+        for item in _list_value(references.get("character_references"))
+        if isinstance(item, dict)
+    ]
+    object_refs = [
+        f"小道具参照: {_api_prompt_text(item.get('target_object_id'))} は形状、材質、縮尺を維持する。"
+        for item in _list_value(references.get("object_references"))
+        if isinstance(item, dict)
+    ]
+    location_refs = [
+        f"場所参照: {_api_prompt_text(item.get('target_location_id'))} は完成構図ではなく、空間の素材、光、配置の一貫性だけに使う。"
+        for item in _list_value(references.get("location_references"))
+        if isinstance(item, dict)
+    ]
+
+    prompt = "\n\n".join(
+        [
+            _api_prompt_section("参照画像の使い方", character_refs + object_refs + location_refs),
+            _api_prompt_section(
+                "shot / 画角",
+                [
+                    f"shot_role: {shot['shot_role']}",
+                    f"shot_scale: {shot['shot_scale']}",
+                    f"a_roll_or_b_roll: {shot['a_roll_or_b_roll']}",
+                    f"camera_position: {location['camera_station']}",
+                    f"camera_height: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('camera_height'), '人物の手元と顔が読める高さ')}",
+                    f"lens_feel: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('lens_feel'), '自然な遠近感')}",
+                    f"should_show_face: {'yes' if shot['should_show_face'] else 'no'}",
+                    f"should_show_hands: {'yes' if shot['should_show_hands'] else 'no'}",
+                    f"should_show_object_detail: {'yes' if shot['should_show_object_detail'] else 'no'}",
+                ],
+            ),
+            _api_prompt_section(
+                "この1枚に写る瞬間",
+                [
+                    f"cut_visible_moment: {_api_prompt_text(temporal.get('event_fact_visible_in_still'), '行為が完了する前の静止した開始状態')}",
+                    f"action_completion_state: {_api_prompt_text(temporal.get('action_completion_state'), 'pre_action')}",
+                    "not_yet_happened: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(temporal.get("not_yet_happened_in_still"))),
+                    "still_must_not_show: 行為完了後、後続reveal、次sceneの結果。",
+                ],
+            ),
+            _api_prompt_section(
+                "前cutからの変化",
+                [
+                    f"previous_cut_state: {delta['previous_visible_state_summary']}",
+                    f"this_cut_delta: {delta['this_cut_new_information']}",
+                    "must_not_repeat: same_camera_distance / same_character_pose / same_location_zone",
+                ],
+            ),
+            _api_prompt_section(
+                "人物の状態と配置",
+                [
+                    f"costume: {_api_prompt_text(character.get('costume_state'), '参照画像と同じ衣装状態')}",
+                    f"pose: {_api_prompt_text(character.get('pose'), '行為が始まる直前の姿勢')}",
+                    f"gaze: {_api_prompt_text(character.get('gaze'), '主要な視覚証拠へ向く')}",
+                    f"expression: {_api_prompt_text(character.get('expression'), 'このcutの圧力が読める表情')}",
+                    f"hand_position: {_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('hand_position'), _api_prompt_text(character.get('hand_position'), '手元は行為直前'))}",
+                    f"foot_position: {_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('foot_position'), _api_prompt_text(character.get('foot_position'), '足元は次に動ける向き'))}",
+                    f"body_axis: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('body_axis'), '身体軸は次の動きに向ける')}",
+                    f"distance_to_other_subjects: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('distance_to_primary_object'), '手を伸ばせる距離')}",
+                ],
+            ),
+            _api_prompt_section(
+                "小道具 / 物体",
+                [
+                    f"object_visibility: {_api_prompt_text(object_item.get('visibility_in_this_cut'), 'この画面で必要な小道具の形と位置が見える')}",
+                    f"object_contact_state: {_api_prompt_text(_dict_value(blocking.get('object_interaction')).get('contact_state'), 'visible_not_touched')}",
+                    f"object_position: {_api_prompt_text(_dict_value(blocking.get('object_interaction')).get('object_screen_position'), 'foreground')}",
+                    f"object_story_role: {_api_prompt_text(object_item.get('story_meaning_in_this_cut'), 'このcutの視覚証拠')}",
+                    "object_must_not_show: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(object_item.get("must_not_show_states"))),
+                ],
+            ),
+            _api_prompt_section(
+                "場所の使い方",
+                [
+                    f"base_location_reference: {location['base_location_reference_id']} は完成構図ではなく、素材と光の一貫性として使う。",
+                    f"location_zone: {location['location_zone_description']}",
+                    f"camera_station: {location['camera_station']}",
+                    f"foreground: {location['foreground_zone']}",
+                    f"midground: {location['midground_zone']}",
+                    f"background: {location['background_zone']}",
+                    "set_dressing_delta: base locationから、このcutで必要なzoneだけを強調し、不要な場所は主役にしない。",
+                ],
+            ),
+            _api_prompt_section(
+                "光 / 質感",
+                [
+                    f"light_source: {_api_prompt_text(material.get('light_source'), '画面内で方向が読める自然な光源')}",
+                    f"light_direction: {_api_prompt_text(material.get('light_direction'), '人物と小道具の形が読める方向')}",
+                    "material_focus: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(material.get("dominant_materials"))),
+                    f"texture_specific_to_this_scene: {_api_prompt_text(material.get('story_specific_texture'), '場所固有の床、壁、衣服、小道具の質感')}",
+                    "material_must_not_leak: 他scene固有の素材や未承認revealを混ぜない。",
+                ],
+            ),
+            _api_prompt_section(
+                "動画開始に向いた静止状態",
+                [
+                    f"movable_subject: {_api_prompt_text(movable.get('subject_id'), '主要人物または小道具')}",
+                    f"movement_vector_visible_as_static_pose: {_api_prompt_text(movable.get('movement_vector'), '姿勢と視線から次の動きが始まる方向')}",
+                    f"image_must_leave_room_for: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('negative_space'), '動き出す方向の余白')}",
+                    "must_not_resolve: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(motion.get("must_not_resolve_in_image"))),
+                ],
+            ),
+            _api_prompt_section(
+                "禁止",
+                [
+                    "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters.",
+                ],
+            ),
+        ]
+    ).strip()
+    if request_visual_beat:
+        prompt = prompt.replace(
+            "[この1枚に写る瞬間]\n",
+            "[この1枚に写る瞬間]\n" + _api_prompt_text(request_visual_beat) + "\n",
+            1,
+        )
+    payload = {
+        "policy_version": IMAGE_API_PROMPT_POLICY_VERSION,
+        "prompt": prompt,
+        "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters",
+        "reference_instructions": "\n".join(character_refs + object_refs + location_refs),
+        "reference_images": list(scene.image_references or []),
+        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "shot_design_contract": shot,
+        "cut_location_frame_plan": location,
+        "cut_visual_delta": delta,
+        "blocking_and_interaction": blocking,
+    }
+    return payload
+
+
+def _image_api_prompt_payload_for_scene(scene: SceneSpec, *, request_visual_beat: str | None = None) -> dict[str, Any]:
+    existing = scene.image_api_prompt_payload if isinstance(scene.image_api_prompt_payload, dict) else {}
+    if existing:
+        policy_version = str(existing.get("policy_version") or "").strip()
+        prompt = str(existing.get("prompt") or "").strip()
+        if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and not prompt:
+            raise SystemExit(f"{scene.selector or scene.scene_id}: api_prompt_missing_for_new_prompt_policy")
+        if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and prompt:
+            payload = dict(existing)
+            payload.setdefault("negative_prompt", "")
+            payload.setdefault("reference_instructions", "")
+            payload.setdefault("reference_images", list(scene.image_references or []))
+            payload["sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            _validate_image_api_prompt_payload(scene, payload)
+            return payload
+
+    payload = _build_image_api_prompt_payload(scene, request_visual_beat=request_visual_beat)
+    _validate_image_api_prompt_payload(scene, payload)
+    return payload
+
+
+def _validate_image_api_prompt_payload(scene: SceneSpec, payload: dict[str, Any]) -> None:
+    policy_version = str(payload.get("policy_version") or "").strip()
+    prompt = str(payload.get("prompt") or "").strip()
+    if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and not prompt:
+        raise SystemExit(f"{scene.selector or scene.scene_id}: api_prompt_missing_for_new_prompt_policy")
+    if policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
+        return
+
+    issues: list[str] = []
+    for gate_name, pattern in API_PROMPT_FORBIDDEN_GATES:
+        if pattern.search(prompt):
+            issues.append(gate_name)
+    required = {
+        "api_prompt_has_shot_role": "shot_role:",
+        "api_prompt_has_location_zone": "location_zone:",
+        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
+        "api_prompt_has_character_blocking": "hand_position:",
+    }
+    for gate_name, needle in required.items():
+        if needle not in prompt:
+            issues.append(gate_name)
+    if (scene.image_object_ids or scene.image_object_variant_ids) and "object_contact_state:" not in prompt:
+        issues.append("api_prompt_has_object_contact_state_if_object_present")
+    if issues:
+        raise SystemExit(
+            f"{scene.selector or scene.scene_id}: Image API prompt v1 gate failed:\n- "
+            + "\n- ".join(_dedupe_nonempty(issues))
+        )
+
+
 def _structured_image_prompt_blocks(scene: SceneSpec) -> str:
     base_prompt = _strip_legacy_prompt_blocks(scene.image_prompt or "")
     plan = _build_first_frame_visual_plan(scene)
@@ -4880,6 +5304,9 @@ def _write_request_preview_md(
             lines.append(f"- authoring_role: `{entry['authoring_role']}`")
         if entry.get("authoring_note"):
             lines.append(f"- authoring_note: {entry['authoring_note']}")
+        api_prompt_payload = entry.get("api_prompt_payload") if isinstance(entry.get("api_prompt_payload"), dict) else {}
+        if api_prompt_payload.get("policy_version"):
+            lines.append(f"- prompt_policy_version: `{api_prompt_payload['policy_version']}`")
         lines.append(f"- output: `{entry['output']}`")
         if entry.get("duration_seconds") is not None:
             lines.append(f"- duration_seconds: `{entry['duration_seconds']}`")
@@ -4923,31 +5350,39 @@ def _write_request_preview_md(
         else:
             lines.append("- references: `[]`")
         first_frame_visual_plan = entry.get("first_frame_visual_plan")
-        if isinstance(first_frame_visual_plan, dict) and first_frame_visual_plan:
+        debug_prompt_source = entry.get("debug_prompt_source") if isinstance(entry.get("debug_prompt_source"), dict) else {}
+        if isinstance(first_frame_visual_plan, dict) and first_frame_visual_plan and not debug_prompt_source:
+            debug_prompt_source = {"first_frame_visual_plan": first_frame_visual_plan, "send_to_api": False}
+        if debug_prompt_source:
             lines.append("")
-            lines.append("```yaml")
+            lines.append("```debug_prompt_source")
             if yaml is not None:
                 lines.append(
                     yaml.safe_dump(
-                        {"first_frame_visual_plan": first_frame_visual_plan},
+                        debug_prompt_source,
                         allow_unicode=True,
                         sort_keys=False,
                     ).rstrip()
                 )
             else:
-                lines.append(json.dumps({"first_frame_visual_plan": first_frame_visual_plan}, ensure_ascii=False, indent=2))
+                lines.append(json.dumps(debug_prompt_source, ensure_ascii=False, indent=2))
             lines.append("```")
         lines.append("")
-        lines.append("```text")
-        lines.append(
-            _rewrite_request_prompt_for_review(
-                prompt=entry.get("prompt") or "",
-                output=entry.get("output") or "",
-                references=list(entry.get("references") or []),
-                topic=topic,
-            ).rstrip()
-        )
-        lines.append("```")
+        if api_prompt_payload.get("prompt"):
+            lines.append("```api_prompt")
+            lines.append(str(api_prompt_payload.get("prompt") or "").rstrip())
+            lines.append("```")
+        else:
+            lines.append("```text")
+            lines.append(
+                _rewrite_request_prompt_for_review(
+                    prompt=entry.get("prompt") or "",
+                    output=entry.get("output") or "",
+                    references=list(entry.get("references") or []),
+                    topic=topic,
+                ).rstrip()
+            )
+            lines.append("```")
         lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -6012,6 +6447,21 @@ def main() -> None:
                 else "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
             )
             first_frame_visual_plan = _build_first_frame_visual_plan(scene)
+            api_prompt_payload = {}
+            debug_prompt_source = {}
+            if not is_asset_stage_request:
+                api_prompt_payload = _image_api_prompt_payload_for_scene(
+                    scene,
+                    request_visual_beat=request_visual_beat,
+                )
+                debug_prompt_source = {
+                    "first_frame_visual_plan": first_frame_visual_plan,
+                    "api_prompt_payload": {
+                        "policy_version": api_prompt_payload.get("policy_version", ""),
+                        "sha256": api_prompt_payload.get("sha256", ""),
+                    },
+                    "send_to_api": False,
+                }
             image_preview_entries.append(
                 {
                     "selector": selector,
@@ -6030,6 +6480,8 @@ def main() -> None:
                     "source_requests": source_requests,
                     "references": list(scene.image_references or []),
                     "first_frame_visual_plan": first_frame_visual_plan,
+                    "debug_prompt_source": debug_prompt_source,
+                    "api_prompt_payload": api_prompt_payload,
                     "prompt": _compose_final_image_prompt(
                         scene,
                         prefix=image_prefix,

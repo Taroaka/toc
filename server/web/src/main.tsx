@@ -66,6 +66,9 @@ type ImageRequestItem = {
   tool: string | null;
   output: string | null;
   prompt: string;
+  promptPolicyVersion?: string | null;
+  debugPromptSource?: Record<string, unknown>;
+  legacyPrompt?: string | null;
   references: string[];
   referenceCount: number;
   executionLane: string;
@@ -2145,6 +2148,8 @@ function App() {
           kind: viewKind,
           item_id: item.id,
           prompt: item.draftPrompt,
+          prompt_policy_version: item.promptPolicyVersion || null,
+          debug_prompt_source: item.debugPromptSource || {},
           references: item.selectedReferences.map((ref) => ref.path),
           candidate_count: candidateCount,
         }),
@@ -2208,6 +2213,8 @@ function App() {
             kind: viewKind,
             item_id: item.id,
             prompt: item.draftPrompt,
+            prompt_policy_version: item.promptPolicyVersion || null,
+            debug_prompt_source: item.debugPromptSource || {},
             references: item.selectedReferences.map((ref) => ref.path),
             candidate_count: candidateCount,
           })),

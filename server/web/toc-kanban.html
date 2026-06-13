@@ -1,0 +1,1307 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ToC TODO Kanban</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101214;
+        --panel: #181b1e;
+        --panel-2: #202427;
+        --panel-3: #262a2d;
+        --ink: #f4efe6;
+        --muted: #aeb2aa;
+        --quiet: #777d76;
+        --line: #363b3e;
+        --line-strong: #565d60;
+        --gold: #f0c56b;
+        --gold-soft: rgba(240, 197, 107, 0.15);
+        --green: #91c287;
+        --blue: #83aac2;
+        --red: #df7a6f;
+        --violet: #b79bd2;
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-height: 100%;
+      }
+
+      body {
+        min-height: 100%;
+        margin: 0;
+        color: var(--ink);
+        font-family:
+          ui-sans-serif,
+          "Hiragino Sans",
+          "Yu Gothic UI",
+          Meiryo,
+          sans-serif;
+        background:
+          linear-gradient(90deg, rgba(240, 197, 107, 0.055) 1px, transparent 1px),
+          linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+          radial-gradient(circle at 14% 4%, rgba(240, 197, 107, 0.18), transparent 28%),
+          radial-gradient(circle at 92% 12%, rgba(131, 170, 194, 0.13), transparent 30%),
+          radial-gradient(circle at 50% 100%, rgba(145, 194, 135, 0.08), transparent 34%),
+          var(--bg);
+        background-size:
+          34px 34px,
+          34px 34px,
+          auto,
+          auto,
+          auto,
+          auto;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.42;
+      }
+
+      .app {
+        min-height: 100vh;
+        padding: 24px;
+      }
+
+      .topbar {
+        display: grid;
+        grid-template-columns: minmax(300px, 1fr) minmax(360px, auto);
+        gap: 18px;
+        align-items: end;
+        max-width: 1740px;
+        margin: 0 auto 16px;
+      }
+
+      .eyebrow {
+        margin: 0 0 9px;
+        color: var(--gold);
+        font-size: 12px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 900px;
+        margin: 0;
+        font-family:
+          Georgia,
+          "Times New Roman",
+          "Yu Mincho",
+          serif;
+        font-size: clamp(34px, 5.2vw, 72px);
+        font-weight: 700;
+        line-height: 0.94;
+        letter-spacing: 0;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(90px, 1fr));
+        gap: 8px;
+      }
+
+      .metric,
+      .panel,
+      .column,
+      .card,
+      .modalDialog {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018)), rgba(24, 27, 30, 0.94);
+        box-shadow: var(--shadow);
+      }
+
+      .metric {
+        min-height: 76px;
+        padding: 12px;
+      }
+
+      .metric b {
+        display: block;
+        font-size: 25px;
+        line-height: 1;
+      }
+
+      .metric span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr auto auto auto;
+        gap: 10px;
+        max-width: 1740px;
+        margin: 0 auto 12px;
+      }
+
+      .filters {
+        display: grid;
+        grid-template-columns: minmax(260px, 1.1fr) minmax(160px, 0.5fr) minmax(170px, 0.5fr);
+        gap: 10px;
+      }
+
+      .field label,
+      .miniLabel {
+        display: block;
+        margin: 0 0 6px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 0;
+        outline: none;
+        background: #101214;
+        color: var(--ink);
+        padding: 9px 10px;
+      }
+
+      textarea {
+        min-height: 86px;
+        resize: vertical;
+        line-height: 1.5;
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: var(--gold);
+        box-shadow: 0 0 0 2px rgba(240, 197, 107, 0.16);
+      }
+
+      .button {
+        min-height: 40px;
+        border: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--ink);
+        padding: 9px 13px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .button.primary {
+        border-color: rgba(240, 197, 107, 0.72);
+        background: linear-gradient(180deg, rgba(240, 197, 107, 0.22), rgba(240, 197, 107, 0.07)), #231f16;
+        color: #ffe9b4;
+      }
+
+      .button.danger {
+        border-color: rgba(223, 122, 111, 0.62);
+        color: #ffc9c3;
+      }
+
+      .button.icon {
+        width: 34px;
+        min-height: 34px;
+        padding: 0;
+        line-height: 1;
+      }
+
+      .segmented {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .segmented button {
+        min-height: 32px;
+        border: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--muted);
+        padding: 6px 10px;
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .segmented button[aria-pressed="true"] {
+        border-color: rgba(240, 197, 107, 0.75);
+        background: var(--gold-soft);
+        color: #ffe8ad;
+      }
+
+      .formPanel {
+        max-width: 1740px;
+        margin: 0 auto 14px;
+        padding: 14px;
+      }
+
+      .formPanel.isCollapsed .formBody {
+        display: none;
+      }
+
+      .formHead {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .formHead h2 {
+        margin: 0;
+        font-size: 17px;
+      }
+
+      .formBody {
+        display: grid;
+        grid-template-columns: 1.1fr 0.62fr 0.62fr 0.46fr 0.46fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .fieldWide {
+        grid-column: span 2;
+      }
+
+      .fieldFull {
+        grid-column: 1 / -1;
+      }
+
+      .formActions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        justify-content: flex-end;
+      }
+
+      .error {
+        display: none;
+        color: #ffd1cc;
+        font-size: 13px;
+        font-weight: 900;
+      }
+
+      .error.isVisible {
+        display: block;
+      }
+
+      .board {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(268px, 1fr));
+        gap: 12px;
+        align-items: start;
+        max-width: 1740px;
+        margin: 0 auto 20px;
+        overflow-x: auto;
+        padding-bottom: 18px;
+      }
+
+      .column {
+        min-width: 268px;
+        background: rgba(17, 19, 21, 0.84);
+      }
+
+      .column.isDropTarget {
+        border-color: rgba(240, 197, 107, 0.72);
+        box-shadow: 0 0 0 2px rgba(240, 197, 107, 0.13), var(--shadow);
+      }
+
+      .columnHeader {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        min-height: 64px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.025)), #191c1e;
+        padding: 12px;
+      }
+
+      .columnTitle {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      .columnMeta {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .lane {
+        min-height: 92px;
+        padding: 10px;
+      }
+
+      .lane + .lane {
+        border-top: 1px solid rgba(255, 255, 255, 0.075);
+      }
+
+      .lane.isDropTarget {
+        background: rgba(240, 197, 107, 0.06);
+      }
+
+      .laneTitle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 0 0 9px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+      }
+
+      .laneTitle span:first-child {
+        overflow-wrap: anywhere;
+      }
+
+      .badge,
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 3px 7px;
+        font-size: 11px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .badge {
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .tag.scene {
+        background: rgba(240, 197, 107, 0.14);
+      }
+
+      .tag.cut {
+        background: rgba(145, 194, 135, 0.14);
+      }
+
+      .tag.narration {
+        background: rgba(183, 155, 210, 0.15);
+      }
+
+      .tag.voice {
+        background: rgba(223, 122, 111, 0.15);
+      }
+
+      .tag.youtube {
+        background: rgba(131, 170, 194, 0.18);
+      }
+
+      .tag.other {
+        background: rgba(174, 178, 170, 0.14);
+      }
+
+      .card {
+        position: relative;
+        padding: 11px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+      }
+
+      .card + .card {
+        margin-top: 9px;
+      }
+
+      .card[draggable="true"] {
+        cursor: grab;
+      }
+
+      .card.isDragging {
+        opacity: 0.44;
+      }
+
+      .card[data-category="product"] {
+        border-left: 4px solid var(--gold);
+      }
+
+      .card[data-category="marketing"] {
+        border-left: 4px solid var(--blue);
+      }
+
+      .cardHead {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: start;
+      }
+
+      .card h3 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.35;
+      }
+
+      .card p {
+        margin: 9px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.48;
+      }
+
+      .scoreRow {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+        margin-top: 10px;
+      }
+
+      .score {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: #111315;
+        padding: 8px;
+      }
+
+      .score span {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 900;
+      }
+
+      .score b {
+        display: block;
+        margin-top: 4px;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .cardFooter {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .miniActions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 5px;
+      }
+
+      .empty {
+        border: 1px dashed rgba(255, 255, 255, 0.13);
+        color: var(--quiet);
+        padding: 12px;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .statusBar {
+        max-width: 1740px;
+        margin: 0 auto;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .modal {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: none;
+        place-items: center;
+        padding: 18px;
+        background: rgba(0, 0, 0, 0.58);
+      }
+
+      .modal.isOpen {
+        display: grid;
+      }
+
+      .modalDialog {
+        width: min(980px, 100%);
+        max-height: min(84vh, 900px);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+
+      .modalHead,
+      .modalFoot {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .modalFoot {
+        border-top: 1px solid var(--line);
+        border-bottom: 0;
+      }
+
+      .modalHead h2 {
+        margin: 0;
+        font-size: 17px;
+      }
+
+      .markdownPreview {
+        width: 100%;
+        min-height: 52vh;
+        border: 0;
+        background: #0e1011;
+        color: var(--ink);
+        padding: 14px;
+        font-family:
+          ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      @media (max-width: 1180px) {
+        .topbar,
+        .actions,
+        .filters,
+        .formBody {
+          grid-template-columns: 1fr;
+        }
+
+        .fieldWide,
+        .fieldFull {
+          grid-column: auto;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .app {
+          padding: 14px;
+        }
+
+        .summary {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .board {
+          grid-template-columns: repeat(5, minmax(240px, 84vw));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">ToC work board</p>
+          <h1>プロダクト作成とマーケティングの TODO カンバン</h1>
+        </div>
+        <section class="summary" aria-label="集計">
+          <div class="metric">
+            <b id="metricTickets">0</b>
+            <span>チケット</span>
+          </div>
+          <div class="metric">
+            <b id="metricPoints">0</b>
+            <span>Story Point</span>
+          </div>
+          <div class="metric">
+            <b id="metricValue">0</b>
+            <span>価値</span>
+          </div>
+          <div class="metric">
+            <b id="metricDone">0%</b>
+            <span>Done 率</span>
+          </div>
+        </section>
+      </header>
+
+      <section class="actions">
+        <div class="filters">
+          <div class="field">
+            <label for="searchInput">検索</label>
+            <input id="searchInput" type="search" placeholder="タスク、説明、カテゴリで検索" />
+          </div>
+          <div class="field">
+            <label for="subcategoryFilter">カテゴリ</label>
+            <select id="subcategoryFilter">
+              <option value="all">すべて</option>
+              <option value="scene">scene</option>
+              <option value="cut">cut</option>
+              <option value="narration">ナレーション</option>
+              <option value="voice">音声</option>
+              <option value="youtube">youtube</option>
+              <option value="other">その他</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="sortSelect">並び替え</label>
+            <select id="sortSelect">
+              <option value="manual">手動順</option>
+              <option value="valueDesc">価値が高い順</option>
+              <option value="pointsDesc">SP が大きい順</option>
+              <option value="pointsAsc">SP が小さい順</option>
+              <option value="titleAsc">タイトル順</option>
+            </select>
+          </div>
+        </div>
+        <button class="button primary" type="button" id="toggleFormButton">追加</button>
+        <button class="button" type="button" id="exportButton">Markdown保存</button>
+        <button class="button" type="button" id="previewButton">Markdown表示</button>
+      </section>
+
+      <section class="panel formPanel" id="formPanel">
+        <div class="formHead">
+          <h2>チケット追加</h2>
+          <div class="segmented" id="categoryButtons">
+            <button type="button" data-category="product" aria-pressed="true">プロダクト作成</button>
+            <button type="button" data-category="marketing" aria-pressed="false">マーケティング</button>
+          </div>
+        </div>
+        <form class="formBody" id="ticketForm">
+          <div class="field fieldWide">
+            <label for="titleInput">タスク名</label>
+            <input id="titleInput" name="title" required placeholder="例: cut 生成失敗時の再試行導線を追加" />
+          </div>
+          <div class="field">
+            <label for="categoryInput">大カテゴリ</label>
+            <select id="categoryInput" name="category" required>
+              <option value="product">プロダクト作成</option>
+              <option value="marketing">マーケティング</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="subcategoryInput">カテゴリ</label>
+            <select id="subcategoryInput" name="subcategory" required></select>
+          </div>
+          <div class="field">
+            <label for="statusInput">状態</label>
+            <select id="statusInput" name="status" required>
+              <option value="todo">Todo</option>
+              <option value="next">Next</option>
+              <option value="doing">Doing</option>
+              <option value="review">Review</option>
+              <option value="done">Done</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pointsInput">ストーリーポイント *</label>
+            <input id="pointsInput" name="points" type="number" min="1" max="21" required value="3" />
+          </div>
+          <div class="field">
+            <label for="valueInput">価値 *</label>
+            <input id="valueInput" name="value" type="number" min="1" max="100" required value="60" />
+          </div>
+          <div class="field fieldWide">
+            <label for="ownerInput">担当 / メモ</label>
+            <input id="ownerInput" name="owner" placeholder="任意。例: product / marketing / Codex" />
+          </div>
+          <div class="field fieldFull">
+            <label for="bodyInput">説明</label>
+            <textarea id="bodyInput" name="body" placeholder="何を達成すれば完了か、価値がどこにあるかを書く"></textarea>
+          </div>
+          <div class="fieldFull formActions">
+            <span class="error" id="formError">ストーリーポイントと価値は必須です。1 以上の数字を入れてください。</span>
+            <button class="button" type="reset">リセット</button>
+            <button class="button primary" type="submit">チケットを追加</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="board" id="board" aria-label="TODO カンバン"></section>
+      <div class="statusBar" id="statusBar">変更はこのブラウザの localStorage に自動保存されます。</div>
+    </main>
+
+    <div class="modal" id="markdownModal" role="dialog" aria-modal="true" aria-labelledby="markdownTitle">
+      <div class="modalDialog">
+        <div class="modalHead">
+          <h2 id="markdownTitle">Markdown プレビュー</h2>
+          <button class="button icon" type="button" id="closeModalButton" aria-label="閉じる">x</button>
+        </div>
+        <textarea class="markdownPreview" id="markdownPreview" readonly></textarea>
+        <div class="modalFoot">
+          <span class="miniLabel">この内容を保存またはコピーできます。</span>
+          <div class="formActions">
+            <button class="button" type="button" id="copyMarkdownButton">コピー</button>
+            <button class="button primary" type="button" id="saveMarkdownButton">Markdown保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const statuses = [
+        { id: "todo", label: "Todo" },
+        { id: "next", label: "Next" },
+        { id: "doing", label: "Doing" },
+        { id: "review", label: "Review" },
+        { id: "done", label: "Done" },
+      ];
+
+      const subcategories = {
+        product: [
+          { id: "scene", label: "scene" },
+          { id: "cut", label: "cut" },
+          { id: "narration", label: "ナレーション" },
+          { id: "voice", label: "音声" },
+        ],
+        marketing: [
+          { id: "youtube", label: "youtube" },
+          { id: "other", label: "その他" },
+        ],
+      };
+
+      const initialTickets = [
+        {
+          id: "scene-brief-schema",
+          title: "scene 設計の入力項目を固定する",
+          body: "生成前に舞台、感情、主役級アイテム、制約を抜け漏れなく確認する。",
+          category: "product",
+          subcategory: "scene",
+          status: "todo",
+          points: 5,
+          value: 86,
+          owner: "product",
+          order: 10,
+        },
+        {
+          id: "cut-continuity-review",
+          title: "cut 間の連続性チェックを追加",
+          body: "人物位置、光源、重要小道具が cut を跨いで破綻しないようにする。",
+          category: "product",
+          subcategory: "cut",
+          status: "doing",
+          points: 8,
+          value: 92,
+          owner: "product",
+          order: 20,
+        },
+        {
+          id: "narration-draft-quality",
+          title: "ナレーション草稿の評価メモを残す",
+          body: "説明過多、感情線、尺の過不足をレビューできるようにする。",
+          category: "product",
+          subcategory: "narration",
+          status: "next",
+          points: 3,
+          value: 74,
+          owner: "story",
+          order: 30,
+        },
+        {
+          id: "voice-pronunciation-dict",
+          title: "音声辞書の登録フローを整える",
+          body: "固有名詞、専門語、難読漢字の読みを再利用可能にする。",
+          category: "product",
+          subcategory: "voice",
+          status: "review",
+          points: 5,
+          value: 79,
+          owner: "audio",
+          order: 40,
+        },
+        {
+          id: "youtube-thumbnail-plan",
+          title: "YouTube サムネの検証枠を作る",
+          body: "タイトル、表情、象徴アイテムの組み合わせを比較できるようにする。",
+          category: "marketing",
+          subcategory: "youtube",
+          status: "todo",
+          points: 3,
+          value: 88,
+          owner: "marketing",
+          order: 50,
+        },
+        {
+          id: "youtube-release-checklist",
+          title: "YouTube 公開前チェックリスト",
+          body: "タイトル、概要欄、章立て、固定コメント、ショート導線を確認する。",
+          category: "marketing",
+          subcategory: "youtube",
+          status: "next",
+          points: 2,
+          value: 68,
+          owner: "marketing",
+          order: 60,
+        },
+        {
+          id: "marketing-reuse-memo",
+          title: "その他チャネル向け再利用メモ",
+          body: "X、ブログ、ニュースレターに流用できる切り口を残す。",
+          category: "marketing",
+          subcategory: "other",
+          status: "done",
+          points: 2,
+          value: 61,
+          owner: "marketing",
+          order: 70,
+        },
+      ];
+
+      const storageKey = "tocStandaloneKanbanTickets";
+      const state = {
+        tickets: loadTickets(),
+        category: "product",
+        subcategoryFilter: "all",
+        sort: "manual",
+        search: "",
+        draggingId: null,
+      };
+
+      function loadTickets() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
+          if (Array.isArray(saved) && saved.length) {
+            return saved.map(normalizeTicket);
+          }
+        } catch (error) {
+          console.warn("保存済みチケットを読み込めませんでした", error);
+        }
+        return initialTickets.map(normalizeTicket);
+      }
+
+      function normalizeTicket(ticket, index = 0) {
+        return {
+          id: ticket.id || `ticket-${Date.now()}-${index}`,
+          title: ticket.title || "無題チケット",
+          body: ticket.body || "",
+          category: ticket.category === "marketing" ? "marketing" : "product",
+          subcategory: ticket.subcategory || "scene",
+          status: statuses.some((status) => status.id === ticket.status) ? ticket.status : "todo",
+          points: Math.max(1, Number(ticket.points) || 1),
+          value: Math.max(1, Number(ticket.value) || 1),
+          owner: ticket.owner || "",
+          order: Number.isFinite(Number(ticket.order)) ? Number(ticket.order) : index * 10,
+        };
+      }
+
+      function saveTickets() {
+        localStorage.setItem(storageKey, JSON.stringify(state.tickets));
+      }
+
+      function categoryLabel(category) {
+        return category === "product" ? "プロダクト作成" : "マーケティング";
+      }
+
+      function subcategoryLabel(subcategory) {
+        return [...subcategories.product, ...subcategories.marketing].find((item) => item.id === subcategory)?.label || subcategory;
+      }
+
+      function allGroups() {
+        return [
+          ...subcategories.product.map((item) => ({ ...item, category: "product" })),
+          ...subcategories.marketing.map((item) => ({ ...item, category: "marketing" })),
+        ];
+      }
+
+      function filteredTickets() {
+        const query = state.search.toLowerCase();
+        return state.tickets.filter((ticket) => {
+          const searchable = `${ticket.title} ${ticket.body} ${ticket.owner} ${categoryLabel(ticket.category)} ${subcategoryLabel(ticket.subcategory)}`.toLowerCase();
+          return (state.subcategoryFilter === "all" || ticket.subcategory === state.subcategoryFilter) && (!query || searchable.includes(query));
+        });
+      }
+
+      function orderedTickets(tickets) {
+        const sorted = [...tickets];
+        if (state.sort === "valueDesc") {
+          sorted.sort((a, b) => b.value - a.value || a.order - b.order);
+        } else if (state.sort === "pointsDesc") {
+          sorted.sort((a, b) => b.points - a.points || a.order - b.order);
+        } else if (state.sort === "pointsAsc") {
+          sorted.sort((a, b) => a.points - b.points || a.order - b.order);
+        } else if (state.sort === "titleAsc") {
+          sorted.sort((a, b) => a.title.localeCompare(b.title, "ja"));
+        } else {
+          sorted.sort((a, b) => a.order - b.order);
+        }
+        return sorted;
+      }
+
+      function render() {
+        const visible = filteredTickets();
+        renderBoard(visible);
+        renderMetrics(visible);
+        setStatus(`表示中 ${visible.length} 件。変更は localStorage に自動保存されます。`);
+      }
+
+      function renderBoard(visible) {
+        const board = document.querySelector("#board");
+        board.innerHTML = statuses.map((status) => renderColumn(status, visible)).join("");
+        wireCardActions();
+        wireDropTargets();
+      }
+
+      function renderColumn(status, visible) {
+        const tickets = visible.filter((ticket) => ticket.status === status.id);
+        const totalPoints = tickets.reduce((sum, ticket) => sum + ticket.points, 0);
+        const totalValue = tickets.reduce((sum, ticket) => sum + ticket.value, 0);
+        return `
+          <article class="column" data-status="${status.id}">
+            <header class="columnHeader">
+              <div>
+                <h2 class="columnTitle">${status.label}</h2>
+                <div class="columnMeta">${tickets.length} 件 / ${totalPoints} SP</div>
+              </div>
+              <span class="badge">${totalValue} 価値</span>
+            </header>
+            ${allGroups().map((group) => renderLane(status.id, group, tickets)).join("")}
+          </article>
+        `;
+      }
+
+      function renderLane(statusId, group, statusTickets) {
+        const laneTickets = orderedTickets(statusTickets.filter((ticket) => ticket.subcategory === group.id));
+        if (!laneTickets.length && state.subcategoryFilter !== "all") return "";
+        return `
+          <section class="lane" data-status="${statusId}" data-category="${group.category}" data-subcategory="${group.id}">
+            <h3 class="laneTitle">
+              <span>${categoryLabel(group.category)} / ${group.label}</span>
+              <span>${laneTickets.length}</span>
+            </h3>
+            ${laneTickets.length ? laneTickets.map(renderCard).join("") : '<div class="empty">ここにドロップ、または追加ボタンから作成</div>'}
+          </section>
+        `;
+      }
+
+      function renderCard(ticket) {
+        const statusIndex = statuses.findIndex((status) => status.id === ticket.status);
+        return `
+          <article class="card" draggable="true" data-id="${ticket.id}" data-category="${ticket.category}">
+            <div class="cardHead">
+              <h3>${escapeHtml(ticket.title)}</h3>
+              <span class="tag ${ticket.subcategory}">${subcategoryLabel(ticket.subcategory)}</span>
+            </div>
+            <p>${escapeHtml(ticket.body || "説明未設定")}</p>
+            <div class="scoreRow">
+              <div class="score"><span>STORY POINT</span><b>${ticket.points}</b></div>
+              <div class="score"><span>VALUE</span><b>${ticket.value}</b></div>
+            </div>
+            <footer class="cardFooter">
+              <span class="badge">${ticket.owner ? escapeHtml(ticket.owner) : categoryLabel(ticket.category)}</span>
+              <div class="miniActions">
+                <button class="button icon" type="button" data-action="up" data-id="${ticket.id}" aria-label="上へ">↑</button>
+                <button class="button icon" type="button" data-action="down" data-id="${ticket.id}" aria-label="下へ">↓</button>
+                <button class="button icon" type="button" data-action="left" data-id="${ticket.id}" aria-label="左へ" ${statusIndex === 0 ? "disabled" : ""}>‹</button>
+                <button class="button icon" type="button" data-action="right" data-id="${ticket.id}" aria-label="右へ" ${statusIndex === statuses.length - 1 ? "disabled" : ""}>›</button>
+                <button class="button icon danger" type="button" data-action="delete" data-id="${ticket.id}" aria-label="削除">×</button>
+              </div>
+            </footer>
+          </article>
+        `;
+      }
+
+      function renderMetrics(visible) {
+        const points = visible.reduce((sum, ticket) => sum + ticket.points, 0);
+        const value = visible.reduce((sum, ticket) => sum + ticket.value, 0);
+        const done = visible.length ? Math.round((visible.filter((ticket) => ticket.status === "done").length / visible.length) * 100) : 0;
+        document.querySelector("#metricTickets").textContent = visible.length;
+        document.querySelector("#metricPoints").textContent = points;
+        document.querySelector("#metricValue").textContent = value;
+        document.querySelector("#metricDone").textContent = `${done}%`;
+      }
+
+      function wireCardActions() {
+        document.querySelectorAll("[data-action]").forEach((button) => {
+          button.addEventListener("click", () => handleCardAction(button.dataset.action, button.dataset.id));
+        });
+        document.querySelectorAll(".card").forEach((card) => {
+          card.addEventListener("dragstart", (event) => {
+            state.draggingId = card.dataset.id;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", card.dataset.id);
+            card.classList.add("isDragging");
+          });
+          card.addEventListener("dragend", () => {
+            state.draggingId = null;
+            document.querySelectorAll(".isDragging, .isDropTarget").forEach((el) => el.classList.remove("isDragging", "isDropTarget"));
+          });
+        });
+      }
+
+      function wireDropTargets() {
+        document.querySelectorAll(".lane").forEach((lane) => {
+          lane.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            lane.classList.add("isDropTarget");
+            lane.closest(".column")?.classList.add("isDropTarget");
+          });
+          lane.addEventListener("dragleave", () => {
+            lane.classList.remove("isDropTarget");
+            lane.closest(".column")?.classList.remove("isDropTarget");
+          });
+          lane.addEventListener("drop", (event) => {
+            event.preventDefault();
+            const id = event.dataTransfer.getData("text/plain") || state.draggingId;
+            moveTicketTo(id, lane.dataset.status, lane.dataset.category, lane.dataset.subcategory);
+          });
+        });
+      }
+
+      function handleCardAction(action, id) {
+        if (action === "left" || action === "right") {
+          moveStatus(id, action === "right" ? 1 : -1);
+        } else if (action === "up" || action === "down") {
+          moveOrder(id, action === "down" ? 1 : -1);
+        } else if (action === "delete") {
+          deleteTicket(id);
+        }
+      }
+
+      function moveStatus(id, direction) {
+        const ticket = state.tickets.find((item) => item.id === id);
+        if (!ticket) return;
+        const index = statuses.findIndex((status) => status.id === ticket.status);
+        const next = statuses[index + direction];
+        if (!next) return;
+        ticket.status = next.id;
+        ticket.order = nextOrder(ticket.status, ticket.subcategory);
+        saveTickets();
+        render();
+      }
+
+      function moveTicketTo(id, status, category, subcategory) {
+        const ticket = state.tickets.find((item) => item.id === id);
+        if (!ticket) return;
+        ticket.status = status;
+        ticket.category = category;
+        ticket.subcategory = subcategory;
+        ticket.order = nextOrder(status, subcategory);
+        saveTickets();
+        render();
+      }
+
+      function moveOrder(id, direction) {
+        const ticket = state.tickets.find((item) => item.id === id);
+        if (!ticket) return;
+        const siblings = state.tickets
+          .filter((item) => item.status === ticket.status && item.subcategory === ticket.subcategory)
+          .sort((a, b) => a.order - b.order);
+        const index = siblings.findIndex((item) => item.id === id);
+        const target = siblings[index + direction];
+        if (!target) return;
+        const currentOrder = ticket.order;
+        ticket.order = target.order;
+        target.order = currentOrder;
+        saveTickets();
+        render();
+      }
+
+      function deleteTicket(id) {
+        const ticket = state.tickets.find((item) => item.id === id);
+        if (!ticket) return;
+        if (!confirm(`「${ticket.title}」を削除しますか？`)) return;
+        state.tickets = state.tickets.filter((item) => item.id !== id);
+        saveTickets();
+        render();
+      }
+
+      function nextOrder(status, subcategory) {
+        const orders = state.tickets.filter((ticket) => ticket.status === status && ticket.subcategory === subcategory).map((ticket) => ticket.order);
+        return orders.length ? Math.max(...orders) + 10 : 10;
+      }
+
+      function updateSubcategoryOptions() {
+        const category = document.querySelector("#categoryInput").value;
+        const select = document.querySelector("#subcategoryInput");
+        select.innerHTML = subcategories[category].map((item) => `<option value="${item.id}">${item.label}</option>`).join("");
+        document.querySelectorAll("#categoryButtons button").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.category === category));
+        });
+        state.category = category;
+      }
+
+      function addTicket(event) {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        const title = String(data.get("title") || "").trim();
+        const points = Number(data.get("points"));
+        const value = Number(data.get("value"));
+        const error = document.querySelector("#formError");
+        if (!title || points < 1 || value < 1) {
+          error.classList.add("isVisible");
+          return;
+        }
+        error.classList.remove("isVisible");
+        const status = String(data.get("status"));
+        const subcategory = String(data.get("subcategory"));
+        state.tickets.unshift({
+          id: `ticket-${Date.now()}`,
+          title,
+          body: String(data.get("body") || "").trim(),
+          category: String(data.get("category")),
+          subcategory,
+          status,
+          points,
+          value,
+          owner: String(data.get("owner") || "").trim(),
+          order: nextOrder(status, subcategory),
+        });
+        saveTickets();
+        event.currentTarget.reset();
+        document.querySelector("#pointsInput").value = 3;
+        document.querySelector("#valueInput").value = 60;
+        document.querySelector("#categoryInput").value = state.category;
+        updateSubcategoryOptions();
+        render();
+      }
+
+      function buildMarkdown() {
+        const now = new Date();
+        const lines = [
+          "# ToC TODO カンバン",
+          "",
+          `更新: ${now.toLocaleString("ja-JP")}`,
+          "",
+          "## 集計",
+          "",
+          `- チケット: ${state.tickets.length}`,
+          `- ストーリーポイント: ${state.tickets.reduce((sum, ticket) => sum + ticket.points, 0)}`,
+          `- 価値: ${state.tickets.reduce((sum, ticket) => sum + ticket.value, 0)}`,
+          "",
+        ];
+        for (const status of statuses) {
+          const statusTickets = orderedTickets(state.tickets.filter((ticket) => ticket.status === status.id));
+          lines.push(`## ${status.label}`, "");
+          for (const group of allGroups()) {
+            const laneTickets = statusTickets.filter((ticket) => ticket.subcategory === group.id);
+            if (!laneTickets.length) continue;
+            lines.push(`### ${categoryLabel(group.category)} / ${group.label}`, "");
+            for (const ticket of laneTickets) {
+              lines.push(`- [${ticket.status === "done" ? "x" : " "}] ${ticket.title}`);
+              lines.push(`  - 大カテゴリ: ${categoryLabel(ticket.category)}`);
+              lines.push(`  - カテゴリ: ${subcategoryLabel(ticket.subcategory)}`);
+              lines.push(`  - ストーリーポイント: ${ticket.points}`);
+              lines.push(`  - 価値: ${ticket.value}`);
+              if (ticket.owner) lines.push(`  - 担当/メモ: ${ticket.owner}`);
+              if (ticket.body) lines.push(`  - 説明: ${ticket.body.replaceAll("\n", " ")}`);
+            }
+            lines.push("");
+          }
+          if (!statusTickets.length) lines.push("- なし", "");
+        }
+        return lines.join("\n").trimEnd() + "\n";
+      }
+
+      async function saveMarkdown() {
+        const markdown = buildMarkdown();
+        const filename = `toc-todo-kanban-${new Date().toISOString().slice(0, 10)}.md`;
+        if ("showSaveFilePicker" in window) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: "Markdown", accept: { "text/markdown": [".md"] } }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(markdown);
+            await writable.close();
+            setStatus(`${filename} を保存しました。`);
+            return;
+          } catch (error) {
+            if (error.name === "AbortError") return;
+            console.warn("File System Access API で保存できませんでした", error);
+          }
+        }
+        const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+        setStatus(`${filename} をダウンロードしました。`);
+      }
+
+      async function copyMarkdown() {
+        const markdown = buildMarkdown();
+        try {
+          await navigator.clipboard.writeText(markdown);
+          setStatus("Markdown をクリップボードにコピーしました。");
+        } catch {
+          document.querySelector("#markdownPreview").select();
+          document.execCommand("copy");
+          setStatus("Markdown をコピーしました。");
+        }
+      }
+
+      function openMarkdownModal() {
+        document.querySelector("#markdownPreview").value = buildMarkdown();
+        document.querySelector("#markdownModal").classList.add("isOpen");
+      }
+
+      function closeMarkdownModal() {
+        document.querySelector("#markdownModal").classList.remove("isOpen");
+      }
+
+      function setStatus(message) {
+        document.querySelector("#statusBar").textContent = message;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      document.querySelector("#ticketForm").addEventListener("submit", addTicket);
+      document.querySelector("#categoryInput").addEventListener("change", updateSubcategoryOptions);
+      document.querySelector("#categoryButtons").addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        document.querySelector("#categoryInput").value = button.dataset.category;
+        updateSubcategoryOptions();
+      });
+      document.querySelector("#toggleFormButton").addEventListener("click", () => {
+        document.querySelector("#formPanel").classList.toggle("isCollapsed");
+      });
+      document.querySelector("#subcategoryFilter").addEventListener("change", (event) => {
+        state.subcategoryFilter = event.target.value;
+        render();
+      });
+      document.querySelector("#sortSelect").addEventListener("change", (event) => {
+        state.sort = event.target.value;
+        render();
+      });
+      document.querySelector("#searchInput").addEventListener("input", (event) => {
+        state.search = event.target.value.trim();
+        render();
+      });
+      document.querySelector("#exportButton").addEventListener("click", saveMarkdown);
+      document.querySelector("#saveMarkdownButton").addEventListener("click", saveMarkdown);
+      document.querySelector("#previewButton").addEventListener("click", openMarkdownModal);
+      document.querySelector("#copyMarkdownButton").addEventListener("click", copyMarkdown);
+      document.querySelector("#closeModalButton").addEventListener("click", closeMarkdownModal);
+      document.querySelector("#markdownModal").addEventListener("click", (event) => {
+        if (event.target.id === "markdownModal") closeMarkdownModal();
+      });
+
+      updateSubcategoryOptions();
+      render();
+    </script>
+  </body>
+</html>

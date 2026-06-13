@@ -1662,6 +1662,46 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertIn("p400.duration_coverage", stage["reason_keys"])
             self.assertIn("p400.review_report_integrity", stage["reason_keys"])
 
+    def test_manifest_evaluator_gates_image_api_prompt_v1_payload(self) -> None:
+        checks: list[dict] = []
+        manifest = {
+            "video_metadata": {"experience": "cinematic_story"},
+            "manifest_phase": "production",
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "scene_shot_mix_plan": {"policy_version": "scene_shot_mix_v1"},
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "viewer_contract": {"must_show": ["門"], "must_avoid": []},
+                                "first_frame_contract": {"first_frame_brief": "門の前に立つ"},
+                                "motion_contract": {"motion_brief": "門へ進む"},
+                                "narration_contract": {"boundary": "same_event_only"},
+                            },
+                            "image_generation": {
+                                "output": "assets/scenes/scene01_cut01.png",
+                                "character_ids": [],
+                                "object_ids": ["gate"],
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": "",
+                                },
+                            },
+                            "video_generation": {"duration_seconds": 5, "motion_prompt": "門へ進む。"},
+                            "audio": {"narration": {"text": "門の前に立つ。"}},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        STAGE_EVALUATOR._manifest_checks(checks, "", manifest, profile="standard", flow="immersive", path_label="manifest")
+        failed_ids = [check["id"] for check in checks if not check["passed"]]
+
+        self.assertIn("manifest.api_prompt_v1_contract", failed_ids)
+
     def test_manifest_p400_readiness_includes_script_scene_readiness(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_script_ready_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0018"

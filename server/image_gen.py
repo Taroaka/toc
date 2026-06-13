@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ REQUEST_FILE_BY_KIND = {
     "asset": "asset_generation_requests.md",
     "scene": "image_generation_requests.md",
 }
+IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 PROMPT_SETTING_TARGETS = {
     "character": {
         "label": "キャラクター",
@@ -69,6 +70,8 @@ class ImageRequestItem:
     execution_lane: str
     generation_status: str | None
     existing_image: str | None
+    prompt_policy_version: str | None = None
+    debug_prompt_source: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -315,10 +318,36 @@ def _parse_int(value: Any, default: int) -> int:
         return default
 
 
-def _extract_request_prompt(section: str) -> tuple[str, str]:
-    prompt_match = re.search(r"```(?:text|txt)?\s*\n(.*?)\n```", section, flags=re.DOTALL)
-    if prompt_match:
-        return prompt_match.group(1).strip(), section[: prompt_match.start()]
+FENCED_BLOCK_RE = re.compile(r"```(?P<label>[A-Za-z0-9_-]+)?[^\n]*\n(?P<body>.*?)\n```", flags=re.DOTALL)
+
+
+def _extract_fenced_blocks(section: str) -> list[tuple[str, str]]:
+    return [
+        ((match.group("label") or "").strip().lower(), match.group("body").strip())
+        for match in FENCED_BLOCK_RE.finditer(section)
+    ]
+
+
+def _metadata_without_fences(section: str) -> str:
+    return FENCED_BLOCK_RE.sub("", section)
+
+
+def _extract_request_prompt(section: str, *, prompt_policy_version: str | None = None) -> tuple[str, str, dict[str, Any]]:
+    metadata_block = _metadata_without_fences(section)
+    fenced_blocks = _extract_fenced_blocks(section)
+    debug_prompt_source = {
+        label: body
+        for label, body in fenced_blocks
+        if label in {"debug_prompt_source", "review_prompt_source", "yaml", "yml"}
+    }
+    for label, body in fenced_blocks:
+        if label == "api_prompt":
+            return body, metadata_block, debug_prompt_source
+    if str(prompt_policy_version or "").strip() == IMAGE_API_PROMPT_POLICY_VERSION:
+        raise ValueError("api_prompt_missing_for_new_prompt_policy")
+    for label, body in fenced_blocks:
+        if label in {"", "text", "txt"}:
+            return body, metadata_block, debug_prompt_source
     prompt_lines: list[str] = []
     metadata_lines: list[str] = []
     in_prompt = False
@@ -344,7 +373,7 @@ def _extract_request_prompt(section: str) -> tuple[str, str]:
                 metadata_lines.append(raw)
             continue
         metadata_lines.append(raw)
-    return "\n".join(prompt_lines).strip(), "\n".join(metadata_lines)
+    return "\n".join(prompt_lines).strip(), "\n".join(metadata_lines), debug_prompt_source
 
 
 def parse_request_markdown(text: str, *, kind: str, run_dir: Path) -> list[ImageRequestItem]:
@@ -353,8 +382,25 @@ def parse_request_markdown(text: str, *, kind: str, run_dir: Path) -> list[Image
     for index in range(1, len(parts), 2):
         item_id = parts[index].strip()
         section = parts[index + 1]
-        prompt, metadata_block = _extract_request_prompt(section)
+        metadata = _parse_metadata(_metadata_without_fences(section))
+        prompt_policy_version = str(
+            metadata.get("prompt_policy_version")
+            or metadata.get("api_prompt_policy_version")
+            or metadata.get("policy_version")
+            or ""
+        ).strip() or None
+        prompt, metadata_block, debug_prompt_source = _extract_request_prompt(
+            section,
+            prompt_policy_version=prompt_policy_version,
+        )
         metadata = _parse_metadata(metadata_block)
+        prompt_policy_version = str(
+            metadata.get("prompt_policy_version")
+            or metadata.get("api_prompt_policy_version")
+            or metadata.get("policy_version")
+            or prompt_policy_version
+            or ""
+        ).strip() or None
         references = [r for r in metadata.get("references", []) if isinstance(r, str) and r.strip()]
         reference_count = _parse_int(metadata.get("reference_count"), len(references))
         execution_lane = str(metadata.get("execution_lane") or "").strip()
@@ -377,6 +423,8 @@ def parse_request_markdown(text: str, *, kind: str, run_dir: Path) -> list[Image
                 execution_lane=execution_lane,
                 generation_status=str(metadata.get("generation_status") or "").strip() or None,
                 existing_image=existing_image,
+                prompt_policy_version=prompt_policy_version,
+                debug_prompt_source=debug_prompt_source,
             )
         )
     return items
@@ -617,6 +665,8 @@ def write_app_server_image_debug_log(
     references: list[Path],
     prompt: str | None = None,
     kind: str | None = None,
+    prompt_policy_version: str | None = None,
+    debug_prompt_source: dict[str, Any] | None = None,
     result: Any | None = None,
     error: str | None = None,
 ) -> Path:
@@ -639,6 +689,8 @@ def write_app_server_image_debug_log(
         "prompt": prompt,
         "promptLength": len(prompt or ""),
         "promptSha256": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest() if prompt is not None else None,
+        "apiPromptPolicyVersion": prompt_policy_version,
+        "debugPromptSource": debug_prompt_source or {},
         "status": getattr(result, "status", "exception" if error else "missing") if result is not None else "exception",
         "savedPath": str(getattr(result, "saved_path", "") or ""),
         "source": getattr(result, "source", None) if result is not None else None,
@@ -794,6 +846,8 @@ def item_to_api(item: ImageRequestItem) -> dict[str, Any]:
         "tool": item.tool,
         "output": item.output,
         "prompt": item.prompt,
+        "promptPolicyVersion": item.prompt_policy_version,
+        "debugPromptSource": item.debug_prompt_source,
         "references": item.references,
         "referenceCount": item.reference_count,
         "executionLane": item.execution_lane,

@@ -393,7 +393,8 @@ scenes:
             # compatibility aliases for older readers
             role: "setup|fact|emotion|contrast|aftertaste|silent"
             target_function: "この声が cut で果たす役割"
-            must_cover: []
+            must_cover:
+              - "derive_from_story_role_must_cover"
             must_avoid:
               - "映像のキャプション化"
             timing_intent: ""
@@ -629,8 +630,10 @@ scenes:
                 max_sentence_chars: 42
                 tts_text_must_differ_from_text_when_needed: true
               # compatibility aliases for older readers
+              role: "setup"
               target_function: "information"
-              must_cover: []
+              must_cover:
+                - "derive_from_story_role_must_cover"
               must_avoid: ["カメラ", "ズーム", "生成", "prompt"]
               done_when:
                 - "物語の導入として自然に読める"

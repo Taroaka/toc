@@ -296,10 +296,13 @@ scenes:
               tts_text_must_differ_from_text_when_needed: true
             # compatibility aliases for older readers
             role: "setup|fact|emotion|contrast|aftertaste|silent"
-            target_function: "この声が cut で果たす役割"
-            must_cover: []
+            target_function: "derive_from_story_role_voice_function"
+            must_cover:
+              - "derive_from_story_role_must_cover"
             must_avoid:
               - "映像のキャプション化"
+            done_when:
+              - "derive_from_story_role_done_when"
             timing_intent: ""
             silence_reason: ""
           rhythm_contract:
@@ -474,16 +477,33 @@ scenes:
               tts_readiness:
                 pronunciation_targets: []
               # compatibility alias
-              target_function: ""
-              must_cover: []
-              must_avoid: []
-              done_when: []
+              role: "setup|fact|emotion|contrast|aftertaste|silent"
+              target_function: "derive_from_story_role_voice_function"
+              must_cover:
+                - "derive_from_story_role_must_cover"
+              must_avoid:
+                - "映像のキャプション化"
+              done_when:
+                - "derive_from_story_role_done_when"
             draft:
               text: ""
               status: "optional_draft|approved_by_human|superseded_by_p700"
             text: ""
             tts_text: ""
             tool: "elevenlabs"
+            review:
+              agent_review_ok: false
+              agent_review_reason_keys: []
+              agent_review_reason_messages: []
+              pronunciation_review:
+                candidates: []
+                unresolved: []
+              narration_arc_review:
+                agent_review_ok: false
+                reason_keys: []
+                rubric_scores: {}
+              human_review_ok: false
+              human_review_reason: ""
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false
 

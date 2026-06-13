@@ -70,9 +70,10 @@ python scripts/run-p720-narration-l3.py \
 
 - finding が出た scene/cut は `agent_review_ok: false` と reason key を持つ
 - L3 artifact は `logs/eval/narration/round_01/critic_*.md` と `logs/eval/narration/round_01/aggregated_review.md` に残る
-- 標準 critic split は `story_role` / `visual_distance` / `tts_delivery` / `arc_and_pacing` / `spoken_japanese`
-- 発音候補は `logs/eval/narration/round_01/pronunciation_candidates.tsv` に出せる
-- cut 単体では見つからない声の流れは `narration_arc_review` として aggregator にまとめる
+- 設計目標の critic split は `story_role` / `visual_distance` / `tts_delivery` / `arc_and_pacing` / `spoken_japanese`
+- 現行 runner が generic `critic_*.md` を出す場合でも、aggregator は上記5観点を report 内で明示する
+- 発音候補は設計目標として `logs/eval/narration/round_01/pronunciation_candidates.tsv` に出せる。未実装時は aggregator report または human handoff に候補を明記する
+- cut 単体では見つからない声の流れは、設計目標として `narration_arc_review` にまとめる
 - contract 未定義や must cover 未達も finding になる
 - fix は source manifest 側へ反映し、再 review してから次へ進む
 - `human_review_ok: true` は例外許容の記録であり、subagent finding 自体は消さない

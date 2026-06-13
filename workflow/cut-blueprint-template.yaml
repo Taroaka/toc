@@ -338,10 +338,13 @@ cuts:
           tts_text_must_differ_from_text_when_needed: true
         # compatibility aliases for older readers
         role: "setup" # setup|fact|emotion|contrast|aftertaste|silent
-        target_function: ""
-        must_cover: []
+        target_function: "derive_from_story_role_voice_function"
+        must_cover:
+          - "derive_from_story_role_must_cover"
         must_avoid:
           - "visible content captioning"
+        done_when:
+          - "derive_from_story_role_done_when"
         timing:
           start: "early" # early|mid|late|none
           end: "on_cut_end" # before_turn|on_cut_end|after_visual|none

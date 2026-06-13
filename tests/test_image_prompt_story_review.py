@@ -173,6 +173,94 @@ motion_ceiling: 終えない。
 
 
 class TestImagePromptStoryReview(unittest.TestCase):
+    def test_parse_prompt_collection_prefers_api_prompt_for_v1(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        entries = mod.parse_prompt_collection(
+            """# Image Prompt Collection
+
+件数: `1`
+
+## scene01_cut01
+
+- output: `assets/scenes/scene01_cut01.png`
+- prompt_policy_version: `image_api_prompt_v1`
+
+```debug_prompt_source
+first_frame_visual_plan:
+  source_event_beat_id: scene01_event_setup
+```
+
+```text
+debug text must not be sent
+```
+
+```api_prompt
+[shot / 画角]
+shot_role: insert
+shot_scale: closeup
+```
+"""
+        )
+
+        self.assertEqual(entries[0].prompt, "[shot / 画角]\nshot_role: insert\nshot_scale: closeup")
+        self.assertEqual(entries[0].prompt_policy_version, "image_api_prompt_v1")
+        self.assertEqual(entries[0].legacy_prompt, "debug text must not be sent")
+        self.assertNotIn("first_frame_visual_plan", entries[0].prompt)
+        self.assertNotIn("debug text", entries[0].prompt)
+
+    def test_review_flags_v1_prompt_missing_without_legacy_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_review_module(repo_root)
+
+        entries = mod.parse_prompt_collection(
+            """# Image Prompt Collection
+
+件数: `1`
+
+## scene01_cut01
+
+- output: `assets/scenes/scene01_cut01.png`
+- prompt_policy_version: `image_api_prompt_v1`
+
+```text
+legacy prompt must not be used
+```
+"""
+        )
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "image_generation": {
+                                "output": "assets/scenes/scene01_cut01.png",
+                                "character_ids": [],
+                                "object_ids": [],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        results = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        findings = [finding.code for outcome in results for finding in outcome.findings]
+
+        self.assertIn("api_prompt_missing_for_new_prompt_policy", findings)
+        self.assertEqual(entries[0].prompt, "")
+        self.assertEqual(entries[0].legacy_prompt, "legacy prompt must not be used")
+
     def test_review_flags_missing_required_prompt_blocks_on_unstructured_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)

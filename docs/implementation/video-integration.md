@@ -119,8 +119,14 @@ generator の既定参照順:
 1) `video_manifest.md` を cuts 前提で書く（`scenes[].cuts[]` でも、sceneをカットとして扱ってもよい）
    - `audio.narration.text` / `audio.narration.tts_text` は **空文字**でよい（未記入）。`TODO:` のようなメタ情報は入れない（TTSで喋られて事故る）
    - 未記入は `audio.narration.authoring_status: "missing"` と `missing_reason: "p700_narration_not_written_yet"` で表す
-2) Narration Writer が `audio.narration.text` と `audio.narration.tts_text` を確定する
-  - 先に `audio.narration.contract` を定義する
+   - p400 / skeleton 時点では、final narration text ではなく `audio.narration.contract` と runtime 枠だけを置く
+2) 先に reusable asset と scene image を生成する（image-only）
+   - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
+3) p710 で `script.md` / `video_manifest.md` / 生成済み scene image を grounding し、image-to-voice の読み取りを行う
+   - first frame / approved image から、見えている subject / action / emotion / location rule / handoff anchor を読む
+   - `visual_distance.visible_facts_in_frame` と `visual_distance.narration_should_add` を確認し、声が映像をキャプション化しないようにする
+4) Narration Writer が、確定した visual に合わせて `audio.narration.text` と `audio.narration.tts_text` を確定する
+  - `audio.narration.contract` を更新し、必要なら image 後の読み取りを反映する
     - `story_role.narrative_position`: `opening|middle|ending`
     - `story_role.cut_function`: `setup|pressure|threshold|turn|payoff|reaction|handoff`
     - `story_role.voice_function`: `information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence`
@@ -128,7 +134,7 @@ generator の既定参照順:
     - `visual_distance.narration_should_add`: 映像だけでは言えない情報・内面・因果・余韻
     - `rhythm_and_timing`: 話し始め、終わり、pause、目標 speech 秒
     - `tts_readiness.pronunciation_targets`: 誤読しそうな語
-    - `target_function` / `role` / `must_cover` / `must_avoid` は旧 reader 用の互換 alias として残してよいが、新規設計では上記 v2 fields を優先する
+    - `target_function` / `role` / `must_cover` / `must_avoid` / `done_when` は現行 reader 用の互換 alias として p720 前に必ず派生同期する。新規設計判断では上記 v2 fields を優先する
   - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
   - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
   - `voice_tags` は bracket なしの生タグで保持し、materialize 時に `[]` を付ける
@@ -146,7 +152,7 @@ generator の既定参照順:
    - 深い設計意図や抽象テーマは、基本的にナレーションで説明せず映像側へ置く
    - 終盤の学び/余韻パートだけ、満足感のために軽く言語化してよい
    - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
-3) Narration review を実行し、finding を source manifest に書き戻す
+5) Narration review を実行し、finding を source manifest に書き戻す
   - `python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings`
   - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、音声生成へ進めない
   - p720 runner は deterministic reviewer で `audio.narration.review` を source manifest に書き戻し、その結果を `logs/eval/narration/round_01/critic_*.md` と `aggregated_review.md` へ L3 artifact として展開する
@@ -154,27 +160,25 @@ generator の既定参照順:
     - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
     - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
     - 言葉の薄さ: `フォーマット` / `フレーム` / `フェーズ` / `構造` / `観点` のような抽象語を連発せず、次文で具体的な人物・行動・場所・物へ落とす
-  - p720 L3 critic は次の 5 役を標準割当とする
+  - p720 L3 critic の設計目標は次の 5 役。現行 runner がまだ v2-aware でない間は、critic report / aggregator report 内で同じ観点を明示して補う
     - critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
     - critic 2 `visual_distance`: 映像説明の重複、image / motion との距離、camera / prompt 語の混入
     - critic 3 `tts_delivery`: `tts_text`, pause, sentence length, audio tag, pronunciation candidates
     - critic 4 `arc_and_pacing`: cut 間接続、scene voice arc、duration density、ending 余韻
     - critic 5 `spoken_japanese`: 聞いたときの自然さ、AI っぽい抽象語、比喩過多、文末の単調さ
-  - p720 は `logs/eval/narration/round_01/pronunciation_candidates.tsv` を作れる
+  - p720 は設計目標として `logs/eval/narration/round_01/pronunciation_candidates.tsv` を作れる。現行 runner が直接 materialize しない場合は、aggregator report の pronunciation section か human handoff で候補を明示する
     - columns: `surface`, `reading`, `selector`, `reason`, `status`
     - p730 前に unresolved candidate を `tts_text` / alias file / official pronunciation dictionary / rejected のいずれかへ解決する
   - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
   - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
   - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
-  - aggregator は cut 単体の finding に加えて、軽量な `narration_arc_review` を持てる
+  - aggregator は設計目標として、cut 単体の finding に加えて軽量な `narration_arc_review` を持てる
     - 初期運用では scene-level の voice continuity / emotional curve / information flow / repetition control を warning として扱う
     - full-run blocking gate 化は運用が安定してから行う
   - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
   - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
    - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
-4) 先に reusable asset と scene image を生成する（image-only）
-   - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
-5) 次に音声だけ生成して秒数を確定する（audio-only）
+6) 次に音声だけ生成して秒数を確定する（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
    - `--skip-narration-review` を付けない限り、この audio-only 実行は p730 前に p720 L3 runner を自動実行する
    - ElevenLabs の pronunciation dictionary を使う場合は、`ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS="dictionary_id:version_id"` または `--elevenlabs-pronunciation-dictionary-locator dictionary_id:version_id` を使う
@@ -182,9 +186,9 @@ generator の既定参照順:
      - TSV 例: `売上	うりあげ`
      - `=>` 形式も可: `取得=>しゅとく`
    - 日本語では IPA/CMU より alias 型の読み替えを優先する。公式 pronunciation dictionary は最大 3 locator までを TTS request に渡す
-6) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
+7) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
-7) 実尺が target を満たすかを gate する
+8) 実尺が target を満たすかを gate する
    - `python scripts/check-audio-duration-gate.py --manifest output/<run>/video_manifest.md --run-dir output/<run>`
    - `cinematic_story` は既定で 300 秒以上を target にする
    - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する

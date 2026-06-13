@@ -1349,14 +1349,30 @@ audio:
         max_sentence_chars: 42
         tts_text_must_differ_from_text_when_needed: true
       # compatibility aliases for older readers; new authoring should fill story_role first.
-      role: "setup|fact|emotion|contrast|aftertaste|silent"
-      target_function: ""
-      must_cover: []
-      must_avoid: []
-      done_when: []
+      role: "setup"
+      target_function: "derive_from_story_role_voice_function"
+      must_cover:
+        - "derive_from_story_role_must_cover"
+      must_avoid:
+        - "映像のキャプション化"
+      done_when:
+        - "derive_from_story_role_done_when"
 ```
 
-Required core fields for new p700 authoring are `schema_version`, `story_role.narrative_position`, `story_role.cut_function`, `story_role.voice_function`, `visual_distance.distance_policy`, `visual_distance.narration_should_add`, and `tts_readiness.pronunciation_targets`. Compatibility aliases may remain during migration, but they do not replace the v2 fields in new design review.
+Required core fields for new p700 authoring are `schema_version`, `story_role.narrative_position`, `story_role.cut_function`, `story_role.voice_function`, `visual_distance.distance_policy`, `visual_distance.narration_should_add`, and `tts_readiness.pronunciation_targets`.
+
+Migration rule:
+
+- v2 fields are the design source of truth for new authoring.
+- Until all p720 / semantic / stage evaluators are v2-aware, legacy aliases are also required before p720:
+  - `role`
+  - `target_function`
+  - `must_cover`
+  - `must_avoid`
+  - `done_when`
+- These aliases are derived projections from v2 fields, not a second source of truth.
+- A manifest that only fills v2 fields but leaves legacy aliases missing or empty is not p720-ready in the current runtime.
+- Template authors should keep the aliases visible so older readers fail predictably instead of silently ignoring the contract.
 
 各 `scenes[].audio.narration.review` または `scenes[].cuts[].audio.narration.review` は、少なくとも次の review field を持つ。
 
@@ -1449,7 +1465,7 @@ Canonical reason key:
 - `narration_pacing_mismatch`
 - `narration_spoken_japanese_weak`
 
-p720 L3 critic assignment:
+p720 L3 critic assignment design target:
 
 - critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
 - critic 2 `visual_distance`: visual captioning, image / motion distance, camera / prompt term leakage
@@ -1457,7 +1473,12 @@ p720 L3 critic assignment:
 - critic 4 `arc_and_pacing`: cut handoff, scene voice arc, duration density, ending aftertaste
 - critic 5 `spoken_japanese`: spoken naturalness, abstract AI wording, metaphor overload, monotonous endings
 
-Pronunciation candidate artifact:
+Current runner compatibility:
+
+- If `scripts/run-p720-narration-l3.py` still emits generic `critic_*.md`, the aggregator report must cover the five design-target viewpoints explicitly.
+- If deterministic review has not materialized `pronunciation_review` / `narration_arc_review`, they are design-target/manual review outputs, not required runtime fields.
+
+Pronunciation candidate artifact design target:
 
 ```text
 logs/eval/narration/round_01/pronunciation_candidates.tsv
@@ -1874,10 +1895,14 @@ cut_contract:
       max_sentence_chars: 42
       tts_text_must_differ_from_text_when_needed: true
     # compatibility aliases for older readers
-    role: "setup|fact|emotion|contrast|aftertaste|silent"
-    target_function: ""
-    must_cover: []
-    must_avoid: []
+    role: "setup"
+    target_function: "derive_from_story_role_voice_function"
+    must_cover:
+      - "derive_from_story_role_must_cover"
+    must_avoid:
+      - "映像のキャプション化"
+    done_when:
+      - "derive_from_story_role_done_when"
     timing_intent: ""
     silence_reason: ""
     draft:

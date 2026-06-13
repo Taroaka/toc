@@ -204,10 +204,10 @@
 #   review.narration.change_request_count=0
 #   review.narration.open_change_request_count=0
 #   review.narration.last_change_request_id=string
-#   review.narration.pronunciation_candidates=logs/eval/narration/round_01/pronunciation_candidates.tsv
+#   review.narration.pronunciation_candidates=logs/eval/narration/round_01/pronunciation_candidates.tsv  # design-target/manual artifact until runner materializes it
 #   review.narration.pronunciation_unresolved_count=0
 #   review.narration.arc.status=passed|warning|changes_requested|skipped
-#   review.narration.arc.report=logs/eval/narration/round_01/arc_review.md
+#   review.narration.arc.report=logs/eval/narration/round_01/arc_review.md  # design-target/manual artifact until runner materializes it
 #   review.duration_fit.status=passed|changes_requested|skipped
 #   review.duration_fit.actual_seconds=0
 #   review.duration_fit.minimum_seconds=0
