@@ -249,6 +249,13 @@ scenes:
         self.assertEqual([beat["beat_id"] for beat in context["neighboring_event_beats"]], ["scene10_event_setup", "scene10_event_turn"])
         self.assertEqual(context["forbidden_event_changes"], ["future_reveal"])
         self.assertEqual(context["reveal_constraints_for_this_cut"], ["future_reveal"])
+        packet = entries[0]["cut_context_packet"]
+        self.assertEqual(packet["schema_version"], "cut_context_packet_v1")
+        self.assertFalse(packet["editable"])
+        self.assertEqual(packet["cut_selector"], "scene10_cut01")
+        self.assertEqual(packet["source_event"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+        self.assertIn("cut_context_packet_diagnostics", entries[0])
+        self.assertIn("warning_keys", entries[0]["cut_context_packet_diagnostics"])
 
     def test_falls_back_to_video_manifest_when_script_is_absent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:

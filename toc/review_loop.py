@@ -181,6 +181,9 @@ CUT_BLUEPRINT_GATE_MARKERS: tuple[str, ...] = (
     "duration_density_and_handoff",
     "coverage_plan_complete",
     "continuity_contract_complete",
+    "character_emotion_continuity_complete",
+    "film_grammar_contract_complete",
+    "action_reaction_and_eyeline_complete",
     "narration_contract_complete",
     "downstream_handoff_complete",
     "triangulation_review_ready",
@@ -639,8 +642,8 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
         - scene_specificity_gate: for scene_set include non_compressible_beat_inventory, scene_promotion_rule, unique_scene_responsibility, actor_force_coverage, object_meaning_ladder, concrete_handoff_chain, and anti_template_language
         - reveal_order_gate: for scene_set include reveal_order_preserved, withheld_information_preserved, and early_reveal_risk_resolved
         - handoff_chain_gate: for scene_set include handoff_chain_coverage, incoming_outgoing_anchor_ids, and terminal_resolution_checked
-        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, scene_event_sequence, turning_event_alignment, end_situation_alignment, and neighbor_handoff
-        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, scene_event_coverage, event_beat_reference_integrity, first_frame_motion_readiness, event_first_frame_alignment, multimodal_event_boundary_coverage, source_event_preservation, no_unapproved_event_invention, event_motion_boundary, event_narration_boundary, event_context_for_cut_ready, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
+        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, scene_event_sequence, scene_character_state_timeline, scene_film_coverage_plan, turning_event_alignment, end_situation_alignment, and neighbor_handoff
+        - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, scene_event_coverage, event_beat_reference_integrity, first_frame_motion_readiness, event_first_frame_alignment, multimodal_event_boundary_coverage, source_event_preservation, no_unapproved_event_invention, event_motion_boundary, event_narration_boundary, event_context_for_cut_ready, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, character_emotion_continuity_complete, film_grammar_contract_complete, action_reaction_and_eyeline_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
         - rejected_suggestions[]
@@ -734,6 +737,8 @@ def render_aggregated_review(
                 "- value_shift_visibility: value_shift.from/to is proven by visible evidence",
                 "- causal_turn_visibility: the irreversible turn is visible or audibly grounded",
                 "- scene_event_sequence: scene_event has setup, pressure, turn, and payoff as concrete story events",
+                "- scene_character_state_timeline: each major character has start/mid/end states with face/gaze/posture/hands/feet/distance visible proof tied to scene_event beats",
+                "- scene_film_coverage_plan: shot_mix, action_reaction_pair, missing_coverage, and reaction/insert/eyeline/silence required_when rules are present",
                 "- turning_event_alignment: turning_event semantically matches scene_intent.causal_turn",
                 "- end_situation_alignment: end_situation semantically matches scene_intent.value_shift.to",
                 "- neighbor_handoff: incoming and outgoing handoffs connect to adjacent scenes",
@@ -763,6 +768,9 @@ def render_aggregated_review(
                 "- duration_density_and_handoff: cut count, duration density, and final handoff are sufficient",
                 "- coverage_plan_complete: scene_cut_coverage_plan maps obligations to cuts",
                 "- continuity_contract_complete: continuity states and carry-forward items are concrete",
+                "- character_emotion_continuity_complete: cut_character_emotion_transition has transition_mode, trigger beat ref, visible behavior, and no final-emotion jump",
+                "- film_grammar_contract_complete: cut_film_grammar_contract separates required_modules and conditional_modules and keeps audience_emotion_target separate from character emotion",
+                "- action_reaction_and_eyeline_complete: turn/reveal/payoff cuts include reaction contracts, edit motivation, eyeline/attention continuity, and motivated screen direction",
                 "- narration_contract_complete: narration role or silence reason is concrete",
                 "- downstream_handoff_complete: p500/p600/p700/p800 requirements are present",
                 "- triangulation_review_ready: cut contract can be checked across image, narration, motion, and scene composite review",

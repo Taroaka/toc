@@ -266,6 +266,8 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- value_shift_visibility: value shift is visible",
                     "- causal_turn_visibility: causal turn is visible",
                     "- scene_event_sequence: setup, pressure, turn, and payoff are present",
+                    "- scene_character_state_timeline: start/mid/end visible behavior is present",
+                    "- scene_film_coverage_plan: shot/action-reaction/missing coverage and required_when rules are present",
                     "- turning_event_alignment: turning_event matches scene_intent.causal_turn",
                     "- end_situation_alignment: end_situation matches scene_intent.value_shift.to",
                     "- neighbor_handoff: neighboring handoffs are checked",
@@ -293,6 +295,9 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- duration_density_and_handoff: passed",
                     "- coverage_plan_complete: passed",
                     "- continuity_contract_complete: passed",
+                    "- character_emotion_continuity_complete: passed",
+                    "- film_grammar_contract_complete: passed",
+                    "- action_reaction_and_eyeline_complete: passed",
                     "- narration_contract_complete: passed",
                     "- downstream_handoff_complete: passed",
                     "- triangulation_review_ready: passed",
@@ -474,6 +479,71 @@ def _valid_scene_event_lines(topic: str, scene_idx: int, *, indent: str = "     
     ]
 
 
+def _valid_scene_emotion_film_lines(topic: str, scene_idx: int, *, indent: str = "      ") -> list[str]:
+    return [
+        f"{indent}scene_character_state_timeline:",
+        f"{indent}  policy_version: \"character_emotion_continuity_v1\"",
+        f"{indent}  source_schema_version: \"scene_event_v1\"",
+        f"{indent}  scene_id: {scene_idx}",
+        f"{indent}  linked_scene_event_beat_ids: [\"scene{scene_idx}_event_setup\", \"scene{scene_idx}_event_pressure\", \"scene{scene_idx}_event_turn\", \"scene{scene_idx}_event_payoff\"]",
+        f"{indent}  characters:",
+        f"{indent}    - character_id: \"momotaro\"",
+        f"{indent}      character_name: \"{topic}\"",
+        f"{indent}      scene_role: \"protagonist\"",
+        f"{indent}      objective_in_scene: \"村道を越える\"",
+        f"{indent}      emotional_arc_summary: \"ためらいから決意へ\"",
+        f"{indent}      start_state:",
+        f"{indent}        trigger_event_beat_id: \"scene{scene_idx}_event_setup\"",
+        f"{indent}        emotion: \"ためらい\"",
+        f"{indent}        desire: \"前へ進みたい\"",
+        f"{indent}        fear_or_pressure: \"村人の視線\"",
+        f"{indent}        belief: \"まだ戻れる\"",
+        f"{indent}        relationship_to_others: \"村人の視線を受ける\"",
+        f"{indent}        body_state: \"足を止める\"",
+        f"{indent}        gaze_target: \"村道\"",
+        f"{indent}        visible_proof: {{face: \"緊張した表情\", gaze: \"村道を見る\", posture: \"足を止める\", hands: \"袋を握る\", feet: \"片足が止まる\", distance: \"村人と距離がある\", visible_proof: \"村道と袋\"}}",
+        f"{indent}      midpoint_state:",
+        f"{indent}        trigger_event_beat_id: \"scene{scene_idx}_event_turn\"",
+        f"{indent}        emotion: \"決意\"",
+        f"{indent}        desire_shift: \"進む\"",
+        f"{indent}        fear_or_pressure_shift: \"後戻りできない\"",
+        f"{indent}        belief_shift: \"進むしかない\"",
+        f"{indent}        relationship_shift: \"村から責務へ\"",
+        f"{indent}        body_state: \"一歩を出す\"",
+        f"{indent}        gaze_target: \"霧の先\"",
+        f"{indent}        visible_proof: {{face: \"息を止めた表情\", gaze: \"霧の先を見る\", posture: \"前傾する\", hands: \"袋を握り直す\", feet: \"一歩を出す\", distance: \"村道の先へ距離が開く\", visible_proof: \"一歩と足跡\"}}",
+        f"{indent}      end_state:",
+        f"{indent}        trigger_event_beat_id: \"scene{scene_idx}_event_payoff\"",
+        f"{indent}        emotion: \"責務\"",
+        f"{indent}        new_desire: \"次へ進む\"",
+        f"{indent}        unresolved_pressure: \"鬼との決着はまだ\"",
+        f"{indent}        belief_after_scene: \"責務を引き受けた\"",
+        f"{indent}        relationship_after_scene: \"村との関係が責務へ変わる\"",
+        f"{indent}        body_state: \"前へ向く\"",
+        f"{indent}        gaze_target: \"次の道\"",
+        f"{indent}        visible_proof: {{face: \"静かな決意\", gaze: \"次の道を見る\", posture: \"前へ向く\", hands: \"袋を持つ\", feet: \"足跡を残す\", distance: \"村から離れる\", visible_proof: \"足跡と霧\"}}",
+        f"{indent}      emotional_no_return_point: {{event_beat_id: \"scene{scene_idx}_event_turn\", description: \"決意が戻れない\", visible_behavior: \"一歩を出す\"}}",
+        f"{indent}scene_film_coverage_plan:",
+        f"{indent}  policy_version: \"scene_film_coverage_v1\"",
+        f"{indent}  source: [\"scene_event\", \"scene_character_state_timeline\", \"scene_cut_coverage_plan\"]",
+        f"{indent}  scene_id: {scene_idx}",
+        f"{indent}  shot_mix:",
+        f"{indent}    required_coverage: {{establishing: [\"scene{scene_idx}_cut1\"], action: [\"scene{scene_idx}_cut2\", \"scene{scene_idx}_cut3\"], insert: [], reaction: [\"scene{scene_idx}_cut4\"], handoff: [\"scene{scene_idx}_cut4\"]}}",
+        f"{indent}    actual_shots: []",
+        f"{indent}    missing_coverage: []",
+        f"{indent}  action_reaction_pair:",
+        f"{indent}    - {{source_event_beat_id: \"scene{scene_idx}_event_turn\", action_cut_selector: \"scene{scene_idx}_cut3\", reaction_cut_selector: \"scene{scene_idx}_cut4\", meaning_created_by_pair: \"決意の意味が反応で読める\"}}",
+        f"{indent}    - {{source_event_beat_id: \"scene{scene_idx}_event_payoff\", action_cut_selector: \"scene{scene_idx}_cut4\", reaction_cut_selector: \"scene{scene_idx}_cut4\", meaning_created_by_pair: \"結果の意味が反応で読める\"}}",
+        f"{indent}  missing_coverage: []",
+        f"{indent}  required_when_rules:",
+        f"{indent}    reaction: \"turn / reveal / payoff の event beat では required\"",
+        f"{indent}    insert: \"重要小道具があれば required\"",
+        f"{indent}    eyeline: \"認識やhandoffでは required\"",
+        f"{indent}    silence: \"感情転換では required\"",
+        f"{indent}  audience_emotion_target: {{separate_from_character_emotion: true, intended_audience_feeling: \"決意を感じる\", achieved_by: [\"character_reaction\", \"shot_scale\", \"silence\"]}}",
+    ]
+
+
 def _write_valid_immersive_p400_pair(
     run_dir: Path,
     *,
@@ -542,6 +612,24 @@ def _write_valid_immersive_p400_pair(
             "      duplicate_meaning_risks: []",
         ]
 
+    def state_progression_plan_lines(scene_idx: int) -> list[str]:
+        return [
+            "    scene_state_progression_plan:",
+            "      policy_version: \"scene_state_progression_v1\"",
+            "      source: [\"scene_event\", \"scene_cut_coverage_plan\"]",
+            "      progression_mode: \"sequential_state_progression\"",
+            "      mode_reason: \"scene内で桃太郎が村道を前へ進むため、各cutは前cutの結果を受ける\"",
+            "      scene_progression_goal: \"村道を越える\"",
+            "      starts_at: \"桃太郎が村道の入口で足を止める\"",
+            "      ends_at: \"桃太郎が霧の先へ進む\"",
+            "      cut_progression_map:",
+            *[
+                f"        - {{cut_selector: \"scene{scene_idx}_cut{cut_idx}\", source_event_beat_ids: [\"scene{scene_idx}_event_{['setup', 'pressure', 'turn', 'payoff'][min(cut_idx - 1, 3)]}\"], progression_position: \"{['setup', 'pressure', 'turn', 'handoff'][min(cut_idx - 1, 3)]}\", progression_mode: \"sequential_state_progression\", first_frame_temporal_role: \"{'suspended_before_or_during_cut_event' if cut_idx == 1 else 'progressed_state_after_previous_cut'}\", state_after_previous_cut: \"{'scene開始時点' if cut_idx == 1 else '前cutで桃太郎が一段前へ進んだ'}\", state_visible_in_this_cut: \"桃太郎が村道を{cut_idx}段階目まで進んでいる\", visible_state_delta_from_previous_cut: \"前cutより足元と視線が前へ進む\", action_completion_state: \"{'scene_start_state' if cut_idx == 1 else 'handoff_state' if cut_idx == 4 else 'progressed_state'}\", must_not_revert_to: \"{'桃太郎が村道の入口で足を止める' if cut_idx > 1 else ''}\", must_not_advance_beyond: \"次cut以降の結果\", forbidden_future_event_beat_ids: [], done_when: [\"前cutから進んだ状態が静止画で読める\"]}}"
+                for cut_idx in range(1, 5)
+            ],
+            "      gate_requirements: [\"scene_state_progression_plan_exists\", \"sequential_scene_cuts_do_not_revert_to_scene_start\", \"cut_state_progression_exists\"]",
+        ]
+
     def cut_contract_lines(scene_idx: int, cut_idx: int, selector: str) -> list[str]:
         next_anchor = f"scene{scene_idx}_cut{cut_idx}_to_cut{cut_idx + 1}" if cut_idx < 4 else f"scene{scene_idx}_to_next"
         incoming_anchor = f"scene{scene_idx}_incoming" if cut_idx == 1 else f"scene{scene_idx}_cut{cut_idx - 1}_to_cut{cut_idx}"
@@ -590,6 +678,20 @@ def _write_valid_immersive_p400_pair(
         return [
             "        cut_contract:",
             "          schema_version: \"3.0\"",
+            "          cut_state_progression:",
+            "            policy_version: \"cut_state_progression_v1\"",
+            "            source_scene_progression_plan: \"scene_state_progression_plan\"",
+            "            progression_mode: \"sequential_state_progression\"",
+            f"            cut_selector: \"{selector}\"",
+            f"            progression_position: \"{beat_function}\"",
+            f"            first_frame_temporal_role: \"{'suspended_before_or_during_cut_event' if cut_idx == 1 else 'progressed_state_after_previous_cut'}\"",
+            f"            state_after_previous_cut: \"{'scene開始時点' if cut_idx == 1 else '前cutで桃太郎が一段前へ進んだ'}\"",
+            f"            state_visible_in_first_frame: \"桃太郎が村道を{cut_idx}段階目まで進んでいる\"",
+            "            visible_state_delta_from_previous_cut: \"前cutより足元と視線が前へ進む\"",
+            f"            action_completion_state: \"{'scene_start_state' if cut_idx == 1 else 'handoff_state' if cut_idx == 4 else 'progressed_state'}\"",
+            f"            must_not_revert_to: \"{'桃太郎が村道の入口で足を止める' if cut_idx > 1 else ''}\"",
+            "            must_not_advance_beyond: \"次cut以降の結果\"",
+            "            done_when: [\"前cutから進んだ状態が静止画で読める\"]",
             "          source_event_contract:",
             f"            primary_event_beat_id: \"{beat_id}\"",
             f"            source_event_beat_ids: [\"{beat_id}\"]",
@@ -606,6 +708,41 @@ def _write_valid_immersive_p400_pair(
             "            allowed_reveal_info_ids: []",
             "            forbidden_reveal_info_ids: [\"勝利の証拠\"]",
             "            must_not_change: [\"scene_eventにない出来事を追加しない\"]",
+            "          cut_character_emotion_transition:",
+            "            policy_version: \"cut_character_emotion_transition_v1\"",
+            "            focal_character_id: \"momotaro\"",
+            "            supporting_character_ids: []",
+            "            transition_mode: \"triggered_shift\"",
+            "            emotion_from:",
+            "              label: \"ためらい\"",
+            "              visible_behavior: {face: \"緊張した表情\", gaze: \"村道を見る\", posture: \"足を止める\", hands: \"袋を握る\", feet: \"片足が止まる\", distance: \"村人と距離がある\", visible_proof: \"村道と袋\"}",
+            "            emotion_to:",
+            "              label: \"決意\"",
+            "              visible_behavior: {face: \"静かな決意\", gaze: \"霧の先を見る\", posture: \"前へ向く\", hands: \"袋を握り直す\", feet: \"一歩を出す\", distance: \"村から離れる\", visible_proof: \"一歩と足跡\"}",
+            "            transition_trigger:",
+            f"              source_event_beat_id: \"{beat_id}\"",
+            f"              what_causes_shift: \"{what_happens}\"",
+            f"              visible_cause: \"{visible_action}\"",
+            "            transition_visible_in_cut: {face_change: \"表情が締まる\", gaze_change: \"霧の先を見る\", posture_change: \"前傾する\", hand_change: \"袋を握る\", foot_change: \"足先が前へ向く\", distance_change: \"村から離れる\", silence_or_pause: \"一拍の沈黙\"}",
+            "            emotional_delta_visible_in_first_frame: \"視線と手足に変化の始まりが見える\"",
+            "            emotional_delta_completed_by_motion: \"動画内で一歩だけ進む\"",
+            "            must_not_jump_to_final_emotion: true",
+            "          cut_film_grammar_contract:",
+            "            policy_version: \"cut_film_grammar_v1\"",
+            "            required_modules:",
+            "              character_objective_and_tactic: {character_id: \"momotaro\", objective: \"村道を越える\", tactic: \"袋を握る\", obstacle: \"村人の視線\", tactic_shift_after_event: \"前へ進む\", visible_action: \"袋を握る\"}",
+            f"              attention_state: {{character_id: \"momotaro\", gaze_target: \"霧の先\", attention_type: \"recognizing\", viewer_attention_target: \"{visible_action}\", eyeline_match_to_next_cut: \"{('scene' + str(scene_idx) + '_cut' + str(cut_idx + 1)) if cut_idx < 4 else ''}\"}}",
+            f"              eyeline_continuity: {{cut_selector: \"{selector}\", character_id: \"momotaro\", gaze_target: \"霧の先\", next_cut_should_show_target: true, previous_cut_gaze_source: \"{('scene' + str(scene_idx) + '_cut' + str(cut_idx - 1)) if cut_idx > 1 else ''}\", eyeline_match_valid: true}}",
+            "              screen_direction_continuity: {movement_direction: \"left_to_right\", previous_direction: \"left_to_right\", direction_change_motivated: true, motivation: \"村道を越えるため\"}",
+            f"              edit_motivation: {{cut_selector: \"{selector}\", cut_reason: \"new_information\", why_previous_cut_is_complete: \"前cutの証拠が読めた\", why_current_cut_is_needed: \"{visible_action}\", viewer_attention_shift: \"霧の先\"}}",
+            f"              audience_emotion_target: {{cut_selector: \"{selector}\", separate_from_character_emotion: true, intended_audience_feeling: \"決意を感じる\", achieved_by: [\"character_reaction\", \"shot_scale\", \"silence\"]}}",
+            "            conditional_modules:",
+            f"              character_reaction_contract: {{required: true, required_when: \"turn / reveal / payoff の event beat を担当するcut\", reacts_to_event_beat_id: \"{beat_id}\", reacting_character_id: \"momotaro\", reaction_type: \"recognition\", visible_reaction: {{eyes: \"霧の先を見る\", mouth: \"閉じる\", head: \"前へ向く\", shoulders: \"硬い\", hands: \"袋を握る\", body_distance: \"村から離れる\"}}, reaction_duration_intent: \"held\", should_be_silent: true, narration_should_not_explain: true}}",
+            "              relationship_state_delta: {required: true, relationship_id: \"momotaro_village\", characters: [\"momotaro\", \"village\"], from_state: \"保護\", to_state: \"責務\", trigger_event_beat_id: \"" + beat_id + "\", visible_evidence: {distance: \"村から離れる\", gaze: \"霧の先\", body_orientation: \"前へ向く\", touch_or_non_touch: \"袋を握る\", hierarchy_in_frame: \"桃太郎が前景\"}, must_not_resolve_yet: []}",
+            "              prop_state_progression: {required: false, object_id: \"\", source_event_beat_ids: [\"" + beat_id + "\"], state_by_cut: []}",
+            "              costume_and_body_continuity: {required: true, character_id: \"momotaro\", costume_state: \"旅衣装\", hair_state: \"同じ髪\", dirt_or_damage_state: \"急変なし\", posture_state: \"前へ向く\", allowed_changes_in_this_cut: [\"視線\", \"手\", \"足\"], forbidden_changes_in_this_cut: [\"別人物化\"]}",
+            f"              silence_and_pause_contract: {{required: true, cut_selector: \"{selector}\", silence_required: true, pause_reason: \"感情転換を説明しない\", emotion_to_read_in_silence: \"視線と手足\", narration_must_not_explain: true}}",
+            "            required_when_rules: {reaction: \"turn / reveal / payoff の event beat では required\", insert: \"重要小道具があれば required\", eyeline: \"認識やhandoffでは required\", silence: \"感情転換では required\"}",
             "          cut_function: \"setup\"",
             "          intent_budget:",
             f"            primary_intent: \"桃太郎 cut {cut_idx}\"",
@@ -735,7 +872,9 @@ def _write_valid_immersive_p400_pair(
                 "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                 *_valid_scene_intent_lines("桃太郎", scene_idx, terminal=terminal),
                 *_valid_scene_event_lines("桃太郎", scene_idx),
+                *_valid_scene_emotion_film_lines("桃太郎", scene_idx),
                 *[line.replace("    ", "      ", 1) for line in coverage_plan_lines(scene_idx)],
+                *[line.replace("    ", "      ", 1) for line in state_progression_plan_lines(scene_idx)],
                 "      agent_review: {status: \"passed\"}",
                 "      cuts:",
             ]
@@ -748,7 +887,9 @@ def _write_valid_immersive_p400_pair(
                 "    estimated_duration_seconds: 30",
                 "    scene_composite_review: {status: \"passed\", scene_obligation_covered_by_cut_group: true, no_duplicate_story_fact_without_new_evidence: true, scene_meaning_visualized_across_cuts: true, blocking_reason_keys: []}",
                 *_valid_scene_event_lines("桃太郎", scene_idx, indent="    "),
+                *_valid_scene_emotion_film_lines("桃太郎", scene_idx, indent="    "),
                 *coverage_plan_lines(scene_idx),
+                *state_progression_plan_lines(scene_idx),
                 "    cuts:",
             ]
         )
@@ -1545,6 +1686,33 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertNotIn("script.scene_event_exists", stage["reason_keys"])
 
+    def test_script_evaluator_reports_cut_context_packet_warnings_as_nonblocking(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_cut_packet_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014gp"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]
+            contract["cut_context_packet"] = {
+                "schema_version": "cut_context_packet_v1",
+                "derived_from": ["scene_intent"],
+                "editable": False,
+                "cut_selector": "scene1_cut1",
+                "source_event": {},
+                "scene_obligations": [{"required_roles": []}],
+                "previous_next_delta": {},
+                "boundary": {},
+            }
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertIn("script.cut_context_packet_required_roles_preserved", stage["warning_keys"])
+            self.assertNotIn("script.cut_context_packet_required_roles_preserved", stage["reason_keys"])
+            warning_check = next(check for check in stage["checks"] if check["id"] == "script.cut_context_packet_required_roles_preserved")
+            self.assertTrue(warning_check["passed"])
+            self.assertEqual(warning_check["kind"], "warning")
+
     def test_script_evaluator_requires_turn_and_payoff_cut_assignment(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0014h"
@@ -1701,6 +1869,312 @@ class TestStageEvaluatorScripts(unittest.TestCase):
         failed_ids = [check["id"] for check in checks if not check["passed"]]
 
         self.assertIn("manifest.api_prompt_v1_contract", failed_ids)
+
+    def test_manifest_evaluator_gates_api_prompt_film_role_alignment(self) -> None:
+        prompt = "\n".join(
+            [
+                "[shot / 画角]",
+                "shot_role: establishing",
+                "shot_scale: medium_wide",
+                "should_show_face: yes",
+                "should_show_hands: no",
+                "should_show_object_detail: no",
+                "",
+                "[この1枚に写る瞬間]",
+                "cut_visible_moment: 鍵のかかった扉を中景で見る",
+                "",
+                "[前cutからの変化]",
+                "this_cut_delta: 扉が閉じている",
+                "",
+                "[人物の状態と配置]",
+                "hand_position: 手は身体の横",
+                "foot_position: 足は扉の前",
+                "",
+                "[人物の見える演技]",
+                "表情は、扉の圧力を受ける表情。",
+                "視線は、扉へ向く。",
+                "姿勢は、扉の前に立つ。",
+                "人物と圧力源の距離は、扉に近い。",
+                "",
+                "[小道具 / 物体]",
+                "object_contact_state: visible_not_touched",
+                "",
+                "[場所の使い方]",
+                "location_zone: 扉の前",
+            ]
+        )
+        checks: list[dict] = []
+        manifest = {
+            "video_metadata": {"experience": "cinematic_story"},
+            "manifest_phase": "production",
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "scene_shot_mix_plan": {
+                        "policy_version": "scene_shot_mix_v1",
+                        "shots": [
+                            {"selector": "scene1_cut1", "shot_role": "object_proof", "shot_scale": "closeup"},
+                        ],
+                    },
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "selector": "scene1_cut1",
+                            "image_generation": {
+                                "output": "assets/scenes/scene1_cut1.png",
+                                "object_ids": ["locked_door"],
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": prompt,
+                                    "shot_design_contract": {
+                                        "shot_role": "insert",
+                                        "shot_scale": "closeup",
+                                        "should_show_object_detail": False,
+                                    },
+                                    "cut_location_frame_plan": {"location_zone_id": "door"},
+                                    "cut_visual_delta": {"this_cut_new_information": "locked door"},
+                                    "blocking_and_interaction": {"object_interaction": {"contact_state": "visible_not_touched"}},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        STAGE_EVALUATOR._manifest_checks(checks, "", manifest, profile="standard", flow="immersive", path_label="manifest")
+        failed = {check["id"]: check["message"] for check in checks if not check["passed"]}
+
+        self.assertIn("manifest.api_prompt_v1_contract", failed)
+        self.assertIn("api_prompt_body_shot_role_mismatch_with_payload", failed["manifest.api_prompt_v1_contract"])
+        self.assertIn("api_prompt_body_shot_scale_mismatch_with_payload", failed["manifest.api_prompt_v1_contract"])
+        self.assertIn("insert_cut_missing_object_detail", failed["manifest.api_prompt_v1_contract"])
+        self.assertIn("manifest.scene_shot_mix_plan", failed)
+        self.assertIn("api_prompt_shot_role_mismatch_with_scene_shot_mix", failed["manifest.scene_shot_mix_plan"])
+
+    def test_manifest_evaluator_gates_reaction_and_handoff_prompt_roles(self) -> None:
+        base_prompt = "\n".join(
+            [
+                "[shot / 画角]",
+                "shot_role: {role}",
+                "shot_scale: medium",
+                "should_show_face: yes",
+                "should_show_hands: no",
+                "should_show_object_detail: no",
+                "",
+                "[この1枚に写る瞬間]",
+                "cut_visible_moment: 人物が立つ",
+                "",
+                "[前cutからの変化]",
+                "this_cut_delta: 状態が変わる",
+                "",
+                "[人物の状態と配置]",
+                "hand_position: 手は身体の横",
+                "foot_position: 足は止まる",
+                "",
+                "[場所の使い方]",
+                "location_zone: 室内",
+            ]
+        )
+        handoff_prompt = "\n".join(
+            [
+                "[shot / 画角]",
+                "shot_role: handoff",
+                "shot_scale: medium",
+                "should_show_face: yes",
+                "should_show_hands: no",
+                "should_show_object_detail: no",
+                "",
+                "[この1枚に写る瞬間]",
+                "cut_visible_moment: 人物が室内で立つ",
+                "",
+                "[前cutからの変化]",
+                "this_cut_delta: 状態が変わる",
+                "",
+                "[人物の状態と配置]",
+                "hand_position: 手は身体の横",
+                "foot_position: 足は止まる",
+                "",
+                "[人物の見える演技]",
+                "表情は、静かに受け止める表情。",
+                "視線は、室内へ向く。",
+                "姿勢は、室内で立つ。",
+                "人物と圧力源の距離は、近い。",
+                "",
+                "[場所の使い方]",
+                "location_zone: 室内",
+            ]
+        )
+        checks: list[dict] = []
+        manifest = {
+            "video_metadata": {"experience": "cinematic_story"},
+            "manifest_phase": "production",
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "scene_shot_mix_plan": {"policy_version": "scene_shot_mix_v1"},
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "selector": "scene1_cut1",
+                            "image_generation": {
+                                "output": "assets/scenes/scene1_cut1.png",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": base_prompt.format(role="reaction"),
+                                    "shot_design_contract": {"shot_role": "reaction", "shot_scale": "medium"},
+                                    "cut_location_frame_plan": {"location_zone_id": "room"},
+                                    "cut_visual_delta": {"this_cut_new_information": "reaction"},
+                                    "blocking_and_interaction": {"character_blocking": {"hand_position": "hands"}},
+                                },
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "selector": "scene1_cut2",
+                            "image_generation": {
+                                "output": "assets/scenes/scene1_cut2.png",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": handoff_prompt,
+                                    "shot_design_contract": {"shot_role": "handoff", "shot_scale": "medium"},
+                                    "cut_location_frame_plan": {"location_zone_id": "room"},
+                                    "cut_visual_delta": {"this_cut_new_information": "handoff"},
+                                    "blocking_and_interaction": {"character_blocking": {"hand_position": "hands"}},
+                                },
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+
+        STAGE_EVALUATOR._manifest_checks(checks, "", manifest, profile="standard", flow="immersive", path_label="manifest")
+        failed = {check["id"]: check["message"] for check in checks if not check["passed"]}
+
+        self.assertIn("manifest.api_prompt_v1_contract", failed)
+        self.assertIn("reaction_cut_missing_visible_reaction_behavior", failed["manifest.api_prompt_v1_contract"])
+        self.assertIn("handoff_cut_missing_next_scene_visual_path", failed["manifest.api_prompt_v1_contract"])
+
+    def test_manifest_evaluator_gates_scene_state_progression_contract(self) -> None:
+        prompt = "\n".join(
+            [
+                "[shot / 画角]",
+                "shot_role: character_action",
+                "shot_scale: medium",
+                "should_show_face: yes",
+                "should_show_hands: yes",
+                "should_show_object_detail: yes",
+                "",
+                "[この1枚に写る瞬間]",
+                "cut_visible_moment: 馬車へ乗る前の門前待機",
+                "action_completion_state: pre_action",
+                "",
+                "[前cutからの変化]",
+                "this_cut_delta: 馬車へ乗る前の門前待機",
+                "",
+                "[人物の状態と配置]",
+                "hand_position: 手は身体の横",
+                "foot_position: 足は門前で止まる",
+                "",
+                "[人物の見える演技]",
+                "表情は、まだ乗る前の表情。",
+                "視線は、馬車へ向く。",
+                "姿勢は、門前で止まる。",
+                "人物と圧力源の距離は、馬車の外。",
+                "",
+                "[小道具 / 物体]",
+                "object_contact_state: visible_not_touched",
+                "",
+                "[場所の使い方]",
+                "location_zone: 門前",
+            ]
+        )
+        checks: list[dict] = []
+        manifest = {
+            "video_metadata": {"experience": "cinematic_story"},
+            "manifest_phase": "production",
+            "scenes": [
+                {
+                    "scene_id": 40,
+                    "scene_shot_mix_plan": {"policy_version": "scene_shot_mix_v1"},
+                    "scene_state_progression_plan": {
+                        "policy_version": "scene_state_progression_v1",
+                        "progression_mode": "sequential_state_progression",
+                        "cut_progression_map": [
+                            {
+                                "cut_selector": "scene40_cut2",
+                                "first_frame_temporal_role": "progressed_state_after_previous_cut",
+                                "state_after_previous_cut": "前cutで馬車へ片足をかけた",
+                                "state_visible_in_this_cut": "馬車が門前を離れ始める",
+                                "must_not_revert_to": "馬車へ乗る前の門前待機",
+                                "must_not_advance_beyond": "宮殿到着",
+                            }
+                        ],
+                    },
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "selector": "scene40_cut1",
+                            "image_generation": {
+                                "output": "assets/scenes/scene40_cut1.png",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": prompt.replace("scene40_cut2", "scene40_cut1"),
+                                    "shot_design_contract": {"shot_role": "character_action", "shot_scale": "medium"},
+                                    "cut_location_frame_plan": {"location_zone_id": "gate"},
+                                    "cut_visual_delta": {"this_cut_new_information": "門前"},
+                                    "blocking_and_interaction": {"character_blocking": {"hand_position": "hands"}},
+                                },
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "selector": "scene40_cut2",
+                            "cut_contract": {
+                                "first_frame_contract": {
+                                    "visible_start_state": {"character_state": "まだ行為を完了していない"},
+                                    "action_completion_state": "pre_action",
+                                },
+                                "motion_contract": {
+                                    "must_not_advance_to_event_beat_ids": ["scene40_event_turn"],
+                                },
+                                "cut_state_progression": {
+                                    "policy_version": "cut_state_progression_v1",
+                                    "progression_mode": "sequential_state_progression",
+                                    "cut_selector": "scene40_cut2",
+                                    "first_frame_temporal_role": "progressed_state_after_previous_cut",
+                                    "state_after_previous_cut": "前cutで馬車へ片足をかけた",
+                                    "state_visible_in_first_frame": "馬車へ乗る前の門前待機",
+                                    "visible_state_delta_from_previous_cut": "",
+                                    "must_not_revert_to": "馬車へ乗る前の門前待機",
+                                    "must_not_advance_beyond": "宮殿到着",
+                                },
+                            },
+                            "image_generation": {
+                                "output": "assets/scenes/scene40_cut2.png",
+                                "object_ids": ["pumpkin_carriage"],
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v1",
+                                    "prompt": prompt,
+                                    "shot_design_contract": {"shot_role": "character_action", "shot_scale": "medium"},
+                                    "cut_location_frame_plan": {"location_zone_id": "gate"},
+                                    "cut_visual_delta": {"this_cut_new_information": "馬車へ乗る前の門前待機"},
+                                    "blocking_and_interaction": {"character_blocking": {"hand_position": "hands"}},
+                                },
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+
+        STAGE_EVALUATOR._manifest_checks(checks, "", manifest, profile="standard", flow="immersive", path_label="manifest")
+        failed = {check["id"]: check["message"] for check in checks if not check["passed"]}
+
+        self.assertIn("manifest.scene_state_progression_plan", failed)
+        self.assertIn("cut_first_frame_reverts_to_scene_start", failed["manifest.scene_state_progression_plan"])
+        self.assertIn("cut_state_progression_delta_missing", failed["manifest.scene_state_progression_plan"])
 
     def test_manifest_p400_readiness_includes_script_scene_readiness(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_script_ready_") as td:

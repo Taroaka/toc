@@ -676,6 +676,20 @@ def write_app_server_image_debug_log(
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
     log_path = log_dir / f"{stamp}_{time.time_ns()}_{safe_id}_candidate_{index:02d}.json"
     transcript = getattr(result, "transcript", []) if result is not None else []
+    result_reference_sha256s = getattr(result, "reference_sha256s", None) if result is not None else None
+    reference_sha256s = result_reference_sha256s if isinstance(result_reference_sha256s, list) else []
+    provenance = {
+        "policy": getattr(result, "provenance_policy", None) if result is not None else None,
+        "generationJobId": getattr(result, "generation_job_id", None) if result is not None else None,
+        "itemId": getattr(result, "item_id", None) if result is not None else None,
+        "turnId": getattr(result, "turn_id", None) if result is not None else None,
+        "promptSha256": getattr(result, "prompt_sha256", None) if result is not None else None,
+        "referenceSha256s": reference_sha256s,
+        "savedPath": str(getattr(result, "saved_path", "") or "") if result is not None else "",
+        "destination": getattr(result, "destination", None) if result is not None else None,
+        "source": getattr(result, "source", None) if result is not None else None,
+        "authoritative": bool(getattr(result, "provenance_authoritative", False)) if result is not None else False,
+    }
     payload = {
         "loggedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "itemId": item_id,
@@ -689,6 +703,11 @@ def write_app_server_image_debug_log(
         "prompt": prompt,
         "promptLength": len(prompt or ""),
         "promptSha256": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest() if prompt is not None else None,
+        "referenceSha256s": reference_sha256s,
+        "generationJobId": provenance["generationJobId"],
+        "turnId": provenance["turnId"],
+        "provenance": provenance,
+        "provenanceAuthoritative": provenance["authoritative"],
         "apiPromptPolicyVersion": prompt_policy_version,
         "debugPromptSource": debug_prompt_source or {},
         "status": getattr(result, "status", "exception" if error else "missing") if result is not None else "exception",

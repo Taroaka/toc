@@ -294,12 +294,19 @@ type RunProgress = {
   percent: number;
 };
 
+type CreateRunMode = 'normal' | 'scene_storyboard';
+
 type CreateRunJob = {
   jobId: string;
   runId: string;
   path: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'paused';
   title: string;
+  createMode?: CreateRunMode;
+  stopTargetNumber?: number;
+  currentProcess?: string;
+  currentProcessNumber?: number;
+  pid?: number | null;
   message?: string | null;
   error?: string | null;
   errorCode?: string | null;
@@ -1815,6 +1822,7 @@ function App() {
   const [createRunOpen, setCreateRunOpen] = useState(false);
   const [createRunTitle, setCreateRunTitle] = useState('');
   const [createRunSource, setCreateRunSource] = useState('');
+  const [createRunMode, setCreateRunMode] = useState<CreateRunMode>('normal');
   const [createRunBusy, setCreateRunBusy] = useState(false);
   const [createRunStatus, setCreateRunStatus] = useState<string | null>(null);
   const [createRunError, setCreateRunError] = useState<string | null>(null);
@@ -3027,11 +3035,13 @@ function App() {
   const createRun = async () => {
     const title = createRunTitle.trim();
     if (!title) return;
+    const mode = createRunMode;
+    const endpoint = mode === 'scene_storyboard' ? '/api/image-gen/runs/create/storyboard' : '/api/image-gen/runs/create';
     setCreateRunBusy(true);
     setCreateRunError(null);
     setCreateRunStatus('フォルダを作成中');
     try {
-      const created = await jsonFetch<CreateRunJob>('/api/image-gen/runs/create', {
+      const created = await jsonFetch<CreateRunJob>(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, source: createRunSource.trim() || null }),
@@ -3051,19 +3061,20 @@ function App() {
       setCreateRunOpen(false);
       setCreateRunTitle('');
       setCreateRunSource('');
-      setCreateRunStatus('ToCを作成中');
+      setCreateRunMode('normal');
+      setCreateRunStatus(mode === 'scene_storyboard' ? 'ストーリーボード式ToCを作成中' : 'ToCを作成中');
 
       let latest = created;
       for (let attempt = 0; attempt < 30; attempt += 1) {
         await sleep(60000);
         latest = await jsonFetch<CreateRunJob>(`/api/image-gen/runs/create/${encodeURIComponent(created.jobId)}`);
         if (latest.message) setCreateRunStatus(latest.message);
-        if (latest.status === 'completed' || latest.status === 'failed') break;
+        if (latest.status === 'completed' || latest.status === 'failed' || latest.status === 'paused') break;
       }
-      if (latest.status !== 'completed') {
+      if (latest.status !== 'completed' && latest.status !== 'paused') {
         throw new Error(latest.error || '作成が完了しませんでした');
       }
-      setCreateRunStatus('作成完了');
+      setCreateRunStatus(latest.status === 'paused' ? `${latest.currentProcess || 'p650'}で中断` : '作成完了');
       await loadRuns(created.runId);
       await loadRunRequests(created.runId, viewKind);
     } catch (error) {
@@ -3685,6 +3696,18 @@ function App() {
                 autoFocus
                 fullWidth
               />
+              <FormControl fullWidth size="small">
+                <InputLabel>作成モード</InputLabel>
+                <Select
+                  label="作成モード"
+                  value={createRunMode}
+                  disabled={createRunBusy}
+                  onChange={(event) => setCreateRunMode(event.target.value as CreateRunMode)}
+                >
+                  <MenuItem value="normal">通常</MenuItem>
+                  <MenuItem value="scene_storyboard">1scene=1ストーリーボード式</MenuItem>
+                </Select>
+              </FormControl>
               <TextField
                 label="中身"
                 value={createRunSource}

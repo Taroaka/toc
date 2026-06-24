@@ -56,7 +56,7 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 #### p540 asset review / fix loop
 
 - やること: review agent が `asset_plan.md` を監査し、漏れや矛盾があれば担当 `p500` L2 supervisor が修正し、再度 review agent が確認する cycle を回す。
-- 標準 loop: 最大 5 round。各 round は複数 critic と aggregator を使い、aggregator が `passed|changes_requested` と unresolved findings を返す。
+- 標準 loop: 最大 1 round。round は複数 critic と aggregator を使い、aggregator が `passed|changes_requested` と unresolved findings を返す。
 - review 観点:
   - この物語の登場人物・物語固有アイテム・使用場所が漏れていないか
   - 後続 cut で identity drift が起きやすい subject が asset 化されているか

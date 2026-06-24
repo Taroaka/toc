@@ -4290,6 +4290,10 @@ def _infer_action_completion_state(event_time_position: str, first_frame: dict[s
 
 def _first_frame_visible_text(scene: SceneSpec) -> str:
     first_frame = _first_frame_contract(scene.cut_contract)
+    cut_state = _dict_value(scene.cut_contract.get("cut_state_progression")) if isinstance(scene.cut_contract, dict) else {}
+    state_visible = str(cut_state.get("state_visible_in_first_frame") or cut_state.get("state_visible_in_this_cut") or "").strip()
+    if state_visible:
+        return state_visible
     source = _source_event_contract(scene.cut_contract)
     event_context = _event_context_for_cut(scene.cut_contract)
     primary_beat = _dict_value(event_context.get("primary_event_beat"))
@@ -4307,6 +4311,7 @@ def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any
     contract = cut_contract if isinstance(cut_contract, dict) else scene.cut_contract
     source = _source_event_contract(contract)
     first_frame = _first_frame_contract(contract)
+    cut_state = _dict_value(contract.get("cut_state_progression"))
     viewer = _viewer_contract(contract)
     event_context = _event_context_for_cut(contract)
     primary_beat = _dict_value(event_context.get("primary_event_beat"))
@@ -4330,15 +4335,39 @@ def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any
         or _contract_text(first_frame, "event_time_position")
         or "before_trigger"
     )
-    action_completion_state = _infer_action_completion_state(event_time_position, first_frame)
+    progression_mode = str(cut_state.get("progression_mode") or "").strip()
+    first_frame_temporal_role = str(cut_state.get("first_frame_temporal_role") or "").strip()
+    action_completion_state = (
+        str(cut_state.get("action_completion_state") or "").strip()
+        or _infer_action_completion_state(event_time_position, first_frame)
+    )
+    if (
+        progression_mode == "sequential_state_progression"
+        and first_frame_temporal_role == "progressed_state_after_previous_cut"
+        and action_completion_state in {"", "pre_action", "early_action"}
+    ):
+        action_completion_state = "progressed_state"
     not_yet = _dedupe_nonempty(
         _contract_list(first_frame, "not_yet_happened_in_still")
         + _contract_list(source, "event_facts_not_to_invent")
         + _ensure_str_list(event_context.get("forbidden_event_changes"))
         + _contract_list(motion_contract, "must_not_advance_to_event_beat_ids")
     )
+    if progression_mode == "sequential_state_progression":
+        not_yet = _dedupe_nonempty(
+            _contract_list(motion_contract, "must_not_advance_to_event_beat_ids")
+            + [cut_state.get("must_not_advance_beyond")]
+            + _contract_list(source, "forbidden_reveal_info_ids")
+            + _contract_list(first_frame, "must_avoid")
+            + _contract_list(viewer, "must_avoid")
+            + _ensure_str_list(event_context.get("forbidden_event_changes"))
+        )
     if not not_yet:
-        not_yet = ["このcutの後続結果、次sceneの解決、未承認のrevealをまだ見せない。"]
+        not_yet = (
+            ["このcutの境界を越える後続結果、次sceneの解決、未承認のrevealを見せない。"]
+            if progression_mode == "sequential_state_progression"
+            else ["このcutの後続結果、次sceneの解決、未承認のrevealをまだ見せない。"]
+        )
 
     event_fact_visible = _first_frame_visible_text(scene)
     must_show = _dedupe_nonempty(
@@ -4450,8 +4479,20 @@ def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any
             "not_yet_happened_in_still": not_yet,
             "forbidden_future_event_beat_ids": _contract_list(motion_contract, "must_not_advance_to_event_beat_ids"),
             "forbidden_future_outcomes": not_yet,
-            "still_must_not_show_completion": True,
+            "still_must_not_show_completion": progression_mode != "sequential_state_progression",
             "one_visible_moment_rule": True,
+        },
+        "scene_state_progression": {
+            "progression_mode": progression_mode or "suspended_moment",
+            "cut_selector": str(cut_state.get("cut_selector") or scene.selector or scene.scene_id or "").strip(),
+            "progression_position": str(cut_state.get("progression_position") or "").strip(),
+            "first_frame_temporal_role": first_frame_temporal_role or "suspended_before_or_during_cut_event",
+            "state_after_previous_cut": str(cut_state.get("state_after_previous_cut") or "").strip(),
+            "state_visible_in_first_frame": str(cut_state.get("state_visible_in_first_frame") or cut_state.get("state_visible_in_this_cut") or event_fact_visible).strip(),
+            "visible_state_delta_from_previous_cut": str(cut_state.get("visible_state_delta_from_previous_cut") or "").strip(),
+            "must_not_revert_to": str(cut_state.get("must_not_revert_to") or "").strip(),
+            "must_not_advance_beyond": str(cut_state.get("must_not_advance_beyond") or "").strip(),
+            "done_when": _contract_list(cut_state, "done_when"),
         },
         "visual_translation": {
             "abstract_intent_terms": [],
@@ -4515,12 +4556,18 @@ def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any
             "costume_state": str(visible_start.get("costume_state") or _dict_value(continuity.get("start_state")).get("character_state") or "参照画像とcutの時点に合う衣装状態を維持する。").strip(),
             "hair_state": str(visible_start.get("hair_state") or "参照画像とcut時点に合う髪型を維持する。").strip(),
             "physical_state": str(visible_start.get("physical_state") or event_fact_visible).strip(),
-            "pose": str(visible_start.get("pose") or first_frame.get("first_frame_brief") or event_fact_visible).strip(),
+            "pose": str(visible_start.get("pose") or cut_state.get("state_visible_in_first_frame") or first_frame.get("first_frame_brief") or event_fact_visible).strip(),
             "gaze": str(visible_start.get("gaze_or_attention") or visible_start.get("gaze") or "主要な出来事の証拠へ向く。").strip(),
             "expression": str(visible_start.get("expression") or first_frame.get("expression") or "このcutの圧力や選択が読める表情。").strip(),
             "emotional_state": str(visible_start.get("emotional_state") or first_frame.get("emotional_state") or "scene内の現在の感情状態。").strip(),
-            "hand_position": str(visible_start.get("hand_position") or "行為が始まる直前または途中だと読める手の位置。").strip(),
-            "foot_position": str(visible_start.get("foot_position") or "次に動き出せる足元の重心。").strip(),
+            "hand_position": str(
+                visible_start.get("hand_position")
+                or ("前cutから進んだ状態に合う手元。" if progression_mode == "sequential_state_progression" else "行為が始まる直前または途中だと読める手の位置。")
+            ).strip(),
+            "foot_position": str(
+                visible_start.get("foot_position")
+                or ("前cutから進んだ位置関係が読める足元。" if progression_mode == "sequential_state_progression" else "次に動き出せる足元の重心。")
+            ).strip(),
             "continuity_must_preserve": _contract_list(continuity, "must_preserve"),
             "must_not_show_character_states": _contract_list(first_frame, "must_not_show_character_states"),
         },
@@ -4778,7 +4825,8 @@ API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "api_prompt_contains_no_yaml_field_names",
         re.compile(
             r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
-            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
+            r"scene_state_progression_plan|cut_state_progression",
             re.I,
         ),
     ),
@@ -4959,13 +5007,53 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
     delta = _cut_visual_delta_from_plan(scene, plan)
     blocking = _blocking_and_interaction_from_plan(plan)
     temporal = _dict_value(plan.get("temporal_boundary"))
+    progression = _dict_value(plan.get("scene_state_progression"))
     references = _dict_value(plan.get("reference_binding"))
+    subjects = _dict_value(plan.get("subject_binding"))
     material = _dict_value(plan.get("scene_material_pack"))
     motion = _dict_value(plan.get("motion_affordance"))
     character = _dict_value(plan.get("character_state_gate"))
     objects = _dict_value(plan.get("object_visibility_gate"))
     movable = next((item for item in _list_value(motion.get("movable_subjects")) if isinstance(item, dict)), {})
     object_item = next((item for item in _list_value(objects.get("objects")) if isinstance(item, dict)), {})
+    primary_subject = _dict_value(subjects.get("primary_subject"))
+    visible_subjects = _dedupe_nonempty(
+        [
+            primary_subject.get("name") or primary_subject.get("id"),
+            *[
+                _dict_value(item).get("name") or _dict_value(item).get("id")
+                for item in _list_value(subjects.get("secondary_subjects"))
+                if isinstance(item, dict)
+            ],
+            *[
+                _dict_value(item).get("name") or _dict_value(item).get("id")
+                for item in _list_value(subjects.get("background_subjects"))
+                if isinstance(item, dict)
+            ],
+        ]
+    )
+    is_sequential_progression = str(progression.get("progression_mode") or "") == "sequential_state_progression"
+    progressed_visible_state = _api_prompt_text(
+        progression.get("state_visible_in_first_frame"),
+        _api_prompt_text(temporal.get("event_fact_visible_in_still"), "このcutで見える状態"),
+    )
+    previous_progressed_state = _api_prompt_text(
+        progression.get("state_after_previous_cut"),
+        delta["previous_visible_state_summary"],
+    )
+    progressed_delta = _api_prompt_text(
+        progression.get("visible_state_delta_from_previous_cut"),
+        delta["this_cut_new_information"],
+    )
+    progression_boundary = _api_prompt_text(
+        progression.get("must_not_advance_beyond"),
+        "次cut以降の結果、次sceneのreveal",
+    )
+    still_must_not_show = (
+        f"still_must_not_show: {progression_boundary}"
+        if is_sequential_progression
+        else "still_must_not_show: 行為完了後、後続reveal、次sceneの結果。"
+    )
 
     character_refs = [
         f"人物参照: {_api_prompt_text(item.get('target_character_id'))} は顔、体格、髪、衣装の主要形状を維持し、pose/gaze/lightingだけをこのcutに合わせる。"
@@ -5003,17 +5091,19 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
             _api_prompt_section(
                 "この1枚に写る瞬間",
                 [
-                    f"cut_visible_moment: {_api_prompt_text(temporal.get('event_fact_visible_in_still'), '行為が完了する前の静止した開始状態')}",
+                    f"cut_visible_moment: {progressed_visible_state if is_sequential_progression else _api_prompt_text(temporal.get('event_fact_visible_in_still'), '行為が完了する前の静止した開始状態')}",
+                    "visible_subjects: " + " / ".join(_api_prompt_text(item) for item in visible_subjects),
                     f"action_completion_state: {_api_prompt_text(temporal.get('action_completion_state'), 'pre_action')}",
                     "not_yet_happened: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(temporal.get("not_yet_happened_in_still"))),
-                    "still_must_not_show: 行為完了後、後続reveal、次sceneの結果。",
+                    still_must_not_show,
                 ],
             ),
             _api_prompt_section(
                 "前cutからの変化",
                 [
-                    f"previous_cut_state: {delta['previous_visible_state_summary']}",
-                    f"this_cut_delta: {delta['this_cut_new_information']}",
+                    f"previous_cut_state: {previous_progressed_state if is_sequential_progression else delta['previous_visible_state_summary']}",
+                    f"this_cut_delta: {progressed_delta if is_sequential_progression else delta['this_cut_new_information']}",
+                    f"must_not_revert: {_api_prompt_text(progression.get('must_not_revert_to'), '前cut以前の開始状態へ戻らない')}" if is_sequential_progression else "",
                     "must_not_repeat: same_camera_distance / same_character_pose / same_location_zone",
                 ],
             ),
@@ -5028,6 +5118,17 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
                     f"foot_position: {_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('foot_position'), _api_prompt_text(character.get('foot_position'), '足元は次に動ける向き'))}",
                     f"body_axis: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('body_axis'), '身体軸は次の動きに向ける')}",
                     f"distance_to_other_subjects: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('distance_to_primary_object'), '手を伸ばせる距離')}",
+                ],
+            ),
+            _api_prompt_section(
+                "人物の見える演技",
+                [
+                    f"表情は、{_api_prompt_text(character.get('expression'), '声に出さず圧力を受け止める表情')}。",
+                    f"視線は、{_api_prompt_text(character.get('gaze'), '主要な視覚証拠へ向く視線')}。",
+                    f"姿勢は、{_api_prompt_text(character.get('pose'), '行為が始まる直前の姿勢')}。",
+                    f"手元は、{_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('hand_position'), _api_prompt_text(character.get('hand_position'), '手元に緊張が読める'))}。",
+                    f"足元は、{_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('foot_position'), _api_prompt_text(character.get('foot_position'), '足先と重心が次の動きに向く'))}。",
+                    f"人物と圧力源の距離は、{_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('distance_to_primary_object'), '人物と圧力源の距離が読める')}。",
                 ],
             ),
             _api_prompt_section(

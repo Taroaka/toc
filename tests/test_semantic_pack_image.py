@@ -59,15 +59,55 @@ def write_manifest(run_dir: Path) -> None:
                 "          evidence: 灰の台所で何が始まるか",
                 "      cut_assignments:",
                 "        - cut_index: 1",
+                "          cut_selector: scene10_cut01",
                 "          obligation_id: scene_pressure",
                 "          cut_function: pressure",
                 "          source: dramatic_question",
                 "          target_beat: 灰の台所の導入",
+                "    scene_film_coverage_plan:",
+                "      shot_mix:",
+                "        actual_shots:",
+                "          - selector: scene10_cut01",
+                "            shot_role: character_action",
+                "            shot_scale: medium",
+                "        required_coverage:",
+                "          action: [scene10_cut01]",
+                "      action_reaction_pair: []",
+                "    scene_shot_mix_plan:",
+                "      policy_version: scene_shot_mix_v1",
+                "      shots:",
+                "        - selector: scene10_cut01",
+                "          shot_role: character_action",
+                "          shot_scale: medium",
+                "    scene_state_progression_plan:",
+                "      policy_version: scene_state_progression_v1",
+                "      progression_mode: sequential_state_progression",
+                "      mode_reason: 出発や移動のsceneでは各cutのfirst frameが前cutの結果を受ける",
+                "      cut_progression_map:",
+                "        - cut_selector: scene10_cut01",
+                "          progression_position: early_progress",
+                "          first_frame_temporal_role: progressed_state_after_previous_cut",
+                "          state_after_previous_cut: 前cutで扉へ近づいた",
+                "          state_visible_in_this_cut: 扉の前で手が上がっている",
+                "          must_not_revert_to: scene開始前の立ち位置へ戻らない",
+                "          must_not_advance_beyond: このcutの扉前状態を越えない",
                 "    cuts:",
                 "      - cut_id: '01'",
                 "        selector: scene10_cut01",
                 "        cut_contract:",
                 "          schema_version: '3.0'",
+                "          cut_state_progression:",
+                "            policy_version: cut_state_progression_v1",
+                "            progression_mode: sequential_state_progression",
+                "            cut_selector: scene10_cut01",
+                "            progression_position: early_progress",
+                "            first_frame_temporal_role: progressed_state_after_previous_cut",
+                "            state_after_previous_cut: 前cutで扉へ近づいた",
+                "            state_visible_in_first_frame: 扉の前で手が上がっている",
+                "            visible_state_delta_from_previous_cut: 立ち位置と手の高さが変わる",
+                "            must_not_revert_to: scene開始前の立ち位置へ戻らない",
+                "            must_not_advance_beyond: このcutの扉前状態を越えない",
+                "            done_when: [前cutから進んだ状態が一枚で読める]",
                 "          source_event_contract:",
                 "            primary_event_beat_id: scene10_event_pressure",
                 "            source_event_beat_ids: [scene10_event_pressure]",
@@ -184,6 +224,11 @@ def write_manifest(run_dir: Path) -> None:
                 "            negative_prompt: text, logo",
                 "            reference_images: [assets/characters/cinderella.png, assets/locations/kitchen.png]",
                 "            sha256: test-sha",
+                "            shot_design_contract:",
+                "              shot_role: character_action",
+                "              shot_scale: medium",
+                "            cut_visual_delta:",
+                "              this_cut_new_information: 灰の台所の姿勢が新しく見える",
                 "          references:",
                 "            - assets/characters/cinderella.png",
                 "            - assets/locations/kitchen.png",
@@ -260,9 +305,18 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["legacy_prompt"], "灰の台所でシンデレラが立つ。画面内テキストなし。")
             self.assertEqual(entry["api_prompt_policy_version"], "image_api_prompt_v1")
             self.assertEqual(entry["api_prompt_payload"]["negative_prompt"], "text, logo")
+            self.assertEqual(entry["shot_design_contract"]["shot_role"], "character_action")
+            self.assertEqual(entry["cut_visual_delta"]["this_cut_new_information"], "灰の台所の姿勢が新しく見える")
+            self.assertEqual(entry["cut_assignment"]["cut_function"], "pressure")
+            self.assertEqual(entry["scene_shot_mix_plan"]["shots"][0]["shot_scale"], "medium")
+            self.assertEqual(entry["scene_film_coverage_plan"]["shot_mix"]["actual_shots"][0]["selector"], "scene10_cut01")
+            self.assertEqual(entry["scene_state_progression_plan"]["progression_mode"], "sequential_state_progression")
+            self.assertEqual(entry["cut_state_progression"]["state_visible_in_first_frame"], "扉の前で手が上がっている")
             self.assertIn("prompt_blocks", entry)
             self.assertIn("shot / 画角", entry["prompt_blocks"])
             self.assertIn("image_prompt_gate_focus", entry)
+            self.assertIn("設計上の絵としての役割", "\n".join(entry["image_prompt_gate_focus"]))
+            self.assertIn("scene state progression", "\n".join(entry["image_prompt_gate_focus"]))
             self.assertIn("first_frame_visual_plan", entry)
             self.assertEqual(entry["first_frame_visual_plan"]["schema_version"], "first_frame_visual_plan_v1")
             self.assertFalse(entry["first_frame_visual_plan"]["editable"])
@@ -292,6 +346,11 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(entry["semantic_contract"]["static_first_frame_rule"], "動作ではなく静止した証拠として見せる")
             self.assertEqual(entry["semantic_contract"]["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
             self.assertEqual(entry["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertEqual(entry["cut_context_packet"]["schema_version"], "cut_context_packet_v1")
+            self.assertFalse(entry["cut_context_packet"]["editable"])
+            self.assertEqual(entry["cut_context_packet"]["cut_selector"], "scene10_cut01")
+            self.assertEqual(entry["cut_context_packet"]["source_event"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertIn("cut_context_packet_diagnostics", entry)
             self.assertNotIn("scene_event", entry)
             self.assertFalse(entry["semantic_contract_missing"])
             self.assertEqual(entry["contract_required_fields_missing"], [])
@@ -320,14 +379,24 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(composite["role_coverage"]["required_roles"], ["protagonist", "opponent"])
             self.assertNotIn("scene_event", composite["scene_contract"])
             self.assertEqual(composite["scene_event"]["schema_version"], "scene_event_v1")
+            self.assertEqual(composite["scene_state_progression_plan"]["progression_mode"], "sequential_state_progression")
             self.assertEqual(composite["cut_entries"][0]["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
             self.assertEqual(composite["cut_entries"][0]["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
+            self.assertEqual(composite["cut_entries"][0]["cut_state_progression"]["progression_position"], "early_progress")
+            self.assertEqual(composite["cut_entries"][0]["cut_context_packet"]["schema_version"], "cut_context_packet_v1")
+            self.assertIn("cut_context_packet_diagnostics", composite["cut_entries"][0])
             self.assertIn("shot_role: character_action", composite["cut_entries"][0]["prompt"])
             self.assertEqual(composite["cut_entries"][0]["api_prompt_policy_version"], "image_api_prompt_v1")
             self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("event_beat_reference_integrity", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("audience_knowledge_delta_missing", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("role_coverage_missing", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("cut_visual_role_not_rendered_in_api_prompt", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("scene_film_coverage_not_visible_across_api_prompts", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("insert_or_reaction_needed_but_prompt_stays_medium_action", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("scene_state_progression_mode_wrong", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("cut_first_frame_reverts_to_scene_start", composite["scene_composite_gate"]["failure_reason_keys"])
+            self.assertIn("scene_progression_not_visible_across_api_prompts", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_cut_coverage_plan", composite["scene_composite_gate"]["must_judge"][0])
 
     def test_scene_image_semantic_stage_is_removed(self) -> None:

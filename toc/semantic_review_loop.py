@@ -7,9 +7,10 @@ from toc.harness import now_iso
 from toc.semantic_review import semantic_review_relpaths
 
 
-DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 5
+DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 1
 DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS = 1800
 DEFAULT_SEMANTIC_REPAIR_TIMEOUT_SECONDS = 1800
+DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY = 6
 
 
 SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
@@ -88,6 +89,16 @@ def semantic_review_timeout_seconds() -> int:
         return DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS
 
 
+def scene_detail_review_concurrency() -> int:
+    raw = os.environ.get("TOC_SCENE_DETAIL_REVIEW_CONCURRENCY", "").strip()
+    if not raw:
+        return DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY
+
+
 def semantic_repair_relpaths(stage: str, round_number: int) -> dict[str, Path]:
     base = Path("logs/review/semantic")
     return {
@@ -102,19 +113,45 @@ def _semantic_review_failed_selectors(review_report: str) -> set[str]:
     for raw in review_report.splitlines():
         stripped = raw.strip()
         if stripped.startswith("failed_selectors:") or stripped.startswith("blocked_entries:"):
-            in_failed_list = True
+            inline = stripped.split(":", 1)[1].strip()
+            for value in _semantic_review_selector_values(inline):
+                _add_semantic_review_selector_aliases(selectors, value)
+            in_failed_list = inline in {"", "[]", "[ ]"}
             continue
         if in_failed_list and stripped and not stripped.startswith("-"):
             in_failed_list = False
         if in_failed_list and stripped.startswith("-"):
-            value = stripped[1:].strip().strip("`\"'")
+            value = _semantic_review_selector_scalar(stripped[1:])
             if value:
-                selectors.add(value)
-                if value.startswith("scene:"):
-                    selectors.add("scene" + value.split(":", 1)[1])
-                elif value.startswith("scene") and value[5:].isdigit():
-                    selectors.add("scene:" + value[5:])
+                _add_semantic_review_selector_aliases(selectors, value)
     return selectors
+
+
+def _semantic_review_selector_values(raw: str) -> list[str]:
+    value = raw.strip()
+    if not value or value in {"[]", "[ ]"}:
+        return []
+    if value.startswith("[") and value.endswith("]"):
+        return [
+            cleaned
+            for item in value[1:-1].split(",")
+            if (cleaned := _semantic_review_selector_scalar(item))
+        ]
+    cleaned = _semantic_review_selector_scalar(value)
+    return [cleaned] if cleaned else []
+
+
+def _semantic_review_selector_scalar(raw: str) -> str:
+    value = raw.strip().strip(",").strip().strip("`\"'")
+    return "" if value in {"...", "[]"} else value
+
+
+def _add_semantic_review_selector_aliases(selectors: set[str], value: str) -> None:
+    selectors.add(value)
+    if value.startswith("scene:"):
+        selectors.add("scene" + value.split(":", 1)[1])
+    elif value.startswith("scene") and value[5:].isdigit():
+        selectors.add("scene:" + value[5:])
 
 
 def _semantic_collection_excerpt(collection_text: str, review_report: str, *, max_chars: int = 14000) -> str:
@@ -200,6 +237,8 @@ def write_semantic_repair_prompt(
     scope_path = run_dir / review_paths["scope"]
     review_report = review_report_path.read_text(encoding="utf-8", errors="replace") if review_report_path.exists() else "(missing semantic report)"
     collection_text = collection_path.read_text(encoding="utf-8", errors="replace") if collection_path.exists() else "(missing collection)"
+    failed_selectors = sorted(_semantic_review_failed_selectors(review_report))
+    failed_selector_text = "\n".join(f"- `{selector}`" for selector in failed_selectors) or "- `(not parsed; use failed report findings)`"
     collection_excerpt = _semantic_collection_excerpt(collection_text, review_report)
     target = SEMANTIC_REVIEW_PRODUCER_TARGETS.get(stage, {})
     owner = str(target.get("owner") or f"{stage} producer")
@@ -207,6 +246,16 @@ def write_semantic_repair_prompt(
     focus = str(target.get("focus") or "stage semantic contract")
     artifacts = [str(item) for item in target.get("artifacts", [])] if isinstance(target.get("artifacts"), list) else []
     error_text = "\n".join(f"- {error}" for error in errors) or "- semantic reviewer did not provide a specific error"
+    stage_specific_repair = ""
+    if stage == "image_prompt":
+        stage_specific_repair = """
+## Image Prompt Repair Boundary
+
+- Repair `api_prompt_payload.prompt` and, when needed, the paired `shot_design_contract`, `cut_location_frame_plan`, and `cut_visual_delta` for the failed selector.
+- Keep `scene_event` as the event canon. Do not change what happened in the story to make an image prompt pass.
+- Align the API prompt with the cut's designed visual role: `scene_cut_coverage_plan.cut_assignments`, `scene_film_coverage_plan`, and `scene_shot_mix_plan` are the comparison targets.
+- If the failure is film-role alignment, fix the visual implementation fields and API prompt together so `shot_role`, `shot_scale`, location zone, visible subject, object detail, reaction behavior, and handoff path agree.
+"""
 
     prompt = f"""# Semantic QA Producer Repair: {stage}
 
@@ -231,6 +280,10 @@ This is a real semantic repair, not a bypass. Do not advance the process slot to
 
 {error_text}
 
+## Target Failed Selectors
+
+{failed_selector_text}
+
 ## Failed Semantic Review Report
 
 ```text
@@ -242,6 +295,8 @@ This is a real semantic repair, not a bypass. Do not advance the process slot to
 - collection: `{review_paths["collection"].as_posix()}`
 - scope: `{review_paths["scope"].as_posix()}`
 - report: `{review_paths["report"].as_posix()}`
+
+{stage_specific_repair}
 
 ## Collection Excerpt
 

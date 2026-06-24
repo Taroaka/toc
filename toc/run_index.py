@@ -483,7 +483,7 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p640",
             "Judgment Eval/Improve Loop",
-            "up to 5 evaluator-improvement rounds for semantic scene/image judgment; each round uses 5 independent critics and 1 aggregator",
+            "one evaluator-improvement round for semantic scene/image judgment; the round uses 5 independent critics and 1 aggregator",
             default_requirement="optional",
             state_keys=("review.image_prompt.judgment.status",),
         ),

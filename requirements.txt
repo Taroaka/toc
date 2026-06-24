@@ -70,12 +70,18 @@ multidict==6.7.1
     #   yarl
 packaging==26.2
     # via pytest
+pillow==12.2.0
+    # via -r requirements.in
 pluggy==1.6.0
     # via pytest
 propcache==0.4.1
     # via
     #   aiohttp
     #   yarl
+psycopg==3.3.4
+    # via -r requirements.in
+psycopg-binary==3.3.4
+    # via psycopg
 pyasn1==0.6.2
     # via
     #   pyasn1-modules
@@ -120,6 +126,7 @@ typing-extensions==4.15.0
     #   anyio
     #   fastapi
     #   google-genai
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   typing-inspection

@@ -10,6 +10,7 @@ from toc.semantic_review_loop import (
     _semantic_collection_excerpt,
     semantic_repair_relpaths,
     semantic_repair_timeout_seconds,
+    scene_detail_review_concurrency,
     semantic_review_max_attempts,
     semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
@@ -141,9 +142,9 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
 
-    def test_semantic_repair_defaults_to_five_review_attempts(self) -> None:
+    def test_semantic_repair_defaults_to_one_review_attempt(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
-            self.assertEqual(semantic_review_max_attempts(), 5)
+            self.assertEqual(semantic_review_max_attempts(), 1)
 
     def test_semantic_review_timeout_default_allows_long_contextless_reviews(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS": ""}):
@@ -152,6 +153,18 @@ class TestSemanticReview(unittest.TestCase):
     def test_semantic_repair_timeout_default_allows_long_producer_repairs(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REPAIR_TIMEOUT_SECONDS": ""}):
             self.assertEqual(semantic_repair_timeout_seconds(), 1800)
+
+    def test_scene_detail_review_concurrency_defaults_to_six(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": ""}):
+            self.assertEqual(scene_detail_review_concurrency(), 6)
+
+    def test_scene_detail_review_concurrency_uses_env_with_floor(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "3"}):
+            self.assertEqual(scene_detail_review_concurrency(), 3)
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "0"}):
+            self.assertEqual(scene_detail_review_concurrency(), 1)
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "bad"}):
+            self.assertEqual(scene_detail_review_concurrency(), 6)
 
     def test_semantic_repair_prompt_forbids_editing_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
@@ -206,6 +219,65 @@ blocked_entries:
         self.assertIn("failed scene forty text", excerpt)
         self.assertIn("failed scene fifty text", excerpt)
         self.assertNotIn("passed scene text", excerpt)
+
+    def test_semantic_repair_prompt_targets_inline_failed_selectors(self) -> None:
+        collection = """# Semantic Review Collection: scene_set
+
+## scene:10
+
+failed scene ten text
+
+## scene:20
+
+failed scene twenty text
+
+## scene:40
+
+passed scene forty text
+"""
+        report = """status: failed
+reviewed_entries: [scene:10, scene:20, scene:40]
+blocked_entries: [scene:10]
+failed_selectors: [scene20]
+reason_keys: [semantic_contract_missing]
+"""
+
+        excerpt = _semantic_collection_excerpt(collection, report)
+
+        self.assertIn("failed scene ten text", excerpt)
+        self.assertIn("failed scene twenty text", excerpt)
+        self.assertNotIn("passed scene forty text", excerpt)
+
+    def test_write_semantic_repair_prompt_lists_inline_failed_selectors(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            paths = semantic_review_relpaths("scene_set")
+            (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / paths["collection"]).write_text(
+                "# Semantic Review Collection: scene_set\n\n## scene:10\n\nfailed ten\n\n## scene:40\n\npassed forty\n",
+                encoding="utf-8",
+            )
+            (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 2}, ensure_ascii=False) + "\n", encoding="utf-8")
+            (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
+            (run_dir / paths["report"]).write_text(
+                "status: failed\nblocked_entries: [scene:10]\nfailed_selectors: [scene10]\n",
+                encoding="utf-8",
+            )
+
+            repair_paths = write_semantic_repair_prompt(
+                run_dir,
+                "scene_set",
+                round_number=1,
+                max_attempts=5,
+                errors=("semantic review status must be passed, got failed",),
+            )
+            prompt = repair_paths["prompt"].read_text(encoding="utf-8")
+
+        self.assertIn("## Target Failed Selectors", prompt)
+        self.assertIn("- `scene:10`", prompt)
+        self.assertIn("- `scene10`", prompt)
+        self.assertIn("failed ten", prompt)
+        self.assertNotIn("passed forty", prompt)
 
 
 if __name__ == "__main__":

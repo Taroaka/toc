@@ -5,6 +5,7 @@ import unittest
 import re
 import json
 import importlib.util
+import os
 from pathlib import Path
 
 
@@ -35,6 +36,51 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
+    def test_same_topic_runs_do_not_reuse_cinderella_scaffold_or_identical_prompts(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_run_repeat_a_", dir=output_root) as tmp_a, tempfile.TemporaryDirectory(prefix="frontend_run_repeat_b_", dir=output_root) as tmp_b:
+            run_a = Path(tmp_a)
+            run_b = Path(tmp_b)
+
+            module.materialize_run("シンデレラ", "シンデレラ", run_a, "p650")
+            module.materialize_run("シンデレラ", "シンデレラ", run_b, "p650")
+
+            request_a = (run_a / "image_generation_requests.md").read_text(encoding="utf-8")
+            request_b = (run_b / "image_generation_requests.md").read_text(encoding="utf-8")
+            manifest_a = (run_a / "video_manifest.md").read_text(encoding="utf-8")
+            manifest_b = (run_b / "video_manifest.md").read_text(encoding="utf-8")
+            combined = "\n".join(
+                [
+                    request_a,
+                    request_b,
+                    manifest_a,
+                    manifest_b,
+                    (run_a / "research.md").read_text(encoding="utf-8"),
+                    (run_a / "story.md").read_text(encoding="utf-8"),
+                    (run_a / "asset_generation_requests.md").read_text(encoding="utf-8"),
+                    (run_b / "research.md").read_text(encoding="utf-8"),
+                    (run_b / "story.md").read_text(encoding="utf-8"),
+                    (run_b / "asset_generation_requests.md").read_text(encoding="utf-8"),
+                ]
+            )
+
+        self.assertNotIn("cinderella_fullbody", combined)
+        self.assertNotIn("cinderella_transformed_fullbody", combined)
+        self.assertNotIn("cinderella_post_midnight_fullbody", combined)
+        self.assertNotIn("glass_slipper", combined)
+        self.assertNotIn("pumpkin_carriage", combined)
+        self.assertNotIn("prince_dance_partner", combined)
+        self.assertNotIn("ガラスの靴", combined)
+        self.assertNotIn("靴合わせ", combined)
+        self.assertNotIn("舞踏会", combined)
+        self.assertNotIn("王子", combined)
+        self.assertNotEqual(request_a, request_b)
+        self.assertNotEqual(manifest_a, manifest_b)
+        self.assertIn("run_variant:", manifest_a)
+        self.assertIn("run_variant:", manifest_b)
+
     def test_cut_design_failure_writes_context_log_and_state(self) -> None:
         module = load_frontend_run_module()
         original_coverage_plan = module._scene_cut_coverage_plan
@@ -98,6 +144,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
+                env={**os.environ, "TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"},
                 check=True,
             )
 
@@ -161,6 +208,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(scene_event_output["scenes"][0]["scene_event"]["schema_version"], "scene_event_v1")
             self.assertIn("source_event_contract", scene_event_output["scenes"][0]["cut_contracts"][0])
             self.assertIn("event_context_for_cut", scene_event_output["scenes"][0]["cut_contracts"][0])
+            self.assertIn("cut_context_packet", scene_event_output["scenes"][0]["cut_contracts"][0])
+            self.assertEqual(scene_event_output["scenes"][0]["cut_contracts"][0]["cut_context_packet"]["schema_version"], "cut_context_packet_v1")
+            self.assertFalse(scene_event_output["scenes"][0]["cut_contracts"][0]["cut_context_packet"]["editable"])
 
             asset_request_text = (run_dir / "asset_generation_requests.md").read_text(encoding="utf-8")
             self.assertGreaterEqual(len(re.findall(r"^##\s+", asset_request_text, flags=re.MULTILINE)), 10)
@@ -241,7 +291,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("visual_evidence:", manifest_text)
             self.assertIn("source_event_contract:", manifest_text)
             self.assertIn("event_context_for_cut:", manifest_text)
+            self.assertIn("cut_context_packet:", manifest_text)
+            self.assertIn("schema_version: cut_context_packet_v1", manifest_text)
             self.assertIn("editable: false", manifest_text)
+            self.assertIn("scene_state_progression_plan:", manifest_text)
+            self.assertIn("cut_state_progression:", manifest_text)
             self.assertNotIn("assigned_story_event_ids:", manifest_text)
             self.assertIn("static_first_frame_rule:", manifest_text)
             self.assertIn("must_be_static_evidence_not_motion: true", manifest_text)
@@ -281,10 +335,18 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("pumpkin_carriage", departure_scene)
             self.assertIn("馬車", departure_scene)
             self.assertNotIn("ガラスの靴はこのsceneでは見せない", departure_scene)
+            scene40_manifest = manifest_text.split("scene_id: 40", 1)[1].split("scene_id: 50", 1)[0]
+            self.assertIn("progression_mode: sequential_state_progression", scene40_manifest)
+            self.assertIn("first_frame_temporal_role: progressed_state_after_previous_cut", scene40_manifest)
+            self.assertNotIn("not_yet_happened_in_still:\n                  - scene04_event_turn", scene40_manifest)
             departure_pressure = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene40_cut2", 1)[0]
             departure_proof = scene_request_text.split("## scene40_cut3", 1)[1].split("## scene40_cut4", 1)[0]
+            departure_late = scene_request_text.split("## scene40_cut4", 1)[1].split("## scene40_cut5", 1)[0]
             self.assertNotIn("glass_slipper", departure_pressure)
             self.assertIn("pumpkin_carriage", departure_proof)
+            self.assertIn("馬車", departure_late)
+            self.assertIn("progressed_state", departure_late)
+            self.assertNotIn("still_must_not_show: 行為完了後、後続reveal、次場面の結果。", departure_late)
 
             palace_stair_scene = scene_request_text.split("## scene50_cut3", 1)[1].split("## scene50_cut4", 1)[0]
             self.assertIn("宮殿の階段", palace_stair_scene)
@@ -386,9 +448,20 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("story_event_obligations:", request_text)
             self.assertIn("audience_knowledge_delta:", request_text)
             self.assertIn("causal_proof:", request_text)
-            self.assertIn("観客理解の増分:", request_text)
-            self.assertIn("因果の証明:", request_text)
-            self.assertIn("静止画ルール:", request_text)
+            self.assertIn("scene_character_state_timeline:", request_text)
+            self.assertIn("scene_film_coverage_plan:", request_text)
+            self.assertIn("scene_state_progression_plan:", request_text)
+            self.assertIn("cut_character_emotion_transition:", request_text)
+            self.assertIn("cut_film_grammar_contract:", request_text)
+            self.assertIn("cut_state_progression:", request_text)
+            self.assertIn("[人物の見える演技]", request_text)
+            self.assertIn("表情は、", request_text)
+            self.assertIn("視線は、", request_text)
+            self.assertIn("姿勢は、", request_text)
+            self.assertIn("人物と圧力源の距離は、", request_text)
+            self.assertNotIn("観客理解の増分:", request_text)
+            self.assertNotIn("因果の証明:", request_text)
+            self.assertNotIn("静止画ルール:", request_text)
             self.assertIn("桃太郎", request_text)
             self.assertNotIn("cinderella_fullbody", request_text)
             self.assertNotIn("glass_slipper", request_text)

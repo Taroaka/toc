@@ -332,7 +332,7 @@ L1 はこの result と fixed slot state を検証し、次 bucket の L2 superv
 
 ### 1.1 Authoring-after evaluator-improvement loop
 
-Authoring の直後に置かれる review slot は、一回限りの採点ではなく **最大 5 round の evaluator-improvement loop** として扱う。
+Authoring の直後に置かれる review slot は **最大 1 round の evaluator-improvement loop** として扱う。
 
 対象 slot:
 
@@ -870,7 +870,7 @@ p500 slot contract:
 - `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
 - `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
 - `p530` semantic QA: asset id / asset_type / story_purpose / visual_spec / prompt は同じ意味を指す。人物 asset が場所画像になったり、location asset が人物ポートレートになったり、scene に不要な小道具を常時参照したりする設計は fail とする。
-- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、担当 `p500` L2 supervisor が修正し、再度 review agent が確認する cycle を最大 5 round 回す。
+- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
@@ -1132,7 +1132,7 @@ Pack / runner commands:
 - `python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>`
 - `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
 
-`scripts/run-semantic-review.py` は既定で repair loop を有効にする。単発レビューだけを実行したい検証用途では `--no-repair-loop` を使う。最大試行回数は `--max-attempts` または `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` で指定できる。
+`scripts/run-semantic-review.py` は既定で repair loop を有効にするが、既定の最大試行回数は 1 回なので通常は修正再試行しない。検証用途では `--no-repair-loop` も使える。最大試行回数は `--max-attempts` または `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` で指定できる。
 `--timeout-seconds` と `--repair-timeout-seconds` は総作業時間の上限ではなく、semantic report、repair report、source artifact、app-server activity marker が更新されない場合の no-progress watchdog として扱う。改善中の artifact 更新や app-server 通知が観測されている間は semantic loop を継続し、無進捗の場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` を state に残して停止する。
 
 実装者の責務:

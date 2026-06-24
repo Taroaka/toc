@@ -171,7 +171,7 @@ output/<topic>_<timestamp>/
   - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
 - reusable asset が多い run では、cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する
   - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を `asset_inventory.md` に網羅する
-  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認し、担当 `p500` L2 supervisor が修正して再 review する cycle を最大 5 round 回す
+  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す
   - character reference は、全身が見える front / side / back の 3 面図を基本にする
   - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
 - image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
@@ -220,7 +220,7 @@ output/<topic>_<timestamp>/
   - L2 が返った後は `--event returned --result logs/orchestration/p600.supervisor_result.json` を同じ bucket に対して追記する
   - `returned|blocked|failed` の terminal event では result JSON path を必ず渡す
   - `scripts/verify-pipeline.py` は target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、`pXXX.supervisor_result.json` を hard gate として検証する
-- authoring 直後の review slot は最大 5 round の evaluator-improvement loop として実行する
+- authoring 直後の review slot は最大 1 round の evaluator-improvement loop として実行する
   - 各 round は 5 critic agents + 1 aggregator
   - critic は独立 report のみを書き、canonical artifact / `state.txt` / `p000_index.md` を直接編集しない
   - aggregator は 5 critic report を統合して `passed|changes_requested` を返す
@@ -301,7 +301,7 @@ python scripts/sync-narration-from-script.py \
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
-  - authoring-after review slot では、これらの evaluator review は最大 5 round の improvement loop として扱う
+  - authoring-after review slot では、これらの evaluator review は最大 1 round の improvement loop として扱う
   - review-loop prompt は `python scripts/build-review-loop-round.py --run-dir output/<run> --slot p230 --round 1` のように slot 番号で materialize できる
   - 1 round は 5 critic agents が独立評価し、1 aggregator が統合判定する
   - `eval.*` summary は最新 aggregator result を反映する

@@ -10,6 +10,9 @@ google-genai
 # YAML parsing (used by scripts and E2E runner)
 pyyaml
 
+# Raster image composition and validation
+pillow
+
 # Test runner used by CI and local verification
 pytest
 
@@ -17,3 +20,4 @@ pytest
 fastapi
 uvicorn
 line-bot-sdk
+psycopg[binary]

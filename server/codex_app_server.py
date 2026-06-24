@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,14 @@ class ImageGenerationResult:
     status: str
     transcript: list[dict[str, Any]]
     source: str = "app_server"
+    generation_job_id: str | None = None
+    item_id: str | None = None
+    turn_id: str | None = None
+    prompt_sha256: str | None = None
+    reference_sha256s: list[str] | None = None
+    destination: str | None = None
+    provenance_authoritative: bool = False
+    provenance_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -478,11 +487,16 @@ class CodexAppServerClient:
         item_id: str,
         run_dir: Path,
         fallback_cutoff_ns: int | None = None,
+        generation_job_id: str | None = None,
+        allow_generated_images_fallback: bool = True,
+        provenance_policy: str | None = None,
         timeout_seconds: int = 900,
     ) -> ImageGenerationResult:
         thread_id = await self.start_thread(cwd=run_dir)
         generated_root = self.generated_images_root()
         cutoff_ns = fallback_cutoff_ns if fallback_cutoff_ns is not None else latest_generated_image_mtime_ns(generated_root)
+        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        reference_sha256s = [_sha256_file(path) for path in reference_images]
         reference_lines = "\n".join(f"- {p.name}: attached local image" for p in reference_images) or "- none"
         text = f"""Use Codex built-in image generation to create one image candidate.
 
@@ -511,15 +525,19 @@ Rules:
             )
         )
         turn_task.add_done_callback(_consume_task_exception)
-        fallback_task = asyncio.create_task(
-            wait_for_unclaimed_generated_image_after(
-                cutoff_ns,
-                root=generated_root,
-                timeout_seconds=timeout_seconds,
+        fallback_task: asyncio.Task[Path | None] | None = None
+        tasks: set[asyncio.Task[Any]] = {turn_task}
+        if allow_generated_images_fallback:
+            fallback_task = asyncio.create_task(
+                wait_for_unclaimed_generated_image_after(
+                    cutoff_ns,
+                    root=generated_root,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
-        done, _pending = await asyncio.wait({turn_task, fallback_task}, return_when=asyncio.FIRST_COMPLETED)
-        if fallback_task in done:
+            tasks.add(fallback_task)
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if fallback_task is not None and fallback_task in done:
             fallback = fallback_task.result()
             if fallback:
                 turn_task.cancel()
@@ -531,12 +549,20 @@ Rules:
                     status="completed",
                     transcript=[],
                     source="generated_images_early_fallback",
+                    generation_job_id=generation_job_id,
+                    item_id=item_id,
+                    prompt_sha256=prompt_sha256,
+                    reference_sha256s=reference_sha256s,
+                    destination=str(output_path),
+                    provenance_authoritative=False,
+                    provenance_policy=provenance_policy,
                 )
-        if not fallback_task.done():
+        if fallback_task is not None and not fallback_task.done():
             fallback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await fallback_task
         transcript = await turn_task
+        turn_id = _extract_turn_id(transcript)
         image_items: list[dict[str, Any]] = []
         for message in transcript:
             image_items.extend(find_image_generation_items(message))
@@ -544,16 +570,25 @@ Rules:
         saved = image_generation_saved_path(latest)
         source = "app_server"
         if not saved:
-            fallback = await claim_latest_generated_image_after(cutoff_ns, root=generated_root)
+            fallback = await claim_latest_generated_image_after(cutoff_ns, root=generated_root) if allow_generated_images_fallback else None
             if fallback:
                 saved = str(fallback)
                 source = "generated_images_fallback"
+        authoritative = bool(saved and source == "app_server")
         return ImageGenerationResult(
             saved_path=Path(saved) if saved else None,
             revised_prompt=latest.get("revisedPrompt") or latest.get("revised_prompt"),
             status=str(latest.get("status") or ("completed" if saved else "missing")),
             transcript=transcript,
             source=source,
+            generation_job_id=generation_job_id,
+            item_id=item_id,
+            turn_id=turn_id,
+            prompt_sha256=prompt_sha256,
+            reference_sha256s=reference_sha256s,
+            destination=str(output_path),
+            provenance_authoritative=authoritative,
+            provenance_policy=provenance_policy,
         )
 
     async def regenerate_prompt(
@@ -802,6 +837,55 @@ def image_generation_saved_path(item: dict[str, Any]) -> str | None:
             value = saved.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _extract_turn_id(transcript: list[dict[str, Any]]) -> str | None:
+    def visit(value: Any) -> str | None:
+        if isinstance(value, dict):
+            method = str(value.get("method") or "")
+            params = value.get("params")
+            if method in {"turn/started", "turn/completed"} and isinstance(params, dict):
+                turn_id = params.get("turnId") or params.get("turn_id")
+                if isinstance(turn_id, str) and turn_id.strip():
+                    return turn_id.strip()
+                turn = params.get("turn")
+                if isinstance(turn, dict):
+                    turn_id = turn.get("id") or turn.get("turnId") or turn.get("turn_id")
+                    if isinstance(turn_id, str) and turn_id.strip():
+                        return turn_id.strip()
+            for key in ("turnId", "turn_id"):
+                turn_id = value.get(key)
+                if isinstance(turn_id, str) and turn_id.strip():
+                    return turn_id.strip()
+            turn = value.get("turn")
+            if isinstance(turn, dict):
+                turn_id = turn.get("id") or turn.get("turnId") or turn.get("turn_id")
+                if isinstance(turn_id, str) and turn_id.strip():
+                    return turn_id.strip()
+            for child in value.values():
+                found = visit(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = visit(child)
+                if found:
+                    return found
+        return None
+
+    for message in transcript:
+        found = visit(message)
+        if found:
+            return found
     return None
 
 

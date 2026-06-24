@@ -45,7 +45,7 @@
   - `prepare-stage-context.py` または同等の grounding preflight で readset を確定する
   - L3 task/review agents に渡す入力を artifact path / 目的 / 出力先へ限定する
   - L3 の draft / audit / review / scratch output を読み、担当 bucket の canonical artifact へ採用する差分を選ぶ
-  - authoring 直後の review slot では、最大 5 round の evaluator-improvement loop を管理する
+  - authoring 直後の review slot では、最大 1 round の evaluator-improvement loop を管理する
   - 各 round で 5 critic agents と 1 aggregator agent を isolated output に限定して起動する
   - aggregator report のうち採用する修正だけを canonical artifact へ反映し、次 round / gate close / human handoff を決める
   - `state.txt` と `p000_index.md` を append / update し、bucket verifier へつなぐ
@@ -168,7 +168,7 @@
 - 入力: `research.md` / `script.md` / `video_manifest.md` / `video.mp4`
 - 出力: critic report / aggregator report + `state.txt` の `eval.<stage>.*`
 - 役割:
-  - authoring-after review slot では最大 5 round の evaluator-improvement loop として動く
+  - authoring-after review slot では最大 1 round の evaluator-improvement loop として動く
   - 各 round では 5 critic agents が generator の出力を rubric/check 単位で独立採点する
   - 1 aggregator agent が critic finding を統合し、`passed|changes_requested` を返す
   - fail reason を次の修正 action に分解する

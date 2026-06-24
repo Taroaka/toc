@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from toc.cut_context_packet import WARNING_KEY_BY_DIAGNOSTIC, cut_context_packet_issue_map
 from toc.grounding import grounding_validation
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
@@ -492,10 +493,11 @@ def add_check(checks: list[dict[str, Any]], check_id: str, passed: bool, message
 
 
 def score_from_checks(checks: list[dict[str, Any]]) -> float:
-    if not checks:
+    scored_checks = [check for check in checks if check.get("kind") != "warning"]
+    if not scored_checks:
         return 0.0
-    passed = sum(1 for check in checks if check["passed"])
-    return round(passed / len(checks), 4)
+    passed = sum(1 for check in scored_checks if check["passed"])
+    return round(passed / len(scored_checks), 4)
 
 
 def make_stage(
@@ -515,11 +517,12 @@ def make_stage(
     return {
         "stage": stage,
         "artifact": artifact,
-        "passed": all(check["passed"] for check in checks),
+        "passed": all(check["passed"] for check in checks if check.get("kind") != "warning"),
         "score": score,
         "overall_rubric": overall_rubric,
         "rubric_scores": rubric_scores,
         "reason_keys": [check["id"] for check in checks if not check["passed"]],
+        "warning_keys": [check["id"] for check in checks if check.get("kind") == "warning"],
         "checks": checks,
         "details": details or {},
     }
@@ -798,7 +801,9 @@ IMAGE_API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "api_prompt_contains_no_yaml_field_names",
         re.compile(
             r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
-            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
+            r"scene_character_state_timeline|scene_film_coverage_plan|cut_character_emotion_transition|cut_film_grammar_contract|"
+            r"scene_state_progression_plan|cut_state_progression|emotion_label|emotion_from|emotion_to|transition_mode",
             re.I,
         ),
     ),
@@ -825,6 +830,17 @@ def _image_api_prompt_policy(image_generation: dict[str, Any]) -> str:
     return str(payload.get("policy_version") or image_generation.get("prompt_policy_version") or "").strip()
 
 
+def _image_api_prompt_line_value(prompt: str, key: str) -> str:
+    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*:\s*(.+?)\s*$", prompt)
+    return match.group(1).strip() if match else ""
+
+
+def _truthy_prompt_contract_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "はい"}
+
+
 def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any]) -> list[str]:
     if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION:
         return []
@@ -845,12 +861,76 @@ def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any])
     for gate_name, needle in required.items():
         if needle not in prompt:
             issues.append(f"{selector}:{gate_name}")
+    for gate_name, needle in {
+        "api_prompt_has_visible_face_behavior": "表情",
+        "api_prompt_has_visible_gaze_behavior": "視線",
+        "api_prompt_has_visible_posture_behavior": "姿勢",
+        "api_prompt_has_visible_distance_behavior": "距離",
+    }.items():
+        if needle not in prompt:
+            issues.append(f"{selector}:{gate_name}")
     if as_list(image_generation.get("object_ids")) and "object_contact_state:" not in prompt:
         issues.append(f"{selector}:api_prompt_has_object_contact_state_if_object_present")
     for required_payload in ("shot_design_contract", "cut_location_frame_plan", "cut_visual_delta", "blocking_and_interaction"):
         if not isinstance(_image_api_prompt_payload(image_generation).get(required_payload), dict):
             issues.append(f"{selector}:{required_payload}_missing")
+    shot = _image_api_prompt_payload(image_generation).get("shot_design_contract")
+    shot = shot if isinstance(shot, dict) else {}
+    expected_role = str(shot.get("shot_role") or "").strip()
+    expected_scale = str(shot.get("shot_scale") or "").strip()
+    prompt_role = _image_api_prompt_line_value(prompt, "shot_role")
+    prompt_scale = _image_api_prompt_line_value(prompt, "shot_scale")
+    if expected_role and prompt_role and prompt_role != expected_role:
+        issues.append(f"{selector}:api_prompt_body_shot_role_mismatch_with_payload")
+    if expected_scale and prompt_scale and prompt_scale != expected_scale:
+        issues.append(f"{selector}:api_prompt_body_shot_scale_mismatch_with_payload")
+    if expected_role in {"insert", "object_proof"}:
+        prompt_has_detail = bool(
+            re.search(
+                r"should_show_object_detail\s*:\s*yes|close[- ]?up|foreground|前景|手元|鍵穴|取っ手|大きく|細部|詳細",
+                prompt,
+                re.I,
+            )
+        )
+        if not _truthy_prompt_contract_value(shot.get("should_show_object_detail")) and not prompt_has_detail:
+            issues.append(f"{selector}:insert_cut_missing_object_detail")
+    if expected_role == "reaction":
+        has_visible_reaction = (
+            re.search(r"表情|face|expression", prompt, re.I)
+            and re.search(r"視線|gaze|eyeline", prompt, re.I)
+            and re.search(r"姿勢|posture|body", prompt, re.I)
+        )
+        if not has_visible_reaction:
+            issues.append(f"{selector}:reaction_cut_missing_visible_reaction_behavior")
+    if expected_role == "handoff":
+        if not re.search(r"次|導線|渡す|path|next|gaze direction|視線.*(?:外|庭|奥|向こう|抜け|移る)", prompt, re.I):
+            issues.append(f"{selector}:handoff_cut_missing_next_scene_visual_path")
     return issues
+
+
+def _planned_scene_shots(scene: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    candidates: list[Any] = []
+    shot_mix_plan = scene.get("scene_shot_mix_plan")
+    if isinstance(shot_mix_plan, dict):
+        candidates.extend(as_list(shot_mix_plan.get("shots")))
+        candidates.extend(as_list(shot_mix_plan.get("actual_shots")))
+        nested_shot_mix = shot_mix_plan.get("shot_mix")
+        if isinstance(nested_shot_mix, dict):
+            candidates.extend(as_list(nested_shot_mix.get("actual_shots")))
+    film_plan = scene.get("scene_film_coverage_plan")
+    if isinstance(film_plan, dict):
+        shot_mix = film_plan.get("shot_mix")
+        if isinstance(shot_mix, dict):
+            candidates.extend(as_list(shot_mix.get("actual_shots")))
+    result: dict[str, tuple[str, str]] = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        selector = str(item.get("selector") or "").strip()
+        if not selector:
+            continue
+        result[selector] = (str(item.get("shot_role") or "").strip(), str(item.get("shot_scale") or "").strip())
+    return result
 
 
 def _scene_shot_mix_plan_v1_issues(scenes: list[Any]) -> list[str]:
@@ -860,6 +940,7 @@ def _scene_shot_mix_plan_v1_issues(scenes: list[Any]) -> list[str]:
             continue
         cuts = as_list(scene.get("cuts")) or [scene]
         v1_shots: list[tuple[str, str, str]] = []
+        planned_shots = _planned_scene_shots(scene)
         for cut_index, cut in enumerate(cuts, start=1):
             if not isinstance(cut, dict):
                 continue
@@ -871,7 +952,14 @@ def _scene_shot_mix_plan_v1_issues(scenes: list[Any]) -> list[str]:
             selector = str(cut.get("selector") or make_scene_cut_selector(scene_id, cut_id))
             shot = _image_api_prompt_payload(image_generation).get("shot_design_contract")
             shot = shot if isinstance(shot, dict) else {}
-            v1_shots.append((selector, str(shot.get("shot_role") or "").strip(), str(shot.get("shot_scale") or "").strip()))
+            actual_role = str(shot.get("shot_role") or "").strip()
+            actual_scale = str(shot.get("shot_scale") or "").strip()
+            v1_shots.append((selector, actual_role, actual_scale))
+            planned_role, planned_scale = planned_shots.get(selector, ("", ""))
+            if planned_role and actual_role and planned_role != actual_role:
+                issues.append(f"{selector}:api_prompt_shot_role_mismatch_with_scene_shot_mix")
+            if planned_scale and actual_scale and planned_scale != actual_scale:
+                issues.append(f"{selector}:api_prompt_shot_scale_mismatch_with_scene_shot_mix")
         if not v1_shots:
             continue
         scene_id = as_dotted_str(scene.get("scene_id")) or str(scene_index)
@@ -883,6 +971,116 @@ def _scene_shot_mix_plan_v1_issues(scenes: list[Any]) -> list[str]:
         for previous, current in zip(v1_shots, v1_shots[1:]):
             if previous[1:] == current[1:] and previous[1]:
                 issues.append(f"{current[0]}:no_two_adjacent_cuts_same_shot_role_and_scale")
+    return issues
+
+
+SCENE_STATE_PROGRESSION_MODES = {"suspended_moment", "sequential_state_progression"}
+
+
+def _scene_state_progression_plan_issues(scenes: list[Any]) -> list[str]:
+    issues: list[str] = []
+
+    def normalized_for_prompt_compare(value: Any) -> str:
+        return re.sub(r"[\s、。,.]+", "", str(value or ""))
+
+    for scene_index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        cuts = [
+            cut
+            for cut in as_list(scene.get("cuts"))
+            if isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() != "deleted"
+        ]
+        has_api_prompt_v1 = any(
+            _image_api_prompt_policy(as_dict(cut.get("image_generation"))) == IMAGE_API_PROMPT_POLICY_VERSION
+            for cut in cuts
+        )
+        if not has_api_prompt_v1:
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id")) or str(scene_index)
+        plan = as_dict(scene.get("scene_state_progression_plan"))
+        if not plan:
+            issues.append(f"scene{scene_id}:scene_state_progression_plan_exists")
+            continue
+        if str(plan.get("policy_version") or "").strip() != "scene_state_progression_v1":
+            issues.append(f"scene{scene_id}:scene_state_progression_plan.policy_version")
+        mode = str(plan.get("progression_mode") or "").strip()
+        if mode not in SCENE_STATE_PROGRESSION_MODES:
+            issues.append(f"scene{scene_id}:scene_state_progression_plan.progression_mode")
+        map_by_selector = {
+            str(item.get("cut_selector") or "").strip(): item
+            for item in as_list(plan.get("cut_progression_map"))
+            if isinstance(item, dict) and str(item.get("cut_selector") or "").strip()
+        }
+        if mode == "sequential_state_progression" and not map_by_selector:
+            issues.append(f"scene{scene_id}:scene_state_progression_plan.cut_progression_map")
+        for cut_index, cut in enumerate(cuts, start=1):
+            image_generation = as_dict(cut.get("image_generation"))
+            if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION:
+                continue
+            selector = _scene_cut_selector(scene_id, cut) or str(cut.get("selector") or cut.get("cut_id") or f"cut{cut_index}")
+            contract = _node_cut_contract(cut)
+            cut_state = as_dict(contract.get("cut_state_progression"))
+            prompt = _image_api_prompt_text(image_generation)
+            mapped_state = as_dict(map_by_selector.get(selector))
+            if mode == "sequential_state_progression":
+                if not cut_state:
+                    issues.append(f"{selector}:cut_state_progression_missing")
+                    continue
+                if str(cut_state.get("policy_version") or "").strip() != "cut_state_progression_v1":
+                    issues.append(f"{selector}:cut_state_progression.policy_version")
+                if str(cut_state.get("progression_mode") or "").strip() != "sequential_state_progression":
+                    issues.append(f"{selector}:cut_state_progression.progression_mode")
+                if mapped_state:
+                    expected_state = str(mapped_state.get("state_visible_in_this_cut") or "").strip()
+                    actual_state = str(cut_state.get("state_visible_in_first_frame") or "").strip()
+                    if expected_state and actual_state and expected_state != actual_state:
+                        issues.append(f"{selector}:cut_state_progression.mismatch_with_scene_plan")
+                required_fields = (
+                    "first_frame_temporal_role",
+                    "state_after_previous_cut",
+                    "state_visible_in_first_frame",
+                    "must_not_advance_beyond",
+                    "done_when",
+                )
+                for field in required_fields:
+                    if field == "done_when":
+                        if not as_list(cut_state.get(field)):
+                            issues.append(f"{selector}:cut_state_progression.{field}")
+                    elif not non_empty(cut_state.get(field)):
+                        issues.append(f"{selector}:cut_state_progression.{field}")
+                if cut_index > 1 and not non_empty(cut_state.get("visible_state_delta_from_previous_cut")):
+                    issues.append(f"{selector}:cut_state_progression_delta_missing")
+                first_frame = as_dict(contract.get("first_frame_contract"))
+                visible_start = as_dict(first_frame.get("visible_start_state"))
+                visible_state_text = " / ".join(
+                    str(value)
+                    for value in (
+                        cut_state.get("state_visible_in_first_frame"),
+                        visible_start.get("character_state"),
+                        first_frame.get("first_frame_brief"),
+                        _image_api_prompt_line_value(prompt, "cut_visible_moment"),
+                        _image_api_prompt_line_value(prompt, "this_cut_delta"),
+                    )
+                    if str(value or "").strip()
+                )
+                must_not_revert = str(cut_state.get("must_not_revert_to") or "").strip()
+                if cut_index > 1:
+                    reverted_to_explicit_state = bool(must_not_revert and must_not_revert in visible_state_text)
+                    reverted_to_generic_start = bool(re.search(r"まだ行為を完了していない|開始前|行為直前|乗る前|待機", visible_state_text))
+                    if reverted_to_explicit_state or reverted_to_generic_start:
+                        issues.append(f"{selector}:cut_first_frame_reverts_to_scene_start")
+                if cut_index > 1 and _image_api_prompt_line_value(prompt, "action_completion_state") in {"pre_action", "early_action"}:
+                    issues.append(f"{selector}:cut_state_progression_action_completion_not_progressed")
+                if (
+                    must_not_revert
+                    and normalized_for_prompt_compare(must_not_revert) not in normalized_for_prompt_compare(prompt)
+                    and cut_index > 1
+                ):
+                    issues.append(f"{selector}:cut_state_progression_must_not_revert_missing_from_api_prompt")
+            elif mode == "suspended_moment":
+                if cut_state and str(cut_state.get("progression_mode") or "").strip() not in {"", "suspended_moment"}:
+                    issues.append(f"{selector}:suspended_moment_cut_state_progression_mode")
     return issues
 
 
@@ -1752,11 +1950,21 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
             issues["motion_boundary"].append(f"{selector}:motion_contract.starts_from_first_frame")
         if "must_not_advance_to_event_beat_ids" not in motion or not isinstance(motion.get("must_not_advance_to_event_beat_ids"), list):
             issues["motion_boundary"].append(f"{selector}:motion_contract.must_not_advance_to_event_beat_ids")
-        expected_blocked = [
-            beat_id
-            for beat_id in sequence_ids
-            if beat_id not in refs and beat_functions.get(beat_id) in {"turn", "payoff"}
-        ]
+        cut_state_progression = as_dict(contract.get("cut_state_progression"))
+        if str(cut_state_progression.get("progression_mode") or "").strip() == "sequential_state_progression":
+            ref_indexes = [sequence_ids.index(ref) for ref in refs if ref in sequence_ids]
+            max_ref_index = max(ref_indexes) if ref_indexes else -1
+            expected_blocked = [
+                beat_id
+                for index, beat_id in enumerate(sequence_ids)
+                if index > max_ref_index and beat_functions.get(beat_id) in {"turn", "payoff"}
+            ]
+        else:
+            expected_blocked = [
+                beat_id
+                for beat_id in sequence_ids
+                if beat_id not in refs and beat_functions.get(beat_id) in {"turn", "payoff"}
+            ]
         motion_blocked = {str(item).strip() for item in as_list(motion.get("must_not_advance_to_event_beat_ids")) if str(item).strip()}
         if expected_blocked and not set(expected_blocked).issubset(motion_blocked):
             issues["motion_boundary"].append(f"{selector}:motion_contract.must_not_advance_to_event_beat_ids.incomplete")
@@ -1823,6 +2031,249 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
     return {key: values for key, values in issues.items() if values}
 
 
+VISIBLE_BEHAVIOR_FIELDS = ("face", "gaze", "posture", "hands", "feet", "distance")
+
+
+def _visible_behavior_complete(value: Any) -> bool:
+    behavior = as_dict(value)
+    return all(non_empty(behavior.get(field)) for field in VISIBLE_BEHAVIOR_FIELDS)
+
+
+def _scene_expected_character_ids(scene: dict[str, Any]) -> set[str]:
+    expected: set[str] = set()
+    for cut in as_list(scene.get("cuts")):
+        if not isinstance(cut, dict) or str(cut.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        contract = _node_cut_contract(cut, allow_legacy=False)
+        asset_dependency = as_dict(contract.get("asset_dependency")) if contract else {}
+        for value in as_list(asset_dependency.get("character_ids_required")):
+            if non_empty(value):
+                expected.add(str(value).strip())
+        image_generation = as_dict(cut.get("image_generation"))
+        for value in as_list(image_generation.get("character_ids")):
+            if non_empty(value):
+                expected.add(str(value).strip())
+    return expected
+
+
+def _scene_emotion_film_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
+    scene_id = _scene_id_for_issue(scene)
+    beat_ids = set(_scene_event_beat_ids(scene))
+    beat_functions = {
+        _scene_event_beat_id(beat): _scene_event_beat_function(beat)
+        for beat in _scene_event_sequence(scene)
+        if _scene_event_beat_id(beat)
+    }
+    beat_has_reveal = {
+        _scene_event_beat_id(beat): _scene_event_beat_function(beat) in {"reveal", "threshold_reveal", "reveal_hold"}
+        for beat in _scene_event_sequence(scene)
+        if _scene_event_beat_id(beat)
+    }
+    cut_selectors = {
+        _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "?")
+        for cut in as_list(scene.get("cuts"))
+        if isinstance(cut, dict) and str(cut.get("cut_status") or "").strip().lower() != "deleted"
+    }
+    issues: dict[str, list[str]] = {
+        "timeline_exists": [],
+        "timeline_states_complete": [],
+        "visible_proof_complete": [],
+        "cut_emotion_exists": [],
+        "cut_emotion_trigger_refs": [],
+        "cut_emotion_visible_behavior": [],
+        "no_emotion_jump": [],
+        "reaction_required": [],
+        "coverage_exists": [],
+        "edit_motivation": [],
+        "attention_continuity": [],
+        "screen_direction": [],
+        "prop_costume_body": [],
+    }
+
+    timeline = as_dict(scene.get("scene_character_state_timeline"))
+    if not timeline:
+        issues["timeline_exists"].append(f"scene{scene_id}:scene_character_state_timeline")
+    else:
+        if str(timeline.get("policy_version") or "").strip() != "character_emotion_continuity_v1":
+            issues["timeline_exists"].append(f"scene{scene_id}:scene_character_state_timeline.policy_version")
+        linked_ids = [str(value).strip() for value in as_list(timeline.get("linked_scene_event_beat_ids")) if str(value).strip()]
+        if not linked_ids or any(beat_id not in beat_ids for beat_id in linked_ids) or (beat_ids and not beat_ids.issubset(set(linked_ids))):
+            issues["timeline_states_complete"].append(f"scene{scene_id}:scene_character_state_timeline.linked_scene_event_beat_ids")
+        characters = [character for character in as_list(timeline.get("characters")) if isinstance(character, dict)]
+        if not characters:
+            issues["timeline_states_complete"].append(f"scene{scene_id}:scene_character_state_timeline.characters")
+        timeline_character_ids = {str(character.get("character_id") or "").strip() for character in characters if str(character.get("character_id") or "").strip()}
+        expected_character_ids = _scene_expected_character_ids(scene)
+        if expected_character_ids and not expected_character_ids.issubset(timeline_character_ids):
+            missing = ",".join(sorted(expected_character_ids - timeline_character_ids))
+            issues["timeline_states_complete"].append(f"scene{scene_id}:scene_character_state_timeline.missing_characters:{missing}")
+        for char_index, character in enumerate(characters, start=1):
+            for state_key in ("start_state", "midpoint_state", "end_state"):
+                state = as_dict(character.get(state_key))
+                if not state:
+                    issues["timeline_states_complete"].append(f"scene{scene_id}:character[{char_index}].{state_key}")
+                    continue
+                if not non_empty(state.get("emotion")):
+                    issues["timeline_states_complete"].append(f"scene{scene_id}:character[{char_index}].{state_key}.emotion")
+                trigger = str(state.get("trigger_event_beat_id") or "").strip()
+                if not trigger or (beat_ids and trigger not in beat_ids):
+                    issues["timeline_states_complete"].append(f"scene{scene_id}:character[{char_index}].{state_key}.trigger_event_beat_id")
+                visible_proof = as_dict(state.get("visible_proof"))
+                if not _visible_behavior_complete(visible_proof):
+                    issues["visible_proof_complete"].append(f"scene{scene_id}:character[{char_index}].{state_key}.visible_proof")
+            no_return = as_dict(character.get("emotional_no_return_point"))
+            no_return_ref = str(no_return.get("event_beat_id") or "").strip()
+            if not no_return_ref or (beat_ids and no_return_ref not in beat_ids):
+                issues["timeline_states_complete"].append(f"scene{scene_id}:character[{char_index}].emotional_no_return_point.event_beat_id")
+
+    coverage = as_dict(scene.get("scene_film_coverage_plan"))
+    if not coverage:
+        issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan")
+    else:
+        if str(coverage.get("policy_version") or "").strip() != "scene_film_coverage_v1":
+            issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.policy_version")
+        shot_mix = as_dict(coverage.get("shot_mix"))
+        if not shot_mix or not isinstance(shot_mix.get("required_coverage"), dict):
+            issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.shot_mix")
+        if "missing_coverage" not in coverage or not isinstance(coverage.get("missing_coverage"), list):
+            issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.missing_coverage")
+        if "action_reaction_pair" not in coverage or not isinstance(coverage.get("action_reaction_pair"), list):
+            issues["reaction_required"].append(f"scene{scene_id}:scene_film_coverage_plan.action_reaction_pair")
+        else:
+            pairs_by_beat = {
+                str(pair.get("source_event_beat_id") or "").strip(): pair
+                for pair in as_list(coverage.get("action_reaction_pair"))
+                if isinstance(pair, dict)
+            }
+            for beat_id, function in beat_functions.items():
+                if function not in {"turn", "payoff"} and not beat_has_reveal.get(beat_id):
+                    continue
+                pair = as_dict(pairs_by_beat.get(beat_id))
+                action_selector = str(pair.get("action_cut_selector") or "").strip()
+                reaction_selector = str(pair.get("reaction_cut_selector") or "").strip()
+                if not pair or action_selector not in cut_selectors or reaction_selector not in cut_selectors:
+                    issues["reaction_required"].append(f"scene{scene_id}:scene_film_coverage_plan.action_reaction_pair.{beat_id}")
+        required_coverage = as_dict(shot_mix.get("required_coverage"))
+        object_required = False
+        for cut in as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            contract = _node_cut_contract(cut, allow_legacy=False)
+            asset_dependency = as_dict(contract.get("asset_dependency")) if contract else {}
+            if as_list(asset_dependency.get("object_ids_required")):
+                object_required = True
+                break
+        if object_required and not as_list(required_coverage.get("insert")):
+            issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.shot_mix.required_coverage.insert")
+        rules = as_dict(coverage.get("required_when_rules"))
+        for rule_key in ("reaction", "insert", "eyeline", "silence"):
+            if not non_empty(rules.get(rule_key)):
+                issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.required_when_rules.{rule_key}")
+        audience = as_dict(coverage.get("audience_emotion_target"))
+        if audience.get("separate_from_character_emotion") is not True:
+            issues["coverage_exists"].append(f"scene{scene_id}:scene_film_coverage_plan.audience_emotion_target")
+
+    for cut in as_list(scene.get("cuts")):
+        if not isinstance(cut, dict) or str(cut.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "?")
+        contract = _node_cut_contract(cut, allow_legacy=False)
+        if not contract:
+            issues["cut_emotion_exists"].append(f"{selector}:cut_contract")
+            continue
+        source_contract = _cut_source_event_contract(contract)
+        primary = str(source_contract.get("primary_event_beat_id") or "").strip()
+        emotion = as_dict(contract.get("cut_character_emotion_transition"))
+        if not emotion:
+            issues["cut_emotion_exists"].append(f"{selector}:cut_character_emotion_transition")
+        else:
+            if str(emotion.get("policy_version") or "").strip() != "cut_character_emotion_transition_v1":
+                issues["cut_emotion_exists"].append(f"{selector}:cut_character_emotion_transition.policy_version")
+            if not non_empty(emotion.get("transition_mode")):
+                issues["no_emotion_jump"].append(f"{selector}:cut_character_emotion_transition.transition_mode")
+            trigger = as_dict(emotion.get("transition_trigger"))
+            trigger_ref = str(trigger.get("source_event_beat_id") or "").strip()
+            if not trigger_ref or trigger_ref not in beat_ids or (primary and trigger_ref != primary):
+                issues["cut_emotion_trigger_refs"].append(f"{selector}:cut_character_emotion_transition.transition_trigger.source_event_beat_id")
+            for state_key in ("emotion_from", "emotion_to"):
+                state = as_dict(emotion.get(state_key))
+                if not _visible_behavior_complete(state.get("visible_behavior")):
+                    issues["cut_emotion_visible_behavior"].append(f"{selector}:cut_character_emotion_transition.{state_key}.visible_behavior")
+            transition_visible = as_dict(emotion.get("transition_visible_in_cut"))
+            for key in ("face_change", "gaze_change", "posture_change", "hand_change", "foot_change", "distance_change"):
+                if not non_empty(transition_visible.get(key)):
+                    issues["cut_emotion_visible_behavior"].append(f"{selector}:cut_character_emotion_transition.transition_visible_in_cut.{key}")
+            if emotion.get("must_not_jump_to_final_emotion") is not True:
+                issues["no_emotion_jump"].append(f"{selector}:cut_character_emotion_transition.must_not_jump_to_final_emotion")
+
+        film = as_dict(contract.get("cut_film_grammar_contract"))
+        if not film:
+            issues["edit_motivation"].append(f"{selector}:cut_film_grammar_contract")
+            issues["attention_continuity"].append(f"{selector}:cut_film_grammar_contract")
+            issues["screen_direction"].append(f"{selector}:cut_film_grammar_contract")
+            issues["prop_costume_body"].append(f"{selector}:cut_film_grammar_contract")
+            continue
+        if str(film.get("policy_version") or "").strip() != "cut_film_grammar_v1":
+            issues["edit_motivation"].append(f"{selector}:cut_film_grammar_contract.policy_version")
+        required_modules = as_dict(film.get("required_modules"))
+        conditional_modules = as_dict(film.get("conditional_modules"))
+        if not required_modules:
+            issues["edit_motivation"].append(f"{selector}:cut_film_grammar_contract.required_modules")
+        if not conditional_modules:
+            issues["prop_costume_body"].append(f"{selector}:cut_film_grammar_contract.conditional_modules")
+        if not non_empty(as_dict(required_modules.get("edit_motivation")).get("why_current_cut_is_needed")):
+            issues["edit_motivation"].append(f"{selector}:cut_film_grammar_contract.required_modules.edit_motivation")
+        attention = as_dict(required_modules.get("attention_state"))
+        eyeline = as_dict(required_modules.get("eyeline_continuity"))
+        if not non_empty(attention.get("gaze_target")) or not non_empty(attention.get("viewer_attention_target")):
+            issues["attention_continuity"].append(f"{selector}:cut_film_grammar_contract.required_modules.attention_state")
+        if not non_empty(eyeline.get("gaze_target")):
+            issues["attention_continuity"].append(f"{selector}:cut_film_grammar_contract.required_modules.eyeline_continuity")
+        screen_direction = as_dict(required_modules.get("screen_direction_continuity"))
+        if not non_empty(screen_direction.get("movement_direction")) or screen_direction.get("direction_change_motivated") is not True:
+            issues["screen_direction"].append(f"{selector}:cut_film_grammar_contract.required_modules.screen_direction_continuity")
+        audience = as_dict(required_modules.get("audience_emotion_target"))
+        if audience.get("separate_from_character_emotion") is not True:
+            issues["attention_continuity"].append(f"{selector}:cut_film_grammar_contract.required_modules.audience_emotion_target")
+        function = beat_functions.get(primary)
+        reaction = as_dict(conditional_modules.get("character_reaction_contract"))
+        reveal_required = bool(beat_has_reveal.get(primary))
+        if function in {"turn", "payoff"} or reveal_required:
+            if reaction.get("required") is not True or str(reaction.get("reacts_to_event_beat_id") or "").strip() != primary:
+                issues["reaction_required"].append(f"{selector}:cut_film_grammar_contract.conditional_modules.character_reaction_contract")
+            silence = as_dict(conditional_modules.get("silence_and_pause_contract"))
+            if silence.get("required") is not True or silence.get("silence_required") is not True:
+                issues["reaction_required"].append(f"{selector}:cut_film_grammar_contract.conditional_modules.silence_and_pause_contract")
+        prop = as_dict(conditional_modules.get("prop_state_progression"))
+        costume = as_dict(conditional_modules.get("costume_and_body_continuity"))
+        object_ids = as_list(as_dict(contract.get("asset_dependency")).get("object_ids_required"))
+        if object_ids and prop.get("required") is not True:
+            issues["prop_costume_body"].append(f"{selector}:cut_film_grammar_contract.conditional_modules.prop_state_progression")
+        for key in ("costume_state", "hair_state", "posture_state"):
+            if not non_empty(costume.get(key)):
+                issues["prop_costume_body"].append(f"{selector}:cut_film_grammar_contract.conditional_modules.costume_and_body_continuity.{key}")
+
+    return {key: values for key, values in issues.items() if values}
+
+
+def _scene_requires_emotion_film_contract(scene: dict[str, Any]) -> bool:
+    if isinstance(scene.get("scene_character_state_timeline"), dict) or isinstance(scene.get("scene_film_coverage_plan"), dict):
+        return True
+    event = as_dict(scene.get("scene_event"))
+    if str(event.get("schema_version") or "").strip() == "scene_event_v1":
+        return True
+    for cut in as_list(scene.get("cuts")):
+        if not isinstance(cut, dict):
+            continue
+        contract = as_dict(cut.get("cut_contract"))
+        if contract.get("cut_character_emotion_transition") or contract.get("cut_film_grammar_contract"):
+            return True
+        image_generation = as_dict(cut.get("image_generation"))
+        if _image_api_prompt_policy(image_generation) == IMAGE_API_PROMPT_POLICY_VERSION:
+            return True
+    return False
+
+
 def _scene_event_readiness_issues(scenes: list[Any], *, prefix: str = "script") -> list[str]:
     issues: list[str] = []
     for scene in scenes:
@@ -1834,6 +2285,10 @@ def _scene_event_readiness_issues(scenes: list[Any], *, prefix: str = "script") 
         for issue_key, values in _cut_event_ref_issue_map(scene).items():
             if values:
                 issues.append(f"{prefix}.cut_event.{issue_key}")
+        if _scene_requires_emotion_film_contract(scene):
+            for issue_key, values in _scene_emotion_film_issue_map(scene).items():
+                if values:
+                    issues.append(f"{prefix}.emotion_film.{issue_key}")
     return list(dict.fromkeys(issues))
 
 
@@ -2244,6 +2699,22 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         "sequence_covered": [],
         "turn_payoff_have_cuts": [],
     }
+    cut_context_packet_issues: dict[str, list[str]] = {key: [] for key in WARNING_KEY_BY_DIAGNOSTIC}
+    emotion_film_issues: dict[str, list[str]] = {
+        "timeline_exists": [],
+        "timeline_states_complete": [],
+        "visible_proof_complete": [],
+        "cut_emotion_exists": [],
+        "cut_emotion_trigger_refs": [],
+        "cut_emotion_visible_behavior": [],
+        "no_emotion_jump": [],
+        "reaction_required": [],
+        "coverage_exists": [],
+        "edit_motivation": [],
+        "attention_continuity": [],
+        "screen_direction": [],
+        "prop_costume_body": [],
+    }
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
@@ -2251,6 +2722,11 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
             scene_event_issues.setdefault(key, []).extend(values)
         for key, values in _cut_event_ref_issue_map(scene).items():
             cut_event_issues.setdefault(key, []).extend(values)
+        for key, values in cut_context_packet_issue_map(scene).items():
+            cut_context_packet_issues.setdefault(key, []).extend(values)
+        if _scene_requires_emotion_film_contract(scene):
+            for key, values in _scene_emotion_film_issue_map(scene).items():
+                emotion_film_issues.setdefault(key, []).extend(values)
     scene_event_checks = (
         ("script.scene_event_exists", "exists", "all scenes include canonical scene_event with scene_event_v1 fields"),
         ("script.scene_event_sequence_complete", "sequence_complete", "scene_event.event_sequence includes setup, pressure, turn, payoff beats with source story refs"),
@@ -2283,6 +2759,50 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
     )
     for check_id, issue_key, message in cut_event_checks:
         issue_values = cut_event_issues.get(issue_key, [])
+        add_check(
+            checks,
+            check_id,
+            not issue_values,
+            message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
+            kind="rubric",
+        )
+    cut_context_packet_checks = (
+        ("script.cut_context_packet_exists", "missing_packet", "cut_context_packet is materialized or can be derived on read"),
+        ("script.cut_context_packet_derived_from_valid", "invalid_derived_from", "cut_context_packet declares editable:false and expected derived_from sources"),
+        ("script.cut_context_packet_event_beat_preserved", "missing_event_beat", "cut_context_packet preserves the primary source event beat"),
+        ("script.cut_context_packet_required_roles_preserved", "missing_required_roles", "cut_context_packet preserves required role coverage"),
+        ("script.cut_context_packet_visual_proof_preserved", "missing_visual_proof", "cut_context_packet preserves visual proof obligations"),
+        ("script.cut_context_packet_reveal_boundary_preserved", "missing_reveal_boundary", "cut_context_packet preserves reveal and forbidden event boundaries"),
+        ("script.cut_context_packet_previous_next_delta_present", "missing_previous_next_delta", "cut_context_packet carries previous/current/next state deltas where neighboring cuts exist"),
+    )
+    for check_id, issue_key, message in cut_context_packet_checks:
+        issue_values = cut_context_packet_issues.get(issue_key, [])
+        if not issue_values:
+            continue
+        add_check(
+            checks,
+            check_id,
+            True,
+            message + f" (warnings: {', '.join(issue_values[:8])})",
+            kind="warning",
+        )
+    emotion_film_checks = (
+        ("script.scene_character_state_timeline_exists", "timeline_exists", "all scenes include scene_character_state_timeline"),
+        ("script.scene_character_state_timeline_start_mid_end_complete", "timeline_states_complete", "character timelines include start/mid/end states tied to scene event beats"),
+        ("script.character_state_visible_proof_complete", "visible_proof_complete", "character states expose drawable face/gaze/posture/hands/feet/distance proof"),
+        ("script.cut_character_emotion_transition_exists", "cut_emotion_exists", "all cuts include cut_character_emotion_transition"),
+        ("script.cut_emotion_transition_trigger_refs_scene_event", "cut_emotion_trigger_refs", "cut emotion transition triggers reference the primary scene_event beat"),
+        ("script.cut_emotion_transition_has_visible_behavior", "cut_emotion_visible_behavior", "cut emotion transitions are expressed as drawable behavior"),
+        ("script.no_emotion_jump_without_trigger", "no_emotion_jump", "cuts do not jump to final emotion without transition_mode and trigger"),
+        ("script.reaction_contract_required_for_turn_reveal_payoff", "reaction_required", "turn/reveal/payoff cuts include required reaction contracts"),
+        ("script.scene_film_coverage_plan_exists", "coverage_exists", "all scenes include scene_film_coverage_plan with shot/action-reaction/missing coverage and required_when rules"),
+        ("script.edit_motivation_exists", "edit_motivation", "all cuts declare why the edit exists"),
+        ("script.eyeline_or_attention_continuity_complete", "attention_continuity", "all cuts declare viewer attention and eyeline continuity"),
+        ("script.screen_direction_change_motivated", "screen_direction", "all screen-direction choices are motivated"),
+        ("script.prop_costume_body_continuity_complete", "prop_costume_body", "prop, costume, and body continuity are declared where required"),
+    )
+    for check_id, issue_key, message in emotion_film_checks:
+        issue_values = emotion_film_issues.get(issue_key, [])
         add_check(
             checks,
             check_id,
@@ -3029,9 +3549,19 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
                 + (f" (issues: {', '.join(shot_mix_issues[:8])})" if shot_mix_issues else ""),
                 kind="rubric",
             )
+            scene_state_progression_issues = _scene_state_progression_plan_issues(scenes)
+            add_check(
+                checks,
+                f"{path_label}.scene_state_progression_plan",
+                not scene_state_progression_issues,
+                "image_api_prompt_v1 scenes declare scene_state_progression_plan and keep sequential cuts from reverting to the scene start"
+                + (f" (issues: {', '.join(scene_state_progression_issues[:8])})" if scene_state_progression_issues else ""),
+                kind="rubric",
+            )
             coverage_issues: list[str] = []
             redundancy_issues: list[str] = []
             handoff_issues: list[str] = []
+            emotion_film_issues: list[str] = []
             composite_issues: list[str] = []
             triangulation_issues: list[str] = []
             for index, scene in enumerate(scenes, start=1):
@@ -3046,6 +3576,9 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
                 coverage_issues.extend(_scene_cut_coverage_plan_issues(scene, scene_id=scene_id, cuts=cuts))
                 redundancy_issues.extend(_scene_cut_redundancy_issues(scene, scene_id=scene_id, cuts=cuts))
                 handoff_issues.extend(_scene_cut_handoff_issues(scene, scene_id=scene_id, cuts=cuts))
+                if _scene_requires_emotion_film_contract(scene):
+                    for values in _scene_emotion_film_issue_map(scene).values():
+                        emotion_film_issues.extend(values)
                 if is_production:
                     composite = as_dict(scene.get("scene_composite_review"))
                     if not composite or str(composite.get("status") or "").strip().lower() not in {"passed", "approved"}:
@@ -3083,6 +3616,14 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
                 not handoff_issues,
                 "adjacent cuts connect by explicit handoff anchors"
                 + (f" (issues: {', '.join(handoff_issues[:8])})" if handoff_issues else ""),
+                kind="rubric",
+            )
+            add_check(
+                checks,
+                f"{path_label}.character_emotion_film_grammar",
+                not emotion_film_issues,
+                "scenes and cuts include character emotion continuity plus film grammar contracts"
+                + (f" (issues: {', '.join(emotion_film_issues[:8])})" if emotion_film_issues else ""),
                 kind="rubric",
             )
             if is_production:
@@ -3483,6 +4024,7 @@ def append_stage_review_state(*, run_dir: Path, stage: str, stage_result: dict[s
         state_updates["review.story.status"] = "approved" if stage_result["passed"] else "changes_requested"
     state_updates[f"eval.{stage}.findings"] = str(finding_count)
     state_updates[f"eval.{stage}.reason_keys"] = ",".join(stage_result.get("reason_keys") or [])
+    state_updates[f"eval.{stage}.warning_keys"] = ",".join(stage_result.get("warning_keys") or [])
     state_updates[f"eval.{stage}.overall_rubric"] = f"{float(stage_result.get('overall_rubric', 0.0)):.4f}"
     for key, value in dict(stage_result.get("rubric_scores") or {}).items():
         state_updates[f"eval.{stage}.rubric.{key}"] = f"{float(value):.4f}"

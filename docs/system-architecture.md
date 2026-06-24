@@ -60,8 +60,8 @@ graph TD
     - `RESEARCH -> STORY -> VISUAL_PLANNING -> SCRIPT -> ASSET -> SCENE_IMPLEMENTATION -> NARRATION -> VIDEO -> RENDER_QA`
   - L1 never reads the body of bucket output artifacts to decide the next bucket. It checks `logs/orchestration/pXXX.supervisor_result.json`, required artifact existence, and terminal slot state only.
   - Parallelism is allowed only inside a stage whose upstream gate is already complete.
-    - `ASSET`: recurring still generation can run in parallel.
-    - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production`.
+    - `ASSET`: recurring still generation can run in parallel only after request-bound image provenance is available.
+    - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production` and per-request image provenance is authoritative.
     - `VIDEO`: clip generation can fan out after still inputs and duration gates are complete.
   - Authoring-after review slots use bounded review parallelism:
     - each round launches 5 independent critic agents against the same artifact/readset
@@ -85,7 +85,7 @@ graph TD
 - `server/codex_app_server.py` is the single runtime boundary for Codex app-server usage.
 - Callers do not instantiate per-feature app-server behavior directly; they use the shared client factory so `TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, proxy env, and diagnostics are resolved the same way for frontend create, semantic QA, prompt repair, image generation, and chat.
 - Frontend create does not run the `toc-immersive-runner` skill through app-server as the main p680 orchestration path. The server process launches `scripts/toc-immersive-frontend-run.py` directly, and that helper uses the shared runtime boundary only at the inner semantic/image operations. This avoids nested app-server sandboxes with different writable homes, generated-image roots, and restart diagnostics.
-- Built-in image generation is serialized in production (`IMAGE_GENERATION_PARALLELISM=1`). The generated-images fallback can complete before `turn/completed` and is discovered from the shared generated-image directory; running multiple fallback-backed image turns concurrently can assign a finished image to the wrong request. Parallel semantic review is allowed, but p500/p600 image generation must not fan out until the app-server provides per-turn saved-path provenance independent of global file ordering. The default per-image deadline is intentionally long (`TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS=900` unless overridden) because app-server image turns can legitimately take more than 300 seconds; treating slow normal generation as timeout causes needless retry churn and can obscure provenance failures.
+- Built-in image generation uses request-bound provenance as the canonical production route. `generation_job_id + item_id + turn_id + prompt_sha256 + reference_sha256s + savedPath + destination` must match before an image is copied to the run, and p500/p600 can use bounded worker parallelism once that provenance is authoritative. `TOC_IMAGE_GEN_PARALLELISM` defaults to 6 for this route. The generated-images fallback can complete before `turn/completed` and is discovered from the shared generated-image directory; running multiple fallback-backed image turns concurrently can assign a finished image to the wrong request. Therefore fallback is not canonical and is available only as explicit legacy/recovery mode with `TOC_IMAGE_GEN_PROVENANCE_POLICY=serial_fallback`, where effective image parallelism is clamped to 1. Parallel semantic review is independent of this image provenance policy. The default per-image deadline is intentionally long (`TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS=900` unless overridden) because app-server image turns can legitimately take more than 300 seconds; treating slow normal generation as timeout causes needless retry churn and can obscure provenance failures.
 - Startup preflight checks the Codex binary, writable effective `CODEX_HOME`, `chatgpt.com` DNS, and HTTPS reachability for `backend-api/codex/responses`. The local server restart helper additionally runs a short no-op turn, because `thread/start` can pass while the later turn transport still fails.
 - Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
 - Semantic QA / producer repair app-server turns use a no-progress watchdog, not a fixed total work deadline. Codex app-server streams turn notifications while agent work is active, so semantic orchestration treats turn notifications, semantic report writes, producer report writes, and source artifact changes as progress. It keeps waiting while progress is observable, and records `review.semantic.<stage>.watchdog.status=no_progress_timeout` only when progress stops for the configured interval.
@@ -141,7 +141,7 @@ graph TD
   - `audit-stage-grounding.py` で readset を監査
   - `logs/grounding/<stage>.readset.json` を「読むべき対象の正本」とする
   - これにより slash command とチャット実行の前提を揃える
-- authoring 直後の review slot は、単発 review ではなく最大 5 round の evaluator-improvement loop とする。
+- authoring 直後の review slot は最大 1 round の evaluator-improvement loop とする。
   - 1 round は 5 critic agents + 1 aggregator で構成する
   - critic / aggregator は `state.txt`、`p000_index.md`、canonical artifact を直接編集しない
   - 担当 L2 P-Bucket Supervisor が aggregator report を読み、採用する修正だけを担当 bucket の canonical artifact に反映する

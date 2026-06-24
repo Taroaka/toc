@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from toc.cut_context_packet import cut_context_packet_for_review
 from toc.harness import load_structured_document
 from toc.immersive_manifest import make_scene_cut_selector
 
@@ -117,6 +118,8 @@ def _scene_entry(
         "contract_required_fields_missing": missing_fields,
         "scene_intent": scene.get("scene_intent"),
         "scene_event": scene.get("scene_event"),
+        "scene_character_state_timeline": scene.get("scene_character_state_timeline"),
+        "scene_film_coverage_plan": scene.get("scene_film_coverage_plan"),
         "coverage_review": scene.get("coverage_review"),
         "handoff_to_next_scene": scene.get("handoff_to_next_scene"),
         "terminal_resolution": scene.get("terminal_resolution"),
@@ -152,6 +155,14 @@ def _cut_entry(
         normalized_contract,
         ("target_beat", "must_show", "must_avoid", "done_when"),
     )
+    previous_cut = scene_cuts[cut_index - 1] if cut_index > 0 else None
+    next_cut = scene_cuts[cut_index + 1] if cut_index + 1 < len(scene_cuts) else None
+    cut_context_packet, cut_context_packet_diagnostics = cut_context_packet_for_review(
+        scene,
+        cut,
+        previous_cut=previous_cut,
+        next_cut=next_cut,
+    )
 
     return _without_empty_values(
         {
@@ -173,7 +184,11 @@ def _cut_entry(
             "semantic_contract": semantic_contract,
             "cut_contract": cut_contract or None,
             "source_event_contract": _dict_value(cut_contract.get("source_event_contract")) or None,
+            "cut_character_emotion_transition": _dict_value(cut_contract.get("cut_character_emotion_transition")) or None,
+            "cut_film_grammar_contract": _dict_value(cut_contract.get("cut_film_grammar_contract")) or None,
             "event_context_for_cut": _event_context_for_cut(scene, cut),
+            "cut_context_packet": cut_context_packet,
+            "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
             "semantic_contract_present": bool(semantic_contract),
             "semantic_contract_missing": bool(missing_fields),
             "normalized_semantic_contract": normalized_contract,
@@ -297,6 +312,8 @@ def _cut_summary(*, scene_id: str, cut: dict[str, Any], cut_index: int) -> dict[
             "cut_id": cut_id,
             "primary_event_beat_id": source_event_contract.get("primary_event_beat_id"),
             "source_event_beat_ids": source_event_contract.get("source_event_beat_ids"),
+            "cut_character_emotion_transition": _dict_value(cut_contract.get("cut_character_emotion_transition")) or None,
+            "cut_film_grammar_contract": _dict_value(cut_contract.get("cut_film_grammar_contract")) or None,
             "target_beat": viewer_contract.get("target_beat") or blueprint.get("target_beat") or scene_contract.get("target_beat"),
             "visual_beat": blueprint.get("visual_beat") or cut.get("visual_beat"),
             "must_show": blueprint.get("must_show") or scene_contract.get("must_show"),

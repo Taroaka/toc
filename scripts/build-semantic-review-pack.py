@@ -188,9 +188,22 @@ def render_report_template(*, stage: str, run_dir: Path, scope_path: Path, colle
     ).strip()
 
 
+def _stage_specific_review_instructions(stage: str) -> list[str]:
+    if stage != "cut_blueprint":
+        return []
+    return [
+        "For `cut_blueprint` failures, each blocked finding must include a concrete producer-facing repair example.",
+        "The example should say what to add, remove, or strengthen in the affected cut contract / viewer contract / first-frame visual plan / downstream prompt requirements.",
+        "Use cut_context_packet and cut_context_packet_diagnostics as repair input when present: if a packet diagnostic reports missing roles, visual proof, event beat, reveal boundary, or previous/next delta, state which packet field and source contract field should be reinforced.",
+        "Prefer compact examples such as: `Add messenger and two witnesses as visible public-proof roles in scene80_cut01; require slipper in messenger hand, Cinderella watching, and no fitted-foot payoff yet.`",
+        "Do not rewrite the artifact yourself and do not invent a different story. The example is guidance for the producer repair agent, not a patch applied by the reviewer.",
+    ]
+
+
 def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_path: Path, report_path: Path) -> str:
     source_artifacts = _source_artifacts(run_dir, stage)
     source_lines = [f"- `{(run_dir / rel).resolve()}`" for rel in source_artifacts]
+    stage_specific_instructions = _stage_specific_review_instructions(stage)
     return "\n".join(
         [
             f"You are a contextless semantic review agent for ToC `{stage}` artifacts.",
@@ -216,6 +229,7 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "A scene_composite passes only when scene_cut_coverage_plan.scene_obligations and scene_event.event_sequence setup/pressure/turn/payoff beats are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
             "Do not require a fixed setup/turn/handoff order or a fixed cut count; judge whether the cuts were reverse-designed from the scene's actual visual obligations.",
             "If the scene meaning cannot be conveyed by the listed cuts, fail the gate and state whether it needs more cuts, stronger per-cut prompts, or a different scene split.",
+            *stage_specific_instructions,
             "",
             "Report format:",
             "status: passed|failed",

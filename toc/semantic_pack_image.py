@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from toc.cut_context_packet import cut_context_packet_for_review
 from toc.harness import load_structured_document
 
 try:
@@ -225,6 +226,16 @@ def extract_yaml_block(text: str) -> str:
     return match.group(1)
 
 
+def _cut_assignment_for(scene: dict[str, Any], selector: str) -> dict[str, Any]:
+    plan = _dict(scene.get("scene_cut_coverage_plan"))
+    for assignment in _list(plan.get("cut_assignments")):
+        if not isinstance(assignment, dict):
+            continue
+        if _as_str(assignment.get("cut_selector")) == selector:
+            return dict(assignment)
+    return {}
+
+
 def collect_image_prompt_entries(
     manifest: dict[str, Any],
     *,
@@ -242,12 +253,21 @@ def collect_image_prompt_entries(
         if plan_mode and plan_mode != mode_filter:
             continue
         review = _dict(image_generation.get("review"))
+        raw_cut_contract = _dict(cut.get("cut_contract"))
         contract = _cut_semantic_contract(cut, image_generation=image_generation, review=review)
         semantic_contract = semantic_contract_payload(contract)
         event_context = _event_context_for_cut(scene, cut)
+        previous_cut, next_cut = _previous_next_cuts(scene, cut)
+        cut_context_packet, cut_context_packet_diagnostics = cut_context_packet_for_review(
+            scene,
+            cut,
+            previous_cut=previous_cut,
+            next_cut=next_cut,
+        )
         first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
         api_prompt_payload = _image_api_prompt_payload(image_generation)
         api_prompt = _image_api_prompt(image_generation)
+        selector = cut_selector(scene, cut)
         ids = {
             "character_ids": _as_str_list(image_generation.get("character_ids")),
             "object_ids": _as_str_list(image_generation.get("object_ids")),
@@ -257,7 +277,7 @@ def collect_image_prompt_entries(
             {
                 "stage": "image_prompt",
                 "review_scope": "all_entries",
-                "selector": cut_selector(scene, cut),
+                "selector": selector,
                 "scene_id": scene.get("scene_id"),
                 "cut_id": cut.get("cut_id"),
                 "output": _as_str(image_generation.get("output")),
@@ -265,11 +285,22 @@ def collect_image_prompt_entries(
                 "legacy_prompt": _as_str(image_generation.get("prompt")),
                 "api_prompt_payload": api_prompt_payload,
                 "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
+                "scene_film_coverage_plan": _dict(scene.get("scene_film_coverage_plan")),
+                "scene_shot_mix_plan": _dict(scene.get("scene_shot_mix_plan")),
+                "scene_state_progression_plan": _dict(scene.get("scene_state_progression_plan")),
+                "cut_assignment": _cut_assignment_for(scene, selector),
+                "shot_design_contract": _dict(api_prompt_payload.get("shot_design_contract")),
+                "cut_visual_delta": _dict(api_prompt_payload.get("cut_visual_delta")),
+                "cut_state_progression": _dict(raw_cut_contract.get("cut_state_progression")),
                 "debug_prompt_source": _dict(image_generation.get("debug_prompt_source")),
                 "prompt_blocks": _prompt_block_labels(api_prompt),
                 "image_prompt_gate_focus": [
                     "api_prompt_payload.prompt が API 送信用正本であり、legacy image_generation.prompt や debug_prompt_source を読んでいないか",
+                    "設計上の絵としての役割が scene_cut_coverage_plan / scene_film_coverage_plan / scene_shot_mix_plan から API prompt の構図・対象・画角へ反映されているか",
+                    "scene state progression: scene_state_progression_plan の suspended_moment / sequential_state_progression の判断が cut_state_progression と API prompt の visible state に反映されているか",
                     "API prompt が意味説明ではなく、shot / location zone / blocking / object contact / previous cut delta で描ける1枚になっているか",
+                    "API prompt が emotion label ではなく face / gaze / posture / hands / feet / distance の visible behavior だけで感情を描かせているか",
                     "旧 [cut契約からの可視要件] や 場面の核/観客理解/因果の証明 などの設計メタが API prompt に残っていないか",
                     "source_event_contract と event_context_for_cut の ID や event_time_position / what_happens / visible_action が API prompt に漏れていないか",
                     "小道具の reveal boundary が must_include / must_not_include と矛盾していないか",
@@ -284,7 +315,11 @@ def collect_image_prompt_entries(
                 "narration": narration_text(cut),
                 "rationale": _as_str(plan.get("rationale")),
                 "event_context_for_cut": event_context,
+                "cut_context_packet": cut_context_packet,
+                "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
                 "first_frame_visual_plan": first_frame_visual_plan,
+                "cut_character_emotion_transition": _dict(raw_cut_contract.get("cut_character_emotion_transition")),
+                "cut_film_grammar_contract": _dict(raw_cut_contract.get("cut_film_grammar_contract")),
                 "semantic_contract": semantic_contract,
                 "semantic_contract_missing": semantic_contract_missing(semantic_contract),
                 "contract_required_fields_missing": missing_contract_fields(semantic_contract),
@@ -386,9 +421,10 @@ def collect_scene_composite_entries(
         if not cuts:
             continue
         cut_entries: list[dict[str, Any]] = []
-        for cut in cuts:
+        for cut_index, cut in enumerate(cuts):
             image_generation = _dict(cut.get("image_generation"))
             video_generation = _dict(cut.get("video_generation"))
+            raw_cut_contract = _dict(cut.get("cut_contract"))
             contract = _cut_semantic_contract(cut, image_generation=image_generation)
             semantic_contract = semantic_contract_payload(contract)
             first_frame_visual_plan = build_first_frame_visual_plan(scene, cut)
@@ -398,11 +434,22 @@ def collect_scene_composite_entries(
             output_exists = None
             if run_dir is not None and output:
                 output_exists = resolve_run_path(run_dir, output).exists()
+            previous_cut = cuts[cut_index - 1] if cut_index > 0 else None
+            next_cut = cuts[cut_index + 1] if cut_index + 1 < len(cuts) else None
+            cut_context_packet, cut_context_packet_diagnostics = cut_context_packet_for_review(
+                scene,
+                cut,
+                previous_cut=previous_cut,
+                next_cut=next_cut,
+            )
             cut_entries.append(
                 {
                     "selector": cut_selector(scene, cut),
                     "cut_function": _as_str(contract.get("cut_function")),
                     "source_event_contract": _dict(contract.get("source_event_contract")),
+                    "cut_state_progression": _dict(raw_cut_contract.get("cut_state_progression")),
+                    "cut_character_emotion_transition": _dict(raw_cut_contract.get("cut_character_emotion_transition")),
+                    "cut_film_grammar_contract": _dict(raw_cut_contract.get("cut_film_grammar_contract")),
                     "target_focus": semantic_contract.get("target_focus", ""),
                     "screen_question": _as_str(contract.get("screen_question")),
                     "dramatic_job": _as_str(contract.get("dramatic_job")),
@@ -424,6 +471,8 @@ def collect_scene_composite_entries(
                     "motion_brief": _as_str(contract.get("motion_brief")),
                     "narration": narration_text(cut),
                     "event_context_for_cut": _event_context_for_cut(scene, cut),
+                    "cut_context_packet": cut_context_packet,
+                    "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
                     "first_frame_visual_plan": first_frame_visual_plan,
                     "semantic_contract": semantic_contract,
                 }
@@ -439,6 +488,8 @@ def collect_scene_composite_entries(
             "anti_redundancy_policy": _dict(scene_intent.get("anti_redundancy_policy")) or _dict(scene.get("anti_redundancy_policy")) or _dict(scene_event.get("anti_redundancy_policy")),
             "static_first_frame_rules": _as_str_list(scene_intent.get("static_first_frame_rules")) or _as_str_list(scene.get("static_first_frame_rules")) or _as_str_list(scene_event.get("static_first_frame_rules")),
             "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
+            "scene_character_state_timeline": _dict(scene.get("scene_character_state_timeline")),
+            "scene_film_coverage_plan": _dict(scene.get("scene_film_coverage_plan")),
             "handoff_to_next_scene": _as_str(scene.get("handoff_to_next_scene")),
             "terminal_resolution": _as_str(scene.get("terminal_resolution")),
             "target_duration_seconds": scene.get("target_duration_seconds"),
@@ -455,6 +506,9 @@ def collect_scene_composite_entries(
                 "scene_contract": scene_contract,
                 "scene_event": scene_event,
                 "scene_cut_coverage_plan": scene_cut_coverage_plan,
+                "scene_character_state_timeline": _dict(scene.get("scene_character_state_timeline")),
+                "scene_film_coverage_plan": _dict(scene.get("scene_film_coverage_plan")),
+                "scene_state_progression_plan": _dict(scene.get("scene_state_progression_plan")),
                 "story_event_obligations": _list(scene_intent.get("story_event_obligations")) or _list(scene.get("story_event_obligations")),
                 "role_coverage": _dict(scene_intent.get("role_coverage")) or _dict(scene.get("role_coverage")) or _dict(scene_event.get("role_coverage")),
                 "audience_knowledge_delta": _dict(scene_intent.get("audience_knowledge_delta")) or _dict(scene.get("audience_knowledge_delta")) or _dict(scene_event.get("audience_knowledge_delta")),
@@ -471,7 +525,12 @@ def collect_scene_composite_entries(
                         "scene_cut_coverage_plan の scene_obligations が cut_entries に割り当てられているか",
                         "cut_contract.source_event_contract の primary_event_beat_id / source_event_beat_ids が scene_event.event_sequence の beat_id を参照し、setup/pressure/turn/payoff を網羅しているか",
                         "event_context_for_cut が source_event_contract から生成された downstream 用 projection として primary beat だけを渡しているか",
+                        "cut_context_packet が scene全体の義務を cut ごとの実行可能責務へ落とし、required_roles / visual_proof / reveal_boundary / previous_next_delta を欠落させていないか",
                         "first_frame_visual_plan が source_event_contract / event_context_for_cut / first_frame_contract / motion_contract から派生し、物語意味を描画可能な開始静止画へ変換しているか",
+                        "scene_character_state_timeline の start/mid/end と cut_character_emotion_transition が scene_event の trigger に沿い、感情が face/gaze/posture/hands/feet/distance として見えるか",
+                        "scene_film_coverage_plan と cut_film_grammar_contract が action/reaction、insert、eyeline、silence の required_when を満たし、audience_emotion_target を character emotion と分けているか",
+                        "scene_state_progression_plan が suspended_moment と sequential_state_progression を scene ごとに正しく選び、sequential scene では cut の first frame が毎回scene開始前へ戻っていないか",
+                        "scene_film_coverage_plan / scene_shot_mix_plan / cut_assignments の絵としての役割が、各 cut の API prompt の shot_role / shot_scale / 構図 / 対象に反映されているか",
                         "role_coverage.required_roles にある妨害者・助力者・証人・共同体などが、必要なsceneで主人公単独に潰されていないか",
                         "cutごとの差異が番号差分や同義反復ではなく、sceneを再現するために必要な視覚要件の分担になっているか",
                         "各cutの first_frame_brief が motion ではなく静止画として読める causal proof を持つか",
@@ -491,6 +550,12 @@ def collect_scene_composite_entries(
                         "event_motion_boundary",
                         "event_narration_boundary",
                         "event_context_for_cut_not_derived",
+                        "cut_context_packet_missing",
+                        "cut_context_packet_obligation_missing",
+                        "cut_context_packet_required_roles_missing",
+                        "cut_context_packet_visual_proof_missing",
+                        "cut_context_packet_reveal_boundary_missing",
+                        "cut_context_packet_previous_next_delta_missing",
                         "first_frame_visual_plan_missing",
                         "first_frame_is_story_event_start_not_poster",
                         "first_frame_has_action_potential",
@@ -507,6 +572,24 @@ def collect_scene_composite_entries(
                         "role_coverage_missing",
                         "static_first_frame_not_imageable",
                         "scene_cut_redundancy_excessive",
+                        "character_emotion_not_visualized",
+                        "emotion_jump_without_event_trigger",
+                        "reaction_missing_after_story_turn",
+                        "relationship_delta_not_visible",
+                        "action_reaction_pair_missing",
+                        "eyeline_continuity_weak",
+                        "edit_motivation_weak",
+                        "scene_coverage_missing_reaction_or_insert",
+                        "api_prompt_emotion_is_abstract_not_performable",
+                        "cut_visual_role_not_rendered_in_api_prompt",
+                        "scene_film_coverage_not_visible_across_api_prompts",
+                        "cut_prompt_repeats_previous_visual_role",
+                        "causal_turn_not_visualized_in_api_prompt",
+                        "insert_or_reaction_needed_but_prompt_stays_medium_action",
+                        "scene_state_progression_mode_wrong",
+                        "cut_first_frame_reverts_to_scene_start",
+                        "scene_progression_not_visible_across_api_prompts",
+                        "suspended_moment_quality_regressed",
                     ],
                 },
             }
@@ -644,6 +727,22 @@ def iter_scene_cuts(manifest: dict[str, Any]) -> list[tuple[dict[str, Any], dict
             if isinstance(cut, dict):
                 pairs.append((scene, cut))
     return pairs
+
+
+def _previous_next_cuts(scene: dict[str, Any], cut: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    cuts = [candidate for candidate in _list(scene.get("cuts")) if isinstance(candidate, dict)]
+    for index, candidate in enumerate(cuts):
+        if candidate is cut:
+            previous_cut = cuts[index - 1] if index > 0 else None
+            next_cut = cuts[index + 1] if index + 1 < len(cuts) else None
+            return previous_cut, next_cut
+    selector = cut_selector(scene, cut)
+    for index, candidate in enumerate(cuts):
+        if cut_selector(scene, candidate) == selector:
+            previous_cut = cuts[index - 1] if index > 0 else None
+            next_cut = cuts[index + 1] if index + 1 < len(cuts) else None
+            return previous_cut, next_cut
+    return None, None
 
 
 def cut_selector(scene: dict[str, Any], cut: dict[str, Any]) -> str:
