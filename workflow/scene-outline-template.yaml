@@ -29,6 +29,15 @@ scene_design_rules:
     - "object_meaning_ladder"
     - "concrete_handoff_chain"
     - "anti_template_language"
+    - "abstract_function"
+    - "concrete_event"
+    - "story_grounding"
+    - "non_replaceable_elements"
+    - "concrete_story_elements_with_story_function"
+    - "asset_story_function_usage"
+    - "specificity_budget"
+  canonical_event_coverage_matrix_required: true
+  abstract_language_policy: "抽象表現は禁止しない。ただし abstract_function だけで終わらず、必ず source-grounded concrete_event / story_grounding を持つ"
   banned_generic_scene_phrases:
     - "主人公は前進できるか"
     - "次へ進む理由が生まれる"
@@ -82,6 +91,22 @@ story_beat_coverage_matrix:
     emotional_function: "hook|pressure|turn|payoff|aftertaste"
     visual_evidence_required: []
     risk_if_compressed: ""
+
+canonical_event_coverage_matrix:
+  policy_version: "canonical_event_coverage_matrix_v1"
+  source: ["research", "story", "user_input", "asset_bible"]
+  source_story_events:
+    - source_event_id: ""
+      source_event_summary: ""
+      importance: "low|medium|high|critical"
+      required: true
+      must_appear_as: "scene|cut|narration|visual_motif|can_be_omitted"
+      canonical_order_index: 0
+      assigned_scene_ids: []
+      assigned_event_beat_ids: []
+      omission_reason: ""
+      adaptation_change_reason: ""
+      human_approval_required: false
 
 scene_decision_log:
   - decision_id: "scene_decision_001"
@@ -185,15 +210,131 @@ scenes:
           story_specific_terms: []
           specificity_note: "固有名詞、道具、関係、場所、行為のうち複数を入れて抽象語を避ける"
 
+    scene_generation:
+      schema_version: "scene_generation_v1"
+      scene_authoring_context:
+        schema_version: "scene_authoring_context_v1"
+        topic: "<topic>"
+        scene_id: 1
+        scene_index: 1
+        scene_title: ""
+        story_scope: {}
+        source_beats: []
+        canonical_event_policy:
+          source_story_events: "top-level canonical_event_coverage_matrix を参照"
+          scene_specificity: "source beat を scene_event の具体出来事へ接地する"
+        scene_count_policy:
+          maximize_meaningful_scene_count: true
+          do_not_fix_cut_count_in_prompt: true
+          cut_count_is_derived_by: "scene_cut_coverage_plan"
+      scene_prompt_payload:
+        schema_version: "scene_prompt_payload_v1"
+        prompt: "この scene が物語内で何を成立させるかを設計し、scene 正本を出力する。後段実行情報は含めない。"
+        input_refs: ["story.md", "research.md", "visual_value.md", "canonical_event_coverage_matrix", "asset_bible"]
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        constraints: ["scene 正本生成だけに使う", "後段の画像・音声・動画実行情報を含めない", "scene_event は物語事実に限定する"]
+      scene_debug_prompt_source:
+        schema_version: "scene_debug_prompt_source_v1"
+        not_sent_to_agent: true
+        source_story_beat_ids: []
+        source_beats: []
+        source_origin: "user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice"
+        adaptation_choices: []
+        excluded_from_payload: []
+        forbidden_event_changes_source: "scene_event.forbidden_event_changes"
+      scene_generation_contract:
+        schema_version: "scene_generation_contract_v1"
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        scene_event_schema_version: "scene_event_v1"
+        payload_boundary: "scene_prompt_payload は scene 正本生成だけに使う"
+
     scene_event:
       schema_version: "scene_event_v1"
       event_logline: "sceneで実際に起きる出来事。演出語ではなく物語事実を書く"
       start_situation: "scene開始時の人物・場所・物・関係の状態"
       source_story_beat_ids: []
+      story_specificity:
+        canonical_specificity:
+          description: "原典・既知筋・ユーザー入力に由来する、この物語で欠かせない出来事や設定"
+          required_elements: []
+        character_specificity:
+          description: "この物語の人物名、役割、欲望、弱点、関係性に固有の要素"
+          required_elements: []
+        relationship_specificity:
+          description: "人物同士の支配、敵対、助力、誤解、約束、秘密などの関係性"
+          required_elements: []
+        object_specificity:
+          description: "物語上の小道具、証拠、呪い、鍵、手紙、靴などの機能"
+          required_elements: []
+        location_specificity:
+          description: "その場所が物語上どんな制約・圧力・誘惑・境界として働くか"
+          required_elements: []
+        rule_specificity:
+          description: "魔法の制約、時間制限、社会制度、約束、禁忌など、その物語固有のルール"
+          required_elements: []
+        visual_specificity:
+          description: "その物語でしか成立しない画面上の証拠、身体状態、痕跡、配置"
+          required_elements: []
       event_sequence:
         - beat_id: "scene1_event_setup"
           beat_function: "setup"
           source_story_beat_ids: []
+          abstract_function:
+            dramatic_job: ""
+            value_shift_role: ""
+            emotional_pressure_role: ""
+            causal_role: ""
+          concrete_event:
+            who: []
+            where: ""
+            what_happens: ""
+            conflict_or_constraint: ""
+            object_or_trace: []
+            visible_action: ""
+            visible_reaction: ""
+            immediate_consequence: ""
+            required_visual_evidence: []
+          story_grounding:
+            source_origin: "user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice|invented_candidate"
+            source_story_beat_ids: []
+            source_confidence: "high|medium|low"
+            source_text_or_summary: ""
+            adaptation_reason: ""
+            human_approval_required: false
+            non_replaceable_elements:
+              - element_id: ""
+                type: "character|object|location|relationship|rule|event|visual_evidence"
+                value: ""
+                why_non_replaceable: ""
+            replaceability_check:
+              would_survive_character_swap: false
+              would_survive_object_swap: false
+              would_survive_location_swap: false
+              note: ""
+            concrete_story_elements:
+              - element_id: ""
+                element_type: "character|object|location|gesture|trace|rule|relationship|sound|light"
+                concrete_description: ""
+                story_function: "obstacle|proof|temptation|deadline|status_marker|secret_holder|memory_trigger|threshold|handoff|contrast|pressure|reward|loss"
+                appears_in_event_beat_ids: []
+                visible_form: ""
+                must_not_be_generic: true
+            asset_story_function_usage:
+              - asset_id: ""
+                asset_type: "character|object|location"
+                used_in_scene: true
+                used_in_event_beat_ids: []
+                story_function_in_scene: "obstacle|proof|helper|pressure|threshold|deadline|status_marker|secret|handoff"
+                visible_or_hidden: "visible|hidden|hinted|offscreen"
+                reason_if_unused: ""
+            confidence: "high|medium|low"
+          specificity_budget:
+            max_primary_story_elements: 3
+            max_secondary_story_elements: 3
+            required_element_types: ["character", "location", "conflict_or_constraint", "visual_evidence"]
+            optional_element_types: ["object", "sound", "weather"]
+            reject_if: ["decorative_detail_without_story_function", "too_many_unrelated_objects", "concrete_but_not_source_grounded"]
+            reject_decorative_detail_without_story_function: true
           what_happens: ""
           visible_action: ""
           visible_reaction: ""

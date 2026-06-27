@@ -28,3 +28,11 @@ Codex 向けの共通ガイド本体は `docs/root-pointer-guide.md`。
 ```bash
 python scripts/validate-pointer-docs.py
 ```
+
+## Story Implementation Follow-up
+
+物語作成の設計実装を実装し終えた後は、ユーザーに次を促す。
+
+> バックエンドを再起動して物語を作成してください。その方がゴールに近づきます。
+
+仮説では、実装完了後に実際の生成結果へフィードバックを返していかないと、いつまで経ってもゴールへ辿りつかないため。

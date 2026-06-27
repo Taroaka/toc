@@ -65,7 +65,7 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
     "scene_detail": {
         1: (
             "scene_detail_structure",
-            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, independent dramatic question/value shift/causal turn, and scene_event setup/pressure/turn/payoff sequence within the maximal scene set.",
+            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, independent dramatic question/value shift/causal turn, scene_event setup/pressure/turn/payoff sequence, scene_generation prompt separation, and story-specific concrete grounding within the maximal scene set.",
         ),
         2: (
             "scene_detail_density",
@@ -81,7 +81,7 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         ),
         5: (
             "scene_detail_visual_production",
-            "Verify that this scene's visible evidence, visual thesis, and p500/p600/p800 handoff are concrete enough for production.",
+            "Verify that this scene's visible evidence, visual thesis, asset story functions, and p500/p600/p800 handoff are concrete enough for production without decorative detail.",
         ),
     },
 }
@@ -133,6 +133,9 @@ SCENE_DETAIL_GATE_MARKERS: tuple[str, ...] = (
     "value_shift_visibility",
     "causal_turn_visibility",
     "scene_event_sequence",
+    "scene_generation_prompt_separation",
+    "scene_generation_debug_source",
+    "scene_generation_contract",
     "turning_event_alignment",
     "end_situation_alignment",
     "neighbor_handoff",
@@ -597,10 +600,21 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
                 For p410c scene-detail review, do not repeat the scene count gate.
                 This review must pass a `Scene Detail Gate` for each concrete scene:
                 scene_necessity, internal_pressure, value_shift_visibility,
-                causal_turn_visibility, scene_event_sequence, turning_event_alignment,
+                causal_turn_visibility, scene_event_sequence, story_specific_grounding,
+                non_replaceable_elements, concrete_story_function, specificity_budget,
+                canonical_event_coverage, scene_generation_prompt_separation,
+                scene_generation_debug_source, scene_generation_contract, turning_event_alignment,
                 end_situation_alignment, and neighbor_handoff. The scene_event checks
                 must verify that turning_event semantically matches scene_intent.causal_turn
                 and end_situation semantically matches scene_intent.value_shift.to.
+                The scene_generation checks must treat scene_generation.scene_prompt_payload.prompt
+                as the canonical scene authoring prompt and fail if it mixes downstream
+                image/video/audio execution fields, fixed cut counts, or image directing terms.
+                scene_debug_prompt_source must explain source beats, adaptation choices, and
+                forbidden changes without being sent to the generation agent.
+                Do not reject useful abstract dramatic language by itself; reject only when
+                abstract_function is not paired with source-grounded concrete_event /
+                story_grounding. Decorative concrete detail without story_function is a blocker.
                 Treat these as blocking gate items, not optional reviewer advice.
                 """
             ).strip()
@@ -642,7 +656,7 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
         - scene_specificity_gate: for scene_set include non_compressible_beat_inventory, scene_promotion_rule, unique_scene_responsibility, actor_force_coverage, object_meaning_ladder, concrete_handoff_chain, and anti_template_language
         - reveal_order_gate: for scene_set include reveal_order_preserved, withheld_information_preserved, and early_reveal_risk_resolved
         - handoff_chain_gate: for scene_set include handoff_chain_coverage, incoming_outgoing_anchor_ids, and terminal_resolution_checked
-        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, scene_event_sequence, scene_character_state_timeline, scene_film_coverage_plan, turning_event_alignment, end_situation_alignment, and neighbor_handoff
+        - scene_detail_gate: for scene_detail include scene_necessity, internal_pressure, value_shift_visibility, causal_turn_visibility, scene_event_sequence, scene_generation_prompt_separation, scene_generation_debug_source, scene_generation_contract, scene_character_state_timeline, scene_film_coverage_plan, turning_event_alignment, end_situation_alignment, and neighbor_handoff
         - cut_blueprint_gate: for p420 cut_blueprint include cut_intent_isolation, scene_event_coverage, event_beat_reference_integrity, first_frame_motion_readiness, event_first_frame_alignment, multimodal_event_boundary_coverage, source_event_preservation, no_unapproved_event_invention, event_motion_boundary, event_narration_boundary, event_context_for_cut_ready, causal_proof_coverage, role_coverage, audience_knowledge_delta_coverage, anti_redundancy_gate, duration_density_and_handoff, coverage_plan_complete, continuity_contract_complete, character_emotion_continuity_complete, film_grammar_contract_complete, action_reaction_and_eyeline_complete, narration_contract_complete, downstream_handoff_complete, and triangulation_review_ready
         - blocking_findings[]: each item must include id, severity, evidence, root_cause, downstream_impact, adopted_fix_plan, acceptance_condition
         - recommended_changes[]: each item must include cause, fix_plan, acceptance_condition
@@ -737,6 +751,14 @@ def render_aggregated_review(
                 "- value_shift_visibility: value_shift.from/to is proven by visible evidence",
                 "- causal_turn_visibility: the irreversible turn is visible or audibly grounded",
                 "- scene_event_sequence: scene_event has setup, pressure, turn, and payoff as concrete story events",
+                "- scene_generation_prompt_separation: scene_generation.scene_prompt_payload.prompt is the canonical scene authoring prompt and does not include downstream execution fields, image directing terms, or fixed cut counts",
+                "- scene_generation_debug_source: scene_debug_prompt_source explains source beats, adaptation choices, excluded payload details, and forbidden changes without being sent to the agent",
+                "- scene_generation_contract: scene_generation_contract requires scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, scene_cut_coverage_plan, and forbidden_event_changes",
+                "- story_specific_grounding: each event beat has abstract_function plus concrete_event and story_grounding derived from source story, user input, canonical reference, or asset bible",
+                "- non_replaceable_elements: each beat declares the character/object/location/relationship/rule/event elements that make it non-replaceable",
+                "- concrete_story_function: concrete details and asset usage have story_function; decorative detail without story function fails",
+                "- specificity_budget: concrete detail stays within the declared specificity budget",
+                "- canonical_event_coverage: required source/canonical/user-input events are assigned to scene ids and scene_event beat ids",
                 "- scene_character_state_timeline: each major character has start/mid/end states with face/gaze/posture/hands/feet/distance visible proof tied to scene_event beats",
                 "- scene_film_coverage_plan: shot_mix, action_reaction_pair, missing_coverage, and reaction/insert/eyeline/silence required_when rules are present",
                 "- turning_event_alignment: turning_event semantically matches scene_intent.causal_turn",

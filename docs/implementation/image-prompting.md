@@ -61,6 +61,8 @@ prompt 本文は画像生成 provider がそのまま描ける語だけで構成
 **構造化する → anchor を決める → reference を固定する → manifest をレビューする → story/script 整合を確認する → 画像生成する** である。
 camera は `30mm` のような数値単独で止めず、`広め / 中広角 / 寄り` と `前景 / 中景 / 背景`、そして「何を読ませるか」まで書く。
 
+構造化 artifact と API prompt は同一ではない。画像生成直前には final image prompt compiler / prompt editor を通し、`api_prompt` fence だけを provider 送信対象にする。`debug_prompt_source`、`first_frame_visual_plan`、`cut_contract`、`scene_event`、`motion_brief`、`api_prompt_payload` のような設計・debug 情報は request metadata / review artifact に残してよいが、prompt 本文に混ぜない。asset stage では特に、scene/cut first-frame prompt を流用せず、asset prompt source から `image_api_prompt_v1` の `api_prompt` を作る。
+
 加えて運用順は次の通り。
 
 0. asset stage が必要な run では、先に `asset_plan.md` を review / approve して reusable asset を作る

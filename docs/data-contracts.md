@@ -1691,6 +1691,8 @@ Canonical reason key:
 
 `video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。V3 の event beat 正本は `cut_contract.source_event_contract` であり、top-level `primary_event_beat_id` / `source_event_beat_ids` / `assigned_story_event_ids` や `scene_contract` alias だけでは V3 gate を pass しない。
 
+`viewer_contract.mixed_affect_design` は optional な感情設計レイヤーである。すべての cut に混合的感情を入れない。`mode: none` は有効な合格値で、`pressure` / `turn` / `payoff` / `reaction` / terminal cut など、正負感情の同時性、緊張から解放、bittersweet な余韻が scene の仕事を強める場合だけ `none` 以外を使う。採用する場合も primary intent は 1 つに保ち、視覚、ナレーション、音/リズム、handoff の少なくとも 1 つで具体的な支えを残す。
+
 ## Scene Event v1
 
 `video_manifest.md.scenes[].scene_event` / `script.md.scenes[].scene_event` を scene の出来事正本とする。`scene_intent` は scene が必要な理由、`scene_event` は実際に起きる出来事、`cut_contract` はその出来事をどう見せるかを表す。画像生成はステートレスなので、downstream には scene 全体を推測させず、cut が参照する beat だけを `event_context_for_cut` として渡す。
@@ -1802,6 +1804,20 @@ cut_contract:
     emotional_micro_shift:
       from: ""
       to: ""
+    mixed_affect_design:
+      mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+      optional: true
+      apply_when: []
+      positive_valence_thread: ""
+      negative_valence_thread: ""
+      arousal_strategy: "hold|rise|drop|spike|release"
+      audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+      design_intent: ""
+      visible_support: []
+      narration_support: []
+      sound_or_rhythm_support: []
+      handoff_effect: ""
+      avoid_if: []
     visual_proof: ""
     must_show: []
     must_avoid: []
@@ -1976,6 +1992,8 @@ Additional cut review reason keys:
 - cut_count_below_calculated_floor
 - cut_count_below_coverage_plan
 - coverage_plan_selected_below_floor
+- mixed_affect_support_missing
+- mixed_affect_overloads_primary_intent
 - prompt_leaks_motion_brief
 - image_prompt_action_window_missing
 - image_prompt_missing_not_yet_state

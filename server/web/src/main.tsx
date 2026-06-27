@@ -1779,8 +1779,8 @@ function App() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('image');
   const [viewKind, setViewKind] = useState<ViewKind>('asset');
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('asset');
-  const [candidateCount, setCandidateCount] = useState(2);
-  const [candidateCountDraft, setCandidateCountDraft] = useState(2);
+  const [candidateCount, setCandidateCount] = useState(1);
+  const [candidateCountDraft, setCandidateCountDraft] = useState(1);
   const [videoCandidateCount, setVideoCandidateCount] = useState(3);
   const [videoCandidateCountDraft, setVideoCandidateCountDraft] = useState(3);
   const [activeImageSceneKey, setActiveImageSceneKey] = useState('');
@@ -1913,6 +1913,9 @@ function App() {
   const imageDisplayItems = workspaceMode === 'image' && viewKind === 'scene'
     ? activeImageCutItem ? [activeImageCutItem] : []
     : visibleItems;
+  const imageBulkItems = workspaceMode === 'image' && viewKind === 'scene'
+    ? imageSceneItems
+    : visibleItems.filter((item) => item.executionLane !== 'existing_asset');
   const videoDisplayItems = workspaceMode === 'video' ? activeVideoScene?.items ?? [] : visibleItems;
   const displayedItemCount = workspaceMode === 'image' ? imageDisplayItems.length : workspaceMode === 'video' ? videoDisplayItems.length : visibleItems.length;
   const sceneCutItems = useMemo(() => items.filter(isSceneCutItem), [items]);
@@ -2021,6 +2024,16 @@ function App() {
     if (!runId) return;
     void loadRunRequests(runId, requestKind);
   }, [loadRunRequests, requestKind, runId]);
+
+  const refreshCurrentRun = useCallback(async () => {
+    if (!runId || busy) return;
+    try {
+      await loadRuns(runId);
+      await loadRunRequests(runId, requestKind);
+    } catch (error) {
+      console.error(error);
+    }
+  }, [busy, loadRunRequests, loadRuns, requestKind, runId]);
 
   useEffect(() => {
     if (!runId || !generationInFlight) return;
@@ -2199,8 +2212,6 @@ function App() {
     if (!runId) return;
     ensureItemsInState(targetItems);
     const targetIds = new Set(targetItems.map((item) => item.id));
-    const totalCandidates = targetItems.length * candidateCount;
-    const concurrency = Math.min(Math.max(totalCandidates, 1), 100);
     setBulkGenerating(true);
     setBulkTotal(targetIds.size);
     setBulkCompletedCount(0);
@@ -2210,26 +2221,35 @@ function App() {
     setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, generating: true, candidates: [] } : item)));
 
     try {
-      const data = await jsonFetch<BulkGenerateResponse>('/api/image-gen/generate-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          run_id: runId,
-          kind: viewKind,
-          items: targetItems.map((item) => ({
+      const requestItems = targetItems.map((item) => ({
+        run_id: runId,
+        kind: viewKind,
+        item_id: item.id,
+        prompt: item.draftPrompt,
+        prompt_policy_version: item.promptPolicyVersion || null,
+        debug_prompt_source: item.debugPromptSource || {},
+        references: item.selectedReferences.map((ref) => ref.path),
+        candidate_count: candidateCount,
+      }));
+      const maxCandidatesPerBulkRequest = 100;
+      const maxItemsPerBulkRequest = Math.max(1, Math.floor(maxCandidatesPerBulkRequest / Math.max(candidateCount, 1)));
+      const allResults: CandidatesResponse[] = [];
+      for (let start = 0; start < requestItems.length; start += maxItemsPerBulkRequest) {
+        const batchItems = requestItems.slice(start, start + maxItemsPerBulkRequest);
+        const batchCandidateTotal = batchItems.reduce((sum, item) => sum + item.candidate_count, 0);
+        const data = await jsonFetch<BulkGenerateResponse>('/api/image-gen/generate-bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
             run_id: runId,
             kind: viewKind,
-            item_id: item.id,
-            prompt: item.draftPrompt,
-            prompt_policy_version: item.promptPolicyVersion || null,
-            debug_prompt_source: item.debugPromptSource || {},
-            references: item.selectedReferences.map((ref) => ref.path),
-            candidate_count: candidateCount,
-          })),
-          concurrency,
-        }),
-      });
-      const resultsById = new Map(data.results.map((result) => [result.itemId, result]));
+            items: batchItems,
+            concurrency: Math.min(Math.max(batchCandidateTotal, 1), 100),
+          }),
+        });
+        allResults.push(...data.results);
+      }
+      const resultsById = new Map(allResults.map((result) => [result.itemId, result]));
       let completed = 0;
       let failed = 0;
       setItems((prev) =>
@@ -2272,7 +2292,7 @@ function App() {
   }, [candidateCount, ensureItemsInState, runId, viewKind]);
 
   const generateBulk = async () => {
-    await generateItems([...visibleItems]);
+    await generateItems([...imageBulkItems]);
   };
 
   const downloadZip = async () => {
@@ -3168,8 +3188,8 @@ function App() {
                   <AddIcon />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="出力フォルダを再読み込み">
-                <IconButton onClick={() => window.location.reload()} color="primary" aria-label="出力フォルダを再読み込み" disabled={generationInFlight}>
+              <Tooltip title="現在の出力を再取得">
+                <IconButton onClick={refreshCurrentRun} color="primary" aria-label="現在の出力を再取得" disabled={!runId || busy}>
                   <RefreshIcon />
                 </IconButton>
               </Tooltip>
@@ -3230,13 +3250,13 @@ function App() {
                   </Stack>
                   <Slider
                     className="countSlider"
-                    min={2}
+                    min={1}
                     max={16}
                     step={0.1}
                     value={candidateCountDraft}
                     valueLabelDisplay="auto"
                     valueLabelFormat={(value) => `${Math.round(value)}候補`}
-                    shiftStep={2}
+                    shiftStep={1}
                     onChange={(_, value) => setCandidateCountDraft(value as number)}
                     onChangeCommitted={(_, value) => {
                       const nextCount = Math.round(value as number);
@@ -3244,7 +3264,7 @@ function App() {
                       setCandidateCountDraft(nextCount);
                     }}
                     marks={[
-                      { value: 2, label: '2' },
+                      { value: 1, label: '1' },
                       { value: 8, label: '8' },
                       { value: 16, label: '16' },
                     ]}
@@ -3588,7 +3608,7 @@ function App() {
               </Button>
               {workspaceMode === 'image' ? (
                 <>
-                  <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={generateBulk} disabled={!visibleItems.length || bulkGenerating}>
+                  <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={generateBulk} disabled={!imageBulkItems.length || bulkGenerating}>
                     一括生成
                   </Button>
                   <Button variant="outlined" startIcon={<DownloadIcon />} onClick={downloadZip}>

@@ -57,6 +57,12 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - 各 scene は `purpose / conflict / turn / affect / visualizable_action / grounding_note` を持ち、単なる一行要約で終わらせない
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
 - 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
+- 後続の `scene_event` では、抽象的な `dramatic_question / value_shift / causal_turn` を残しつつ、各 event beat が `abstract_function / concrete_event / story_grounding` を持つ前提で source story を渡す
+- 後続の scene 生成では `scene_authoring_context / scene_prompt_payload / scene_debug_prompt_source / scene_generation_contract` を分離し、実行正本は `scenes[].scene_generation.scene_prompt_payload.prompt` とする
+- `scene_prompt_payload` は scene 正本生成だけに使い、first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。cut/image/video は `scene_event` と `scene_cut_coverage_plan` から逆算する
+- `concrete_event` は人物・場所・関係性・小道具・ルール・視覚証拠のうち、その物語で置換できない要素へ接地する。抽象表現は禁止しないが、抽象だけで終わる scene は不可
+- 具体ディテールは `story_function` を持つものに限る。装飾的な小物や背景描写を、source grounding なしに story fact のように扱わない
+- 原典・既知筋・ユーザー入力の重要出来事は `canonical_event_coverage_matrix` で scene / event beat へ割り当て、欠落・順序破壊・承認なしの発明を review gate にする
 - 矛盾するソースを混成する場合は、hybridization gate でユーザー承認を得ている
 - 下流の prompt 設計で `1 clip = 1意図` に分けられる scene 意図が残っている
 

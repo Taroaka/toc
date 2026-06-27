@@ -41,6 +41,20 @@ cuts:
     visual_evidence: []
     required_roles: []
     anti_redundancy_key: ""
+    emotional_micro_shift:
+      from: ""
+      to: ""
+    mixed_affect_design:
+      mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+      optional: true
+      positive_valence_thread: ""
+      negative_valence_thread: ""
+      arousal_strategy: "hold|rise|drop|spike|release"
+      audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+      visible_support: []
+      narration_support: []
+      sound_or_rhythm_support: []
+      handoff_effect: ""
     static_first_frame_rule: ""
     receives_from_previous:
       visual: ""

@@ -34,8 +34,15 @@ def collect_entries(
     scenes = _extract_scenes(data)
 
     if stage in {"scene_set", "scene_detail"}:
+        canonical_event_coverage_matrix = _dict_value(data.get("canonical_event_coverage_matrix"))
         return [
-            _scene_entry(stage=stage, scene=scene, scene_index=index, source_path=source_path)
+            _scene_entry(
+                stage=stage,
+                scene=scene,
+                scene_index=index,
+                source_path=source_path,
+                canonical_event_coverage_matrix=canonical_event_coverage_matrix,
+            )
             for index, scene in enumerate(scenes)
         ]
 
@@ -90,6 +97,7 @@ def _scene_entry(
     scene: dict[str, Any],
     scene_index: int,
     source_path: str,
+    canonical_event_coverage_matrix: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scene_id = _text(scene.get("scene_id"), default=str(scene_index + 1))
     cuts = _list_value(scene.get("cuts"))
@@ -117,7 +125,9 @@ def _scene_entry(
         "normalized_semantic_contract": normalized_contract,
         "contract_required_fields_missing": missing_fields,
         "scene_intent": scene.get("scene_intent"),
+        "scene_generation": scene.get("scene_generation"),
         "scene_event": scene.get("scene_event"),
+        "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
         "scene_character_state_timeline": scene.get("scene_character_state_timeline"),
         "scene_film_coverage_plan": scene.get("scene_film_coverage_plan"),
         "coverage_review": scene.get("coverage_review"),

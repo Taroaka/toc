@@ -266,6 +266,9 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- value_shift_visibility: value shift is visible",
                     "- causal_turn_visibility: causal turn is visible",
                     "- scene_event_sequence: setup, pressure, turn, and payoff are present",
+                    "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details",
+                    "- scene_generation_debug_source: source beats and adaptation choices are recorded",
+                    "- scene_generation_contract: required scene outputs are declared",
                     "- scene_character_state_timeline: start/mid/end visible behavior is present",
                     "- scene_film_coverage_plan: shot/action-reaction/missing coverage and required_when rules are present",
                     "- turning_event_alignment: turning_event matches scene_intent.causal_turn",
@@ -415,54 +418,121 @@ def _valid_scene_intent_lines(topic: str, scene_idx: int, *, terminal: bool, ind
 
 
 def _valid_scene_event_lines(topic: str, scene_idx: int, *, indent: str = "      ") -> list[str]:
-    return [
+    source_beat_id = f"story_scene{scene_idx}_departure"
+    beat_specs = [
+        (
+            "setup",
+            f"{topic}が村道に立ち、腰の袋と伸びる道が見える",
+            f"{topic}が村道の入口で足を止める",
+            "村人が黙って見守る",
+            "旅立ちの圧力が画面に生まれる",
+            "ためらいと責務が同時に見える",
+            ["村道", "旅袋", "村人の視線"],
+            "departure_pressure",
+        ),
+        (
+            "pressure",
+            f"霧の道と沈黙が{topic}に後戻りできない圧力をかける",
+            f"{topic}が袋を握る手に力を入れる",
+            "道端の子どもが息をのむ",
+            "迷いが行為へ変わり始める",
+            "見えない敵への不安が高まる",
+            ["握られた袋", "霧", "止まった足"],
+            "choice_pressure",
+        ),
+        (
+            "turn",
+            f"{topic}が袋を握り直し、村道を越える決断を行動にする",
+            f"{topic}が最初の一歩を前へ出す",
+            "村人の視線が足跡へ集まる",
+            "後戻りできない足跡が残る",
+            "不安が決意へ変わる",
+            ["一歩", "足跡", "握られた袋"],
+            "departure_decision",
+        ),
+        (
+            "payoff",
+            f"{topic}の足跡と前を向く姿が次の場面の理由になる",
+            f"{topic}が霧の先へ進む",
+            "村道に残った足跡が見える",
+            "次の移動が避けられなくなる",
+            "責務が継続する",
+            ["足跡", "前を向く姿", "霧の先の道"],
+            "departure_handoff",
+        ),
+    ]
+    lines = [
         f"{indent}scene_event:",
         f"{indent}  schema_version: \"scene_event_v1\"",
         f"{indent}  event_logline: \"{topic}が村道で迷いを越え、次へ進む証拠を残す\"",
         f"{indent}  start_situation: \"{topic}は村道で旅立ちをためらい、村人の視線を受けている\"",
-        f"{indent}  source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}  source_story_beat_ids: [\"{source_beat_id}\"]",
+        f"{indent}  story_specificity:",
+        f"{indent}    canonical_specificity: {{description: \"原典・ユーザー入力由来\", required_elements: [\"{topic}が村道を越えて旅立つ\"]}}",
+        f"{indent}    character_specificity: {{description: \"人物固有\", required_elements: [\"{topic}\"]}}",
+        f"{indent}    relationship_specificity: {{description: \"関係性固有\", required_elements: [\"{topic}と村人の責務関係\"]}}",
+        f"{indent}    object_specificity: {{description: \"小道具固有\", required_elements: [\"旅袋\"]}}",
+        f"{indent}    location_specificity: {{description: \"場所固有\", required_elements: [\"村道\"]}}",
+        f"{indent}    rule_specificity: {{description: \"物語ルール固有\", required_elements: [\"鬼との決着を先に見せない\"]}}",
+        f"{indent}    visual_specificity: {{description: \"視覚証拠固有\", required_elements: [\"足跡\", \"握られた袋\"]}}",
         f"{indent}  event_sequence:",
-        f"{indent}    - beat_id: \"scene{scene_idx}_event_setup\"",
-        f"{indent}      beat_function: \"setup\"",
-        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
-        f"{indent}      what_happens: \"{topic}が村道に立ち、腰の袋と伸びる道が見える\"",
-        f"{indent}      visible_action: \"{topic}が村道の入口で足を止める\"",
-        f"{indent}      visible_reaction: \"村人が黙って見守る\"",
-        f"{indent}      immediate_consequence: \"旅立ちの圧力が画面に生まれる\"",
-        f"{indent}      emotional_pressure: \"ためらいと責務が同時に見える\"",
-        f"{indent}      required_visual_evidence: [\"村道\", \"旅袋\", \"村人の視線\"]",
-        f"{indent}      story_information_revealed_ids: [\"departure_pressure\"]",
-        f"{indent}    - beat_id: \"scene{scene_idx}_event_pressure\"",
-        f"{indent}      beat_function: \"pressure\"",
-        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
-        f"{indent}      what_happens: \"霧の道と沈黙が{topic}に後戻りできない圧力をかける\"",
-        f"{indent}      visible_action: \"{topic}が袋を握る手に力を入れる\"",
-        f"{indent}      visible_reaction: \"道端の子どもが息をのむ\"",
-        f"{indent}      immediate_consequence: \"迷いが行為へ変わり始める\"",
-        f"{indent}      emotional_pressure: \"見えない敵への不安が高まる\"",
-        f"{indent}      required_visual_evidence: [\"握られた袋\", \"霧\", \"止まった足\"]",
-        f"{indent}      story_information_revealed_ids: [\"choice_pressure\"]",
-        f"{indent}    - beat_id: \"scene{scene_idx}_event_turn\"",
-        f"{indent}      beat_function: \"turn\"",
-        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
-        f"{indent}      what_happens: \"{topic}が袋を握り直し、村道を越える決断を行動にする\"",
-        f"{indent}      visible_action: \"{topic}が最初の一歩を前へ出す\"",
-        f"{indent}      visible_reaction: \"村人の視線が足跡へ集まる\"",
-        f"{indent}      immediate_consequence: \"後戻りできない足跡が残る\"",
-        f"{indent}      emotional_pressure: \"不安が決意へ変わる\"",
-        f"{indent}      required_visual_evidence: [\"一歩\", \"足跡\", \"握られた袋\"]",
-        f"{indent}      story_information_revealed_ids: [\"departure_decision\"]",
-        f"{indent}    - beat_id: \"scene{scene_idx}_event_payoff\"",
-        f"{indent}      beat_function: \"payoff\"",
-        f"{indent}      source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
-        f"{indent}      what_happens: \"{topic}の足跡と前を向く姿が次の場面の理由になる\"",
-        f"{indent}      visible_action: \"{topic}が霧の先へ進む\"",
-        f"{indent}      visible_reaction: \"村道に残った足跡が見える\"",
-        f"{indent}      immediate_consequence: \"次の移動が避けられなくなる\"",
-        f"{indent}      emotional_pressure: \"責務が継続する\"",
-        f"{indent}      required_visual_evidence: [\"足跡\", \"前を向く姿\", \"霧の先の道\"]",
-        f"{indent}      story_information_revealed_ids: [\"departure_handoff\"]",
-        f"{indent}  turning_event:",
+    ]
+    for function, what, action, reaction, consequence, pressure, evidence, reveal_id in beat_specs:
+        beat_id = f"scene{scene_idx}_event_{function}"
+        evidence_yaml = json.dumps(evidence, ensure_ascii=False)
+        lines.extend(
+            [
+                f"{indent}    - beat_id: \"{beat_id}\"",
+                f"{indent}      beat_function: \"{function}\"",
+                f"{indent}      source_story_beat_ids: [\"{source_beat_id}\"]",
+                f"{indent}      abstract_function:",
+                f"{indent}        dramatic_job: \"{function}として観客理解を進める\"",
+                f"{indent}        value_shift_role: \"受け身から責務へ\"",
+                f"{indent}        emotional_pressure_role: \"{pressure}\"",
+                f"{indent}        causal_role: \"{consequence}\"",
+                f"{indent}      concrete_event:",
+                f"{indent}        who: [\"{topic}\", \"村人\"]",
+                f"{indent}        where: \"村道\"",
+                f"{indent}        what_happens: \"{what}\"",
+                f"{indent}        conflict_or_constraint: \"村人の視線と鬼への責務が{topic}を後戻りできなくする\"",
+                f"{indent}        object_or_trace: [\"旅袋\", \"足跡\"]",
+                f"{indent}        visible_action: \"{action}\"",
+                f"{indent}        visible_reaction: \"{reaction}\"",
+                f"{indent}        immediate_consequence: \"{consequence}\"",
+                f"{indent}        required_visual_evidence: {evidence_yaml}",
+                f"{indent}      story_grounding:",
+                f"{indent}        source_origin: \"canonical_reference\"",
+                f"{indent}        source_story_beat_ids: [\"{source_beat_id}\"]",
+                f"{indent}        source_confidence: \"high\"",
+                f"{indent}        source_text_or_summary: \"{what}\"",
+                f"{indent}        adaptation_reason: \"旅立ちの出来事を静止画で読める物理証拠へ変換する\"",
+                f"{indent}        human_approval_required: false",
+                f"{indent}        non_replaceable_elements:",
+                f"{indent}          - {{element_id: \"protagonist\", type: \"character\", value: \"{topic}\", why_non_replaceable: \"この人物の責務がsceneの因果を作る\"}}",
+                f"{indent}          - {{element_id: \"kibidango_bag\", type: \"object\", value: \"旅袋\", why_non_replaceable: \"旅立ちと仲間獲得の証拠になる\"}}",
+                f"{indent}          - {{element_id: \"village_road\", type: \"location\", value: \"村道\", why_non_replaceable: \"越境の境界として働く\"}}",
+                f"{indent}        replaceability_check: {{would_survive_character_swap: false, would_survive_object_swap: false, would_survive_location_swap: false, note: \"人物・袋・村道を置換すると桃太郎の旅立ちではなくなる\"}}",
+                f"{indent}        concrete_story_elements:",
+                f"{indent}          - {{element_id: \"protagonist_state\", element_type: \"character\", concrete_description: \"{topic}\", story_function: \"status_marker\", appears_in_event_beat_ids: [\"{beat_id}\"], visible_form: \"表情・視線・手足\", must_not_be_generic: true}}",
+                f"{indent}          - {{element_id: \"kibidango_bag\", element_type: \"object\", concrete_description: \"旅袋\", story_function: \"proof\", appears_in_event_beat_ids: [\"{beat_id}\"], visible_form: \"握られた袋\", must_not_be_generic: true}}",
+                f"{indent}          - {{element_id: \"village_road\", element_type: \"location\", concrete_description: \"村道\", story_function: \"threshold\", appears_in_event_beat_ids: [\"{beat_id}\"], visible_form: \"入口と足跡\", must_not_be_generic: true}}",
+                f"{indent}        asset_story_function_usage:",
+                f"{indent}          - {{asset_id: \"momotaro\", asset_type: \"character\", used_in_scene: true, used_in_event_beat_ids: [\"{beat_id}\"], story_function_in_scene: \"status_marker\", visible_or_hidden: \"visible\", reason_if_unused: \"\"}}",
+                f"{indent}          - {{asset_id: \"village_road\", asset_type: \"location\", used_in_scene: true, used_in_event_beat_ids: [\"{beat_id}\"], story_function_in_scene: \"threshold\", visible_or_hidden: \"visible\", reason_if_unused: \"\"}}",
+                f"{indent}        confidence: \"high\"",
+                f"{indent}      specificity_budget: {{max_primary_story_elements: 3, max_secondary_story_elements: 3, required_element_types: [\"character\", \"location\", \"conflict_or_constraint\", \"visual_evidence\"], optional_element_types: [\"object\"], reject_if: [\"decorative_detail_without_story_function\"], reject_decorative_detail_without_story_function: true}}",
+                f"{indent}      what_happens: \"{what}\"",
+                f"{indent}      visible_action: \"{action}\"",
+                f"{indent}      visible_reaction: \"{reaction}\"",
+                f"{indent}      immediate_consequence: \"{consequence}\"",
+                f"{indent}      emotional_pressure: \"{pressure}\"",
+                f"{indent}      required_visual_evidence: {evidence_yaml}",
+                f"{indent}      story_information_revealed_ids: [\"{reveal_id}\"]",
+            ]
+        )
+    lines.extend(
+        [
+            f"{indent}  turning_event:",
         f"{indent}    source_event_beat_id: \"scene{scene_idx}_event_turn\"",
         f"{indent}    causal_turn_ref: \"scene_intent.causal_turn\"",
         f"{indent}    irreversible_change: \"{topic}が旅立ちを身体行為として確定する\"",
@@ -476,6 +546,60 @@ def _valid_scene_event_lines(topic: str, scene_idx: int, *, indent: str = "     
         f"{indent}    visible_evidence_refs: [\"scene{scene_idx}_event_payoff\"]",
         f"{indent}  offscreen_context: [\"鬼との決着はまだ起きていない\"]",
         f"{indent}  forbidden_event_changes: [\"鬼との決着をこのsceneで起こさない\", \"勝利の証拠を見せない\"]",
+        f"{indent}  specificity_budget: {{max_primary_story_elements: 3, max_secondary_story_elements: 3, required_element_types: [\"character\", \"location\", \"conflict_or_constraint\", \"visual_evidence\"], optional_element_types: [\"object\"], reject_if: [\"decorative_detail_without_story_function\"], reject_decorative_detail_without_story_function: true}}",
+        ]
+    )
+    return lines
+
+
+def _valid_scene_generation_lines(topic: str, scene_idx: int, *, indent: str = "      ") -> list[str]:
+    return [
+        f"{indent}scene_generation:",
+        f"{indent}  schema_version: \"scene_generation_v1\"",
+        f"{indent}  scene_authoring_context:",
+        f"{indent}    schema_version: \"scene_authoring_context_v1\"",
+        f"{indent}    topic: \"{topic}\"",
+        f"{indent}    scene_id: {scene_idx}",
+        f"{indent}    scene_index: {scene_idx}",
+        f"{indent}    scene_title: \"{topic}が村道を越える\"",
+        f"{indent}    story_scope:",
+        f"{indent}      protagonist: \"{topic}\"",
+        f"{indent}      artifact: \"旅袋\"",
+        f"{indent}      theme: \"責務と越境\"",
+        f"{indent}      scene_titles: [\"{topic}が村道を越える\"]",
+        f"{indent}    source_beats:",
+        f"{indent}      - {{source_story_beat_id: \"story_scene{scene_idx}_departure\", summary: \"{topic}が村道を越えて旅立つ\", source_origin: \"canonical_reference\"}}",
+        f"{indent}    canonical_event_policy:",
+        f"{indent}      source_story_events: \"top-level canonical_event_coverage_matrix を参照\"",
+        f"{indent}      scene_specificity: \"source beat を具体出来事へ接地する\"",
+        f"{indent}    scene_count_policy:",
+        f"{indent}      maximize_meaningful_scene_count: true",
+        f"{indent}      do_not_fix_cut_count_in_prompt: true",
+        f"{indent}      cut_count_is_derived_by: \"scene_cut_coverage_plan\"",
+        f"{indent}  scene_prompt_payload:",
+        f"{indent}    schema_version: \"scene_prompt_payload_v1\"",
+        f"{indent}    prompt: \"物語『{topic}』の scene{scene_idx} を設計する。目的は絵を直接描くことではなく、この scene が物語内で何を成立させるかを正本化すること。必須 source beat を setup / pressure / turn / payoff の具体出来事へ接地し、scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, scene_cut_coverage_plan, forbidden_event_changes を出力する。後段の画像・音声・動画実行情報は含めず、必要な scene obligation と event beat の対応だけを明確にする。\"",
+        f"{indent}    input_refs: [\"story.md\", \"research.md\", \"visual_value.md\", \"canonical_event_coverage_matrix\", \"asset_bible\"]",
+        f"{indent}    required_outputs: [\"scene_intent\", \"scene_event\", \"scene_character_state_timeline\", \"scene_film_coverage_plan\", \"scene_cut_coverage_plan\", \"forbidden_event_changes\"]",
+        f"{indent}    constraints:",
+        f"{indent}      - \"scene 正本生成だけに使う\"",
+        f"{indent}      - \"後段の画像・音声・動画実行情報を含めない\"",
+        f"{indent}      - \"scene_event は物語事実に限定する\"",
+        f"{indent}  scene_debug_prompt_source:",
+        f"{indent}    schema_version: \"scene_debug_prompt_source_v1\"",
+        f"{indent}    not_sent_to_agent: true",
+        f"{indent}    source_story_beat_ids: [\"story_scene{scene_idx}_departure\"]",
+        f"{indent}    source_beats: [\"{topic}が村道を越えて旅立つ\"]",
+        f"{indent}    source_origin: \"canonical_reference\"",
+        f"{indent}    adaptation_choices: [\"source beat を setup / pressure / turn / payoff の可視出来事へ分解する\"]",
+        f"{indent}    excluded_from_payload: [\"後段の画像生成詳細\", \"後段の動画生成詳細\", \"後段の音声生成詳細\"]",
+        f"{indent}    forbidden_event_changes_source: \"scene_event.forbidden_event_changes\"",
+        f"{indent}  scene_generation_contract:",
+        f"{indent}    schema_version: \"scene_generation_contract_v1\"",
+        f"{indent}    required_outputs: [\"scene_intent\", \"scene_event\", \"scene_character_state_timeline\", \"scene_film_coverage_plan\", \"scene_cut_coverage_plan\", \"forbidden_event_changes\"]",
+        f"{indent}    scene_event_schema_version: \"scene_event_v1\"",
+        f"{indent}    must_preserve_order: [\"scene_intent\", \"scene_event\", \"scene_character_state_timeline\", \"scene_film_coverage_plan\", \"scene_cut_coverage_plan\"]",
+        f"{indent}    payload_boundary: \"scene_prompt_payload は scene 正本生成だけに使う\"",
     ]
 
 
@@ -561,6 +685,21 @@ def _write_valid_immersive_p400_pair(
         "scene_set_review: {status: \"approved\"}",
         "scene_detail_review: {status: \"approved\"}",
         "cut_blueprint_review: {status: \"approved\"}",
+        "canonical_event_coverage_matrix:",
+        "  policy_version: \"canonical_event_coverage_matrix_v1\"",
+        "  source: [\"test_fixture\"]",
+        "  source_story_events:",
+        "    - source_event_id: \"source_event_01\"",
+        "      source_event_summary: \"桃太郎が村道を越えて旅立つ\"",
+        "      importance: \"critical\"",
+        "      required: true",
+        "      must_appear_as: \"scene\"",
+        "      canonical_order_index: 1",
+        "      assigned_scene_ids: [1]",
+        "      assigned_event_beat_ids: [\"scene1_event_turn\"]",
+        "      omission_reason: \"\"",
+        "      adaptation_change_reason: \"fixture\"",
+        "      human_approval_required: false",
         "script:",
         "  scenes:",
     ]
@@ -571,6 +710,21 @@ def _write_valid_immersive_p400_pair(
         "  topic: \"桃太郎\"",
         "  experience: \"cinematic_story\"",
         f"  target_duration_seconds: {target_duration}",
+        "canonical_event_coverage_matrix:",
+        "  policy_version: \"canonical_event_coverage_matrix_v1\"",
+        "  source: [\"test_fixture\"]",
+        "  source_story_events:",
+        "    - source_event_id: \"source_event_01\"",
+        "      source_event_summary: \"桃太郎が村道を越えて旅立つ\"",
+        "      importance: \"critical\"",
+        "      required: true",
+        "      must_appear_as: \"scene\"",
+        "      canonical_order_index: 1",
+        "      assigned_scene_ids: [1]",
+        "      assigned_event_beat_ids: [\"scene1_event_turn\"]",
+        "      omission_reason: \"\"",
+        "      adaptation_change_reason: \"fixture\"",
+        "      human_approval_required: false",
         "scenes:",
     ]
 
@@ -698,6 +852,12 @@ def _write_valid_immersive_p400_pair(
             f"            event_beat_function: \"{beat_function}\"",
             "            event_time_position: \"before_trigger\"",
             f"            source_event_summary: \"{what_happens}\"",
+            f"            source_concrete_events:",
+            f"              - {{who: [\"桃太郎\"], where: \"村道\", what_happens: \"{what_happens}\", conflict_or_constraint: \"村人の視線と鬼への責務\", visible_action: \"{visible_action}\", visible_reaction: \"{visible_reaction}\", required_visual_evidence: {json.dumps(visual_evidence, ensure_ascii=False)}}}",
+            f"            source_story_grounding:",
+            f"              - {{source_origin: \"canonical_reference\", source_story_beat_ids: [\"story_scene{scene_idx}_departure\"], source_text_or_summary: \"{what_happens}\", non_replaceable_elements: [{{element_id: \"protagonist\", type: \"character\", value: \"桃太郎\", why_non_replaceable: \"旅立ちの主体\"}}], concrete_story_elements: [{{element_id: \"village_road\", element_type: \"location\", concrete_description: \"村道\", story_function: \"threshold\", appears_in_event_beat_ids: [\"{beat_id}\"], visible_form: \"入口と足跡\"}}], asset_story_function_usage: [{{asset_id: \"momotaro\", asset_type: \"character\", story_function_in_scene: \"status_marker\", visible_or_hidden: \"visible\"}}]}}",
+            f"            source_non_replaceable_elements:",
+            f"              - {{element_id: \"protagonist\", type: \"character\", value: \"桃太郎\", why_non_replaceable: \"旅立ちの主体\"}}",
             f"            source_visible_action: \"{visible_action}\"",
             f"            source_visible_reaction: \"{visible_reaction}\"",
             f"            source_required_visual_evidence: {json.dumps(visual_evidence, ensure_ascii=False)}",
@@ -871,6 +1031,7 @@ def _write_valid_immersive_p400_pair(
                 "      coverage_review: {audience_information_covered: true, visualizable_action_covered: true, value_shift_visible: true, causal_turn_visible: true, scene_specificity_gate_passed: true, next_scene_connection_checked: true}",
                 "      research_refs: [\"research.story_baseline.canonical_synopsis\"]",
                 *_valid_scene_intent_lines("桃太郎", scene_idx, terminal=terminal),
+                *_valid_scene_generation_lines("桃太郎", scene_idx),
                 *_valid_scene_event_lines("桃太郎", scene_idx),
                 *_valid_scene_emotion_film_lines("桃太郎", scene_idx),
                 *[line.replace("    ", "      ", 1) for line in coverage_plan_lines(scene_idx)],
@@ -886,6 +1047,7 @@ def _write_valid_immersive_p400_pair(
                 "    target_duration_seconds: 30",
                 "    estimated_duration_seconds: 30",
                 "    scene_composite_review: {status: \"passed\", scene_obligation_covered_by_cut_group: true, no_duplicate_story_fact_without_new_evidence: true, scene_meaning_visualized_across_cuts: true, blocking_reason_keys: []}",
+                *_valid_scene_generation_lines("桃太郎", scene_idx, indent="    "),
                 *_valid_scene_event_lines("桃太郎", scene_idx, indent="    "),
                 *_valid_scene_emotion_film_lines("桃太郎", scene_idx, indent="    "),
                 *coverage_plan_lines(scene_idx),
@@ -1562,6 +1724,94 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(stage["passed"])
             self.assertIn("script.scene_event_exists", stage["reason_keys"])
 
+    def test_script_evaluator_requires_scene_generation_payload(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c2"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0].pop("scene_generation", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_generation_payload_exists", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_scene_generation_downstream_payload_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c3"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_generation"]["scene_prompt_payload"]["first_frame_brief"] = "漏れ"
+            data["script"]["scenes"][0]["scene_generation"]["scene_prompt_payload"]["prompt"] += " motion_brief"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_prompt_payload_no_downstream_fields", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_scene_generation_image_directing_terms(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c4"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_generation"]["scene_prompt_payload"]["prompt"] += " camera lens framing"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_prompt_payload_no_image_directing_terms", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_scene_generation_fixed_cut_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c5"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_generation"]["scene_prompt_payload"]["prompt"] += " cut_count: 4"
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_prompt_payload_no_fixed_cut_count", stage["reason_keys"])
+
+    def test_script_evaluator_requires_scene_generation_contract_outputs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c6"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            outputs = data["script"]["scenes"][0]["scene_generation"]["scene_generation_contract"]["required_outputs"]
+            data["script"]["scenes"][0]["scene_generation"]["scene_generation_contract"]["required_outputs"] = [
+                output for output in outputs if output != "scene_event"
+            ]
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_generation_contract_complete", stage["reason_keys"])
+
+    def test_script_evaluator_requires_scene_generation_debug_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_generation_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014c7"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_generation"].pop("scene_debug_prompt_source", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_debug_prompt_source_exists", stage["reason_keys"])
+
     def test_script_evaluator_requires_complete_scene_event_sequence(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0014d"
@@ -1579,6 +1829,65 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(stage["passed"])
             self.assertIn("script.scene_event_sequence_complete", stage["reason_keys"])
             self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_requires_scene_event_story_grounding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_grounding_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014d2"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data["script"]["scenes"][0]["scene_event"]["event_sequence"][0].pop("story_grounding", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_story_specific_grounding_complete", stage["reason_keys"])
+
+    def test_script_evaluator_requires_concrete_story_function(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_function_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014d3"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            element = data["script"]["scenes"][0]["scene_event"]["event_sequence"][0]["story_grounding"]["concrete_story_elements"][0]
+            element.pop("story_function", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_concrete_story_function_complete", stage["reason_keys"])
+
+    def test_script_evaluator_rejects_specificity_budget_overload(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_budget_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014d4"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            budget = data["script"]["scenes"][0]["scene_event"]["event_sequence"][0]["specificity_budget"]
+            budget["max_primary_story_elements"] = 1
+            budget["max_secondary_story_elements"] = 1
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.scene_event_specificity_budget_respected", stage["reason_keys"])
+
+    def test_script_evaluator_requires_canonical_event_coverage_matrix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_canonical_matrix_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014d5"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            data.pop("canonical_event_coverage_matrix", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.canonical_event_coverage_matrix_complete", stage["reason_keys"])
 
     def test_script_evaluator_rejects_duplicate_scene_event_beat_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
@@ -1670,6 +1979,23 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertFalse(stage["passed"])
             self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+
+    def test_script_evaluator_requires_cut_story_specificity_projection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_projection_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0014gfp"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_valid_immersive_p400_pair(run_dir)
+            data = _read_script_yaml(run_dir)
+            source_contract = data["script"]["scenes"][0]["cuts"][0]["cut_contract"]["source_event_contract"]
+            source_contract.pop("source_concrete_events", None)
+            source_contract.pop("source_story_grounding", None)
+            source_contract.pop("source_non_replaceable_elements", None)
+            _write_script_yaml(run_dir, data)
+
+            stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+
+            self.assertFalse(stage["passed"])
+            self.assertIn("script.source_story_specificity_projection", stage["reason_keys"])
 
     def test_script_evaluator_allows_empty_scene_event_context_lists(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:

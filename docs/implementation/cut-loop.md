@@ -81,6 +81,7 @@ Required areas:
 
 - `source_event_contract`: primary/source event beat ids, beat function, event time position, source action/reaction, facts to preserve, facts not to invent, reveal boundary.
 - `viewer_contract`: target beat, screen question, dramatic job, audience knowledge delta, causal proof, visual evidence, required roles, anti-redundancy key, visual proof, must-show, must-avoid, done-when.
+- `viewer_contract.mixed_affect_design`: optional layer for mixed emotion, tension/release, bittersweet payoff, or aftertaste. `mode: none` is valid; non-`none` modes need concrete visual, narration, sound/rhythm, or handoff support and must not add a second plot intent.
 - `cinematic_contract`: camera purpose, shot size, subject priority, foreground/midground/background, screen direction.
 - `continuity_contract`: start state, end state, carry-forward items, continuity risks.
 - `first_frame_contract`: p600-only still requirement, action completion state, and static first-frame rule. It must be an imageable state, not a motion description.
@@ -116,6 +117,7 @@ continuity_contract_complete
 narration_contract_complete
 downstream_handoff_complete
 triangulation_review_ready
+mixed_affect_optional_or_supported
 ```
 
 Do not pass p420 while any of these are unresolved.
@@ -157,4 +159,6 @@ New manifests should write V3 `cut_contract`. Legacy readers may read `scene_con
 - cut_role_duplicate
 - cut_downstream_handoff_missing
 - cut_triangulation_unready
+- mixed_affect_support_missing
+- mixed_affect_overloads_primary_intent
 ```

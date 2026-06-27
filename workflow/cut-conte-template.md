@@ -43,6 +43,17 @@ Use this template after p420 cut contracts are approved.
   - event_facts_to_preserve:
   - event_facts_not_to_invent:
 - anti_redundancy_key:
+- emotional_micro_shift:
+- mixed_affect_design:
+  - mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+  - positive_valence_thread:
+  - negative_valence_thread:
+  - arousal_strategy:
+  - audience_rollercoaster_job:
+  - visible_support:
+  - narration_support:
+  - sound_or_rhythm_support:
+  - handoff_effect:
 - visual_proof:
 - first_frame_brief:
 - static_first_frame_rule:

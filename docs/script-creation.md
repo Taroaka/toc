@@ -1775,6 +1775,23 @@ cut_contract:
     visual_evidence: []
     required_roles: []
     anti_redundancy_key: ""
+    emotional_micro_shift:
+      from: ""
+      to: ""
+    mixed_affect_design:
+      mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+      optional: true
+      apply_when: []
+      positive_valence_thread: ""
+      negative_valence_thread: ""
+      arousal_strategy: "hold|rise|drop|spike|release"
+      audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+      design_intent: ""
+      visible_support: []
+      narration_support: []
+      sound_or_rhythm_support: []
+      handoff_effect: ""
+      avoid_if: []
     reveal_constraints:
       inherited_from_scene: []
       allowed_reveals_in_this_cut: []
@@ -1895,6 +1912,7 @@ cut_contract:
 - さらに `ceil(target_duration_seconds / 8)` を下回らない。
 - 1 cut が 12 秒を超える場合は、意図的な hold / silence / spectacle である理由を残す。
 - spectacle / transformation / emotional reversal / proof reveal は `approach -> mechanism -> threshold -> reveal/payoff -> reaction -> handoff` に分ける。
+- mixed affect は全 cut 必須ではない。必要な pressure / turn / payoff / reaction / terminal cut だけ `mixed_affect_design.mode != none` にし、視覚・語り・音/リズム・handoff の支えを少なくとも 1 つ示す。
 
 ### Blocking Conditions
 
@@ -1907,3 +1925,4 @@ cut_contract:
 - turn の前に threshold がない。
 - turn / payoff の後に reaction がない。
 - 最終 cut が次 cut / 次 scene への handoff を持たない。
+- `mixed_affect_design.mode != none` なのに支えが抽象的、または primary intent を二重化している。

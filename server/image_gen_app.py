@@ -2202,15 +2202,6 @@ def _is_silent_role(contract: dict[str, Any]) -> bool:
     return role == "silent" or speakable is False
 
 
-def _fallback_narration_text(node: dict[str, Any], contract: dict[str, Any]) -> str:
-    explicit = _first_non_empty(contract.get("text"), contract.get("narration"), node.get("narration_text"))
-    if explicit:
-        return explicit
-    role = _first_non_empty(contract.get("role"), "emotion")
-    target = _first_non_empty(contract.get("target_function"), _cut_summary(node), "このcutの物語上の意味を補う")
-    return f"{target}。"
-
-
 def _narration_contract_payload(contract: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
     cut_contract = _dict_value(node.get("cut_contract"))
     source_event = _dict_value(cut_contract.get("source_event_contract"))
@@ -2260,6 +2251,11 @@ def _elevenlabs_prompt_payload(*, text: str, scene: dict[str, Any], node: dict[s
         "stability": "creative",
         "materialized": materialized,
     }
+
+
+def _pending_elevenlabs_prompt_payload(*, scene: dict[str, Any], node: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    payload = _elevenlabs_prompt_payload(text="", scene=scene, node=node, contract=contract)
+    return {**payload, "materialized": ""}
 
 
 def _silence_contract_payload(contract: dict[str, Any], *, confirmed_by_human: bool = False, reason: str | None = None) -> dict[str, Any]:
@@ -2392,7 +2388,8 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
     targets = _manifest_scene_targets(data)
     if not targets:
         raise ValueError("video_manifest.md has no scene cuts")
-    _validate_scene_image_outputs_ready(run_dir, data)
+    if not replace:
+        _validate_scene_image_outputs_ready(run_dir, data)
     _backup_run_file(run_dir, "video_manifest.md", label="before_narration_drafts_create")
     targets_by_scene: dict[int, list[dict[str, Any]]] = {}
     for target in targets:
@@ -2417,20 +2414,22 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
         source_event_contract = _dict_value(cut_contract.get("source_event_contract"))
         event_context = _dict_value(cut_contract.get("event_context_for_cut"))
         is_silent = _is_silent_role(contract)
-        text = "" if is_silent else _fallback_narration_text(node, contract)
-        elevenlabs_prompt = _elevenlabs_prompt_payload(text=text, scene=scene, node=node, contract=contract) if not is_silent else {
+        text = ""
+        elevenlabs_prompt = _pending_elevenlabs_prompt_payload(scene=scene, node=node, contract=contract) if not is_silent else {
             "spoken_context": _scene_logline(scene),
             "voice_tags": [],
             "spoken_body": "",
             "stability": "creative",
             "materialized": "",
         }
-        tts_text = "" if is_silent else _first_non_empty(contract.get("tts_text"), elevenlabs_prompt.get("materialized"), text)
+        tts_text = ""
         output = str(previous.get("output") or _default_narration_output_for_target(target)).strip()
         narration = {
             **previous,
-            "status": "review_pending",
-            "source": "p710_p720_narration_drafts_create",
+            "status": "",
+            "authoring_status": "silent" if is_silent else "missing",
+            "missing_reason": "" if is_silent else "p700_narration_not_written_yet",
+            "source": "p710_narration_contract_prepare",
             "source_cut_contract_version": str(cut_contract.get("schema_version") or ""),
             "source_event_contract_hash": _json_hash(source_event_contract),
             "event_context_hash": _json_hash(event_context),
@@ -2449,10 +2448,10 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
             "tool": "silent" if is_silent else str(previous.get("tool") or "elevenlabs"),
             "output": "" if is_silent else output,
             "review": {
-                "status": "pending",
+                "status": "",
                 "human_review_ok": False,
                 "approved_at": "",
-                "note": "frontend review required before p800",
+                "note": "p700 narration writer must author text before frontend TTS review",
             },
             "normalize_to_scene_duration": False,
         }
@@ -2466,16 +2465,16 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
         run_dir / "state.txt",
         {
             "status": "P720",
-            "runtime.stage": "narration_text_ready_for_frontend_review",
+            "runtime.stage": "narration_contract_ready_p700_text_missing",
             "slot.p710.status": "done",
             "slot.p710.note": "narration grounding and scene_narration_plan created from video_manifest",
-            "slot.p720.status": "awaiting_approval",
-            "slot.p720.note": "narration text drafts ready for frontend TTS review",
+            "slot.p720.status": "pending",
+            "slot.p720.note": "awaiting p700 narration writer before frontend TTS review",
             "slot.p730.status": "pending",
             "slot.p740.status": "pending",
             "slot.p750.status": "pending",
-            "stage.narration.status": "awaiting_frontend_review",
-            "review.narration.status": "pending",
+            "stage.narration.status": "authoring_missing",
+            "review.narration.status": "not_started",
             "gate.narration_review": "required",
             "artifact.narration_authoring_report": report_path.relative_to(run_dir).as_posix(),
         },
@@ -6273,7 +6272,11 @@ def _write_scene_detail_shard_artifacts(
                 "",
                 f"Write the final report to `{report_path}` and replace the pending template.",
                 "",
-                "Gate this scene_detail entry on scene necessity, internal pressure, value_shift visibility, causal_turn visibility, scene_event sequence, turning_event/end_situation alignment, cut summary support, reveal order, and neighbor handoff.",
+                "Gate this scene_detail entry on scene necessity, internal pressure, value_shift visibility, causal_turn visibility, scene_event sequence, scene_generation prompt separation, story-specific concrete grounding, non_replaceable_elements, concrete detail story_function, source grounding confidence, canonical event coverage, turning_event/end_situation alignment, cut summary support, reveal order, and neighbor handoff.",
+                "Treat `scene_generation.scene_prompt_payload.prompt` as the canonical scene authoring prompt. This review prompt is only a display/review artifact, not the scene generation canon.",
+                "Fail if scene_prompt_payload mixes downstream image/video/audio execution details, fixed cut count, or image directing terms instead of describing what the scene must establish in the story.",
+                "Do not reject useful abstract dramatic language by itself. Reject only when abstraction is not paired with concrete_event / story_grounding that comes from source story, user input, canonical reference, or asset bible.",
+                "Treat decorative concrete detail without story_function, asset names mentioned without story function, invented_candidate details without approval, and missing required canonical events as gate failures.",
                 "Do not require a fixed cut count. Judge whether this scene's actual visual obligations are sufficiently represented by its cut summaries and contracts.",
                 "Do not fail solely because generated image/video/audio files do not exist yet.",
                 "",
@@ -6283,7 +6286,7 @@ def _write_scene_detail_shard_artifacts(
                 "blocked_entries: [...]",
                 "findings: [...]",
                 "failed_selectors: [...]",
-                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|scene_detail_obligation_missing|scene_detail_cut_support_weak|scene_detail_handoff_weak|...]",
+                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|scene_detail_obligation_missing|scene_detail_cut_support_weak|scene_detail_handoff_weak|scene_generation_payload_missing|scene_generation_payload_downstream_leak|scene_generation_payload_fixed_cut_count|scene_generation_debug_source_missing|scene_generation_contract_mismatch|scene_event_abstract_only|scene_event_concrete_but_not_story_specific|scene_event_concrete_but_decorative|scene_event_missing_non_replaceable_elements|scene_event_missing_source_grounding|scene_event_source_grounding_low_confidence|scene_event_missing_character_relationship_specificity|scene_event_missing_story_rule_specificity|scene_event_missing_object_story_function|scene_event_asset_mentioned_without_story_function|scene_event_canonical_event_missing|scene_event_canonical_order_broken|scene_event_invented_detail_without_approval|scene_event_specificity_overloaded|...]",
                 "notes: [...]",
                 "",
                 f"Run dir: `{run_dir.resolve()}`",

@@ -553,6 +553,25 @@ scenes:
             visual_evidence: []
             required_roles: []
             anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
+            emotional_micro_shift:
+              from: ""
+              to: ""
+            mixed_affect_design:
+              mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+              optional: true
+              apply_when: []
+              positive_valence_thread: ""
+              negative_valence_thread: ""
+              arousal_strategy: "hold|rise|drop|spike|release"
+              audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+              design_intent: ""
+              visible_support: []
+              narration_support: []
+              sound_or_rhythm_support: []
+              handoff_effect: ""
+              avoid_if:
+                - "1 cut = 1 intent を壊す"
+                - "scene_event にない事実を足す"
             visual_proof: "映像だけで target_beat が成立したと分かる証拠"
             must_show: []
             must_avoid: []

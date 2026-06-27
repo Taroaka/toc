@@ -620,6 +620,7 @@ def _write_downstream_generation_artifacts(run_dir: Path) -> None:
 - reference_count: `0`
 - review_status: `approved`
 - creation_status: `created`
+- prompt_policy_version: `image_api_prompt_v1`
 - source_script_selectors:
   - `scene10_cut1`
 - required_views:
@@ -629,7 +630,7 @@ def _write_downstream_generation_artifacts(run_dir: Path) -> None:
 - output: `assets/characters/momotaro_seed.png`
 - references: `[]`
 
-```text
+```api_prompt
 桃太郎の全身キャラクター参照。正面、側面、背面の3面図。赤い鉢巻、素朴な旅装束、同じ体格と顔立ちを保つ。
 ```
 
@@ -642,12 +643,13 @@ def _write_downstream_generation_artifacts(run_dir: Path) -> None:
 - reference_count: `0`
 - review_status: `approved`
 - creation_status: `created`
+- prompt_policy_version: `image_api_prompt_v1`
 - source_script_selectors:
   - `scene10_cut1`
 - output: `assets/objects/kibidango.png`
 - references: `[]`
 
-```text
+```api_prompt
 small handmade kibidango dumpling in a cloth wrap, photorealistic object reference, no text.
 ```
 
@@ -660,12 +662,13 @@ small handmade kibidango dumpling in a cloth wrap, photorealistic object referen
 - reference_count: `0`
 - review_status: `approved`
 - creation_status: `created`
+- prompt_policy_version: `image_api_prompt_v1`
 - source_script_selectors:
   - `scene10_cut1`
 - output: `assets/locations/village_road.png`
 - references: `[]`
 
-```text
+```api_prompt
 old Japanese village road, wooden houses and dirt path, photorealistic location reference, no text.
 ```
 """,
@@ -868,6 +871,9 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
                 "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details\n"
+                "- scene_generation_debug_source: source beats and adaptation choices are recorded\n"
+                "- scene_generation_contract: required scene outputs are declared\n"
                 "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
                 "- end_situation_alignment: end_situation matches scene_intent.value_shift.to\n"
                 "- neighbor_handoff: neighboring handoffs are checked\n\n"
@@ -893,6 +899,9 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- duration_density_and_handoff: passed\n"
                 "- coverage_plan_complete: passed\n"
                 "- continuity_contract_complete: passed\n"
+                "- character_emotion_continuity_complete: passed\n"
+                "- film_grammar_contract_complete: passed\n"
+                "- action_reaction_and_eyeline_complete: passed\n"
                 "- narration_contract_complete: passed\n"
                 "- downstream_handoff_complete: passed\n"
                 "- triangulation_review_ready: passed\n\n"
@@ -990,7 +999,7 @@ def _valid_scene_intent_dict(topic: str, scene_idx: int, *, terminal: bool) -> d
 
 
 def _valid_scene_event_dict(topic: str, scene_idx: int) -> dict:
-    return {
+    return _with_story_specific_grounding({
         "schema_version": "scene_event_v1",
         "event_logline": f"{topic}が村道で迷いを越え、次へ進む証拠を残す",
         "start_situation": f"{topic}は村道で旅立ちをためらい、村人の視線を受けている",
@@ -1061,7 +1070,154 @@ def _valid_scene_event_dict(topic: str, scene_idx: int) -> dict:
         },
         "offscreen_context": ["鬼との決着はまだ起きていない"],
         "forbidden_event_changes": ["鬼との決着をこのsceneで起こさない", "勝利の証拠を見せない"],
+    }, topic, scene_idx)
+
+
+def _valid_scene_generation_dict(topic: str, scene_idx: int) -> dict:
+    return {
+        "schema_version": "scene_generation_v1",
+        "scene_authoring_context": {
+            "schema_version": "scene_authoring_context_v1",
+            "topic": topic,
+            "scene_id": scene_idx,
+            "scene_index": scene_idx,
+            "scene_title": f"{topic}が村道を越える",
+            "story_scope": {"protagonist": topic, "artifact": "旅袋", "theme": "責務と越境"},
+            "source_beats": [
+                {
+                    "source_story_beat_id": f"story_scene{scene_idx}_departure",
+                    "summary": f"{topic}が村道を越えて旅立つ",
+                    "source_origin": "canonical_reference",
+                }
+            ],
+            "canonical_event_policy": {
+                "source_story_events": "top-level canonical_event_coverage_matrix を参照",
+                "scene_specificity": "source beat を具体出来事へ接地する",
+            },
+            "scene_count_policy": {
+                "maximize_meaningful_scene_count": True,
+                "do_not_fix_cut_count_in_prompt": True,
+                "cut_count_is_derived_by": "scene_cut_coverage_plan",
+            },
+        },
+        "scene_prompt_payload": {
+            "schema_version": "scene_prompt_payload_v1",
+            "prompt": (
+                f"物語『{topic}』の scene{scene_idx} を設計する。目的は絵を直接描くことではなく、"
+                "この scene が物語内で何を成立させるかを正本化すること。"
+                "source beat を setup / pressure / turn / payoff の具体出来事へ接地し、"
+                "scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, "
+                "scene_cut_coverage_plan, forbidden_event_changes を出力する。"
+                "後段の画像・音声・動画実行情報は含めない。"
+            ),
+            "input_refs": ["story.md", "research.md", "visual_value.md", "canonical_event_coverage_matrix", "asset_bible"],
+            "required_outputs": [
+                "scene_intent",
+                "scene_event",
+                "scene_character_state_timeline",
+                "scene_film_coverage_plan",
+                "scene_cut_coverage_plan",
+                "forbidden_event_changes",
+            ],
+            "constraints": ["scene 正本生成だけに使う", "後段の画像・音声・動画実行情報を含めない", "scene_event は物語事実に限定する"],
+        },
+        "scene_debug_prompt_source": {
+            "schema_version": "scene_debug_prompt_source_v1",
+            "not_sent_to_agent": True,
+            "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
+            "source_beats": [f"{topic}が村道を越えて旅立つ"],
+            "source_origin": "canonical_reference",
+            "adaptation_choices": ["source beat を setup / pressure / turn / payoff の可視出来事へ分解する"],
+            "excluded_from_payload": ["後段の画像生成詳細", "後段の動画生成詳細", "後段の音声生成詳細"],
+            "forbidden_event_changes_source": "scene_event.forbidden_event_changes",
+        },
+        "scene_generation_contract": {
+            "schema_version": "scene_generation_contract_v1",
+            "required_outputs": [
+                "scene_intent",
+                "scene_event",
+                "scene_character_state_timeline",
+                "scene_film_coverage_plan",
+                "scene_cut_coverage_plan",
+                "forbidden_event_changes",
+            ],
+            "scene_event_schema_version": "scene_event_v1",
+            "payload_boundary": "scene_prompt_payload は scene 正本生成だけに使う",
+        },
     }
+
+
+def _with_story_specific_grounding(event: dict, topic: str, scene_idx: int) -> dict:
+    source_beat_id = f"story_scene{scene_idx}_departure"
+    event["story_specificity"] = {
+        "canonical_specificity": {"description": "原典・ユーザー入力由来", "required_elements": [f"{topic}が村道を越える"]},
+        "character_specificity": {"description": "人物固有", "required_elements": [topic]},
+        "relationship_specificity": {"description": "関係性固有", "required_elements": [f"{topic}と村人の責務関係"]},
+        "object_specificity": {"description": "小道具固有", "required_elements": ["旅袋"]},
+        "location_specificity": {"description": "場所固有", "required_elements": ["村道"]},
+        "rule_specificity": {"description": "物語ルール固有", "required_elements": ["鬼との決着を先に見せない"]},
+        "visual_specificity": {"description": "視覚証拠固有", "required_elements": ["足跡", "握られた袋"]},
+    }
+    event["specificity_budget"] = {
+        "max_primary_story_elements": 3,
+        "max_secondary_story_elements": 3,
+        "required_element_types": ["character", "location", "conflict_or_constraint", "visual_evidence"],
+        "optional_element_types": ["object"],
+        "reject_if": ["decorative_detail_without_story_function"],
+        "reject_decorative_detail_without_story_function": True,
+    }
+    for beat in event.get("event_sequence", []):
+        if not isinstance(beat, dict):
+            continue
+        beat_id = str(beat.get("beat_id") or "")
+        what = str(beat.get("what_happens") or "")
+        evidence = beat.get("required_visual_evidence") if isinstance(beat.get("required_visual_evidence"), list) else []
+        beat["abstract_function"] = {
+            "dramatic_job": "観客理解を進める",
+            "value_shift_role": "受け身から責務へ",
+            "emotional_pressure_role": str(beat.get("emotional_pressure") or ""),
+            "causal_role": str(beat.get("immediate_consequence") or ""),
+        }
+        beat["concrete_event"] = {
+            "who": [topic, "村人"],
+            "where": "村道",
+            "what_happens": what,
+            "conflict_or_constraint": f"村人の視線と鬼への責務が{topic}を後戻りできなくする",
+            "object_or_trace": ["旅袋", "足跡"],
+            "visible_action": str(beat.get("visible_action") or ""),
+            "visible_reaction": str(beat.get("visible_reaction") or ""),
+            "immediate_consequence": str(beat.get("immediate_consequence") or ""),
+            "required_visual_evidence": evidence,
+        }
+        beat["story_grounding"] = {
+            "source_origin": "canonical_reference",
+            "source_story_beat_ids": [source_beat_id],
+            "source_confidence": "high",
+            "source_text_or_summary": what,
+            "adaptation_reason": "出来事を静止画で読める物理証拠へ変換する",
+            "human_approval_required": False,
+            "non_replaceable_elements": [
+                {"element_id": "protagonist", "type": "character", "value": topic, "why_non_replaceable": "旅立ちの主体"},
+                {"element_id": "village_road", "type": "location", "value": "村道", "why_non_replaceable": "越境の境界"},
+            ],
+            "replaceability_check": {
+                "would_survive_character_swap": False,
+                "would_survive_object_swap": False,
+                "would_survive_location_swap": False,
+                "note": "人物・袋・村道を置換すると成立しない",
+            },
+            "concrete_story_elements": [
+                {"element_id": "protagonist_state", "element_type": "character", "concrete_description": topic, "story_function": "status_marker", "appears_in_event_beat_ids": [beat_id], "visible_form": "表情・視線・手足", "must_not_be_generic": True},
+                {"element_id": "village_road", "element_type": "location", "concrete_description": "村道", "story_function": "threshold", "appears_in_event_beat_ids": [beat_id], "visible_form": "入口と足跡", "must_not_be_generic": True},
+            ],
+            "asset_story_function_usage": [
+                {"asset_id": "momotaro", "asset_type": "character", "used_in_scene": True, "used_in_event_beat_ids": [beat_id], "story_function_in_scene": "status_marker", "visible_or_hidden": "visible", "reason_if_unused": ""},
+                {"asset_id": "village_road", "asset_type": "location", "used_in_scene": True, "used_in_event_beat_ids": [beat_id], "story_function_in_scene": "threshold", "visible_or_hidden": "visible", "reason_if_unused": ""},
+            ],
+            "confidence": "high",
+        }
+        beat["specificity_budget"] = dict(event["specificity_budget"])
+    return event
 
 
 def _p400_coverage_review() -> dict:
@@ -1086,6 +1242,215 @@ def _verify_triangulation_review() -> dict:
         "continuity_preserved": True,
         "handoff_visible_or_audible": True,
     }
+
+
+def _verify_source_projection_for_event(scene_idx: int, event_record: dict, *, topic: str) -> tuple[dict, dict, list[dict]]:
+    beat_id = str(event_record.get("beat_id") or "")
+    source_beat_id = f"story_scene{scene_idx}_departure"
+    concrete_event = {
+        "who": [topic, "村人"],
+        "where": "村道",
+        "what_happens": str(event_record.get("what_happens") or ""),
+        "conflict_or_constraint": f"村人の視線と鬼への責務が{topic}を後戻りできなくする",
+        "object_or_trace": ["旅袋", "足跡"],
+        "visible_action": str(event_record.get("visible_action") or ""),
+        "visible_reaction": str(event_record.get("visible_reaction") or ""),
+        "required_visual_evidence": list(event_record.get("required_visual_evidence") or []),
+    }
+    non_replaceable = [
+        {
+            "element_id": "protagonist",
+            "type": "character",
+            "value": topic,
+            "why_non_replaceable": "旅立ちの主体",
+        },
+        {
+            "element_id": "village_road",
+            "type": "location",
+            "value": "村道",
+            "why_non_replaceable": "越境の境界",
+        },
+    ]
+    story_grounding = {
+        "source_origin": "canonical_reference",
+        "source_story_beat_ids": [source_beat_id],
+        "source_confidence": "high",
+        "source_text_or_summary": str(event_record.get("what_happens") or ""),
+        "adaptation_reason": "出来事を静止画で読める物理証拠へ変換する",
+        "human_approval_required": False,
+        "non_replaceable_elements": non_replaceable,
+        "replaceability_check": {
+            "would_survive_character_swap": False,
+            "would_survive_object_swap": False,
+            "would_survive_location_swap": False,
+            "note": "人物・袋・村道を置換すると成立しない",
+        },
+        "concrete_story_elements": [
+            {
+                "element_id": "protagonist_state",
+                "element_type": "character",
+                "concrete_description": topic,
+                "story_function": "status_marker",
+                "appears_in_event_beat_ids": [beat_id],
+                "visible_form": "表情・視線・手足",
+                "must_not_be_generic": True,
+            },
+            {
+                "element_id": "village_road",
+                "element_type": "location",
+                "concrete_description": "村道",
+                "story_function": "threshold",
+                "appears_in_event_beat_ids": [beat_id],
+                "visible_form": "入口と足跡",
+                "must_not_be_generic": True,
+            },
+        ],
+        "asset_story_function_usage": [
+            {
+                "asset_id": "momotaro_seed",
+                "asset_type": "character",
+                "used_in_scene": True,
+                "used_in_event_beat_ids": [beat_id],
+                "story_function_in_scene": "status_marker",
+                "visible_or_hidden": "visible",
+                "reason_if_unused": "",
+            },
+            {
+                "asset_id": "village_road",
+                "asset_type": "location",
+                "used_in_scene": True,
+                "used_in_event_beat_ids": [beat_id],
+                "story_function_in_scene": "threshold",
+                "visible_or_hidden": "visible",
+                "reason_if_unused": "",
+            },
+        ],
+        "confidence": "high",
+    }
+    return concrete_event, story_grounding, non_replaceable
+
+
+def _visible_behavior_for_verify(topic: str, visible_action: str) -> dict:
+    return {
+        "face": "緊張した表情",
+        "gaze": "村道の先を見る",
+        "posture": visible_action or f"{topic}が前へ向く",
+        "hands": "旅袋を握る",
+        "feet": "足元が前へ向く",
+        "distance": "村道の先へ距離が開く",
+        "visible_proof": visible_action or f"{topic}の姿勢",
+    }
+
+
+def _verify_scene_emotion_film_dicts(scene_idx: int, topic: str, selectors: list[str]) -> tuple[dict, dict]:
+    beat_ids = [
+        f"scene{scene_idx}_event_setup",
+        f"scene{scene_idx}_event_pressure",
+        f"scene{scene_idx}_event_turn",
+        f"scene{scene_idx}_event_payoff",
+    ]
+    first_selector = selectors[0] if selectors else f"scene{scene_idx}_cut1"
+    turn_selector = selectors[min(2, len(selectors) - 1)] if selectors else first_selector
+    payoff_selector = selectors[-1] if selectors else first_selector
+    visible_start = _visible_behavior_for_verify(topic, "村道の入口で足を止める")
+    visible_mid = _visible_behavior_for_verify(topic, "最初の一歩を前へ出す")
+    visible_end = _visible_behavior_for_verify(topic, "霧の先へ進む")
+    timeline = {
+        "policy_version": "character_emotion_continuity_v1",
+        "source_schema_version": "scene_event_v1",
+        "scene_id": scene_idx,
+        "linked_scene_event_beat_ids": beat_ids,
+        "characters": [
+            {
+                "character_id": "momotaro_seed",
+                "character_name": topic,
+                "scene_role": "protagonist",
+                "objective_in_scene": "村道を越える",
+                "emotional_arc_summary": "ためらいから決意へ",
+                "start_state": {
+                    "trigger_event_beat_id": beat_ids[0],
+                    "emotion": "ためらい",
+                    "desire": "前へ進みたい",
+                    "fear_or_pressure": "村人の視線",
+                    "belief": "まだ戻れる",
+                    "relationship_to_others": "村人の視線を受ける",
+                    "body_state": "足を止める",
+                    "gaze_target": "村道",
+                    "visible_proof": visible_start,
+                },
+                "midpoint_state": {
+                    "trigger_event_beat_id": beat_ids[2],
+                    "emotion": "決意",
+                    "desire_shift": "進む",
+                    "fear_or_pressure_shift": "後戻りできない",
+                    "belief_shift": "進むしかない",
+                    "relationship_shift": "村から責務へ",
+                    "body_state": "一歩を出す",
+                    "gaze_target": "霧の先",
+                    "visible_proof": visible_mid,
+                },
+                "end_state": {
+                    "trigger_event_beat_id": beat_ids[3],
+                    "emotion": "責務",
+                    "new_desire": "次へ進む",
+                    "unresolved_pressure": "鬼との決着はまだ",
+                    "belief_after_scene": "責務を引き受けた",
+                    "relationship_after_scene": "村との関係が責務へ変わる",
+                    "body_state": "前へ向く",
+                    "gaze_target": "次の道",
+                    "visible_proof": visible_end,
+                },
+                "emotional_no_return_point": {
+                    "event_beat_id": beat_ids[2],
+                    "description": "決意が戻れない",
+                    "visible_behavior": "一歩を出す",
+                },
+            }
+        ],
+    }
+    coverage = {
+        "policy_version": "scene_film_coverage_v1",
+        "source": ["scene_event", "scene_character_state_timeline", "scene_cut_coverage_plan"],
+        "scene_id": scene_idx,
+        "shot_mix": {
+            "required_coverage": {
+                "establishing": [first_selector],
+                "action": selectors[1:3] if len(selectors) >= 3 else selectors,
+                "insert": [],
+                "reaction": [payoff_selector],
+                "handoff": [payoff_selector],
+            },
+            "actual_shots": [],
+            "missing_coverage": [],
+        },
+        "action_reaction_pair": [
+            {
+                "source_event_beat_id": beat_ids[2],
+                "action_cut_selector": turn_selector,
+                "reaction_cut_selector": payoff_selector,
+                "meaning_created_by_pair": "決意の意味が反応で読める",
+            },
+            {
+                "source_event_beat_id": beat_ids[3],
+                "action_cut_selector": payoff_selector,
+                "reaction_cut_selector": payoff_selector,
+                "meaning_created_by_pair": "結果の意味が反応で読める",
+            },
+        ],
+        "missing_coverage": [],
+        "required_when_rules": {
+            "reaction": "turn / reveal / payoff の event beat では required",
+            "insert": "重要小道具があれば required",
+            "eyeline": "認識やhandoffでは required",
+            "silence": "感情転換では required",
+        },
+        "audience_emotion_target": {
+            "separate_from_character_emotion": True,
+            "intended_audience_feeling": "決意を感じる",
+            "achieved_by": ["character_reaction", "shot_scale", "silence"],
+        },
+    }
+    return timeline, coverage
 
 
 def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[str]) -> dict:
@@ -1219,6 +1584,13 @@ def _verify_cut_contract(
     outgoing_anchor = f"{selector}_to_{next_selector}" if next_selector else f"scene{scene_idx}_to_next"
     narration_role = "silent" if silent else "emotion"
     narration_requirements = ["無音で視覚報酬を保持"] if silent else ["決意を補う"]
+    concrete_event, story_grounding, non_replaceable_elements = _verify_source_projection_for_event(
+        scene_idx,
+        event_record,
+        topic=topic,
+    )
+    visible_behavior = _visible_behavior_for_verify(topic, event_record["visible_action"])
+    reaction_required = event_function in {"turn", "payoff"}
     return {
         "schema_version": "3.0",
         "source_event_contract": {
@@ -1227,6 +1599,9 @@ def _verify_cut_contract(
             "event_beat_function": event_function,
             "event_time_position": "before_trigger",
             "source_event_summary": event_record["what_happens"],
+            "source_concrete_events": [concrete_event],
+            "source_story_grounding": [story_grounding],
+            "source_non_replaceable_elements": non_replaceable_elements,
             "source_visible_action": event_record["visible_action"],
             "source_visible_reaction": event_record["visible_reaction"],
             "source_required_visual_evidence": event_record["required_visual_evidence"],
@@ -1234,6 +1609,144 @@ def _verify_cut_contract(
             "event_facts_not_to_invent": forbidden_event_changes,
             "allowed_reveal_info_ids": [],
             "forbidden_reveal_info_ids": ["勝利の証拠"],
+        },
+        "cut_character_emotion_transition": {
+            "policy_version": "cut_character_emotion_transition_v1",
+            "focal_character_id": "momotaro_seed",
+            "supporting_character_ids": [],
+            "transition_mode": "triggered_shift",
+            "emotion_from": {"label": "ためらい", "visible_behavior": visible_behavior},
+            "emotion_to": {"label": "決意", "visible_behavior": visible_behavior},
+            "transition_trigger": {
+                "source_event_beat_id": event_beat_id,
+                "what_causes_shift": event_record["what_happens"],
+                "visible_cause": event_record["visible_action"],
+            },
+            "transition_visible_in_cut": {
+                "face_change": "表情が締まる",
+                "gaze_change": "村道の先を見る",
+                "posture_change": event_record["visible_action"],
+                "hand_change": "旅袋を握る",
+                "foot_change": "足元が前へ向く",
+                "distance_change": "村道の先へ距離が開く",
+                "silence_or_pause": "一拍の沈黙",
+            },
+            "emotional_delta_visible_in_first_frame": "視線と手足に変化の始まりが見える",
+            "emotional_delta_completed_by_motion": "動画で一段だけ進む",
+            "must_not_jump_to_final_emotion": True,
+        },
+        "cut_film_grammar_contract": {
+            "policy_version": "cut_film_grammar_v1",
+            "required_modules": {
+                "character_objective_and_tactic": {
+                    "character_id": "momotaro_seed",
+                    "objective": "村道を越える",
+                    "tactic": event_record["visible_action"],
+                    "obstacle": "村人の視線と鬼への責務",
+                    "tactic_shift_after_event": "次へ進む",
+                    "visible_action": event_record["visible_action"],
+                },
+                "attention_state": {
+                    "character_id": "momotaro_seed",
+                    "gaze_target": "村道の先",
+                    "attention_type": "recognizing",
+                    "viewer_attention_target": event_record["visible_action"],
+                    "eyeline_match_to_next_cut": next_selector,
+                },
+                "eyeline_continuity": {
+                    "cut_selector": selector,
+                    "character_id": "momotaro_seed",
+                    "gaze_target": "村道の先",
+                    "next_cut_should_show_target": bool(next_selector),
+                    "previous_cut_gaze_source": previous_selector,
+                    "eyeline_match_valid": True,
+                },
+                "screen_direction_continuity": {
+                    "movement_direction": "left_to_right",
+                    "previous_direction": "left_to_right",
+                    "direction_change_motivated": True,
+                    "motivation": "村道を越えるため",
+                },
+                "edit_motivation": {
+                    "cut_selector": selector,
+                    "cut_reason": "new_information",
+                    "why_previous_cut_is_complete": "前cutの証拠が読めた",
+                    "why_current_cut_is_needed": event_record["visible_action"],
+                    "viewer_attention_shift": "村道の先",
+                },
+                "audience_emotion_target": {
+                    "cut_selector": selector,
+                    "separate_from_character_emotion": True,
+                    "intended_audience_feeling": "決意を感じる",
+                    "achieved_by": ["character_reaction", "shot_scale", "silence"],
+                },
+            },
+            "conditional_modules": {
+                "character_reaction_contract": {
+                    "required": reaction_required,
+                    "required_when": "turn / reveal / payoff の event beat を担当するcut",
+                    "reacts_to_event_beat_id": event_beat_id,
+                    "reacting_character_id": "momotaro_seed",
+                    "reaction_type": "recognition",
+                    "visible_reaction": {
+                        "eyes": "村道の先を見る",
+                        "mouth": "閉じる",
+                        "head": "前へ向く",
+                        "shoulders": "硬い",
+                        "hands": "旅袋を握る",
+                        "body_distance": "村道の先へ距離が開く",
+                    },
+                    "reaction_duration_intent": "held",
+                    "should_be_silent": True,
+                    "narration_should_not_explain": True,
+                },
+                "relationship_state_delta": {
+                    "required": True,
+                    "relationship_id": "momotaro_village",
+                    "characters": ["momotaro_seed", "village"],
+                    "from_state": "保護",
+                    "to_state": "責務",
+                    "trigger_event_beat_id": event_beat_id,
+                    "visible_evidence": {
+                        "distance": "村道の先へ距離が開く",
+                        "gaze": "村道の先",
+                        "body_orientation": event_record["visible_action"],
+                        "touch_or_non_touch": "旅袋を握る",
+                        "hierarchy_in_frame": "桃太郎が中景",
+                    },
+                    "must_not_resolve_yet": [],
+                },
+                "prop_state_progression": {
+                    "required": False,
+                    "object_id": "",
+                    "source_event_beat_ids": [event_beat_id],
+                    "state_by_cut": [],
+                },
+                "costume_and_body_continuity": {
+                    "required": True,
+                    "character_id": "momotaro_seed",
+                    "costume_state": "同じ旅装束",
+                    "hair_state": "同じ髪",
+                    "dirt_or_damage_state": "急変なし",
+                    "posture_state": event_record["visible_action"],
+                    "allowed_changes_in_this_cut": ["視線", "手", "足"],
+                    "forbidden_changes_in_this_cut": ["別人物化"],
+                },
+                "silence_and_pause_contract": {
+                    "required": reaction_required,
+                    "cut_selector": selector,
+                    "silence_required": reaction_required,
+                    "pause_reason": "感情転換を説明しない",
+                    "emotion_to_read_in_silence": "視線と手足",
+                    "narration_must_not_explain": True,
+                },
+            },
+            "required_when_rules": {
+                "reaction": "turn / reveal / payoff の event beat では required",
+                "insert": "重要小道具があれば required",
+                "eyeline": "認識やhandoffでは required",
+                "silence": "感情転換では required",
+            },
         },
         "cut_function": cut_function,
         "intent_budget": {
@@ -1382,6 +1895,8 @@ def _verify_cut_contract(
                 "visible_action": event_record["visible_action"],
                 "visible_reaction": event_record["visible_reaction"],
                 "required_visual_evidence": event_record["required_visual_evidence"],
+                "concrete_event": concrete_event,
+                "story_grounding": story_grounding,
             },
             "source_event_beats": [event_record],
             "neighboring_event_beats": neighboring_event_beats,
@@ -1401,6 +1916,11 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
         terminal = scene_idx == scene_count
         selectors = [f"scene{scene_idx}_cut{cut_idx}" for cut_idx in range(1, cut_count + 1)]
         coverage_plan = _verify_scene_cut_coverage_plan(scene_idx, topic, selectors)
+        scene_character_state_timeline, scene_film_coverage_plan = _verify_scene_emotion_film_dicts(
+            scene_idx,
+            topic,
+            selectors,
+        )
         common_scene = {
             "scene_id": scene_idx,
             "phase": "opening",
@@ -1410,8 +1930,11 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
             "estimated_duration_seconds": 30,
             "coverage_review": _p400_coverage_review(),
             "scene_intent": _valid_scene_intent_dict(topic, scene_idx, terminal=terminal),
+            "scene_generation": _valid_scene_generation_dict(topic, scene_idx),
             "scene_event": _valid_scene_event_dict(topic, scene_idx),
             "scene_cut_coverage_plan": coverage_plan,
+            "scene_character_state_timeline": scene_character_state_timeline,
+            "scene_film_coverage_plan": scene_film_coverage_plan,
         }
         if terminal:
             common_scene["terminal_resolution"] = "物語が締まる"
@@ -1512,6 +2035,25 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
 
     script_data = {
         "evaluation_contract": {"target_arc": "opening", "must_cover": [topic], "must_avoid": []},
+        "canonical_event_coverage_matrix": {
+            "policy_version": "canonical_event_coverage_matrix_v1",
+            "source": ["test_fixture"],
+            "source_story_events": [
+                {
+                    "source_event_id": "source_event_01",
+                    "source_event_summary": f"{topic}が村道を越えて旅立つ",
+                    "importance": "critical",
+                    "required": True,
+                    "must_appear_as": "scene",
+                    "canonical_order_index": 1,
+                    "assigned_scene_ids": [1],
+                    "assigned_event_beat_ids": ["scene1_event_turn"],
+                    "omission_reason": "",
+                    "adaptation_change_reason": "fixture",
+                    "human_approval_required": False,
+                }
+            ],
+        },
         "scene_set_review": {"status": "approved"},
         "scene_detail_review": {"status": "approved"},
         "cut_blueprint_review": {"status": "approved"},
@@ -1520,6 +2062,7 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
     manifest_data = {
         "manifest_phase": "production",
         "video_metadata": {"topic": topic, "experience": "cinematic_story", "target_duration_seconds": 300},
+        "canonical_event_coverage_matrix": script_data["canonical_event_coverage_matrix"],
         "scenes": manifest_scenes,
     }
     (run_dir / "script.md").write_text(
@@ -2223,6 +2766,29 @@ assets:
             checks = {check["id"]: check["passed"] for check in stage["checks"]}
 
             self.assertTrue(checks["asset.request_metadata"], msg=stage["details"])
+
+    def test_check_asset_rejects_legacy_text_prompt_contract(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_asset_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0508"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text("topic=桃太郎\nstatus=ASSET\n---\n", encoding="utf-8")
+            _write_ready_grounding_artifacts(run_dir, "asset")
+            _write_downstream_generation_artifacts(run_dir)
+            request_path = run_dir / "asset_generation_requests.md"
+            request_text = request_path.read_text(encoding="utf-8")
+            request_text = request_text.replace("- prompt_policy_version: `image_api_prompt_v1`\n", "")
+            request_text = request_text.replace("```api_prompt", "```text")
+            request_path.write_text(request_text, encoding="utf-8")
+
+            stage, _ = VERIFY_MODULE.check_asset(run_dir)
+            checks = {check["id"]: check["passed"] for check in stage["checks"]}
+
+            self.assertFalse(checks["asset.request_metadata"], msg=stage["details"])
+            self.assertTrue(checks["asset.request_prompt_no_production_meta"], msg=stage["details"])
+            self.assertIn("prompt_policy_version must be image_api_prompt_v1", "\n".join(stage["details"]["asset_request_metadata_failures"]))
+            self.assertIn("missing api_prompt fence", "\n".join(stage["details"]["asset_request_metadata_failures"]))
 
     def test_check_asset_accepts_selector_based_manifest_item(self) -> None:
         import tempfile

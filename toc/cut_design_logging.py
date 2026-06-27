@@ -12,6 +12,9 @@ def scene_design_log_relpath(filename: str) -> str:
     return f"logs/scene_design/{filename}"
 
 
+SCENE_GENERATION_PROMPTS_FILENAME = "scene_generation_prompts.json"
+
+
 def write_scene_design_json(run_dir: Path, filename: str, payload: dict[str, Any]) -> None:
     log_dir = run_dir / "logs" / "scene_design"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +88,7 @@ def write_cut_design_failure_log(
     latest_context = read_scene_design_json(run_dir, "latest_generation_context.json")
     scene_event_input = read_scene_design_json(run_dir, "scene_event_input.json")
     scene_event_output = read_scene_design_json(run_dir, "scene_event_output.json")
+    scene_generation_prompts = read_scene_design_json(run_dir, SCENE_GENERATION_PROMPTS_FILENAME)
     payload = {
         "schema_version": "cut_design_failure_v1",
         "created_at": now,
@@ -100,6 +104,10 @@ def write_cut_design_failure_log(
             "scene_event_output": {
                 "path": scene_design_log_relpath("scene_event_output.json"),
                 "scene_count": scene_event_output.get("scene_count"),
+            },
+            "scene_generation_prompts": {
+                "path": scene_design_log_relpath(SCENE_GENERATION_PROMPTS_FILENAME),
+                "scene_count": scene_generation_prompts.get("scene_count"),
             },
         },
         "error": {
@@ -138,6 +146,19 @@ def write_scene_design_placeholder(run_dir: Path, *, topic: str, flow: str, now:
     }
     for filename in ("scene_event_input.json", "scene_event_output.json"):
         write_scene_design_json(run_dir, filename, base_payload)
+    write_scene_design_json(
+        run_dir,
+        SCENE_GENERATION_PROMPTS_FILENAME,
+        {
+            "schema_version": "scene_generation_prompt_log_v1",
+            "flow": flow,
+            "status": "not_generated",
+            "reason": reason,
+            "topic": topic,
+            "scene_count": 0,
+            "scenes": [],
+        },
+    )
     write_cut_design_context(
         run_dir,
         now=now,

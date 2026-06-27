@@ -5413,8 +5413,92 @@ scenes:
         self.assertEqual(response.status_code, 200)
         self.assertIn("scene10_cut1", response.json()["skipped"])
         self.assertEqual(cuts[0]["audio"]["narration"]["text"], "既存レビュー中の文面")
-        self.assertEqual(cuts[1]["audio"]["narration"]["status"], "review_pending")
+        self.assertEqual(cuts[1]["audio"]["narration"]["status"], "")
+        self.assertEqual(cuts[1]["audio"]["narration"]["authoring_status"], "missing")
+        self.assertEqual(cuts[1]["audio"]["narration"]["missing_reason"], "p700_narration_not_written_yet")
+        self.assertEqual(cuts[1]["audio"]["narration"]["text"], "")
+        self.assertEqual(cuts[1]["audio"]["narration"]["tts_text"], "")
         self.assertIn("scene_narration_plan", updated_data["scenes"][0])
+
+    def test_narration_drafts_create_does_not_write_placeholder_text_before_p700(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p680_artifacts(root, "sample_run")
+            manifest_path = run_dir / "video_manifest.md"
+            original_text = manifest_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
+            first_cut = data["scenes"][0]["cuts"][0]
+            first_cut["narration_text"] = "先取りしてはいけない簡易文"
+            first_cut["cut_contract"] = {
+                "schema_version": "cut_contract_v1",
+                "narration_contract": {
+                    "role": "emotion",
+                    "target_function": "主人公の決意を補う",
+                    "text": "contractからの仮文も入れない",
+                    "tts_text": "contract ttsも入れない",
+                },
+            }
+            image_gen_app._write_manifest_data(manifest_path, original_text, data)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/narration-drafts/create",
+                            json={"run_id": "sample_run", "replace": False},
+                        )
+
+            updated_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_path.read_text(encoding="utf-8")))
+            narration = updated_data["scenes"][0]["cuts"][0]["audio"]["narration"]
+            state_text = (run_dir / "state.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(narration["authoring_status"], "missing")
+        self.assertEqual(narration["missing_reason"], "p700_narration_not_written_yet")
+        self.assertEqual(narration["text"], "")
+        self.assertEqual(narration["tts_text"], "")
+        self.assertEqual(narration["text_draft"], "")
+        self.assertEqual(narration["elevenlabs_prompt"]["spoken_body"], "")
+        self.assertEqual(narration["elevenlabs_prompt"]["materialized"], "")
+        self.assertEqual(narration["review"]["status"], "")
+        self.assertIn("runtime.stage=narration_contract_ready_p700_text_missing", state_text)
+        self.assertIn("slot.p720.status=pending", state_text)
+
+    def test_narration_drafts_replace_does_not_require_existing_image_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path = run_dir / "video_manifest.md"
+            original_text = manifest_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
+            data["scenes"][0]["cuts"][0]["audio"] = {
+                "narration": {
+                    "status": "review_pending",
+                    "text": "古い文面",
+                    "tts_text": "古い文面。",
+                }
+            }
+            image_gen_app._write_manifest_data(manifest_path, original_text, data)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/narration-drafts/create",
+                            json={"run_id": "sample_run", "replace": True},
+                        )
+
+            updated_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_path.read_text(encoding="utf-8")))
+            cuts = updated_data["scenes"][0]["cuts"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["skipped"], [])
+        self.assertEqual(len(response.json()["updated"]), 3)
+        self.assertEqual(cuts[0]["audio"]["narration"]["status"], "")
+        self.assertEqual(cuts[0]["audio"]["narration"]["authoring_status"], "missing")
+        self.assertEqual(cuts[0]["audio"]["narration"]["missing_reason"], "p700_narration_not_written_yet")
+        self.assertEqual(cuts[0]["audio"]["narration"]["text"], "")
+        self.assertEqual(cuts[0]["audio"]["narration"]["tts_text"], "")
 
     def test_narration_generate_updates_manifest_and_duration_minimum(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -31,6 +31,30 @@ assets:
 
 human_change_requests: []
 
+scene_generation:
+  schema_version: "scene_generation_policy_v1"
+  canonical_payload_path: "scenes[].scene_generation.scene_prompt_payload.prompt"
+  deprecated_fields: ["scene_generation.prompt"]
+  required_blocks: ["scene_authoring_context", "scene_prompt_payload", "scene_debug_prompt_source", "scene_generation_contract"]
+  required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+  downstream_boundary: "cut/image/narration/video は scene_prompt_payload を読まず、scene_event と scene_cut_coverage_plan から逆算する"
+
+canonical_event_coverage_matrix:
+  policy_version: "canonical_event_coverage_matrix_v1"
+  source: ["parent_story", "scene_script", "asset_bible"]
+  source_story_events:
+    - source_event_id: ""
+      source_event_summary: ""
+      importance: "low|medium|high|critical"
+      required: true
+      must_appear_as: "scene|cut|narration|visual_motif|can_be_omitted"
+      canonical_order_index: 0
+      assigned_scene_ids: []
+      assigned_event_beat_ids: []
+      omission_reason: ""
+      adaptation_change_reason: ""
+      human_approval_required: false
+
 scenes:
   - scene_id: 1
     timestamp: "00:00-00:30"
@@ -39,6 +63,45 @@ scenes:
     estimated_duration_seconds: 30
     handoff_to_next_scene: "terminal_resolution または次sceneへのアンカー"
     terminal_resolution: ""
+    # scene_generation は scene 正本を作る authoring prompt の正本。
+    # scene_prompt_payload.prompt には first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。
+    scene_generation:
+      schema_version: "scene_generation_v1"
+      scene_authoring_context:
+        schema_version: "scene_authoring_context_v1"
+        topic: "<topic>"
+        scene_id: 1
+        scene_index: 1
+        scene_title: ""
+        story_scope: {}
+        source_beats: []
+        canonical_event_policy:
+          source_story_events: "top-level canonical_event_coverage_matrix を参照"
+          scene_specificity: "source beat を scene_event の具体出来事へ接地する"
+        scene_count_policy:
+          maximize_meaningful_scene_count: true
+          do_not_fix_cut_count_in_prompt: true
+          cut_count_is_derived_by: "scene_cut_coverage_plan"
+      scene_prompt_payload:
+        schema_version: "scene_prompt_payload_v1"
+        prompt: "この scene が物語内で何を成立させるかを設計し、scene 正本を出力する。後段実行情報は含めない。"
+        input_refs: ["story.md", "research.md", "visual_value.md", "canonical_event_coverage_matrix", "asset_bible"]
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        constraints: ["scene 正本生成だけに使う", "後段の画像・音声・動画実行情報を含めない", "scene_event は物語事実に限定する"]
+      scene_debug_prompt_source:
+        schema_version: "scene_debug_prompt_source_v1"
+        not_sent_to_agent: true
+        source_story_beat_ids: []
+        source_beats: []
+        source_origin: "user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice"
+        adaptation_choices: []
+        excluded_from_payload: []
+        forbidden_event_changes_source: "scene_event.forbidden_event_changes"
+      scene_generation_contract:
+        schema_version: "scene_generation_contract_v1"
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        scene_event_schema_version: "scene_event_v1"
+        payload_boundary: "scene_prompt_payload は scene 正本生成だけに使う"
     scene_intent:
       importance: "medium"
       target_duration_seconds: 30
@@ -171,6 +234,9 @@ scenes:
             event_beat_function: "setup"
             event_time_position: "before_trigger"
             source_event_summary: ""
+            source_concrete_events: []
+            source_story_grounding: []
+            source_non_replaceable_elements: []
             source_visible_action: ""
             source_visible_reaction: ""
             no_reaction_required_reason: ""
@@ -202,6 +268,22 @@ scenes:
               forbidden_until_later_cut: []
               forbidden_until_later_scene: []
             emotional_micro_shift: {from: "", to: ""}
+            mixed_affect_design:
+              mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+              optional: true
+              apply_when: []
+              positive_valence_thread: ""
+              negative_valence_thread: ""
+              arousal_strategy: "hold|rise|drop|spike|release"
+              audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+              design_intent: ""
+              visible_support: []
+              narration_support: []
+              sound_or_rhythm_support: []
+              handoff_effect: ""
+              avoid_if:
+                - "1 cut = 1意図 を壊す"
+                - "scene_event にない事実を足す"
             visual_proof: "映像だけで target_beat が成立したと分かる証拠"
             must_show: []
             must_avoid: []

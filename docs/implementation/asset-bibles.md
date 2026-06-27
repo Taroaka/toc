@@ -73,6 +73,10 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - やること: `asset_plan.md` から `asset_generation_requests.md` と `asset_generation_manifest.md` を materialize する。
 - ゴール: 人間が request file だけを見て、何を、どの参照画像で、どの output に、どの status で生成するか判断できること。
 - prompt 本文は image API に渡る凍結文なので、制作管理メタではなく具体的に見える対象を書く。
+- asset request は final prompt compiler を通し、`prompt_policy_version: image_api_prompt_v1` と `api_prompt` fence を持つ。API に渡すのは `api_prompt` fence だけで、構造化設計・debug・review source は送らない。
+- asset stage の deterministic compiler は `asset_stage_manifest.md` / `asset_plan.md` の asset prompt を source にする。scene/cut の `first_frame_visual_plan`、`cut_contract`、`motion_brief` は asset request prompt に混ぜない。
+- prompt editor は、構造化 artifact から provider が描ける語だけを残す。LLM agent で編集する場合も、出力は同じ `api_prompt` contract に凍結し、agent report は別 artifact に置く。
+- leak gate は `api_prompt` 内の `sceneNN_cutNN`、`debug_prompt_source`、`first_frame_visual_plan`、`source_event_beat_id`、`motion_brief` などを fail にする。source selector などの metadata 欄は検査対象ではない。
 - NG:
   - `物語「シンデレラ」の scene10 のための背景画像。`
   - `scene30_cut01 で使う魔法の変身 scene。`

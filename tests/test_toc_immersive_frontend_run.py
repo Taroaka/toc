@@ -113,6 +113,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(failure["error"]["type"], "RuntimeError")
             self.assertIn("synthetic cut design failure", failure["error"]["message"])
             self.assertIn("scene_event_input", failure["partial_artifacts"])
+            self.assertIn("scene_generation_prompts", failure["partial_artifacts"])
+            self.assertEqual(failure["partial_artifacts"]["scene_generation_prompts"]["path"], "logs/scene_design/scene_generation_prompts.json")
 
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["runtime.stage"], "cut_design_failed")
@@ -167,6 +169,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "logs/review/semantic/image_prompt.collection.md",
                 "logs/scene_design/scene_event_input.json",
                 "logs/scene_design/scene_event_output.json",
+                "logs/scene_design/scene_generation_prompts.json",
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
                 "image_generation_requests.md",
@@ -202,11 +205,37 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(generic_scope["entry_count"], scope["entry_count"])
             scene_event_input = json.loads((run_dir / "logs/scene_design/scene_event_input.json").read_text(encoding="utf-8"))
             scene_event_output = json.loads((run_dir / "logs/scene_design/scene_event_output.json").read_text(encoding="utf-8"))
+            scene_generation_prompts = json.loads((run_dir / "logs/scene_design/scene_generation_prompts.json").read_text(encoding="utf-8"))
             self.assertEqual(scene_event_input["schema_version"], "scene_event_log_v1")
             self.assertEqual(scene_event_output["schema_version"], "scene_event_log_v1")
+            self.assertEqual(scene_generation_prompts["schema_version"], "scene_generation_prompt_log_v1")
             self.assertEqual(scene_event_input["scene_count"], scene_event_output["scene_count"])
+            self.assertEqual(scene_generation_prompts["scene_count"], scene_event_output["scene_count"])
+            self.assertEqual(scene_generation_prompts["scenes"][0]["scene_generation"]["schema_version"], "scene_generation_v1")
             self.assertEqual(scene_event_output["scenes"][0]["scene_event"]["schema_version"], "scene_event_v1")
+            first_scene_event = scene_event_output["scenes"][0]["scene_event"]
+            first_scene_generation = scene_event_output["scenes"][0]["scene_generation"]
+            self.assertIn("scene_authoring_context", first_scene_generation)
+            self.assertIn("scene_prompt_payload", first_scene_generation)
+            self.assertIn("scene_debug_prompt_source", first_scene_generation)
+            self.assertIn("scene_generation_contract", first_scene_generation)
+            self.assertIn("prompt", first_scene_generation["scene_prompt_payload"])
+            self.assertNotIn("first_frame_brief", first_scene_generation["scene_prompt_payload"]["prompt"])
+            self.assertNotIn("motion_brief", first_scene_generation["scene_prompt_payload"]["prompt"])
+            self.assertNotIn("api_prompt_payload", first_scene_generation["scene_prompt_payload"]["prompt"])
+            first_event_beat = first_scene_event["event_sequence"][0]
+            self.assertIn("story_specificity", first_scene_event)
+            self.assertIn("abstract_function", first_event_beat)
+            self.assertIn("concrete_event", first_event_beat)
+            self.assertIn("story_grounding", first_event_beat)
+            self.assertIn("non_replaceable_elements", first_event_beat["story_grounding"])
+            self.assertIn("concrete_story_elements", first_event_beat["story_grounding"])
+            self.assertIn("asset_story_function_usage", first_event_beat["story_grounding"])
+            self.assertIn("specificity_budget", first_event_beat)
             self.assertIn("source_event_contract", scene_event_output["scenes"][0]["cut_contracts"][0])
+            self.assertIn("source_concrete_events", scene_event_output["scenes"][0]["cut_contracts"][0]["source_event_contract"])
+            self.assertIn("source_story_grounding", scene_event_output["scenes"][0]["cut_contracts"][0]["source_event_contract"])
+            self.assertIn("source_non_replaceable_elements", scene_event_output["scenes"][0]["cut_contracts"][0]["source_event_contract"])
             self.assertIn("event_context_for_cut", scene_event_output["scenes"][0]["cut_contracts"][0])
             self.assertIn("cut_context_packet", scene_event_output["scenes"][0]["cut_contracts"][0])
             self.assertEqual(scene_event_output["scenes"][0]["cut_contracts"][0]["cut_context_packet"]["schema_version"], "cut_context_packet_v1")

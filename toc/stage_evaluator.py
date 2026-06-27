@@ -177,6 +177,30 @@ TRIANGULATION_REQUIRED_KEYS: tuple[str, ...] = (
     "handoff_visible_or_audible",
 )
 REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS: tuple[str, ...] = ("setup", "pressure", "turn", "payoff")
+STORY_GROUNDING_SOURCE_ORIGINS: tuple[str, ...] = (
+    "user_input",
+    "script",
+    "canonical_reference",
+    "asset_bible",
+    "inferred",
+    "adaptation_choice",
+    "invented_candidate",
+)
+CONCRETE_STORY_ELEMENT_FUNCTIONS: tuple[str, ...] = (
+    "obstacle",
+    "proof",
+    "temptation",
+    "deadline",
+    "status_marker",
+    "secret_holder",
+    "memory_trigger",
+    "threshold",
+    "handoff",
+    "contrast",
+    "pressure",
+    "reward",
+    "loss",
+)
 FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS: tuple[str, ...] = (
     "cut_id",
     "camera",
@@ -186,6 +210,34 @@ FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS: tuple[str, ...] = (
     "image_prompt",
     "video_prompt",
     "motion_prompt",
+)
+SCENE_GENERATION_REQUIRED_BLOCKS: tuple[str, ...] = (
+    "scene_authoring_context",
+    "scene_prompt_payload",
+    "scene_debug_prompt_source",
+    "scene_generation_contract",
+)
+SCENE_GENERATION_REQUIRED_OUTPUTS: tuple[str, ...] = (
+    "scene_intent",
+    "scene_event",
+    "scene_character_state_timeline",
+    "scene_film_coverage_plan",
+    "scene_cut_coverage_plan",
+    "forbidden_event_changes",
+)
+SCENE_PROMPT_PAYLOAD_FORBIDDEN_DOWNSTREAM_FIELDS: tuple[str, ...] = (
+    "first_frame_brief",
+    "motion_brief",
+    "api_prompt_payload",
+)
+SCENE_PROMPT_PAYLOAD_FORBIDDEN_DIRECTING_TERMS_RE = re.compile(
+    r"\b(?:camera|lens|framing|shot)\b|カメラ|レンズ|画角|フレーミング|ショット",
+    re.I,
+)
+SCENE_PROMPT_PAYLOAD_FIXED_CUT_COUNT_RE = re.compile(
+    r"\b(?:cut_count|fixed_cut_count)\s*[:=]\s*\d+\b|(?:cut数|カット数)\s*(?:は|:|=)?\s*\d+|"
+    r"\d+\s*(?:cuts|カット)\s*(?:で|に)?\s*(?:固定|する|作る)",
+    re.I,
 )
 
 
@@ -1728,6 +1780,99 @@ def _scene_event_source_story_beat_refs(scene_event: dict[str, Any]) -> list[str
     return [str(item).strip() for item in refs if str(item).strip()] if isinstance(refs, list) else []
 
 
+def _story_grounding_source_refs(grounding: dict[str, Any]) -> list[str]:
+    refs = grounding.get("source_story_beat_ids")
+    return [str(item).strip() for item in refs if str(item).strip()] if isinstance(refs, list) else []
+
+
+def _concrete_story_elements(grounding: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in as_list(grounding.get("concrete_story_elements")) if isinstance(item, dict)]
+
+
+def _asset_story_function_usage(grounding: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in as_list(grounding.get("asset_story_function_usage")) if isinstance(item, dict)]
+
+
+def _scene_event_top_level_matrix(data: dict[str, Any]) -> dict[str, Any]:
+    direct = as_dict(data.get("canonical_event_coverage_matrix"))
+    if direct:
+        return direct
+    return as_dict(as_dict(data.get("script")).get("canonical_event_coverage_matrix"))
+
+
+def _scene_generation_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
+    scene_id = _scene_id_for_issue(scene)
+    issues: dict[str, list[str]] = {
+        "payload_exists": [],
+        "contract_complete": [],
+        "payload_no_downstream_fields": [],
+        "payload_no_image_directing_terms": [],
+        "payload_no_fixed_cut_count": [],
+        "debug_prompt_source_exists": [],
+        "contract_matches_outputs": [],
+    }
+    generation = as_dict(scene.get("scene_generation"))
+    if not generation:
+        issues["payload_exists"].append(f"scene{scene_id}:scene_generation")
+        return {key: values for key, values in issues.items() if values}
+    if str(generation.get("schema_version") or "").strip() != "scene_generation_v1":
+        issues["payload_exists"].append(f"scene{scene_id}:scene_generation.schema_version")
+    for block in SCENE_GENERATION_REQUIRED_BLOCKS:
+        if not as_dict(generation.get(block)):
+            target = "debug_prompt_source_exists" if block == "scene_debug_prompt_source" else "payload_exists"
+            issues[target].append(f"scene{scene_id}:scene_generation.{block}")
+
+    payload = as_dict(generation.get("scene_prompt_payload"))
+    prompt = str(payload.get("prompt") or "")
+    if not prompt.strip():
+        issues["payload_exists"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.prompt")
+    if not as_list(payload.get("input_refs")):
+        issues["payload_exists"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.input_refs")
+    payload_required_outputs = [str(item).strip() for item in as_list(payload.get("required_outputs")) if str(item).strip()]
+    for output in SCENE_GENERATION_REQUIRED_OUTPUTS:
+        if output not in payload_required_outputs:
+            issues["contract_complete"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.required_outputs.{output}")
+    prompt_paths = _iter_mapping_keys_recursive(payload)
+    for forbidden in SCENE_PROMPT_PAYLOAD_FORBIDDEN_DOWNSTREAM_FIELDS:
+        if any(path.rsplit(".", 1)[-1] == forbidden for path in prompt_paths) or forbidden in prompt:
+            issues["payload_no_downstream_fields"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.{forbidden}")
+    if SCENE_PROMPT_PAYLOAD_FORBIDDEN_DIRECTING_TERMS_RE.search(prompt):
+        issues["payload_no_image_directing_terms"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.prompt")
+    if SCENE_PROMPT_PAYLOAD_FIXED_CUT_COUNT_RE.search(prompt):
+        issues["payload_no_fixed_cut_count"].append(f"scene{scene_id}:scene_generation.scene_prompt_payload.prompt")
+
+    debug_source = as_dict(generation.get("scene_debug_prompt_source"))
+    if not debug_source:
+        issues["debug_prompt_source_exists"].append(f"scene{scene_id}:scene_generation.scene_debug_prompt_source")
+    else:
+        for key in ("source_story_beat_ids", "source_beats", "adaptation_choices", "excluded_from_payload"):
+            if not as_list(debug_source.get(key)):
+                issues["debug_prompt_source_exists"].append(f"scene{scene_id}:scene_generation.scene_debug_prompt_source.{key}")
+        if debug_source.get("not_sent_to_agent") is not True:
+            issues["debug_prompt_source_exists"].append(f"scene{scene_id}:scene_generation.scene_debug_prompt_source.not_sent_to_agent")
+
+    contract = as_dict(generation.get("scene_generation_contract"))
+    if not contract:
+        issues["contract_complete"].append(f"scene{scene_id}:scene_generation.scene_generation_contract")
+    else:
+        contract_outputs = [str(item).strip() for item in as_list(contract.get("required_outputs")) if str(item).strip()]
+        for output in SCENE_GENERATION_REQUIRED_OUTPUTS:
+            if output not in contract_outputs:
+                issues["contract_complete"].append(f"scene{scene_id}:scene_generation.scene_generation_contract.required_outputs.{output}")
+        if str(contract.get("scene_event_schema_version") or "").strip() != "scene_event_v1":
+            issues["contract_complete"].append(f"scene{scene_id}:scene_generation.scene_generation_contract.scene_event_schema_version")
+
+    for output in SCENE_GENERATION_REQUIRED_OUTPUTS:
+        if output == "forbidden_event_changes":
+            scene_event = as_dict(scene.get("scene_event"))
+            if "forbidden_event_changes" not in scene_event or not isinstance(scene_event.get("forbidden_event_changes"), list):
+                issues["contract_matches_outputs"].append(f"scene{scene_id}:scene_event.forbidden_event_changes")
+            continue
+        if not as_dict(scene.get(output)):
+            issues["contract_matches_outputs"].append(f"scene{scene_id}:{output}")
+    return {key: values for key, values in issues.items() if values}
+
+
 def _forbidden_reveal_ids_from_scene_intent(scene: dict[str, Any]) -> set[str]:
     intent = as_dict(scene.get("scene_intent"))
     forbidden: set[str] = set()
@@ -1762,6 +1907,9 @@ def _scene_event_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
         "exists": [],
         "sequence_complete": [],
         "visible_actions_complete": [],
+        "story_grounding_complete": [],
+        "concrete_story_function_complete": [],
+        "specificity_budget_respected": [],
         "no_forbidden_directing_fields": [],
         "beat_ids_unique": [],
         "turning_event_ref_valid": [],
@@ -1783,6 +1931,27 @@ def _scene_event_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
             issues["exists"].append(f"scene{scene_id}:scene_event.{key}")
     if not _scene_event_source_story_beat_refs(event):
         issues["exists"].append(f"scene{scene_id}:scene_event.source_story_beat_ids")
+    specificity_layers = as_dict(event.get("story_specificity"))
+    if not specificity_layers:
+        issues["story_grounding_complete"].append(f"scene{scene_id}:scene_event.story_specificity")
+    else:
+        for layer_key in (
+            "canonical_specificity",
+            "character_specificity",
+            "relationship_specificity",
+            "object_specificity",
+            "location_specificity",
+            "rule_specificity",
+            "visual_specificity",
+        ):
+            layer = as_dict(specificity_layers.get(layer_key))
+            if not layer or not as_list(layer.get("required_elements")):
+                issues["story_grounding_complete"].append(f"scene{scene_id}:scene_event.story_specificity.{layer_key}")
+    scene_budget = as_dict(event.get("specificity_budget"))
+    if not scene_budget:
+        issues["specificity_budget_respected"].append(f"scene{scene_id}:scene_event.specificity_budget")
+    elif scene_budget.get("reject_decorative_detail_without_story_function") is not True:
+        issues["specificity_budget_respected"].append(f"scene{scene_id}:scene_event.specificity_budget.reject_decorative_detail_without_story_function")
 
     forbidden_fields = set(FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS)
     forbidden_paths = [
@@ -1821,6 +1990,80 @@ def _scene_event_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
                 issues["visible_actions_complete"].append(f"scene{scene_id}:{beat_id or index}.{key}")
         if not as_list(beat.get("required_visual_evidence")):
             issues["visible_actions_complete"].append(f"scene{scene_id}:{beat_id or index}.required_visual_evidence")
+        abstract_function = as_dict(beat.get("abstract_function"))
+        if not abstract_function:
+            issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.abstract_function")
+        else:
+            for key in ("dramatic_job", "causal_role"):
+                if not non_empty(abstract_function.get(key)):
+                    issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.abstract_function.{key}")
+        concrete_event = as_dict(beat.get("concrete_event"))
+        if not concrete_event:
+            issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.concrete_event")
+        else:
+            if not as_list(concrete_event.get("who")):
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.concrete_event.who")
+            for key in ("where", "what_happens", "conflict_or_constraint", "visible_action", "visible_reaction"):
+                if not non_empty(concrete_event.get(key)):
+                    issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.concrete_event.{key}")
+            if not as_list(concrete_event.get("required_visual_evidence")):
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.concrete_event.required_visual_evidence")
+        grounding = as_dict(beat.get("story_grounding"))
+        if not grounding:
+            issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding")
+        else:
+            origin = str(grounding.get("source_origin") or "").strip()
+            if origin not in STORY_GROUNDING_SOURCE_ORIGINS:
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.source_origin")
+            grounding_refs = _story_grounding_source_refs(grounding)
+            if not grounding_refs:
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.source_story_beat_ids")
+            elif source_story_beat_ids and any(ref not in source_story_beat_ids for ref in grounding_refs):
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.source_story_beat_ids.ref")
+            if not non_empty(grounding.get("source_text_or_summary")):
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.source_text_or_summary")
+            if origin == "invented_candidate" and grounding.get("human_approval_required") is not True:
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.invented_candidate_without_approval")
+            non_replaceable = [item for item in as_list(grounding.get("non_replaceable_elements")) if isinstance(item, dict)]
+            if not non_replaceable:
+                issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.non_replaceable_elements")
+            for element_index, element in enumerate(non_replaceable, start=1):
+                for key in ("element_id", "type", "value", "why_non_replaceable"):
+                    if not non_empty(element.get(key)):
+                        issues["story_grounding_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.non_replaceable_elements[{element_index}].{key}")
+            concrete_elements = _concrete_story_elements(grounding)
+            if not concrete_elements:
+                issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.concrete_story_elements")
+            for element_index, element in enumerate(concrete_elements, start=1):
+                for key in ("element_id", "element_type", "concrete_description", "story_function", "visible_form"):
+                    if not non_empty(element.get(key)):
+                        issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.concrete_story_elements[{element_index}].{key}")
+                function = str(element.get("story_function") or "").strip()
+                if function and function not in CONCRETE_STORY_ELEMENT_FUNCTIONS:
+                    issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.concrete_story_elements[{element_index}].story_function.enum")
+                beat_refs = [str(item).strip() for item in as_list(element.get("appears_in_event_beat_ids")) if str(item).strip()]
+                if beat_id and beat_refs and beat_id not in beat_refs:
+                    issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.concrete_story_elements[{element_index}].appears_in_event_beat_ids")
+            asset_usage = _asset_story_function_usage(grounding)
+            if not asset_usage:
+                issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.asset_story_function_usage")
+            for usage_index, usage in enumerate(asset_usage, start=1):
+                for key in ("asset_id", "asset_type", "story_function_in_scene", "visible_or_hidden"):
+                    if not non_empty(usage.get(key)):
+                        issues["concrete_story_function_complete"].append(f"scene{scene_id}:{beat_id or index}.story_grounding.asset_story_function_usage[{usage_index}].{key}")
+        budget = as_dict(beat.get("specificity_budget"))
+        if not budget:
+            issues["specificity_budget_respected"].append(f"scene{scene_id}:{beat_id or index}.specificity_budget")
+        else:
+            max_primary = as_int(budget.get("max_primary_story_elements")) or 0
+            max_secondary = as_int(budget.get("max_secondary_story_elements")) or 0
+            if max_primary <= 0:
+                issues["specificity_budget_respected"].append(f"scene{scene_id}:{beat_id or index}.specificity_budget.max_primary_story_elements")
+            if budget.get("reject_decorative_detail_without_story_function") is not True:
+                issues["specificity_budget_respected"].append(f"scene{scene_id}:{beat_id or index}.specificity_budget.reject_decorative_detail_without_story_function")
+            concrete_count = len(_concrete_story_elements(as_dict(beat.get("story_grounding"))))
+            if max_primary and max_secondary and concrete_count > max_primary + max_secondary:
+                issues["specificity_budget_respected"].append(f"scene{scene_id}:{beat_id or index}.specificity_budget.overloaded:{concrete_count}>{max_primary + max_secondary}")
 
     duplicate_ids = sorted({beat_id for beat_id in beat_ids if beat_ids.count(beat_id) > 1})
     if duplicate_ids:
@@ -1864,6 +2107,7 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
         "refs_valid": [],
         "reference_integrity": [],
         "source_event_preservation": [],
+        "source_story_specificity_projection": [],
         "first_frame_alignment": [],
         "motion_boundary": [],
         "narration_boundary": [],
@@ -1918,6 +2162,15 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
                 if key in {"event_facts_to_preserve", "event_facts_not_to_invent"}:
                     issues["refs_valid"].append(f"{selector}:source_event_contract.{key}")
                 issues["source_event_preservation"].append(f"{selector}:source_event_contract.{key}")
+        source_concrete_events = [item for item in as_list(source_contract.get("source_concrete_events")) if isinstance(item, dict)]
+        if not source_concrete_events:
+            issues["source_story_specificity_projection"].append(f"{selector}:source_event_contract.source_concrete_events")
+        source_story_grounding = [item for item in as_list(source_contract.get("source_story_grounding")) if isinstance(item, dict)]
+        if not source_story_grounding:
+            issues["source_story_specificity_projection"].append(f"{selector}:source_event_contract.source_story_grounding")
+        source_non_replaceable = [item for item in as_list(source_contract.get("source_non_replaceable_elements")) if isinstance(item, dict)]
+        if not source_non_replaceable:
+            issues["source_story_specificity_projection"].append(f"{selector}:source_event_contract.source_non_replaceable_elements")
         ref_beats = [beat_by_id[ref] for ref in refs if ref in beat_by_id]
         primary_beat = beat_by_id.get(primary)
         expected_facts = {str(beat.get("what_happens") or "").strip() for beat in ref_beats if str(beat.get("what_happens") or "").strip()}
@@ -2290,6 +2543,56 @@ def _scene_event_readiness_issues(scenes: list[Any], *, prefix: str = "script") 
                 if values:
                     issues.append(f"{prefix}.emotion_film.{issue_key}")
     return list(dict.fromkeys(issues))
+
+
+def _canonical_event_coverage_matrix_issues(data: dict[str, Any], scenes: list[Any]) -> list[str]:
+    matrix = _scene_event_top_level_matrix(data)
+    concrete_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
+    if not concrete_scenes:
+        return []
+    scene_ids = {str(scene.get("scene_id") or index + 1).strip() for index, scene in enumerate(concrete_scenes)}
+    beat_ids_by_scene: dict[str, set[str]] = {}
+    all_beat_ids: set[str] = set()
+    for index, scene in enumerate(concrete_scenes):
+        scene_id = str(scene.get("scene_id") or index + 1).strip()
+        beat_ids = set(_scene_event_beat_ids(scene))
+        beat_ids_by_scene[scene_id] = beat_ids
+        all_beat_ids.update(beat_ids)
+    issues: list[str] = []
+    if not matrix:
+        return ["canonical_event_coverage_matrix"]
+    rows = [row for row in as_list(matrix.get("source_story_events")) if isinstance(row, dict)]
+    if not rows:
+        return ["canonical_event_coverage_matrix.source_story_events"]
+    previous_index = -1
+    for row_index, row in enumerate(rows, start=1):
+        row_id = str(row.get("source_event_id") or row_index).strip()
+        if not non_empty(row.get("source_event_summary")):
+            issues.append(f"{row_id}:source_event_summary")
+        canonical_order = as_int(row.get("canonical_order_index"))
+        if canonical_order is None:
+            issues.append(f"{row_id}:canonical_order_index")
+        elif canonical_order < previous_index:
+            issues.append(f"{row_id}:canonical_order_broken")
+        else:
+            previous_index = canonical_order
+        required = row.get("required") is True or str(row.get("importance") or "").strip().lower() in {"high", "critical"}
+        assigned_scene_ids = [str(item).strip() for item in as_list(row.get("assigned_scene_ids")) if str(item).strip()]
+        assigned_beat_ids = [str(item).strip() for item in as_list(row.get("assigned_event_beat_ids")) if str(item).strip()]
+        if required:
+            if not assigned_scene_ids and not non_empty(row.get("omission_reason")):
+                issues.append(f"{row_id}:assigned_scene_ids")
+            if not assigned_beat_ids and not non_empty(row.get("omission_reason")):
+                issues.append(f"{row_id}:assigned_event_beat_ids")
+        for scene_id in assigned_scene_ids:
+            if scene_id not in scene_ids:
+                issues.append(f"{row_id}:assigned_scene_ids.ref:{scene_id}")
+        for beat_id in assigned_beat_ids:
+            if beat_id not in all_beat_ids:
+                issues.append(f"{row_id}:assigned_event_beat_ids.ref:{beat_id}")
+        if row.get("human_approval_required") is True and not non_empty(row.get("adaptation_change_reason") or row.get("omission_reason")):
+            issues.append(f"{row_id}:human_approval_required.reason")
+    return issues
 
 
 def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
@@ -2678,10 +2981,46 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
             kind="rubric",
         )
 
+    scene_generation_issues: dict[str, list[str]] = {
+        "payload_exists": [],
+        "contract_complete": [],
+        "payload_no_downstream_fields": [],
+        "payload_no_image_directing_terms": [],
+        "payload_no_fixed_cut_count": [],
+        "debug_prompt_source_exists": [],
+        "contract_matches_outputs": [],
+    }
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        for key, values in _scene_generation_issue_map(scene).items():
+            scene_generation_issues.setdefault(key, []).extend(values)
+    scene_generation_checks = (
+        ("script.scene_generation_payload_exists", "payload_exists", "all scenes include scene_generation with scene_prompt_payload"),
+        ("script.scene_generation_contract_complete", "contract_complete", "scene_generation declares the required output contract"),
+        ("script.scene_prompt_payload_no_downstream_fields", "payload_no_downstream_fields", "scene prompt payload excludes downstream execution fields"),
+        ("script.scene_prompt_payload_no_image_directing_terms", "payload_no_image_directing_terms", "scene prompt payload excludes image directing terms"),
+        ("script.scene_prompt_payload_no_fixed_cut_count", "payload_no_fixed_cut_count", "scene prompt payload does not fix cut count"),
+        ("script.scene_debug_prompt_source_exists", "debug_prompt_source_exists", "scene debug prompt source records source beats and adaptation choices"),
+        ("script.scene_generation_contract_matches_outputs", "contract_matches_outputs", "scene_generation required outputs exist on the scene"),
+    )
+    for check_id, issue_key, message in scene_generation_checks:
+        issue_values = scene_generation_issues.get(issue_key, [])
+        add_check(
+            checks,
+            check_id,
+            not issue_values,
+            message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
+            kind="rubric",
+        )
+
     scene_event_issues: dict[str, list[str]] = {
         "exists": [],
         "sequence_complete": [],
         "visible_actions_complete": [],
+        "story_grounding_complete": [],
+        "concrete_story_function_complete": [],
+        "specificity_budget_respected": [],
         "no_forbidden_directing_fields": [],
         "beat_ids_unique": [],
         "turning_event_ref_valid": [],
@@ -2692,6 +3031,7 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         "refs_valid": [],
         "reference_integrity": [],
         "source_event_preservation": [],
+        "source_story_specificity_projection": [],
         "first_frame_alignment": [],
         "motion_boundary": [],
         "narration_boundary": [],
@@ -2731,6 +3071,9 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         ("script.scene_event_exists", "exists", "all scenes include canonical scene_event with scene_event_v1 fields"),
         ("script.scene_event_sequence_complete", "sequence_complete", "scene_event.event_sequence includes setup, pressure, turn, payoff beats with source story refs"),
         ("script.scene_event_visible_actions_complete", "visible_actions_complete", "each scene_event beat declares what happens, visible action/reaction, consequence, pressure, and visual evidence"),
+        ("script.scene_event_story_specific_grounding_complete", "story_grounding_complete", "each scene_event beat separates abstract_function, concrete_event, and source-grounded story_grounding with non-replaceable elements"),
+        ("script.scene_event_concrete_story_function_complete", "concrete_story_function_complete", "concrete story elements and asset usage declare story functions instead of decorative detail"),
+        ("script.scene_event_specificity_budget_respected", "specificity_budget_respected", "scene_event and beats include specificity budgets and do not overload concrete detail"),
         ("script.scene_event_no_forbidden_directing_fields", "no_forbidden_directing_fields", "scene_event contains story events only and no directing or prompt fields"),
         ("script.scene_event_beat_ids_unique", "beat_ids_unique", "scene_event beat_id values are present and unique per scene"),
         ("script.scene_event_turning_event_ref_valid", "turning_event_ref_valid", "scene_event.turning_event references the turn beat and scene_intent.causal_turn"),
@@ -2746,10 +3089,20 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
             message + (f" (issues: {', '.join(issue_values[:8])})" if issue_values else ""),
             kind="rubric",
         )
+    canonical_matrix_issues = _canonical_event_coverage_matrix_issues(data, scenes)
+    add_check(
+        checks,
+        "script.canonical_event_coverage_matrix_complete",
+        not canonical_matrix_issues,
+        "canonical source/user-input events are mapped to scene ids and scene_event beat ids"
+        + (f" (issues: {', '.join(canonical_matrix_issues[:8])})" if canonical_matrix_issues else ""),
+        kind="rubric",
+    )
     cut_event_checks = (
         ("script.cut_event_beat_refs_valid", "refs_valid", "all cut_contract entries reference valid scene_event beat ids"),
         ("script.event_beat_reference_integrity", "reference_integrity", "cut_contract.source_event_contract matches the primary scene_event beat and enum policy"),
         ("script.source_event_preservation", "source_event_preservation", "cut_contract.source_event_contract preserves source event facts and reveal boundaries"),
+        ("script.source_story_specificity_projection", "source_story_specificity_projection", "cut_contract.source_event_contract projects concrete_event, story_grounding, and non-replaceable elements from scene_event"),
         ("script.event_first_frame_alignment", "first_frame_alignment", "first_frame_contract aligns with the primary source event beat"),
         ("script.event_motion_boundary", "motion_boundary", "motion_contract starts from the first frame and does not cross forbidden event beat boundaries"),
         ("script.event_narration_boundary", "narration_boundary", "narration_contract stays within allowed event and reveal boundaries"),

@@ -117,7 +117,7 @@ def _scene_intent_dict(scene_id: int | str, *, topic: str = "request preview") -
 
 
 def _scene_event_dict(scene_id: int | str, *, topic: str = "request preview") -> dict:
-    return {
+    return _with_story_specific_grounding({
         "schema_version": "scene_event_v1",
         "event_logline": f"{topic} が preview の圧力を受けて次の生成に渡る",
         "start_situation": f"{topic} は画面中央で未確定の状態にある",
@@ -188,6 +188,254 @@ def _scene_event_dict(scene_id: int | str, *, topic: str = "request preview") ->
         },
         "offscreen_context": ["後続 cut の結末はまだ起きていない"],
         "forbidden_event_changes": ["後続 cut の結末をこのsceneで起こさない"],
+    }, scene_id, topic=topic)
+
+
+def _with_story_specific_grounding(event: dict, scene_id: int | str, *, topic: str) -> dict:
+    source_beat_id = f"preview_scene{scene_id}_beat"
+    event["story_specificity"] = {
+        "canonical_specificity": {"description": "preview source", "required_elements": [topic]},
+        "character_specificity": {"description": "preview subject", "required_elements": [topic]},
+        "relationship_specificity": {"description": "preview relation", "required_elements": ["reviewer と生成対象"]},
+        "object_specificity": {"description": "preview object", "required_elements": ["道具"]},
+        "location_specificity": {"description": "preview location", "required_elements": ["画面中央"]},
+        "rule_specificity": {"description": "preview rule", "required_elements": ["後続 cut の結末を先に見せない"]},
+        "visual_specificity": {"description": "preview evidence", "required_elements": ["足跡", "道具"]},
+    }
+    event["specificity_budget"] = {
+        "max_primary_story_elements": 3,
+        "max_secondary_story_elements": 3,
+        "required_element_types": ["character", "location", "conflict_or_constraint", "visual_evidence"],
+        "optional_element_types": ["object"],
+        "reject_if": ["decorative_detail_without_story_function"],
+        "reject_decorative_detail_without_story_function": True,
+    }
+    for beat in event.get("event_sequence", []):
+        if not isinstance(beat, dict):
+            continue
+        beat_id = str(beat.get("beat_id") or "")
+        what = str(beat.get("what_happens") or "")
+        evidence = beat.get("required_visual_evidence") if isinstance(beat.get("required_visual_evidence"), list) else []
+        beat["abstract_function"] = {
+            "dramatic_job": "preview の観客理解を進める",
+            "value_shift_role": "未確定から生成可能へ",
+            "emotional_pressure_role": str(beat.get("emotional_pressure") or ""),
+            "causal_role": str(beat.get("immediate_consequence") or ""),
+        }
+        beat["concrete_event"] = {
+            "who": [topic],
+            "where": "preview frame",
+            "what_happens": what,
+            "conflict_or_constraint": "後続生成の境界を越えずに根拠だけを見せる",
+            "object_or_trace": ["道具", "足跡"],
+            "visible_action": str(beat.get("visible_action") or ""),
+            "visible_reaction": str(beat.get("visible_reaction") or ""),
+            "immediate_consequence": str(beat.get("immediate_consequence") or ""),
+            "required_visual_evidence": evidence,
+        }
+        beat["story_grounding"] = {
+            "source_origin": "script",
+            "source_story_beat_ids": [source_beat_id],
+            "source_confidence": "high",
+            "source_text_or_summary": what,
+            "adaptation_reason": "request preview の出来事を後続 prompt に渡せる具体証拠へ変換する",
+            "human_approval_required": False,
+            "non_replaceable_elements": [
+                {"element_id": "preview_subject", "type": "character", "value": topic, "why_non_replaceable": "preview 対象"},
+                {"element_id": "preview_tool", "type": "object", "value": "道具", "why_non_replaceable": "後続 prompt の証拠"},
+            ],
+            "replaceability_check": {
+                "would_survive_character_swap": False,
+                "would_survive_object_swap": False,
+                "would_survive_location_swap": False,
+                "note": "preview 対象と道具を置換すると request の意味が変わる",
+            },
+            "concrete_story_elements": [
+                {"element_id": "preview_subject", "element_type": "character", "concrete_description": topic, "story_function": "status_marker", "appears_in_event_beat_ids": [beat_id], "visible_form": "主対象の姿勢", "must_not_be_generic": True},
+                {"element_id": "preview_tool", "element_type": "object", "concrete_description": "道具", "story_function": "proof", "appears_in_event_beat_ids": [beat_id], "visible_form": "手元の道具", "must_not_be_generic": True},
+            ],
+            "asset_story_function_usage": [
+                {"asset_id": "preview_subject", "asset_type": "character", "used_in_scene": True, "used_in_event_beat_ids": [beat_id], "story_function_in_scene": "status_marker", "visible_or_hidden": "visible", "reason_if_unused": ""},
+            ],
+            "confidence": "high",
+        }
+        beat["specificity_budget"] = dict(event["specificity_budget"])
+    return event
+
+
+def _scene_generation_dict(scene_id: int | str, *, topic: str = "request preview") -> dict:
+    source_beat_id = f"preview_scene{scene_id}_beat"
+    return {
+        "schema_version": "scene_generation_v1",
+        "scene_authoring_context": {
+            "schema_version": "scene_authoring_context_v1",
+            "topic": topic,
+            "scene_id": scene_id,
+            "scene_index": scene_id,
+            "scene_title": f"{topic} preview",
+            "story_scope": {"protagonist": topic, "artifact": "道具", "theme": "preview 境界"},
+            "source_beats": [{"source_story_beat_id": source_beat_id, "summary": f"{topic} が後続生成へ渡る", "source_origin": "script"}],
+            "canonical_event_policy": {
+                "source_story_events": "top-level canonical_event_coverage_matrix を参照",
+                "scene_specificity": "source beat を具体出来事へ接地する",
+            },
+            "scene_count_policy": {
+                "maximize_meaningful_scene_count": True,
+                "do_not_fix_cut_count_in_prompt": True,
+                "cut_count_is_derived_by": "scene_cut_coverage_plan",
+            },
+        },
+        "scene_prompt_payload": {
+            "schema_version": "scene_prompt_payload_v1",
+            "prompt": (
+                f"物語『{topic}』の preview scene{scene_id} を設計する。"
+                "この scene が物語内で何を成立させるかを正本化し、"
+                "scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, "
+                "scene_cut_coverage_plan, forbidden_event_changes を出力する。"
+                "後段の画像・音声・動画実行情報は含めない。"
+            ),
+            "input_refs": ["story.md", "video_manifest.md", "canonical_event_coverage_matrix"],
+            "required_outputs": [
+                "scene_intent",
+                "scene_event",
+                "scene_character_state_timeline",
+                "scene_film_coverage_plan",
+                "scene_cut_coverage_plan",
+                "forbidden_event_changes",
+            ],
+            "constraints": ["scene 正本生成だけに使う", "後段の画像・音声・動画実行情報を含めない", "scene_event は物語事実に限定する"],
+        },
+        "scene_debug_prompt_source": {
+            "schema_version": "scene_debug_prompt_source_v1",
+            "not_sent_to_agent": True,
+            "source_story_beat_ids": [source_beat_id],
+            "source_beats": [f"{topic} が後続生成へ渡る"],
+            "source_origin": "script",
+            "adaptation_choices": ["preview source beat を setup / pressure / turn / payoff の可視出来事へ分解する"],
+            "excluded_from_payload": ["後段の画像生成詳細", "後段の動画生成詳細", "後段の音声生成詳細"],
+            "forbidden_event_changes_source": "scene_event.forbidden_event_changes",
+        },
+        "scene_generation_contract": {
+            "schema_version": "scene_generation_contract_v1",
+            "required_outputs": [
+                "scene_intent",
+                "scene_event",
+                "scene_character_state_timeline",
+                "scene_film_coverage_plan",
+                "scene_cut_coverage_plan",
+                "forbidden_event_changes",
+            ],
+            "scene_event_schema_version": "scene_event_v1",
+            "payload_boundary": "scene_prompt_payload は scene 正本生成だけに使う",
+        },
+    }
+
+
+def _preview_source_projection_for_event(scene_id: int | str, event_record: dict, *, label: str) -> tuple[dict, dict, list[dict]]:
+    beat_id = str(event_record.get("beat_id") or "")
+    source_beat_id = f"preview_scene{scene_id}_beat"
+    concrete_event = {
+        "who": [label],
+        "where": "preview frame",
+        "what_happens": str(event_record.get("what_happens") or ""),
+        "conflict_or_constraint": "後続生成の境界を越えずに根拠だけを見せる",
+        "object_or_trace": ["道具", "足跡"],
+        "visible_action": str(event_record.get("visible_action") or ""),
+        "visible_reaction": str(event_record.get("visible_reaction") or ""),
+        "required_visual_evidence": list(event_record.get("required_visual_evidence") or []),
+    }
+    non_replaceable = [
+        {
+            "element_id": "preview_subject",
+            "type": "character",
+            "value": label,
+            "why_non_replaceable": "preview 対象",
+        },
+        {
+            "element_id": "preview_tool",
+            "type": "object",
+            "value": "道具",
+            "why_non_replaceable": "後続 prompt の証拠",
+        },
+    ]
+    story_grounding = {
+        "source_origin": "script",
+        "source_story_beat_ids": [source_beat_id],
+        "source_confidence": "high",
+        "source_text_or_summary": str(event_record.get("what_happens") or ""),
+        "adaptation_reason": "request preview の出来事を後続 prompt に渡せる具体証拠へ変換する",
+        "human_approval_required": False,
+        "non_replaceable_elements": non_replaceable,
+        "replaceability_check": {
+            "would_survive_character_swap": False,
+            "would_survive_object_swap": False,
+            "would_survive_location_swap": False,
+            "note": "preview 対象と道具を置換すると request の意味が変わる",
+        },
+        "concrete_story_elements": [
+            {
+                "element_id": "preview_subject",
+                "element_type": "character",
+                "concrete_description": label,
+                "story_function": "status_marker",
+                "appears_in_event_beat_ids": [beat_id],
+                "visible_form": "主対象の姿勢",
+                "must_not_be_generic": True,
+            },
+            {
+                "element_id": "preview_tool",
+                "element_type": "object",
+                "concrete_description": "道具",
+                "story_function": "proof",
+                "appears_in_event_beat_ids": [beat_id],
+                "visible_form": "手元の道具",
+                "must_not_be_generic": True,
+            },
+        ],
+        "asset_story_function_usage": [
+            {
+                "asset_id": "preview_subject",
+                "asset_type": "character",
+                "used_in_scene": True,
+                "used_in_event_beat_ids": [beat_id],
+                "story_function_in_scene": "status_marker",
+                "visible_or_hidden": "visible",
+                "reason_if_unused": "",
+            },
+        ],
+        "confidence": "high",
+    }
+    return concrete_event, story_grounding, non_replaceable
+
+
+def _preview_canonical_event_coverage_matrix(scene_ids: list[int | str]) -> dict:
+    rows = []
+    for order, scene_id in enumerate(scene_ids, start=1):
+        scene_id_text = str(scene_id)
+        rows.append(
+            {
+                "source_event_id": f"preview_scene{scene_id_text}_source_event",
+                "source_event_summary": f"scene{scene_id_text} の preview 出来事が setup から payoff まで成立する",
+                "importance": "high",
+                "required": True,
+                "must_appear_as": "scene",
+                "canonical_order_index": order,
+                "assigned_scene_ids": [scene_id_text],
+                "assigned_event_beat_ids": [
+                    f"scene{scene_id_text}_event_setup",
+                    f"scene{scene_id_text}_event_pressure",
+                    f"scene{scene_id_text}_event_turn",
+                    f"scene{scene_id_text}_event_payoff",
+                ],
+                "omission_reason": "",
+                "adaptation_change_reason": "",
+                "human_approval_required": False,
+            }
+        )
+    return {
+        "policy_version": "canonical_event_coverage_matrix_v1",
+        "source": ["script", "manifest", "request_preview"],
+        "source_story_events": rows,
     }
 
 
@@ -382,6 +630,11 @@ def _preview_cut_contract(
         if 0 <= neighbor_index < len(event_records):
             neighboring_event_beats.append(event_records[neighbor_index])
     forbidden_event_changes = ["後続 cut の結末をこのsceneで起こさない"]
+    concrete_event, story_grounding, non_replaceable_elements = _preview_source_projection_for_event(
+        scene_id,
+        event_record,
+        label=label,
+    )
     visible_behavior = {
         "face": "緊張した表情",
         "gaze": "前方を見る",
@@ -399,6 +652,9 @@ def _preview_cut_contract(
             "event_beat_function": event_function,
             "event_time_position": "before_trigger",
             "source_event_summary": event_record["what_happens"],
+            "source_concrete_events": [concrete_event],
+            "source_story_grounding": [story_grounding],
+            "source_non_replaceable_elements": non_replaceable_elements,
             "source_visible_action": event_record["visible_action"],
             "source_visible_reaction": event_record["visible_reaction"],
             "source_required_visual_evidence": event_record["required_visual_evidence"],
@@ -661,6 +917,8 @@ def _preview_cut_contract(
                 "visible_action": event_record["visible_action"],
                 "visible_reaction": event_record["visible_reaction"],
                 "required_visual_evidence": event_record["required_visual_evidence"],
+                "concrete_event": concrete_event,
+                "story_grounding": story_grounding,
             },
             "source_event_beats": [event_record],
             "neighboring_event_beats": neighboring_event_beats,
@@ -937,6 +1195,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     "next_scene_connection_checked": True,
                 },
                 "scene_intent": _scene_intent_dict(scene_id),
+                "scene_generation": _scene_generation_dict(scene_id),
                 "scene_event": _scene_event_dict(scene_id),
                 "scene_character_state_timeline": scene_character_state_timeline,
                 "scene_film_coverage_plan": scene_film_coverage_plan,
@@ -949,6 +1208,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scene["target_duration_seconds"] = max(32, len(script_cuts) * 8)
         scene["estimated_duration_seconds"] = max(32, len(script_cuts) * 8)
         scene["scene_intent"] = _scene_intent_dict(scene_id)
+        scene["scene_generation"] = _scene_generation_dict(scene_id)
         scene["scene_event"] = _scene_event_dict(scene_id)
         scene["scene_character_state_timeline"] = scene_character_state_timeline
         scene["scene_film_coverage_plan"] = scene_film_coverage_plan
@@ -1004,7 +1264,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
             topic="filler preview",
             selectors=filler_selectors,
         )
-        scenes.append({"scene_id": filler_scene_id, "scene_intent": _scene_intent_dict(filler_scene_id, topic="filler preview"), "scene_event": _scene_event_dict(filler_scene_id, topic="filler preview"), "scene_character_state_timeline": filler_timeline, "scene_film_coverage_plan": filler_film_coverage, "cuts": manifest_cuts})
+        scenes.append({"scene_id": filler_scene_id, "scene_intent": _scene_intent_dict(filler_scene_id, topic="filler preview"), "scene_generation": _scene_generation_dict(filler_scene_id, topic="filler preview"), "scene_event": _scene_event_dict(filler_scene_id, topic="filler preview"), "scene_character_state_timeline": filler_timeline, "scene_film_coverage_plan": filler_film_coverage, "cuts": manifest_cuts})
         script_scenes.append(
             {
                 "scene_id": filler_scene_id,
@@ -1024,6 +1284,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     "next_scene_connection_checked": True,
                 },
                 "scene_intent": _scene_intent_dict(filler_scene_id, topic="filler preview"),
+                "scene_generation": _scene_generation_dict(filler_scene_id, topic="filler preview"),
                 "scene_event": _scene_event_dict(filler_scene_id, topic="filler preview"),
                 "scene_character_state_timeline": filler_timeline,
                 "scene_film_coverage_plan": filler_film_coverage,
@@ -1036,6 +1297,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scenes[-1]["target_duration_seconds"] = 32
         scenes[-1]["estimated_duration_seconds"] = 32
         scenes[-1]["scene_intent"] = _scene_intent_dict(filler_scene_id, topic="filler preview")
+        scenes[-1]["scene_generation"] = _scene_generation_dict(filler_scene_id, topic="filler preview")
         scenes[-1]["scene_event"] = _scene_event_dict(filler_scene_id, topic="filler preview")
         scenes[-1]["scene_character_state_timeline"] = filler_timeline
         scenes[-1]["scene_film_coverage_plan"] = filler_film_coverage
@@ -1043,17 +1305,25 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scenes[-1]["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
         filler_scene_id += 1
 
+    canonical_event_coverage_matrix = _preview_canonical_event_coverage_matrix(
+        [scene.get("scene_id", index + 1) for index, scene in enumerate(script_scenes) if isinstance(scene, dict)]
+    )
+    data["canonical_event_coverage_matrix"] = canonical_event_coverage_matrix
     manifest_path.write_text("```yaml\n" + MODULE.yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
     (run_dir / "script.md").write_text(
         "```yaml\n"
         + MODULE.yaml.safe_dump(
             {
                 "evaluation_contract": {"target_arc": "development", "must_cover": ["request preview"], "must_avoid": []},
+                "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
                 "scene_set_review": {"status": "approved"},
                 "scene_detail_review": {"status": "approved"},
                 "cut_blueprint_review": {"status": "approved"},
                 "scenes": script_scenes,
-                "script": {"scenes": script_scenes},
+                "script": {
+                    "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
+                    "scenes": script_scenes,
+                },
             },
             allow_unicode=True,
             sort_keys=False,
@@ -1112,6 +1382,9 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
                 "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details\n"
+                "- scene_generation_debug_source: source beats and adaptation choices are recorded\n"
+                "- scene_generation_contract: required scene outputs are declared\n"
                 "- scene_character_state_timeline: start/mid/end visible behavior is present\n"
                 "- scene_film_coverage_plan: shot/action-reaction/missing coverage and required_when rules are present\n"
                 "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
@@ -2047,8 +2320,16 @@ scenes:
             self.assertIn("- creation_status: `planned`", request_text)
             self.assertIn("- authoring_role: `reusable_asset_candidate`", request_text)
             self.assertIn("prompt本文には物語タイトルやscene idを書かず", request_text)
+            self.assertIn("- prompt_policy_version: `image_api_prompt_v1`", request_text)
+            self.assertIn("```api_prompt", request_text)
+            self.assertNotIn("```text", request_text)
+            self.assertNotIn("```debug_prompt_source", request_text)
+            self.assertNotIn("first_frame_visual_plan", request_text)
+            self.assertNotIn("source_event_beat_id", request_text)
+            self.assertNotIn("このcut", request_text)
             self.assertNotIn("video_first_frame_candidate", request_text)
             self.assertNotIn("最初の1フレーム", request_text)
+            self.assertIn("浦島太郎の seed", request_text)
             self.assertIn("- bootstrap_allowed: `true`", request_text)
             self.assertIn("- bootstrap_reason: `no_reference_seed`", request_text)
             self.assertIn("- source_script_selectors:", request_text)
@@ -2107,6 +2388,72 @@ scenes:
             request_text = (tmp_path / "asset_generation_requests.md").read_text(encoding="utf-8")
             self.assertIn("- asset_id: `seed_asset`", request_text)
             self.assertIn("- authoring_role: `reusable_asset_candidate`", request_text)
+            self.assertIn("- prompt_policy_version: `image_api_prompt_v1`", request_text)
+            self.assertIn("```api_prompt", request_text)
+            self.assertNotIn("```debug_prompt_source", request_text)
+            self.assertNotIn("first_frame_visual_plan", request_text)
+
+    def test_reference_asset_generation_uses_compiled_api_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_yaml = """
+video_metadata:
+  topic: "シンデレラ"
+  experience: "asset_stage"
+scenes:
+  - scene_id: 1
+    still_assets:
+      - asset_id: "cinderella_seed"
+        asset_type: "character_reference"
+        output: "assets/characters/cinderella_seed.png"
+        image_generation:
+          tool: "codex_builtin_image"
+          execution_lane: "bootstrap_builtin"
+          prompt: "シンデレラの全身参照。後続 scene でも同じ顔を保つ。source_event_beat_id: scene01_event_setup"
+          output: "assets/characters/cinderella_seed.png"
+          references: []
+"""
+            _, _, scenes = MODULE.parse_manifest_yaml_full(manifest_yaml)
+            calls: list[dict] = []
+            original_generate = MODULE.generate_codex_builtin_image
+            try:
+                MODULE.generate_codex_builtin_image = lambda **kwargs: calls.append(kwargs)
+                args = type(
+                    "Args",
+                    (),
+                    {
+                        "force": True,
+                        "dry_run": False,
+                        "test_image_dir": "assets/test",
+                        "image_size": "1K",
+                        "image_prompt_prefix": "",
+                        "image_prompt_suffix": "",
+                        "character_reference_strip": False,
+                        "character_reference_strip_suffix": "_refstrip",
+                        "log_prompts": False,
+                        "test_image_variants": 0,
+                    },
+                )()
+                MODULE._generate_single_image_scene(
+                    scene=scenes[0],
+                    base_dir=tmp_path,
+                    aspect_ratio="16:9",
+                    args=args,
+                    char_views=set(),
+                    log_dir=tmp_path / "logs",
+                    gemini_client=None,
+                    seadream_client=None,
+                )
+            finally:
+                MODULE.generate_codex_builtin_image = original_generate
+
+            self.assertEqual(len(calls), 1)
+            prompt = calls[0]["prompt"]
+            self.assertEqual(calls[0]["prompt_policy_version"], "image_api_prompt_v1")
+            self.assertIn("シンデレラの全身参照", prompt)
+            self.assertIn("後続画像でも同じ顔を保つ", prompt)
+            self.assertNotIn("後続 scene", prompt)
+            self.assertNotIn("source_event_beat_id", prompt)
 
     def test_image_generation_requests_include_lane_and_reference_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

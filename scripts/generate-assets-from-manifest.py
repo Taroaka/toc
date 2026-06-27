@@ -1807,7 +1807,11 @@ def _generate_single_image_scene(
         prompt_policy_version: str | None = None
         debug_prompt_source: dict[str, Any] = {}
         if is_reference_asset:
-            prompt = scene.image_prompt.strip()
+            api_prompt_payload = _asset_image_api_prompt_payload_for_scene(
+                scene,
+            )
+            prompt = str(api_prompt_payload.get("prompt") or "").strip()
+            prompt_policy_version = str(api_prompt_payload.get("policy_version") or "").strip() or None
             if prefix:
                 prompt = prefix + "\n\n" + prompt
             if suffix:
@@ -4837,6 +4841,21 @@ API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("api_prompt_contains_no_pipeline_stage_terms", re.compile(r"\bp[678]\d\d\b", re.I)),
 )
 API_PROMPT_FORBIDDEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(pattern for _, pattern in API_PROMPT_FORBIDDEN_GATES)
+FINAL_IMAGE_PROMPT_LEAK_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "final_prompt_contains_no_story_scene_management_text",
+        re.compile(r"物語「[^」]+」の\s*scene\d+|この画像は物語「[^」]+」の一場面|(?:後続|次|前)\s*scene", re.I),
+    ),
+    ("final_prompt_contains_no_scene_cut_selector", re.compile(r"\bscene\d+[_-]cut\d+\b", re.I)),
+    (
+        "final_prompt_contains_no_internal_authoring_fields",
+        re.compile(
+            r"debug_prompt_source|first_frame_visual_plan|source_event_beat_id|event_time_position|what_happens|"
+            r"visible_action|motion_brief|cut_contract|scene_event|validation_gates|api_prompt_payload",
+            re.I,
+        ),
+    ),
+)
 
 
 def _scene_is_reference_asset_image(out_path: Path | None) -> bool:
@@ -5250,6 +5269,73 @@ def _validate_image_api_prompt_payload(scene: SceneSpec, payload: dict[str, Any]
             f"{scene.selector or scene.scene_id}: Image API prompt v1 gate failed:\n- "
             + "\n- ".join(_dedupe_nonempty(issues))
         )
+
+
+def _validate_final_image_prompt_no_leaks(*, prompt: str, selector: str) -> None:
+    issues = [gate_name for gate_name, pattern in FINAL_IMAGE_PROMPT_LEAK_GATES if pattern.search(prompt or "")]
+    if issues:
+        raise SystemExit(
+            f"{selector}: final image prompt leak gate failed:\n- "
+            + "\n- ".join(_dedupe_nonempty(issues))
+        )
+
+
+def _final_image_prompt_editor(
+    *,
+    prompt: str,
+    output: str,
+    references: list[str],
+    topic: str = "",
+) -> str:
+    text = _rewrite_request_prompt_for_review(
+        prompt=prompt,
+        output=output,
+        references=references,
+        topic=topic,
+    )
+    text = re.sub(r"\n?```[A-Za-z0-9_-]*\s*\n.*?\n```\n?", "\n", text, flags=re.DOTALL)
+    text = re.sub(r"(?m)^\s*(debug_prompt_source|api_prompt_payload|first_frame_visual_plan)\s*:.*$", "", text)
+    text = re.sub(r"(?m)^\s*(source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief)\s*:.*$", "", text)
+    text = re.sub(
+        r"\s*(?:source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief)\s*:[^。\n]*(?:。|$)",
+        "。",
+        text,
+        flags=re.I,
+    )
+    text = text.replace("このcut", "この画像")
+    text = text.replace("この cut", "この画像")
+    text = re.sub(r"後続\s*scene", "後続画像", text, flags=re.I)
+    text = re.sub(r"次\s*scene", "後続画像", text, flags=re.I)
+    text = re.sub(r"前\s*scene", "前段画像", text, flags=re.I)
+    text = re.sub(r"(後続画像|前段画像)\s+でも", r"\1でも", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
+def _asset_image_api_prompt_payload_for_scene(scene: SceneSpec, *, topic: str = "") -> dict[str, Any]:
+    source_prompt = str(scene.image_prompt or "").strip()
+    if not source_prompt:
+        raise SystemExit(f"{scene.selector or scene.scene_id}: asset_api_prompt_missing_source_prompt")
+    prompt = _final_image_prompt_editor(
+        prompt=source_prompt,
+        output=scene.image_output or "",
+        references=list(scene.image_references or []),
+        topic=topic,
+    )
+    if not prompt:
+        raise SystemExit(f"{scene.selector or scene.scene_id}: asset_api_prompt_empty_after_editor")
+    _validate_final_image_prompt_no_leaks(prompt=prompt, selector=scene.image_asset_id or scene.selector or scene.scene_id)
+    return {
+        "policy_version": IMAGE_API_PROMPT_POLICY_VERSION,
+        "prompt": prompt,
+        "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, production metadata, scene ids, debug metadata",
+        "reference_instructions": "",
+        "reference_images": list(scene.image_references or []),
+        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "compiler": "asset_final_image_prompt_compiler_v1",
+        "editor": "deterministic_drawable_prompt_editor_v1",
+    }
 
 
 def _structured_image_prompt_blocks(scene: SceneSpec) -> str:
@@ -6547,10 +6633,16 @@ def main() -> None:
                 if is_asset_stage_request
                 else "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
             )
-            first_frame_visual_plan = _build_first_frame_visual_plan(scene)
+            first_frame_visual_plan = {}
             api_prompt_payload = {}
             debug_prompt_source = {}
-            if not is_asset_stage_request:
+            if is_asset_stage_request:
+                api_prompt_payload = _asset_image_api_prompt_payload_for_scene(
+                    scene,
+                    topic=str(metadata.get("topic") or ""),
+                )
+            else:
+                first_frame_visual_plan = _build_first_frame_visual_plan(scene)
                 api_prompt_payload = _image_api_prompt_payload_for_scene(
                     scene,
                     request_visual_beat=request_visual_beat,
@@ -6583,7 +6675,9 @@ def main() -> None:
                     "first_frame_visual_plan": first_frame_visual_plan,
                     "debug_prompt_source": debug_prompt_source,
                     "api_prompt_payload": api_prompt_payload,
-                    "prompt": _compose_final_image_prompt(
+                    "prompt": scene.image_prompt
+                    if is_asset_stage_request
+                    else _compose_final_image_prompt(
                         scene,
                         prefix=image_prefix,
                         suffix=image_suffix,

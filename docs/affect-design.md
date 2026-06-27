@@ -157,7 +157,32 @@ selection や revision の判断材料には使えるが、research grounding、
 - `aftertaste`
   - 意味や代償を残す
 
-### 4. 終盤は valence より arousal の落とし方が重要
+### 4. mixed affect は必要な cut だけに使う
+
+混合的感情は、正負感情の同時性または短時間の交替を意図して作る補助レイヤーである。
+すべての cut に入れる必要はない。純粋な情報提示、位置関係の整理、単純な handoff では `mode: none` でよい。
+
+使うべき典型:
+
+- `pressure`
+  - 希望が見えるほど不安が上がる
+- `turn`
+  - 勝利や発見と同時に代償が見える
+- `payoff`
+  - 安堵の中に戻れなさや喪失感が残る
+- `reaction`
+  - 恐怖が解けた直後に意味が反転する
+- ending / terminal cut
+  - 完全な幸福ではなく、変化の代償を静かに残す
+
+使わない方がよい場合:
+
+- 1 cut の primary intent が曖昧になる
+- scene_event にない新事実を感情のために足したくなる
+- 視覚、ナレーション、音/リズム、handoff のどこにも具体的な支えがない
+- 高 arousal を連打するだけで contrast がない
+
+### 5. 終盤は valence より arousal の落とし方が重要
 
 climax 後に何を残すかは、`良い終わりか悪い終わりか` より
 `どの速度で静けさに戻すか` の方が効くことが多い。
@@ -218,10 +243,48 @@ scenes:
         label_hint: "dread"
         audience_job: "strain"
         contrast_from_previous: "spike"
+      mixed_affect_design:
+        mode: "mixed"
+        optional: true
+        positive_valence_thread: "まだ救える可能性"
+        negative_valence_thread: "選択の代償"
+        arousal_strategy: "hold"
+        audience_rollercoaster_job: "strain"
 ```
 
 `emotional_target` は人間が読みやすいラベル、
 `affect.intended` は比較可能な座標、として使い分ける。
+
+### cut_contract
+
+```yaml
+viewer_contract:
+  emotional_micro_shift:
+    from: "dread"
+    to: "relief"
+  mixed_affect_design:
+    mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
+    optional: true
+    apply_when:
+      - "この cut が pressure / turn / payoff / reaction / terminal のいずれかを担う"
+      - "正負感情を重ねることで scene の causal turn や aftertaste が強くなる"
+    positive_valence_thread: ""
+    negative_valence_thread: ""
+    arousal_strategy: "hold|rise|drop|spike|release"
+    audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
+    design_intent: ""
+    visible_support: []
+    narration_support: []
+    sound_or_rhythm_support: []
+    handoff_effect: ""
+    avoid_if:
+      - "primary intent が増えて 1 cut = 1意図 を壊す"
+      - "research / scene_event にない事実を足す必要がある"
+```
+
+`mixed_affect_design` は optional であり、`mode: none` は合格値である。
+ただし `none` 以外を選ぶ場合は、少なくとも `visible_support` / `narration_support` / `sound_or_rhythm_support` / `handoff_effect`
+のいずれかで具体的な支えを示す。
 
 ## Sources
 

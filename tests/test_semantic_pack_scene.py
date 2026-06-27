@@ -21,6 +21,30 @@ scenes:
       dramatic_question: "シンデレラは灰の中で希望を保てるか"
       value_shift: "抑圧から希望へ"
       causal_turn: "小さな光が次の行動を促す"
+    scene_generation:
+      schema_version: "scene_generation_v1"
+      scene_authoring_context:
+        schema_version: "scene_authoring_context_v1"
+        source_beats:
+          - source_story_beat_id: "cinderella_ash_beat"
+            summary: "灰の中で希望を保つ"
+      scene_prompt_payload:
+        schema_version: "scene_prompt_payload_v1"
+        prompt: "灰の台所のsceneが物語内で何を成立させるかを設計する。"
+        input_refs: ["story.md"]
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        constraints: ["後段実行情報を含めない"]
+      scene_debug_prompt_source:
+        schema_version: "scene_debug_prompt_source_v1"
+        not_sent_to_agent: true
+        source_story_beat_ids: ["cinderella_ash_beat"]
+        source_beats: ["灰の中で希望を保つ"]
+        adaptation_choices: ["source beatを具体化する"]
+        excluded_from_payload: ["後段実行情報"]
+      scene_generation_contract:
+        schema_version: "scene_generation_contract_v1"
+        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
+        scene_event_schema_version: "scene_event_v1"
     done_when: ["次の行動の理由が見える"]
     coverage_review:
       audience_information_covered: true
@@ -94,6 +118,7 @@ class TestSemanticPackScene(unittest.TestCase):
         self.assertEqual(entries[0]["source_json_pointer"], "/scenes/0")
         self.assertIn("シンデレラは灰の中で希望を保てるか", entries[0]["summary"])
         self.assertEqual(entries[0]["semantic_contract"]["dramatic_question"], "シンデレラは灰の中で希望を保てるか")
+        self.assertEqual(entries[0]["scene_generation"]["schema_version"], "scene_generation_v1")
         self.assertTrue(entries[0]["semantic_contract_present"])
         self.assertFalse(entries[0]["semantic_contract_missing"])
         self.assertEqual(
@@ -142,6 +167,7 @@ scenes:
         self.assertEqual(entries[0]["cut_count"], 2)
         self.assertEqual(entries[0]["cut_summaries"][0]["selector"], "scene10_cut01")
         self.assertEqual(entries[0]["cut_summaries"][1]["selector"], "scene10_cut02")
+        self.assertEqual(entries[0]["scene_generation"]["scene_prompt_payload"]["schema_version"], "scene_prompt_payload_v1")
         self.assertEqual(entries[0]["cut_summaries"][0]["must_show"], ["シンデレラ", "灰の台所"])
         self.assertEqual(entries[0]["handoff_to_next_scene"], "灰の台所から舞踏会の予感へつなぐ")
 
@@ -244,6 +270,7 @@ scenes:
             entries = collect_entries("cut_blueprint", run_dir)
 
         self.assertNotIn("scene_event", entries[0])
+        self.assertNotIn("scene_generation", entries[0])
         context = entries[0]["event_context_for_cut"]
         self.assertEqual(context["primary_event_beat"]["beat_id"], "scene10_event_pressure")
         self.assertEqual([beat["beat_id"] for beat in context["neighboring_event_beats"]], ["scene10_event_setup", "scene10_event_turn"])

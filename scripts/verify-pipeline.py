@@ -814,9 +814,16 @@ def _request_sections_by_asset_id(text: str) -> dict[str, dict[str, str]]:
 
     out: dict[str, dict[str, str]] = {}
     field_pattern = re.compile(r"^\s*-\s+([A-Za-z0-9_.]+):\s*(.*?)\s*$")
+    fence_pattern = re.compile(r"^```([A-Za-z0-9_-]+)?")
     for heading, lines in sections:
         fields: dict[str, str] = {}
         for line in lines:
+            fence_match = fence_pattern.match(line.strip())
+            if fence_match:
+                labels = [item for item in fields.get("__fenced_labels", "").split(",") if item]
+                labels.append((fence_match.group(1) or "").strip().lower())
+                fields["__fenced_labels"] = ",".join(labels)
+                continue
             match = field_pattern.match(line)
             if not match:
                 continue
@@ -907,6 +914,11 @@ PRODUCTION_META_PATTERNS = (
     re.compile(r"\bscene\d+[_-]cut\d+\b", flags=re.IGNORECASE),
     re.compile(r"この画像は物語「[^」]+」の一場面"),
     re.compile(r"後続\s*scene", flags=re.IGNORECASE),
+    re.compile(
+        r"debug_prompt_source|first_frame_visual_plan|source_event_beat_id|event_time_position|what_happens|"
+        r"visible_action|motion_brief|cut_contract|scene_event|validation_gates|api_prompt_payload",
+        flags=re.IGNORECASE,
+    ),
 )
 
 VECTOR_LIKE_MIN_BYTES_PER_MEGAPIXEL = 60_000
@@ -919,7 +931,7 @@ VECTOR_GATE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def _request_prompt_contains_production_meta(text: str) -> bool:
-    prompt_blocks = re.findall(r"```text\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
+    prompt_blocks = re.findall(r"```(?:text|api_prompt)\s*\n(.*?)\n```", text, flags=re.DOTALL | re.IGNORECASE)
     targets = prompt_blocks or [text]
     return any(pattern.search(block) for block in targets for pattern in PRODUCTION_META_PATTERNS)
 
@@ -1374,6 +1386,16 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
             expected_request_lane = "standard" if request_reference_count > 0 else "bootstrap_builtin"
             if request_lane != expected_request_lane:
                 metadata_failures.append(f"{asset_id}: execution_lane {request_lane or '(missing)'} mismatches reference_count {request_reference_count}")
+        prompt_policy_version = _request_field_value(fields, "prompt_policy_version", "api_prompt_policy_version", "policy_version")
+        fenced_labels = {
+            label
+            for label in str(fields.get("__fenced_labels") or "").split(",")
+            if label
+        }
+        if prompt_policy_version != "image_api_prompt_v1":
+            metadata_failures.append(f"{asset_id}: prompt_policy_version must be image_api_prompt_v1")
+        if "api_prompt" not in fenced_labels:
+            metadata_failures.append(f"{asset_id}: missing api_prompt fence")
     if metadata_failures:
         details["asset_request_metadata_failures"] = metadata_failures[:20]
     add_check(
