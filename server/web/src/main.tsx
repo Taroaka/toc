@@ -498,6 +498,9 @@ function candidateErrorMessage(error: unknown): string {
 
 function candidateDisplayMessage(candidate: Candidate, generating: boolean): string {
   if (candidate.error) {
+    if (candidate.error.includes('semantic scene_detail')) return 'scene semantic未完了';
+    if (candidate.error.includes('semantic cut_blueprint')) return 'cut semantic未完了';
+    if (candidate.error.includes('semantic image_prompt')) return 'prompt semantic未完了';
     if (candidate.error.includes('savedPath')) return '画像保存に失敗';
     if (candidate.error.includes('disabled')) return 'app-server停止中';
     if (candidate.error.includes('reference')) return '参照画像エラー';
@@ -738,6 +741,20 @@ function currentStageTitle(stage: RunStage): string {
   return `${stage.code} / ${stageDisplayLabel(stage)}`;
 }
 
+function runtimeStageLabel(runtimeStage?: string | null): string {
+  if (!runtimeStage) return '';
+  const labels: Record<string, string> = {
+    semantic_review_blocked_transport: 'semantic QA が通信 timeout で停止',
+    semantic_review_failed_before_media_generation: 'semantic QA 不合格で画像生成前に停止',
+    semantic_review_failed_after_media_generation: '画像生成後に semantic QA 不合格',
+    app_server_transport_failed: 'Codex app-server 通信失敗',
+    create_run_failed: 'ToC作成失敗',
+    scene_images_generating: 'シーン画像生成中',
+    scene_images_ready_for_review: 'シーン画像レビュー待ち',
+  };
+  return labels[runtimeStage] || runtimeStage;
+}
+
 function parentStageCode(code: string): string {
   return /^p\d{3}$/.test(code) ? `${code.slice(0, 2)}00` : code;
 }
@@ -774,7 +791,7 @@ function RunProgressPanel({ progress }: { progress: RunProgress | null }) {
         ))}
       </Box>
       <Typography variant="caption" color="text.secondary">
-        {progress.runtimeStage ? `runtime.stage: ${progress.runtimeStage}` : 'state.txt / p000_index.md の進捗を表示しています'}
+        {progress.runtimeStage ? `runtime.stage: ${runtimeStageLabel(progress.runtimeStage)}` : 'state.txt / p000_index.md の進捗を表示しています'}
       </Typography>
       <Divider flexItem />
       <Box className="stageCatalog" aria-label="Pステージと小番号一覧">

@@ -11,6 +11,7 @@ from toc.semantic_review_loop import (
     semantic_repair_relpaths,
     semantic_repair_timeout_seconds,
     scene_detail_review_concurrency,
+    scene_detail_transport_retry_attempts,
     semantic_review_max_attempts,
     semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
@@ -142,9 +143,9 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
 
-    def test_semantic_repair_defaults_to_one_review_attempt(self) -> None:
+    def test_semantic_repair_defaults_to_two_review_attempts(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
-            self.assertEqual(semantic_review_max_attempts(), 1)
+            self.assertEqual(semantic_review_max_attempts(), 2)
 
     def test_semantic_review_timeout_default_allows_long_contextless_reviews(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS": ""}):
@@ -165,6 +166,18 @@ class TestSemanticReview(unittest.TestCase):
             self.assertEqual(scene_detail_review_concurrency(), 1)
         with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "bad"}):
             self.assertEqual(scene_detail_review_concurrency(), 6)
+
+    def test_scene_detail_transport_retry_attempts_defaults_to_three(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": ""}):
+            self.assertEqual(scene_detail_transport_retry_attempts(), 3)
+
+    def test_scene_detail_transport_retry_attempts_uses_env_with_floor(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "2"}):
+            self.assertEqual(scene_detail_transport_retry_attempts(), 2)
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "0"}):
+            self.assertEqual(scene_detail_transport_retry_attempts(), 1)
+        with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "bad"}):
+            self.assertEqual(scene_detail_transport_retry_attempts(), 3)
 
     def test_semantic_repair_prompt_forbids_editing_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:

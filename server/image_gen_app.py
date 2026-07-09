@@ -92,6 +92,7 @@ from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
     semantic_loop_state_updates,
     scene_detail_review_concurrency,
+    scene_detail_transport_retry_attempts,
     semantic_repair_state_updates,
     semantic_repair_relpaths,
     semantic_repair_timeout_seconds,
@@ -4329,6 +4330,43 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
         raise RuntimeError(f"{kind} request file has no {kind} items")
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
+    blocked_item_ids = _semantic_blocked_image_item_ids(run_dir, items) if kind == "scene" else set()
+    skipped_items = [item for item in items if str(getattr(item, "id", "") or "") in blocked_item_ids]
+    if skipped_items:
+        items = [item for item in items if str(getattr(item, "id", "") or "") not in blocked_item_ids]
+        blocked_ids = [str(getattr(item, "id", "") or "") for item in skipped_items]
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.semantic.scene_detail.partial_media_generated": "true",
+                "review.semantic.partial_media.blocked_image_items": ", ".join(blocked_ids),
+                "review.semantic.partial_media.blocked_image_item_count": str(len(blocked_ids)),
+            },
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_generation_skip",
+            status="skipped",
+            item_id=kind,
+            request={
+                "kind": kind,
+                "reason": "localized semantic QA blocked selected scene image items",
+                "skippedItemIds": blocked_ids,
+            },
+        )
+    if not items:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="request_generation_batch",
+            status="skipped",
+            item_id=kind,
+            request={
+                "kind": kind,
+                "reason": "all request items are blocked by localized semantic QA",
+                "skippedItemCount": len(skipped_items),
+            },
+        )
+        return
     groups = _build_generation_groups(items, run_dir=run_dir, kind=kind)
     if not groups:
         raise RuntimeError(f"{kind} request file has no output items")
@@ -4451,7 +4489,10 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
     issues: list[str] = []
+    blocked_item_ids = _semantic_blocked_image_item_ids(run_dir) if kind == "scene" else set()
     for item in load_request_items(run_dir, kind):
+        if str(getattr(item, "id", "") or "") in blocked_item_ids:
+            continue
         if not item.output:
             issues.append(f"{item.id}: missing output")
             continue
@@ -4622,6 +4663,231 @@ def _validate_image_review_ready(run_id: str) -> None:
         raise RuntimeError(f"image review handoff incomplete: {', '.join(mismatches)}")
 
 
+def _scene_numbers_from_scene_selectors(selectors: Iterable[Any]) -> set[str]:
+    scene_numbers: set[str] = set()
+    pattern = re.compile(r"\bscene[_:]?(\d+)\b|\bscene(\d+)_cut\b|\bscene(\d+)cut\b")
+    for selector in selectors:
+        value = str(selector or "")
+        for match in pattern.finditer(value):
+            for group in match.groups():
+                if group:
+                    scene_numbers.add(str(int(group)))
+                    break
+    return scene_numbers
+
+
+def _state_list_value(state: dict[str, str], key: str) -> list[str]:
+    raw = str(state.get(key, "") or "").strip()
+    if not raw:
+        return []
+    return [item.strip().strip("`\"'") for item in raw.split(",") if item.strip()]
+
+
+def _normalized_scene_cut_token(value: Any) -> str:
+    raw = str(value or "").strip().strip("`\"'")
+    match = re.search(r"\bscene[_:]?(\d+)[_\-]?cut[_:]?0*(\d+)\b", raw)
+    if not match:
+        return raw
+    return f"scene{int(match.group(1))}_cut{int(match.group(2))}"
+
+
+def _image_item_selector_aliases(item: Any) -> set[str]:
+    aliases: set[str] = set()
+    item_id = str(getattr(item, "id", "") or "")
+    output = str(getattr(item, "output", "") or "")
+    for value in (item_id, Path(output).stem if output else ""):
+        if value:
+            aliases.add(value)
+            aliases.add(_normalized_scene_cut_token(value))
+    return {alias for alias in aliases if alias}
+
+
+def _semantic_failure_selectors(
+    run_dir: Path,
+    stage: str,
+    failure_context: dict[str, Any] | None = None,
+) -> list[Any]:
+    state = parse_state_file(run_dir / "state.txt")
+    selectors: list[Any] = []
+    if failure_context:
+        for key in ("failedSelectors", "blockedEntries"):
+            values = failure_context.get(key)
+            if isinstance(values, list):
+                selectors.extend(values)
+    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.failure.failed_selectors"))
+    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.failure.blocked_entries"))
+    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.blocked_image_items"))
+    if stage == "asset_plan":
+        selectors.extend(_asset_plan_source_selectors_for_failed_entries(run_dir, selectors))
+    return selectors
+
+
+def _asset_plan_source_selectors_for_failed_entries(run_dir: Path, selectors: Iterable[Any]) -> list[str]:
+    selector_keys = {str(selector or "").strip().strip("`\"'") for selector in selectors if str(selector or "").strip()}
+    if not selector_keys:
+        return []
+    normalized_keys = {_normalized_scene_cut_token(key) for key in selector_keys}
+    asset_plan_path = run_dir / "asset_plan.md"
+    if not asset_plan_path.exists():
+        return []
+    try:
+        data = yaml.safe_load(_extract_manifest_yaml_text(asset_plan_path.read_text(encoding="utf-8"))) or {}
+    except Exception:
+        return []
+    assets = data.get("assets") if isinstance(data, dict) else None
+    if not isinstance(assets, list):
+        return []
+    source_selectors: list[str] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get("asset_id") or "").strip()
+        output_stem = Path(str(asset.get("generation_plan", {}).get("output") or asset.get("output") or "")).stem
+        aliases = {asset_id, output_stem}
+        aliases = {alias for alias in aliases if alias}
+        if not (aliases & selector_keys or {_normalized_scene_cut_token(alias) for alias in aliases} & normalized_keys):
+            continue
+        for source_selector in asset.get("source_script_selectors") or []:
+            text = str(source_selector or "").strip()
+            if text:
+                source_selectors.append(text)
+    return source_selectors
+
+
+def _scene_detail_transport_blocked_scene_numbers(run_dir: Path) -> set[str]:
+    state = parse_state_file(run_dir / "state.txt")
+    blocked: set[str] = set()
+    pattern = re.compile(r"^review\.semantic\.scene_detail\.shards\.scene_(\d+)\.transport\.status$")
+    for key, value in state.items():
+        match = pattern.match(key)
+        if match and str(value).strip().lower() == "failed":
+            blocked.add(match.group(1))
+    return blocked
+
+
+def _scene_detail_semantic_blocked_scene_numbers(
+    run_dir: Path,
+    failure_context: dict[str, Any] | None = None,
+) -> set[str]:
+    return _scene_numbers_from_scene_selectors(
+        _semantic_failure_selectors(run_dir, "scene_detail", failure_context=failure_context)
+    )
+
+
+def _scene_detail_blocked_scene_numbers(
+    run_dir: Path,
+    failure_context: dict[str, Any] | None = None,
+) -> set[str]:
+    return _scene_detail_transport_blocked_scene_numbers(run_dir) | _scene_detail_semantic_blocked_scene_numbers(
+        run_dir,
+        failure_context=failure_context,
+    )
+
+
+def _item_matches_scene_number(item: Any, scene_number: str) -> bool:
+    item_id = str(getattr(item, "id", "") or "")
+    output = str(getattr(item, "output", "") or "")
+    scene_token = f"scene{scene_number}"
+    return (
+        item_id == scene_token
+        or item_id.startswith(f"{scene_token}_")
+        or item_id.startswith(f"{scene_token}cut")
+        or f"/{scene_token}_" in output
+        or f"/{scene_token}cut" in output
+    )
+
+
+def _scene_detail_transport_blocked_image_item_ids(run_dir: Path, items: list[Any] | None = None) -> set[str]:
+    blocked_scene_numbers = _scene_detail_blocked_scene_numbers(run_dir)
+    if not blocked_scene_numbers:
+        return set()
+    scene_items = items if items is not None else load_request_items(run_dir, "scene")
+    return {
+        str(getattr(item, "id", "") or "")
+        for item in scene_items
+        if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers)
+    }
+
+
+def _localized_semantic_blocked_image_item_ids(
+    run_dir: Path,
+    *,
+    stage: str,
+    items: list[Any] | None = None,
+    failure_context: dict[str, Any] | None = None,
+) -> set[str]:
+    scene_items = items if items is not None else load_request_items(run_dir, "scene")
+    if stage == "scene_detail":
+        blocked_scene_numbers = _scene_detail_blocked_scene_numbers(run_dir, failure_context=failure_context)
+        return {
+            str(getattr(item, "id", "") or "")
+            for item in scene_items
+            if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers)
+        }
+    selectors = _semantic_failure_selectors(run_dir, stage, failure_context=failure_context)
+    normalized_selectors = {_normalized_scene_cut_token(selector) for selector in selectors if str(selector or "").strip()}
+    blocked_scene_numbers = _scene_numbers_from_scene_selectors(selectors)
+    blocked_item_ids: set[str] = set()
+    for item in scene_items:
+        item_id = str(getattr(item, "id", "") or "")
+        if not item_id:
+            continue
+        if _image_item_selector_aliases(item) & normalized_selectors:
+            blocked_item_ids.add(item_id)
+            continue
+        if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers):
+            blocked_item_ids.add(item_id)
+    return blocked_item_ids
+
+
+def _semantic_blocked_image_item_ids(run_dir: Path, items: list[Any] | None = None) -> set[str]:
+    blocked: set[str] = set()
+    for stage in ("scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
+        blocked.update(_localized_semantic_blocked_image_item_ids(run_dir, stage=stage, items=items))
+    return blocked
+
+
+def _semantic_blocked_candidate(run_dir: Path, item: Any) -> dict[str, Any]:
+    state = parse_state_file(run_dir / "state.txt")
+    item_id = str(getattr(item, "id", "") or "")
+    for stage in ("scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
+        if item_id in _localized_semantic_blocked_image_item_ids(run_dir, stage=stage, items=[item]):
+            if stage == "scene_detail":
+                return _scene_detail_blocked_candidate(run_dir, item)
+            reason_keys = state.get(f"review.semantic.{stage}.failure.reason_keys", "semantic_review_failed")
+            return {
+                "index": 1,
+                "status": "failed",
+                "path": None,
+                "error": f"semantic {stage} failed; image generation skipped for this item ({reason_keys})",
+            }
+    return {
+        "index": 1,
+        "status": "failed",
+        "path": None,
+        "error": "semantic QA failed; image generation skipped for this item",
+    }
+
+
+def _scene_detail_blocked_candidate(run_dir: Path, item: Any) -> dict[str, Any]:
+    state = parse_state_file(run_dir / "state.txt")
+    transport_scene_numbers = _scene_detail_transport_blocked_scene_numbers(run_dir)
+    blocked_scene_numbers = sorted(scene_number for scene_number in _scene_detail_blocked_scene_numbers(run_dir) if _item_matches_scene_number(item, scene_number))
+    scene_number = blocked_scene_numbers[0] if blocked_scene_numbers else ""
+    if scene_number in transport_scene_numbers:
+        error_kind = state.get(f"review.semantic.scene_detail.shards.scene_{scene_number}.transport.error_kind", "timeout")
+        error = f"semantic scene_detail transport {error_kind}; image generation skipped for this scene"
+    else:
+        reason_keys = state.get("review.semantic.scene_detail.failure.reason_keys", "semantic_review_failed")
+        error = f"semantic scene_detail failed; image generation skipped for this scene ({reason_keys})"
+    return {
+        "index": 1,
+        "status": "failed",
+        "path": None,
+        "error": error,
+    }
+
+
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
     semantic_failures: list[str] = []
@@ -4737,6 +5003,11 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
     except Exception as exc:
         if is_codex_transport_error(exc):
             transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
+            blocked_item_ids = (
+                _localized_semantic_blocked_image_item_ids(run_dir, stage=stage)
+                if stage in {"scene_detail", "cut_blueprint", "asset_plan", "image_prompt"}
+                else set()
+            )
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
@@ -4744,9 +5015,48 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                     f"review.semantic.{stage}.transport.error_kind": transport_kind,
                     f"review.semantic.{stage}.transport.error": str(exc)[:2000],
                     f"review.semantic.{stage}.loop.status": "blocked_transport",
-                    "runtime.stage": "app_server_transport_failed",
+                    "runtime.stage": "semantic_review_blocked_transport",
                     "runtime.app_server.transport.status": "failed",
                     "runtime.app_server.transport.error_kind": transport_kind,
+                    "slot.p660.status": "pending",
+                    "slot.p660.note": f"blocked before image generation by {stage} transport failure",
+                    "slot.p670.status": "pending",
+                    "slot.p670.note": "waiting for semantic QA transport recovery before image generation",
+                    "slot.p680.status": "pending",
+                    "slot.p680.note": "frontend image review is not ready because semantic QA transport failed before image generation",
+                    "review.image.status": "pending",
+                },
+            )
+            if blocked_item_ids:
+                blocked_ids = sorted(blocked_item_ids)
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.partial_media_allowed": "true",
+                        f"review.semantic.{stage}.blocked_image_items": ", ".join(blocked_ids),
+                        f"review.semantic.{stage}.blocked_image_item_count": str(len(blocked_ids)),
+                        "runtime.stage": "semantic_review_transport_partial_media",
+                    },
+                )
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_review",
+                    status="transport_partial_media_allowed",
+                    item_id=job_id,
+                    request={"stage": stage},
+                    response={
+                        "transportErrorKind": transport_kind,
+                        "blockedImageItems": blocked_ids,
+                        "note": "semantic transport failure is localized to image request items; continuing media generation for unblocked scene items",
+                    },
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return f"{stage}: transport {transport_kind}; skipped image generation for {', '.join(blocked_ids)}"
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.localization.status": "not_localized",
+                    f"review.semantic.{stage}.localization.reason": "transport failure did not map to scene image request items",
                 },
             )
             slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
@@ -4771,9 +5081,63 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                 "runtime.stage": "semantic_review_failed_before_media_generation",
                 "review.semantic.create_media_generated": "false",
                 "review.semantic.create_blocking_stage": stage,
+                "slot.p660.status": "pending",
+                "slot.p660.note": f"blocked before image generation by {stage} semantic review failure",
+                "slot.p670.status": "pending",
+                "slot.p670.note": "waiting for semantic QA before image generation",
+                "slot.p680.status": "pending",
+                "slot.p680.note": "frontend image review is not ready because semantic QA failed before image generation",
+                "review.image.status": "pending",
             }
         )
+        semantic_failure_context = _semantic_review_failure_context(run_dir, stage)
         state_updates.update(_semantic_review_failure_state(run_dir, stage))
+        blocked_item_ids = (
+            _localized_semantic_blocked_image_item_ids(
+                run_dir,
+                stage=stage,
+                items=load_request_items(run_dir, "scene"),
+                failure_context=semantic_failure_context,
+            )
+            if stage in {"scene_detail", "cut_blueprint", "asset_plan", "image_prompt"}
+            else set()
+        )
+        if blocked_item_ids:
+            blocked_ids = sorted(blocked_item_ids)
+            state_updates.update(
+                {
+                    f"review.semantic.{stage}.partial_media_allowed": "true",
+                    f"review.semantic.{stage}.blocked_image_items": ", ".join(blocked_ids),
+                    f"review.semantic.{stage}.blocked_image_item_count": str(len(blocked_ids)),
+                    f"review.semantic.{stage}.localization.status": "localized_to_image_items",
+                    f"review.semantic.{stage}.localization.blocked_image_items": ", ".join(blocked_ids),
+                    "runtime.stage": "semantic_review_semantic_partial_media",
+                    "slot.p660.status": "pending",
+                    "slot.p660.note": f"scene images can continue except {stage} blocked items",
+                    "slot.p670.status": "pending",
+                    "slot.p670.note": "waiting for scene image generation to finish",
+                    "slot.p680.status": "pending",
+                    "slot.p680.note": "frontend image review will show blocked scene items from semantic QA",
+                    "review.image.status": "pending",
+                }
+            )
+            append_state_snapshot(run_dir / "state.txt", state_updates)
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="semantic_partial_media_allowed",
+                item_id=job_id,
+                request={"stage": stage},
+                response={
+                    "blockedImageItems": blocked_ids,
+                    "semanticFailureContext": semantic_failure_context,
+                    "note": "semantic failure is localized to image request items; continuing media generation for unblocked scene items",
+                },
+                error=message,
+            )
+            return f"{stage}: semantic QA failed; skipped image generation for {', '.join(blocked_ids)}"
+        state_updates[f"review.semantic.{stage}.localization.status"] = "not_localized"
+        state_updates[f"review.semantic.{stage}.localization.reason"] = "semantic failure did not map to scene image request items"
         slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
         if slot:
             state_updates[f"slot.{slot}.status"] = "failed"
@@ -4869,6 +5233,17 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 error_count=len(result.errors),
             )
             failure_updates.update(_semantic_review_failure_state(run_dir, stage))
+            if attempts <= 1:
+                failure_updates.update(
+                    {
+                        f"review.semantic.{stage}.repair.active": "false",
+                        f"review.semantic.{stage}.repair.skipped": "true",
+                        f"review.semantic.{stage}.repair.skipped_reason": "max_attempts_1",
+                    }
+                )
+                slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+                if slot:
+                    failure_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed without repair"
             append_state_snapshot(run_dir / "state.txt", failure_updates)
             error_text = f"{stage} semantic review failed after {attempts} attempt(s): " + "; ".join(result.errors)
             write_app_server_debug_log(
@@ -5770,6 +6145,7 @@ async def _run_scene_detail_sharded_semantic_review_once(
     report_path = run_dir / relpaths["report"]
     shard_dir = run_dir / "logs" / "review" / "semantic" / "scene_detail_shards" / f"attempt_{attempt:02d}"
     concurrency = scene_detail_review_concurrency()
+    transport_retry_attempts = scene_detail_transport_retry_attempts()
     entry_ids = _semantic_review_scope_entry_ids(scope_path)
     if not entry_ids:
         _write_scene_detail_shard_aggregate_report(
@@ -5810,6 +6186,7 @@ async def _run_scene_detail_sharded_semantic_review_once(
                 "maxAttempts": max_attempts,
                 "mode": "per_scene_shards",
                 "concurrency": concurrency,
+                "transportRetryAttempts": transport_retry_attempts,
                 "shardCount": 0,
                 "report": str(report_path.relative_to(run_dir)),
             },
@@ -5853,6 +6230,8 @@ async def _run_scene_detail_sharded_semantic_review_once(
                 attempt=attempt,
                 max_attempts=max_attempts,
                 final_attempt=final_attempt,
+                transport_attempt=1,
+                transport_max_attempts=transport_retry_attempts,
                 semaphore=semaphore,
             )
         )
@@ -5874,6 +6253,98 @@ async def _run_scene_detail_sharded_semantic_review_once(
     if unexpected_exceptions:
         raise unexpected_exceptions[0]
 
+    for transport_attempt in range(2, transport_retry_attempts + 1):
+        transport_failures_for_retry = [
+            result_item
+            for result_item in shard_results
+            if str(result_item.get("status") or "") == "transport_failed"
+        ]
+        if not transport_failures_for_retry:
+            break
+        retry_entry_ids = [str(result_item["entry_id"]) for result_item in transport_failures_for_retry]
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.semantic.scene_detail.shards.transport.status": "retrying",
+                "review.semantic.scene_detail.shards.transport.attempt": str(transport_attempt),
+                "review.semantic.scene_detail.shards.transport.max_attempts": str(transport_retry_attempts),
+                "review.semantic.scene_detail.shards.transport.retry_entries": ", ".join(retry_entry_ids),
+                "review.semantic.scene_detail.shards.updated_at": now_iso(),
+            },
+        )
+        for entry_id in retry_entry_ids:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.status": "retrying",
+                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.retry_count": str(transport_attempt - 1),
+                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.max_attempts": str(transport_retry_attempts),
+                },
+            )
+        retry_tasks = [
+            asyncio.create_task(
+                _run_scene_detail_shard_review(
+                    job_id,
+                    run_dir=run_dir,
+                    shard_dir=shard_dir,
+                    entry_id=entry_id,
+                    entry_index=entry_ids.index(entry_id) + 1,
+                    total_entries=len(entry_ids),
+                    collection_section=sections.get(entry_id, ""),
+                    canonical_scope_path=scope_path,
+                    canonical_report_path=report_path,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    final_attempt=final_attempt,
+                    transport_attempt=transport_attempt,
+                    transport_max_attempts=transport_retry_attempts,
+                    semaphore=semaphore,
+                )
+            )
+            for entry_id in retry_entry_ids
+        ]
+        raw_retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+        retry_results_by_entry: dict[str, dict[str, Any]] = {}
+        retry_unexpected_exceptions: list[BaseException] = []
+        for entry_id, raw_result in zip(retry_entry_ids, raw_retry_results):
+            if isinstance(raw_result, BaseException):
+                if is_codex_transport_error(raw_result):
+                    retry_results_by_entry[entry_id] = _scene_detail_transport_failure_result(entry_id=entry_id, exc=raw_result)
+                    continue
+                retry_unexpected_exceptions.append(raw_result)
+                continue
+            retry_results_by_entry[entry_id] = raw_result
+        if retry_unexpected_exceptions:
+            raise retry_unexpected_exceptions[0]
+        next_shard_results: list[dict[str, Any]] = []
+        for result_item in shard_results:
+            entry_id = str(result_item["entry_id"])
+            replacement = retry_results_by_entry.get(entry_id)
+            if replacement is None:
+                next_shard_results.append(result_item)
+                continue
+            next_shard_results.append(replacement)
+            label = _safe_scene_detail_shard_label(entry_id)
+            if str(replacement.get("status") or "") == "transport_failed":
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.scene_detail.shards.{label}.transport.status": "failed",
+                        f"review.semantic.scene_detail.shards.{label}.transport.retry_count": str(transport_attempt - 1),
+                        f"review.semantic.scene_detail.shards.{label}.transport.error_kind": str(replacement.get("transport_error_kind") or "unknown"),
+                        f"review.semantic.scene_detail.shards.{label}.transport.error": str(replacement.get("transport_error") or "")[:2000],
+                    },
+                )
+            else:
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.scene_detail.shards.{label}.transport.status": "recovered",
+                        f"review.semantic.scene_detail.shards.{label}.transport.retry_count": str(transport_attempt - 1),
+                    },
+                )
+        shard_results = next_shard_results
+
     reviewed_entries = [result["entry_id"] for result in shard_results]
     blocked_entries = _dedupe_preserve_order(
         blocked_entry
@@ -5886,6 +6357,7 @@ async def _run_scene_detail_sharded_semantic_review_once(
     notes = [
         f"scene_detail reviewed as {len(shard_results)} per-scene shard(s)",
         f"bounded concurrency: {concurrency}",
+        f"transport retry attempts: {transport_retry_attempts}",
     ]
     for result_item in shard_results:
         if result_item["status"] == "passed":
@@ -5942,7 +6414,13 @@ async def _run_scene_detail_sharded_semantic_review_once(
             state_updates["review.semantic.scene_detail.repair.active"] = "false"
         elif final_attempt:
             state_updates[f"slot.{slot}.status"] = "failed"
-            state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review failed after repair loop"
+            if max_attempts <= 1:
+                state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review failed without repair"
+                state_updates["review.semantic.scene_detail.repair.active"] = "false"
+                state_updates["review.semantic.scene_detail.repair.skipped"] = "true"
+                state_updates["review.semantic.scene_detail.repair.skipped_reason"] = "max_attempts_1"
+            else:
+                state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review failed after repair loop"
         else:
             state_updates[f"slot.{slot}.status"] = "in_progress"
             state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review requested producer repair"
@@ -5958,6 +6436,7 @@ async def _run_scene_detail_sharded_semantic_review_once(
             "maxAttempts": max_attempts,
             "mode": "per_scene_shards",
             "concurrency": concurrency,
+            "transportRetryAttempts": transport_retry_attempts,
             "shardCount": len(shard_results),
             "report": str(report_path.relative_to(run_dir)),
         },
@@ -5970,6 +6449,11 @@ async def _run_scene_detail_sharded_semantic_review_once(
         },
         error="; ".join(result.errors) if result.errors else None,
     )
+    if transport_failures:
+        failed_entries = ", ".join(str(result_item["entry_id"]) for result_item in transport_failures)
+        raise CodexAppServerTransportError(
+            f"scene_detail shard transport failed after {transport_retry_attempts} attempt(s): {failed_entries}"
+        )
     return result
 
 
@@ -6009,6 +6493,8 @@ async def _run_scene_detail_shard_review(
     max_attempts: int,
     final_attempt: bool,
     semaphore: asyncio.Semaphore,
+    transport_attempt: int = 1,
+    transport_max_attempts: int = 1,
 ) -> dict[str, Any]:
     async with semaphore:
         shard_label = _safe_scene_detail_shard_label(entry_id)
@@ -6074,6 +6560,8 @@ async def _run_scene_detail_shard_review(
                         "entryId": entry_id,
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
+                        "transportAttempt": transport_attempt,
+                        "transportMaxAttempts": transport_max_attempts,
                         "prompt": str(prompt_path.relative_to(run_dir)),
                         "report": str(report_path.relative_to(run_dir)),
                     },
@@ -6097,6 +6585,8 @@ async def _run_scene_detail_shard_review(
                         "entryId": entry_id,
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
+                        "transportAttempt": transport_attempt,
+                        "transportMaxAttempts": transport_max_attempts,
                         "prompt": str(prompt_path.relative_to(run_dir)),
                         "report": str(report_path.relative_to(run_dir)),
                     },
@@ -6120,6 +6610,8 @@ async def _run_scene_detail_shard_review(
                             "entryId": entry_id,
                             "attempt": attempt,
                             "maxAttempts": max_attempts,
+                            "transportAttempt": transport_attempt,
+                            "transportMaxAttempts": transport_max_attempts,
                             "prompt": str(prompt_path.relative_to(run_dir)),
                             "report": str(report_path.relative_to(run_dir)),
                         },
@@ -6142,6 +6634,8 @@ async def _run_scene_detail_shard_review(
                         "entryId": entry_id,
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
+                        "transportAttempt": transport_attempt,
+                        "transportMaxAttempts": transport_max_attempts,
                         "prompt": str(prompt_path.relative_to(run_dir)),
                         "report": str(report_path.relative_to(run_dir)),
                     },
@@ -6187,6 +6681,8 @@ async def _run_scene_detail_shard_review(
                 "entryId": entry_id,
                 "attempt": attempt,
                 "maxAttempts": max_attempts,
+                "transportAttempt": transport_attempt,
+                "transportMaxAttempts": transport_max_attempts,
                 "prompt": str(prompt_path.relative_to(run_dir)),
                 "report": str(report_path.relative_to(run_dir)),
             },
@@ -6862,12 +7358,12 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
         prefix = "Codex app-server の画像生成認証が不足しています"
     elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeouterror" in normalized_lower:
         prefix = "Codex app-server の画像生成がタイムアウトしました"
+    elif "transport failure" in normalized_lower or "blocked by codex app-server transport" in normalized_lower or "transport failed" in normalized_lower:
+        prefix = "Codex app-server の通信確認に失敗したため semantic QA を完了できませんでした"
     elif "semantic review failed after media generation" in normalized_lower:
         prefix = "semantic QA に失敗しました。asset/scene 画像生成は実行済みですが p680 承認には進めません"
     elif "semantic review failed" in normalized_lower:
         prefix = "semantic QA に失敗しました"
-    elif "transport failure" in normalized_lower or "blocked by codex app-server transport" in normalized_lower:
-        prefix = "Codex app-server の通信確認に失敗したため semantic QA を実行できませんでした"
     elif "readonly database" in normalized or "failed to initialize sqlite state runtime" in normalized:
         prefix = "Codex app-server の状態DBを初期化できませんでした"
     elif "stream disconnected" in normalized or "backend-api/codex/responses" in normalized:
@@ -7002,16 +7498,26 @@ async def _run_create_job(
                 error=f"{type(exc).__name__}: {exc}",
             )
             if (run_dir / "state.txt").exists():
+                current_state = parse_state_file(run_dir / "state.txt")
+                existing_runtime_stage = str(current_state.get("runtime.stage") or "")
+                preserve_runtime_stage = existing_runtime_stage in {
+                    "semantic_review_blocked_transport",
+                    "semantic_review_failed_before_media_generation",
+                    "semantic_review_failed_after_media_generation",
+                    "app_server_transport_failed",
+                }
+                failure_updates = {
+                    "status": "FAILED",
+                    "runtime.create_job.status": "failed",
+                    "runtime.create_job.error_code": type(exc).__name__,
+                    "runtime.create_job.stop_target": stop_target,
+                    "last_error": detail,
+                }
+                if not preserve_runtime_stage:
+                    failure_updates["runtime.stage"] = "create_run_failed"
                 append_state_snapshot(
                     run_dir / "state.txt",
-                    {
-                        "status": "FAILED",
-                        "runtime.stage": "create_run_failed",
-                        "runtime.create_job.status": "failed",
-                        "runtime.create_job.error_code": type(exc).__name__,
-                        "runtime.create_job.stop_target": stop_target,
-                        "last_error": detail,
-                    },
+                    failure_updates,
                 )
         except Exception:
             pass
@@ -7339,9 +7845,15 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
 async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
     items = []
-    for item in load_request_items(run_dir, kind):
+    request_items = load_request_items(run_dir, kind)
+    blocked_scene_item_ids = _semantic_blocked_image_item_ids(run_dir, request_items) if kind == "scene" else set()
+    for item in request_items:
         payload = item_to_api(item)
-        payload["candidates"] = list_candidate_items(run_dir, item.id)
+        if str(item.id) in blocked_scene_item_ids:
+            payload["generationStatus"] = "blocked"
+            payload["candidates"] = [_semantic_blocked_candidate(run_dir, item)]
+        else:
+            payload["candidates"] = list_candidate_items(run_dir, item.id)
         items.append(payload)
     references = [reference_to_api(option) for option in list_reference_options(run_dir)]
     return {

@@ -4866,12 +4866,165 @@ def _api_prompt_text(value: Any, fallback: str = "") -> str:
     text = _sanitize_contract_prompt_text(str(value or "")).strip()
     for pattern in API_PROMPT_FORBIDDEN_PATTERNS:
         text = pattern.sub("", text)
+    for term in (
+        "source出来事",
+        "scene開始",
+        "scene_start_state",
+        "same_camera_distance",
+        "same_character_pose",
+        "same_location_zone",
+        "このcut",
+        "前cut",
+        "次cut",
+        "変化cut",
+        "sceneの",
+        "scene固有",
+    ):
+        replacement = {
+            "このcut": "この画像",
+            "前cut": "前の画像",
+            "次cut": "次の画像",
+            "変化cut": "変化の画像",
+            "sceneの": "場面の",
+            "scene固有": "場面固有",
+        }.get(term, "")
+        text = text.replace(term, replacement)
     text = re.sub(r"\s+", " ", text).strip(" /。:：\n\t")
     return text or fallback
 
 
+API_PROMPT_VALUE_LABELS = {
+    "establishing": "場所と人物の関係を示す導入",
+    "character_action": "人物の行為",
+    "reaction": "人物の反応",
+    "insert": "手元や小道具の寄り",
+    "object_proof": "小道具が物語上の証拠になる画面",
+    "b_roll": "補助的な証拠画面",
+    "handoff": "次の動きへ渡す導線",
+    "wide": "広い引き",
+    "medium_wide": "やや引いた中広",
+    "medium": "中景",
+    "medium_closeup": "近めの中景",
+    "closeup": "寄り",
+    "extreme_closeup": "極端な寄り",
+    "a_roll": "人物の本筋画面",
+    "visible_not_touched": "見えているがまだ触れていない",
+    "reaching_toward": "手を伸ばしかけている",
+    "touching": "触れている",
+    "holding": "持っている",
+    "released": "手放した直後",
+    "left_behind": "置き去りにされている",
+    "not_visible": "画面に出さない",
+    "scene_start_state": "場面の開始状態",
+    "handoff_state": "次へ渡す直前",
+    "deadline_pressure": "時間に急かされる方向",
+    "reaction_hold": "反応を受け止める位置",
+    "toward_next_scene": "次の場面へ向かう方向",
+    "toward_primary_action": "主要な行為へ向かう位置",
+    "proof_connected_to_scene": "証拠が場面の因果へつながる位置",
+    "progressed_state": "前の状態から進んだ途中",
+    "true": "ある",
+    "false": "ない",
+    "yes": "ある",
+    "no": "ない",
+}
+
+
+def _api_prompt_display_value(value: Any) -> str:
+    text = _api_prompt_text(value)
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in API_PROMPT_VALUE_LABELS:
+        return API_PROMPT_VALUE_LABELS[lowered]
+    for token, label in sorted(API_PROMPT_VALUE_LABELS.items(), key=lambda item: len(item[0]), reverse=True):
+        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", label, text, flags=re.IGNORECASE)
+    for token, label in {
+        "same camera distance": "前と同じカメラ距離",
+        "same character pose": "前と同じ人物姿勢",
+        "same location zone": "前と同じ場所の切り取り",
+        "full reveal": "最終的な明示",
+        "next scene": "次の場面",
+        "next cut": "次の画像",
+        "previous cut": "前の画像",
+    }.items():
+        text = re.sub(re.escape(token), label, text, flags=re.IGNORECASE)
+    return text
+
+
+def _natural_api_prompt_line(line: Any) -> str:
+    text = _api_prompt_text(line)
+    if not text:
+        return ""
+    if text == "must_not_repeat":
+        return "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。"
+    if ":" not in text:
+        return text
+    key, raw_value = text.split(":", 1)
+    key = key.strip()
+    value = _api_prompt_display_value(raw_value)
+    if not value:
+        return ""
+    templates = {
+        "shot_role": "この一枚は{value}として、画面上の意味が一目で伝わる構図にする。",
+        "shot_scale": "画面サイズは{value}で、人物、場所、小道具の関係が読める距離にする。",
+        "a_roll_or_b_roll": "{value}として、主役の行為または証拠物が自然に読める一枚にする。",
+        "camera_position": "カメラ位置は{value}に置き、同じ場所でも前後の画像と違う見え方にする。",
+        "camera_height": "カメラの高さは{value}。",
+        "lens_feel": "レンズ感は{value}。",
+        "should_show_face": "顔を見せる必要は{value}。",
+        "should_show_hands": "手元を見せる必要は{value}。",
+        "should_show_object_detail": "小道具の細部を見せる必要は{value}。",
+        "cut_visible_moment": "この一枚では、{value}。",
+        "visible_subjects": "画面には{value}が見える。",
+        "action_completion_state": "行為は{value}の状態で、完了後の結果までは見せない。",
+        "not_yet_happened": "まだ起きていない出来事は{value}。",
+        "still_must_not_show": "この静止画では{value}を見せない。",
+        "previous_cut_state": "前の画像では{value}。",
+        "this_cut_delta": "この画像では{value}が新しく見える。",
+        "must_not_revert": "前の状態へ戻らず、{value}を保つ。",
+        "must_not_repeat": "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。",
+        "costume": "衣装は{value}。",
+        "pose": "姿勢は{value}。",
+        "gaze": "視線は{value}。",
+        "expression": "表情は{value}。",
+        "hand_position": "手元は{value}。",
+        "foot_position": "足元は{value}。",
+        "body_axis": "身体の向きは{value}。",
+        "distance_to_other_subjects": "人物と周囲の距離は{value}。",
+        "object_visibility": "小道具や物体は{value}。",
+        "object_contact_state": "小道具への接触状態は{value}。",
+        "object_position": "小道具は画面の{value}に置く。",
+        "object_story_role": "小道具や場所の証拠は{value}として読ませる。",
+        "object_must_not_show": "この画面では{value}を出さない。",
+        "base_location_reference": "{value}",
+        "location_zone": "場所は{value}を中心に切り取る。",
+        "camera_station": "カメラは{value}から見る。",
+        "foreground": "前景には{value}を置く。",
+        "midground": "中景には{value}を置く。",
+        "background": "背景には{value}を残す。",
+        "set_dressing_delta": "{value}",
+        "light_source": "光源は{value}。",
+        "light_direction": "光の向きは{value}。",
+        "material_focus": "質感は{value}を重点的に見せる。",
+        "texture_specific_to_this_scene": "この場面固有の質感は{value}。",
+        "material_must_not_leak": "{value}",
+        "movable_subject": "動画開始時に動き出せる主体は{value}。",
+        "movement_vector_visible_as_static_pose": "次の動きの方向は{value}として姿勢に残す。",
+        "image_must_leave_room_for": "画面には{value}を残す。",
+        "must_not_resolve": "この一枚で{value}まで解決しない。",
+        "camera_start_reason": "カメラが動き出す理由は{value}。",
+        "image_supports_motion_start": "動画開始に必要な余地を残す。",
+        "motion_ceiling": "動画でも{value}までは進めない。",
+    }
+    template = templates.get(key)
+    if template:
+        return template.format(value=value)
+    return value
+
+
 def _api_prompt_section(title: str, lines: Iterable[Any]) -> str:
-    cleaned = _dedupe_nonempty(_api_prompt_text(line) for line in lines)
+    cleaned = _dedupe_nonempty(_natural_api_prompt_line(line) for line in lines)
     if not cleaned:
         cleaned = ["この項目は、他の具体描写と参照画像に矛盾しない範囲で自然に補完する。"]
     return f"[{title}]\n" + "\n".join(cleaned)
@@ -5118,7 +5271,7 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
                 ],
             ),
             _api_prompt_section(
-                "前cutからの変化",
+                "前の画像からの変化",
                 [
                     f"previous_cut_state: {previous_progressed_state if is_sequential_progression else delta['previous_visible_state_summary']}",
                     f"this_cut_delta: {progressed_delta if is_sequential_progression else delta['this_cut_new_information']}",
@@ -5253,16 +5406,20 @@ def _validate_image_api_prompt_payload(scene: SceneSpec, payload: dict[str, Any]
     for gate_name, pattern in API_PROMPT_FORBIDDEN_GATES:
         if pattern.search(prompt):
             issues.append(gate_name)
-    required = {
-        "api_prompt_has_shot_role": "shot_role:",
-        "api_prompt_has_location_zone": "location_zone:",
-        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
-        "api_prompt_has_character_blocking": "hand_position:",
-    }
-    for gate_name, needle in required.items():
-        if needle not in prompt:
-            issues.append(gate_name)
-    if (scene.image_object_ids or scene.image_object_variant_ids) and "object_contact_state:" not in prompt:
+    shot = payload.get("shot_design_contract") if isinstance(payload.get("shot_design_contract"), dict) else {}
+    location = payload.get("cut_location_frame_plan") if isinstance(payload.get("cut_location_frame_plan"), dict) else {}
+    delta = payload.get("cut_visual_delta") if isinstance(payload.get("cut_visual_delta"), dict) else {}
+    blocking = payload.get("blocking_and_interaction") if isinstance(payload.get("blocking_and_interaction"), dict) else {}
+    if not str(shot.get("shot_role") or "").strip():
+        issues.append("api_prompt_has_shot_role")
+    if not str(location.get("location_zone_id") or location.get("location_zone_description") or "").strip():
+        issues.append("api_prompt_has_location_zone")
+    if not str(delta.get("this_cut_new_information") or delta.get("cut_delta_visible_in_still") or "").strip():
+        issues.append("api_prompt_has_previous_cut_delta")
+    if not isinstance(blocking.get("character_blocking"), dict):
+        issues.append("api_prompt_has_character_blocking")
+    object_interaction = blocking.get("object_interaction") if isinstance(blocking.get("object_interaction"), dict) else {}
+    if (scene.image_object_ids or scene.image_object_variant_ids) and not str(object_interaction.get("contact_state") or "").strip():
         issues.append("api_prompt_has_object_contact_state_if_object_present")
     if issues:
         raise SystemExit(

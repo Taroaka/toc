@@ -7,10 +7,11 @@ from toc.harness import now_iso
 from toc.semantic_review import semantic_review_relpaths
 
 
-DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 1
+DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 2
 DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS = 1800
 DEFAULT_SEMANTIC_REPAIR_TIMEOUT_SECONDS = 1800
 DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY = 6
+DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS = 3
 
 
 SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
@@ -97,6 +98,16 @@ def scene_detail_review_concurrency() -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY
+
+
+def scene_detail_transport_retry_attempts() -> int:
+    raw = os.environ.get("TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS", "").strip()
+    if not raw:
+        return DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS
 
 
 def semantic_repair_relpaths(stage: str, round_number: int) -> dict[str, Path]:

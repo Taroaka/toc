@@ -36,7 +36,7 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
-    def test_same_topic_runs_do_not_reuse_cinderella_scaffold_or_identical_prompts(self) -> None:
+    def test_same_topic_runs_use_story_specific_cinderella_without_fixed_scaffold_ids(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
         output_root.mkdir(exist_ok=True)
@@ -51,6 +51,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             request_b = (run_b / "image_generation_requests.md").read_text(encoding="utf-8")
             manifest_a = (run_a / "video_manifest.md").read_text(encoding="utf-8")
             manifest_b = (run_b / "video_manifest.md").read_text(encoding="utf-8")
+            asset_request_a = (run_a / "asset_generation_requests.md").read_text(encoding="utf-8")
             combined = "\n".join(
                 [
                     request_a,
@@ -59,7 +60,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                     manifest_b,
                     (run_a / "research.md").read_text(encoding="utf-8"),
                     (run_a / "story.md").read_text(encoding="utf-8"),
-                    (run_a / "asset_generation_requests.md").read_text(encoding="utf-8"),
+                    asset_request_a,
                     (run_b / "research.md").read_text(encoding="utf-8"),
                     (run_b / "story.md").read_text(encoding="utf-8"),
                     (run_b / "asset_generation_requests.md").read_text(encoding="utf-8"),
@@ -72,10 +73,29 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertNotIn("glass_slipper", combined)
         self.assertNotIn("pumpkin_carriage", combined)
         self.assertNotIn("prince_dance_partner", combined)
-        self.assertNotIn("ガラスの靴", combined)
-        self.assertNotIn("靴合わせ", combined)
-        self.assertNotIn("舞踏会", combined)
-        self.assertNotIn("王子", combined)
+        self.assertIn("ガラスの靴", combined)
+        self.assertIn("靴合わせ", combined)
+        self.assertIn("舞踏会", combined)
+        self.assertIn("王子", combined)
+        self.assertIn("灰と家事に縛られたシンデレラは、舞踏会の知らせへ顔を上げられるか", combined)
+        self.assertRegex(
+            asset_request_a,
+            r"(?s)asset_id: `[a-z0-9_]+_transformed_fullbody`.*?references:\n\s+- `人物参照画像1`: `assets/characters/[a-z0-9_]+_protagonist_fullbody\.png`",
+        )
+        self.assertRegex(
+            asset_request_a,
+            r"(?s)asset_id: `[a-z0-9_]+_post_midnight_fullbody`.*?references:\n\s+- `人物参照画像1`: `assets/characters/[a-z0-9_]+_protagonist_fullbody\.png`",
+        )
+        scene30_cut1 = request_a.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
+        scene30_cut3 = request_a.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
+        scene70_cut1 = request_a.split("## scene70_cut1", 1)[1].split("## scene70_cut2", 1)[0]
+        scene70_cut3 = request_a.split("## scene70_cut3", 1)[1].split("## scene70_cut4", 1)[0]
+        scene70_cut5 = request_a.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
+        self.assertNotRegex(scene30_cut1, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertRegex(scene30_cut3, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertNotRegex(scene70_cut1, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertRegex(scene70_cut3, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertRegex(scene70_cut5, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
         self.assertNotEqual(request_a, request_b)
         self.assertNotEqual(manifest_a, manifest_b)
         self.assertIn("run_variant:", manifest_a)
@@ -289,9 +309,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("```api_prompt", scene_request_text)
             self.assertNotIn("```text\n[参照画像の使い方]", scene_request_text)
             self.assertIn("[shot / 画角]", scene_request_text)
-            self.assertIn("shot_role:", scene_request_text)
-            self.assertIn("location_zone:", scene_request_text)
-            self.assertIn("this_cut_delta:", scene_request_text)
+            self.assertNotIn("shot_role:", scene_request_text)
+            self.assertNotIn("location_zone:", scene_request_text)
+            self.assertNotIn("this_cut_delta:", scene_request_text)
             self.assertIn("[動画開始に向いた静止状態]", scene_request_text)
             self.assertNotIn("観客理解の増分:", scene_request_text)
             self.assertNotIn("因果の証明:", scene_request_text)
@@ -340,13 +360,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             scene70_text = scene_request_text.split("## scene70_cut1", 1)[1].split("## scene80_cut1", 1)[0]
             post_loss_scene70 = scene_request_text.split("## scene70_cut8", 1)[1].split("## scene80_cut1", 1)[0]
             self.assertIn("ガラスの靴", scene70_text)
-            self.assertIn("脱げて階段に残", scene70_text)
+            self.assertIn("脱げ", scene70_text)
+            self.assertIn("階段に残ったガラスの靴", scene70_text)
+            self.assertIn("証拠", scene70_text)
             self.assertIn("逃走", scene70_text)
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
             pre_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
             self.assertIn("cinderella_transformed_fullbody", pre_loss_scene70)
-            self.assertIn("costume: 舞踏会ドレス姿を維持し、質素な普段着へ戻さない。", pre_loss_scene70)
-            self.assertIn("costume: 魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", post_loss_scene70)
+            self.assertIn("衣装は舞踏会ドレス姿を維持し、質素な普段着へ戻さない。", pre_loss_scene70)
+            self.assertIn("衣装は魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", post_loss_scene70)
             scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
             self.assertIn("source_event_contract:", scene70_manifest)
             self.assertIn("event_context_for_cut:", scene70_manifest)
@@ -356,8 +378,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("reference_count: `2`", transformation_scene)
             self.assertNotIn("glass_slipper", transformation_scene)
             transformation_reveal = scene_request_text.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
+            transformation_reveal_api_prompt = re.search(r"```api_prompt\n(?P<body>.*?)\n```", transformation_reveal, re.DOTALL).group("body")
             self.assertIn("glass_slipper", transformation_reveal)
-            self.assertIn("object_visibility: ガラスの靴", transformation_reveal)
+            self.assertNotIn("object_visibility:", transformation_reveal_api_prompt)
+            self.assertIn("小道具や物体はガラスの靴", transformation_reveal)
             self.assertIn("cinderella_transformed_fullbody", transformation_reveal)
 
             departure_scene = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene50_cut1", 1)[0]
@@ -368,6 +392,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("progression_mode: sequential_state_progression", scene40_manifest)
             self.assertIn("first_frame_temporal_role: progressed_state_after_previous_cut", scene40_manifest)
             self.assertNotIn("not_yet_happened_in_still:\n                  - scene04_event_turn", scene40_manifest)
+            self.assertIn("story_meaning: 馬車", scene40_manifest)
+            self.assertNotIn("story_meaning: ガラスの靴", scene40_manifest)
             departure_pressure = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene40_cut2", 1)[0]
             departure_proof = scene_request_text.split("## scene40_cut3", 1)[1].split("## scene40_cut4", 1)[0]
             departure_late = scene_request_text.split("## scene40_cut4", 1)[1].split("## scene40_cut5", 1)[0]
@@ -399,6 +425,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("ガラスの靴", final_scene_manifest)
             self.assertIn("主人公の価値を証明", final_scene_manifest)
             self.assertIn("出口ではなくシンデレラとガラスの靴へ収束する", final_scene_manifest)
+            self.assertIn("fitted_on_foot", final_scene_manifest)
             self.assertIn("carries_to_next_scene: []", final_scene_manifest)
             self.assertNotIn("次の場所へ進む証拠が生まれる", final_scene_manifest)
             self.assertNotIn("背景に次の場所へ続く導線", final_scene_manifest)
@@ -407,8 +434,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_post_midnight_fullbody", final_scene_requests)
             self.assertNotIn("cinderella_transformed_fullbody", final_scene_requests)
             self.assertNotIn("背景に次の場所へ続く導線", final_scene_requests)
-            self.assertIn("costume: 魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", final_scene_requests)
-            self.assertIn("object_visibility: ガラスの靴", final_scene_requests)
+            self.assertIn("衣装は魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", final_scene_requests)
+            final_scene_api_prompts = "\n".join(re.findall(r"```api_prompt\n(.*?)\n```", final_scene_requests, re.DOTALL))
+            self.assertNotIn("object_visibility:", final_scene_api_prompts)
+            self.assertIn("小道具や物体はガラスの靴", final_scene_requests)
+            self.assertIn("ガラスの靴がシンデレラの足に合", final_scene_requests)
+            self.assertIn("小道具への接触状態は足に合っている", final_scene_requests)
             self.assertIn("靴合わせが行われる部屋", final_scene_requests)
             self.assertNotIn("月光、ガラス、階段", final_scene_requests)
 

@@ -2266,6 +2266,466 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertIn("slot.p680.status=awaiting_approval", state)
         self.assertIn("review.image.status=pending", state)
 
+    def test_generate_create_images_skips_scene_detail_transport_blocked_scene_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8")
+                + """
+
+## scene40_cut1
+
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene40_cut1.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```text
+transport blocked scene should not generate.
+```
+""",
+                encoding="utf-8",
+            )
+            saved = root / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+            generated: list[str] = []
+
+            class FakeResult:
+                saved_path = saved
+                revised_prompt = None
+                status = "completed"
+                transcript = []
+                source = "app_server"
+                provenance_authoritative = True
+                turn_id = "turn-1"
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    generated.append(kwargs["item_id"])
+                    return FakeResult()
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "scene_detail":
+                    image_gen_app.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.semantic.scene_detail.shards.scene_40.transport.status": "failed",
+                            "review.semantic.scene_detail.shards.scene_40.transport.error_kind": "timeout",
+                            "review.semantic.scene_detail.shards.scene_40.transport.error": "CodexAppServerTransportError: turn timed out",
+                        },
+                    )
+                    raise CodexAppServerTransportError("scene_detail shard transport failed after 3 attempt(s): scene:40")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
+            scene40_exists = (run_dir / "assets/scenes/scene40_cut1.png").exists()
+
+        self.assertTrue(scene10_exists)
+        self.assertFalse(scene40_exists)
+        self.assertEqual(generated, ["scene10_cut1", "scene10_cut2", "scene10_cut3"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
+        self.assertIn("scene40_cut1", state["review.semantic.scene_detail.blocked_image_items"])
+
+    def test_generate_create_images_skips_scene_detail_semantic_blocked_scene_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8")
+                + """
+
+## scene20_cut1
+
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene20_cut1.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```text
+semantic blocked scene should not generate.
+```
+""",
+                encoding="utf-8",
+            )
+            saved = root / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+            generated: list[str] = []
+
+            class FakeResult:
+                saved_path = saved
+                revised_prompt = None
+                status = "completed"
+                transcript = []
+                source = "app_server"
+                provenance_authoritative = True
+                turn_id = "turn-1"
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    generated.append(kwargs["item_id"])
+                    return FakeResult()
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "scene_detail":
+                    relpaths = image_gen_app.semantic_review_relpaths(stage)
+                    report_path = run_dir / relpaths["report"]
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        "\n".join(
+                            [
+                                "status: failed",
+                                "failed_selectors:",
+                                "  - scene:20",
+                                "blocked_entries:",
+                                "  - scene20_cut1",
+                                "reason_keys:",
+                                "  - scene_detail_obligation_missing",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    raise RuntimeError("scene_detail semantic review failed after 1 attempt(s)")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
+            scene20_exists = (run_dir / "assets/scenes/scene20_cut1.png").exists()
+
+        self.assertTrue(scene10_exists)
+        self.assertFalse(scene20_exists)
+        self.assertEqual(generated, ["scene10_cut1", "scene10_cut2", "scene10_cut3"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
+        self.assertIn("scene20_cut1", state["review.semantic.scene_detail.blocked_image_items"])
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "true")
+
+    def test_api_requests_marks_scene_detail_transport_blocked_items_as_failed_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8")
+                + """
+
+## scene40_cut1
+
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene40_cut1.png`
+
+```text
+transport blocked scene should show as failed.
+```
+""",
+                encoding="utf-8",
+            )
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.scene_detail.shards.scene_40.transport.status": "failed",
+                    "review.semantic.scene_detail.shards.scene_40.transport.error_kind": "timeout",
+                    "review.semantic.scene_detail.shards.scene_40.transport.error": "CodexAppServerTransportError: turn timed out",
+                },
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                payload = asyncio.run(image_gen_app.api_requests(run_id=run_id, kind="scene"))
+
+        blocked = next(item for item in payload["items"] if item["id"] == "scene40_cut1")
+        normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
+        self.assertEqual(blocked["generationStatus"], "blocked")
+        self.assertEqual(blocked["candidates"][0]["status"], "failed")
+        self.assertIn("semantic scene_detail transport timeout", blocked["candidates"][0]["error"])
+        self.assertIsNone(normal["generationStatus"])
+        self.assertEqual(normal["candidates"], [])
+
+    def test_api_requests_marks_scene_detail_semantic_blocked_items_as_failed_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8")
+                + """
+
+## scene20_cut1
+
+- tool: `codex_builtin_image`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene20_cut1.png`
+
+```text
+semantic blocked scene should show as failed.
+```
+""",
+                encoding="utf-8",
+            )
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.scene_detail.failure.failed_selectors": "scene:20",
+                    "review.semantic.scene_detail.failure.blocked_entries": "scene20_cut1",
+                    "review.semantic.scene_detail.failure.reason_keys": "scene_detail_obligation_missing",
+                },
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                payload = asyncio.run(image_gen_app.api_requests(run_id=run_id, kind="scene"))
+
+        blocked = next(item for item in payload["items"] if item["id"] == "scene20_cut1")
+        normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
+        self.assertEqual(blocked["generationStatus"], "blocked")
+        self.assertEqual(blocked["candidates"][0]["status"], "failed")
+        self.assertIn("semantic scene_detail failed", blocked["candidates"][0]["error"])
+        self.assertIsNone(normal["generationStatus"])
+        self.assertEqual(normal["candidates"], [])
+
+    def test_generate_create_images_skips_image_prompt_blocked_cut_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            saved = root / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+            generated: list[str] = []
+
+            class FakeResult:
+                saved_path = saved
+                revised_prompt = None
+                status = "completed"
+                transcript = []
+                source = "app_server"
+                provenance_authoritative = True
+                turn_id = "turn-1"
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    generated.append(kwargs["item_id"])
+                    return FakeResult()
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "image_prompt":
+                    relpaths = image_gen_app.semantic_review_relpaths(stage)
+                    report_path = run_dir / relpaths["report"]
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        "\n".join(
+                            [
+                                "status: failed",
+                                "failed_selectors:",
+                                "  - scene10_cut02",
+                                "blocked_entries:",
+                                "  - scene10_cut02",
+                                "reason_keys:",
+                                "  - api_prompt_emotion_is_abstract_not_performable",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    raise RuntimeError("image_prompt semantic review failed after 1 attempt(s)")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            scene10_cut1_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
+            scene10_cut2_exists = (run_dir / "assets/scenes/scene10_cut2.png").exists()
+            scene10_cut3_exists = (run_dir / "assets/scenes/scene10_cut3.png").exists()
+
+        self.assertTrue(scene10_cut1_exists)
+        self.assertFalse(scene10_cut2_exists)
+        self.assertTrue(scene10_cut3_exists)
+        self.assertEqual(generated, ["scene10_cut1", "scene10_cut3"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
+        self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "true")
+        self.assertIn("scene10_cut2", state["review.semantic.image_prompt.blocked_image_items"])
+
+    def test_generate_create_images_skips_asset_plan_blocked_source_cut_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            (run_dir / "asset_plan.md").write_text(
+                """```yaml
+assets:
+  - asset_id: story_signature_artifact
+    asset_type: object_reference
+    source_script_selectors:
+      - scene10_cut2
+    generation_plan:
+      output: assets/objects/story_signature_artifact.png
+```
+""",
+                encoding="utf-8",
+            )
+            saved = root / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+            generated: list[str] = []
+
+            class FakeResult:
+                saved_path = saved
+                revised_prompt = None
+                status = "completed"
+                transcript = []
+                source = "app_server"
+                provenance_authoritative = True
+                turn_id = "turn-1"
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    generated.append(kwargs["item_id"])
+                    return FakeResult()
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "asset_plan":
+                    relpaths = image_gen_app.semantic_review_relpaths(stage)
+                    report_path = run_dir / relpaths["report"]
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(
+                        "\n".join(
+                            [
+                                "status: failed",
+                                "failed_selectors:",
+                                "  - story_signature_artifact",
+                                "blocked_entries:",
+                                "  - story_signature_artifact",
+                                "reason_keys:",
+                                "  - asset_missing_required_cut_selector",
+                                "",
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    raise RuntimeError("asset_plan semantic review failed after 1 attempt(s)")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            scene10_cut1_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
+            scene10_cut2_exists = (run_dir / "assets/scenes/scene10_cut2.png").exists()
+            scene10_cut3_exists = (run_dir / "assets/scenes/scene10_cut3.png").exists()
+
+        self.assertTrue(scene10_cut1_exists)
+        self.assertFalse(scene10_cut2_exists)
+        self.assertTrue(scene10_cut3_exists)
+        self.assertEqual(generated, ["scene10_cut1", "scene10_cut3"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
+        self.assertEqual(state["review.semantic.asset_plan.partial_media_allowed"], "true")
+        self.assertEqual(state["review.semantic.asset_plan.localization.status"], "localized_to_image_items")
+        self.assertIn("scene10_cut2", state["review.semantic.asset_plan.blocked_image_items"])
+
+    def test_api_requests_marks_image_prompt_blocked_cut_as_failed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.image_prompt.failure.failed_selectors": "scene10_cut02",
+                    "review.semantic.image_prompt.failure.blocked_entries": "scene10_cut02",
+                    "review.semantic.image_prompt.failure.reason_keys": "api_prompt_emotion_is_abstract_not_performable",
+                },
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                payload = asyncio.run(image_gen_app.api_requests(run_id=run_id, kind="scene"))
+
+        blocked = next(item for item in payload["items"] if item["id"] == "scene10_cut2")
+        normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
+        self.assertEqual(blocked["generationStatus"], "blocked")
+        self.assertEqual(blocked["candidates"][0]["status"], "failed")
+        self.assertIn("semantic image_prompt failed", blocked["candidates"][0]["error"])
+        self.assertIsNone(normal["generationStatus"])
+        self.assertEqual(normal["candidates"], [])
+
     def test_build_generation_groups_layers_reference_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -2590,7 +3050,8 @@ base b prompt
         self.assertEqual(state["review.semantic.create_media_generated"], "false")
         self.assertEqual(state["review.semantic.create_blocking_stage"], "scene_set")
         self.assertEqual(state["slot.p410.status"], "failed")
-        self.assertNotIn("slot.p660.status", state)
+        self.assertEqual(state["slot.p660.status"], "pending")
+        self.assertIn("blocked before image generation", state["slot.p660.note"])
         mark_ready.assert_not_called()
 
     def test_generate_create_images_blocks_media_generation_when_semantic_transport_fails(self) -> None:
@@ -2633,10 +3094,11 @@ base b prompt
         self.assertEqual(generated_kinds, [])
         self.assertEqual(state["review.semantic.scene_detail.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_detail.loop.status"], "blocked_transport")
-        self.assertEqual(state["runtime.stage"], "app_server_transport_failed")
+        self.assertEqual(state["runtime.stage"], "semantic_review_blocked_transport")
         self.assertEqual(state["slot.p410.status"], "failed")
         self.assertNotIn("review.semantic.create_media_generated", state)
-        self.assertNotIn("slot.p660.status", state)
+        self.assertEqual(state["slot.p660.status"], "pending")
+        self.assertIn("blocked before image generation", state["slot.p660.note"])
         mark_ready.assert_not_called()
 
     def test_semantic_review_failure_invokes_producer_repair_then_rereviews(self) -> None:
@@ -2900,7 +3362,7 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.repair.status"], "done")
         self.assertEqual(state["slot.p410.status"], "done")
 
-    def test_semantic_review_default_runs_one_final_attempt_without_repair(self) -> None:
+    def test_semantic_review_explicit_one_attempt_skips_repair_with_state_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "output" / "sample_run"
@@ -2945,7 +3407,7 @@ base b prompt
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app.subprocess.run", fake_build_pack),
                 patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
-                patch.dict(os.environ, {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}),
+                patch.dict(os.environ, {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": "1"}),
             ):
                 with self.assertRaisesRegex(RuntimeError, "failed after 1 attempt"):
                     asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage))
@@ -2957,6 +3419,8 @@ base b prompt
         self.assertIn("Final Attempt Review Policy", review_prompts[0])
         self.assertEqual(state["review.semantic.scene_set.loop.max_attempts"], "1")
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_set.repair.skipped"], "true")
+        self.assertEqual(state["review.semantic.scene_set.repair.skipped_reason"], "max_attempts_1")
 
     def test_semantic_review_final_failure_records_report_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3026,6 +3490,9 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.failure.failed_selectors"], "scene10")
         self.assertEqual(state["review.semantic.scene_set.failure.blocked_entries"], "scene:10")
         self.assertEqual(state["review.semantic.scene_set.failure.reason_keys"], "semantic_contract_missing, causal_proof_weak")
+        self.assertEqual(state["review.semantic.scene_set.repair.skipped"], "true")
+        self.assertEqual(state["review.semantic.scene_set.repair.skipped_reason"], "max_attempts_1")
+        self.assertEqual(state["slot.p410.note"], "contextless semantic scene_set review failed without repair")
         self.assertEqual(final_logs[-1]["response"]["failedSelectors"], ["scene10"])
         self.assertEqual(final_logs[-1]["response"]["reasonKeys"], ["semantic_contract_missing", "causal_proof_weak"])
 
@@ -3453,7 +3920,120 @@ base b prompt
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app.subprocess.run", fake_build_pack),
                 patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
-                patch.dict(os.environ, {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "2"}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "2",
+                        "TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "2",
+                    },
+                ),
+            ):
+                with self.assertRaisesRegex(CodexAppServerTransportError, "scene_detail shard transport failed"):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            report = (run_dir / paths["report"]).read_text(encoding="utf-8")
+
+        self.assertEqual(state["review.semantic.scene_detail.shards.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_detail.shards.failed_count"], "1")
+        self.assertEqual(state["review.semantic.scene_detail.shards.scene_20.transport.status"], "failed")
+        self.assertEqual(state["review.semantic.scene_detail.shards.scene_20.transport.retry_count"], "1")
+        self.assertIn("blocked_entries:\n  - scene:20", report)
+        self.assertIn("failed_selectors:\n  - scene:20", report)
+        self.assertIn("scene_detail_shard_transport_failed", report)
+        self.assertIn("scene_detail shard transport failed before a terminal report", report)
+
+    def test_scene_detail_shard_transport_timeout_retries_only_failed_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            stage = "scene_detail"
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            turn_counts: dict[str, int] = {}
+
+            def fake_build_pack(cmd, **_kwargs):
+                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / paths["collection"]).write_text(
+                    "\n".join(
+                        [
+                            "# Semantic Review Collection: scene_detail",
+                            "",
+                            "## scene:10",
+                            "",
+                            "```json",
+                            json.dumps({"id": "scene:10", "selector": "scene10"}, ensure_ascii=False),
+                            "```",
+                            "",
+                            "## scene:20",
+                            "",
+                            "```json",
+                            json.dumps({"id": "scene:20", "selector": "scene20"}, ensure_ascii=False),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 2,
+                            "entry_ids": ["scene:10", "scene:20"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
+                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    entry_id = text.split("Review only shard entry `", 1)[1].split("`", 1)[0]
+                    turn_counts[entry_id] = turn_counts.get(entry_id, 0) + 1
+                    if entry_id == "scene:20" and turn_counts[entry_id] == 1:
+                        raise CodexAppServerTransportError("turn timed out")
+                    marker = "Write the final report to `"
+                    report_path = Path(text.split(marker, 1)[1].split("`", 1)[0])
+                    report_path.write_text(
+                        f"status: passed\nreviewed_entries: [{entry_id}]\nblocked_entries: []\nfindings: []\n",
+                        encoding="utf-8",
+                    )
+                    return []
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "2",
+                        "TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "3",
+                    },
+                ),
             ):
                 result = asyncio.run(
                     image_gen_app._run_semantic_review_once(
@@ -3461,22 +4041,22 @@ base b prompt
                         run_dir=run_dir,
                         stage=stage,
                         attempt=1,
-                        max_attempts=2,
-                        final_attempt=False,
+                        max_attempts=1,
+                        final_attempt=True,
                     )
                 )
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             report = (run_dir / paths["report"]).read_text(encoding="utf-8")
 
-        self.assertFalse(result.passed)
-        self.assertEqual(state["review.semantic.scene_detail.shards.status"], "failed")
-        self.assertEqual(state["review.semantic.scene_detail.shards.failed_count"], "1")
-        self.assertEqual(state["review.semantic.scene_detail.shards.scene_20.transport.status"], "failed")
-        self.assertIn("blocked_entries:\n  - scene:20", report)
-        self.assertIn("failed_selectors:\n  - scene:20", report)
-        self.assertIn("scene_detail_shard_transport_failed", report)
-        self.assertIn("scene_detail shard transport failed before a terminal report", report)
+        self.assertTrue(result.passed)
+        self.assertEqual(turn_counts, {"scene:10": 1, "scene:20": 2})
+        self.assertEqual(state["review.semantic.scene_detail.shards.status"], "passed")
+        self.assertEqual(state["review.semantic.scene_detail.shards.failed_count"], "0")
+        self.assertEqual(state["review.semantic.scene_detail.shards.scene_20.transport.status"], "recovered")
+        self.assertEqual(state["review.semantic.scene_detail.shards.scene_20.transport.retry_count"], "1")
+        self.assertIn("status: passed", report)
+        self.assertNotIn("scene_detail_shard_transport_failed", report)
 
     def test_scene_detail_missing_entry_ids_records_shard_state_and_debuggable_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

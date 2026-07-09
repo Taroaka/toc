@@ -904,13 +904,26 @@ def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any])
     for gate_name, pattern in IMAGE_API_PROMPT_FORBIDDEN_GATES:
         if pattern.search(prompt):
             issues.append(f"{selector}:{gate_name}")
-    required = {
-        "api_prompt_has_shot_role": "shot_role:",
-        "api_prompt_has_location_zone": "location_zone:",
-        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
-        "api_prompt_has_character_blocking": "hand_position:",
+    payload = _image_api_prompt_payload(image_generation)
+    shot_payload = payload.get("shot_design_contract") if isinstance(payload.get("shot_design_contract"), dict) else {}
+    location_payload = payload.get("cut_location_frame_plan") if isinstance(payload.get("cut_location_frame_plan"), dict) else {}
+    delta_payload = payload.get("cut_visual_delta") if isinstance(payload.get("cut_visual_delta"), dict) else {}
+    blocking_payload = payload.get("blocking_and_interaction") if isinstance(payload.get("blocking_and_interaction"), dict) else {}
+    if not str(shot_payload.get("shot_role") or "").strip():
+        issues.append(f"{selector}:api_prompt_has_shot_role")
+    if not str(location_payload.get("location_zone_id") or location_payload.get("location_zone_description") or "").strip():
+        issues.append(f"{selector}:api_prompt_has_location_zone")
+    if not str(delta_payload.get("this_cut_new_information") or delta_payload.get("cut_delta_visible_in_still") or "").strip():
+        issues.append(f"{selector}:api_prompt_has_previous_cut_delta")
+    if not isinstance(blocking_payload.get("character_blocking"), dict):
+        issues.append(f"{selector}:api_prompt_has_character_blocking")
+    prompt_body_requirements = {
+        "api_prompt_body_has_naturalized_shot_role": "この一枚は",
+        "api_prompt_body_has_naturalized_location_zone": "場所は",
+        "api_prompt_body_has_naturalized_cut_delta": "この画像では",
+        "api_prompt_body_has_naturalized_character_blocking": "姿勢は",
     }
-    for gate_name, needle in required.items():
+    for gate_name, needle in prompt_body_requirements.items():
         if needle not in prompt:
             issues.append(f"{selector}:{gate_name}")
     for gate_name, needle in {
@@ -921,8 +934,11 @@ def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any])
     }.items():
         if needle not in prompt:
             issues.append(f"{selector}:{gate_name}")
-    if as_list(image_generation.get("object_ids")) and "object_contact_state:" not in prompt:
+    object_interaction = blocking_payload.get("object_interaction") if isinstance(blocking_payload.get("object_interaction"), dict) else {}
+    if as_list(image_generation.get("object_ids")) and not str(object_interaction.get("contact_state") or "").strip():
         issues.append(f"{selector}:api_prompt_has_object_contact_state_if_object_present")
+    if as_list(image_generation.get("object_ids")) and "小道具への接触状態" not in prompt:
+        issues.append(f"{selector}:api_prompt_body_has_object_contact_state_if_object_present")
     for required_payload in ("shot_design_contract", "cut_location_frame_plan", "cut_visual_delta", "blocking_and_interaction"):
         if not isinstance(_image_api_prompt_payload(image_generation).get(required_payload), dict):
             issues.append(f"{selector}:{required_payload}_missing")
@@ -948,6 +964,8 @@ def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any])
             issues.append(f"{selector}:insert_cut_missing_object_detail")
     if expected_role == "reaction":
         has_visible_reaction = (
+            "[人物の見える演技]" in prompt
+            and
             re.search(r"表情|face|expression", prompt, re.I)
             and re.search(r"視線|gaze|eyeline", prompt, re.I)
             and re.search(r"姿勢|posture|body", prompt, re.I)

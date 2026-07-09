@@ -627,19 +627,19 @@ def api_prompt_structural_contract_issues(prompt: str, *, object_present: bool) 
         if pattern.search(prompt):
             findings.append(Finding(code=code, message=f"API prompt violates v1 gate `{code}`."))
     required = {
-        "api_prompt_has_shot_role": "shot_role:",
-        "api_prompt_has_location_zone": "location_zone:",
-        "api_prompt_has_previous_cut_delta": "this_cut_delta:",
-        "api_prompt_has_character_blocking": "hand_position:",
+        "api_prompt_has_shot_role": ("構図", "画面", "カット"),
+        "api_prompt_has_location_zone": ("場所", "前景", "中景", "背景"),
+        "api_prompt_has_previous_cut_delta": ("前", "このcut", "このカット", "新しく"),
+        "api_prompt_has_character_blocking": ("手元", "足元", "姿勢", "視線"),
     }
-    for code, needle in required.items():
-        if needle not in prompt:
-            findings.append(Finding(code=code, message=f"API prompt is missing required drawable field `{needle}`."))
-    if object_present and "object_contact_state:" not in prompt:
+    for code, needles in required.items():
+        if not any(needle in prompt for needle in needles):
+            findings.append(Finding(code=code, message=f"API prompt is missing drawable prose for `{code}`."))
+    if object_present and not any(needle in prompt for needle in ("接触", "手元", "小道具", "物体")):
         findings.append(
             Finding(
                 code="api_prompt_has_object_contact_state_if_object_present",
-                message="API prompt must describe object_contact_state when image_generation.object_ids is non-empty.",
+                message="API prompt must describe object contact or hand/object relationship when image_generation.object_ids is non-empty.",
             )
         )
     return findings

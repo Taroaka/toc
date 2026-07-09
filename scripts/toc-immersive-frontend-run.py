@@ -157,6 +157,15 @@ def _run_variant(topic: str, source: str, variant_seed: str) -> dict[str, Any]:
     return variant
 
 
+def _is_cinderella_topic(topic: str, source: str) -> bool:
+    normalized = f"{topic}\n{source}".lower()
+    return "シンデレラ" in normalized or "cinderella" in normalized
+
+
+def _profile_is_cinderella(profile: dict[str, Any]) -> bool:
+    return profile.get("story_key") == "cinderella" or profile.get("slug") == "cinderella"
+
+
 def _safe_asset_id(prefix: str, text: str, index: int) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
     if not normalized:
@@ -169,9 +178,10 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
     """Build topic-aware names used by authored artifacts and image requests."""
 
     normalized = f"{topic}\n{source}".lower()
-    if os.environ.get("TOC_ENABLE_LEGACY_CINDERELLA_PROFILE") == "1" and ("シンデレラ" in normalized or "cinderella" in normalized):
+    if os.environ.get("TOC_ENABLE_LEGACY_CINDERELLA_PROFILE") == "1" and _is_cinderella_topic(topic, source):
         return {
             "slug": "cinderella",
+            "story_key": "cinderella",
             "topic_label": "シンデレラ",
             "protagonist_name": "シンデレラ",
             "protagonist_asset_id": "cinderella_fullbody",
@@ -182,6 +192,8 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
             "protagonist_post_midnight_asset_subject": "真夜中に魔法が解けた後のシンデレラの全身参照。参照元の変身前シンデレラと同じ顔・髪・体格を維持し、舞踏会ドレスではない質素な衣装だけに戻す、靴合わせの部屋へつながる実写映画の人物状態",
             "artifact_name": "ガラスの靴",
             "artifact_asset_id": "glass_slipper",
+            "dance_partner_asset_id": "prince_dance_partner",
+            "carriage_asset_id": "pumpkin_carriage",
             "artifact_output_dir": "objects",
             "artifact_role": "身元を証明する主役級アイテム",
             "artifact_visual": "透明なガラスの靴、月光反射、実物の質感",
@@ -228,6 +240,71 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
     variant = _run_variant(topic, source, variant_seed)
     slug = _stable_slug(f"{topic}\n{source}\n{variant['label']}\n{variant['seed']}")
     topic_label = topic.strip() or "物語"
+    if _is_cinderella_topic(topic, source):
+        return {
+            "slug": slug,
+            "story_key": "cinderella",
+            "topic_label": "シンデレラ",
+            "run_variant": {
+                "seed": variant["seed"],
+                "index": variant["index"],
+                "label": variant["label"],
+                "focus": variant["focus"],
+                "source": variant["source"],
+            },
+            "protagonist_name": "シンデレラ",
+            "protagonist_asset_id": f"{slug}_protagonist_fullbody",
+            "protagonist_transformed_asset_id": f"{slug}_transformed_fullbody",
+            "protagonist_post_midnight_asset_id": f"{slug}_post_midnight_fullbody",
+            "protagonist_transformed_asset_subject": "シンデレラの変身後の全身参照。変身前と同じ顔・髪・体格を維持し、舞踏会へ進めるドレス姿だけに変える、実写映画の礼装",
+            "protagonist_post_midnight_asset_subject": "真夜中に魔法が解けた後のシンデレラの全身参照。変身前と同じ顔・髪・体格を維持し、舞踏会ドレスではない質素な衣装へ戻す",
+            "artifact_name": "ガラスの靴",
+            "artifact_asset_id": f"{slug}_signature_artifact",
+            "dance_partner_asset_id": f"{slug}_dance_partner",
+            "carriage_asset_id": f"{slug}_carriage_setpiece",
+            "artifact_output_dir": "objects",
+            "artifact_role": "身元を証明する主役級アイテム",
+            "artifact_visual": "片方だけ残る透明なガラスの靴。足に合うことで身元を証明する、実物の質感を持つ靴",
+            "artifact_fixed_prompt": "透明なガラスの靴、片方だけの証拠、実物の反射、読める文字なし",
+            "places": ["灰の台所", "閉ざされた扉", "月明かりの庭", "宮殿の大階段"],
+            "scene_locations": [
+                "灰の台所",
+                "閉ざされた扉の前",
+                "月明かりの庭",
+                "馬車が待つ門前",
+                "宮殿の階段",
+                "舞踏会の大広間",
+                "真夜中の大階段",
+                "靴合わせの部屋",
+            ],
+            "motifs": ["灰", "破れた布", "月光", "ガラス", "階段"],
+            "scene_titles": [
+                "灰の台所",
+                "舞踏会へ行けない扉",
+                "月下の変身",
+                "かぼちゃの馬車の出発",
+                "宮殿の階段",
+                "舞踏会の中心",
+                "真夜中の逃走",
+                "靴が名前を取り戻す部屋",
+            ],
+            "artifact_scene_indices": [3, 7, 8],
+            "summary": "継母と義姉に家事を押しつけられ灰まみれで暮らすシンデレラが、魔法の助けで舞踏会へ向かい、真夜中に逃げ、残されたガラスの靴によって自分の名を取り戻す。",
+            "aliases": ["灰かぶり", "Cinderella", "Cendrillon"],
+            "events": [
+                "継母と義姉たちが家の支配を握り、シンデレラは灰の台所で家事を押しつけられる。",
+                "王宮の舞踏会の知らせが届き、義姉たちは着飾る一方でシンデレラだけが参加を願う。",
+                "継母が仕事と衣装の欠如を理由にシンデレラを扉の内側へ閉じ込める。",
+                "月明かりの庭で助力者が現れ、かぼちゃの馬車、ドレス、ガラスの靴が整う。",
+                "シンデレラは馬車に乗り、家の門を越えて宮殿へ向かう。",
+                "宮殿の階段を上がったシンデレラが、群衆と王子の視線を集めて舞踏会の中心へ入る。",
+                "王子と踊る間、誰も灰かぶりの彼女だと知らず、シンデレラは初めて公の場で認識される。",
+                "真夜中の鐘で魔法が解け始め、シンデレラは大階段を駆け下りて片方のガラスの靴を残す。",
+                "使者がガラスの靴の持ち主を探して家々を巡り、義姉たちは靴に足を合わせようとする。",
+                "隠されていたシンデレラの足にガラスの靴が合い、彼女の名と価値が公に認められる。",
+            ],
+        }
+
     artifact_name = f"{topic_label}の{variant['artifact']}"
     return {
         "slug": slug,
@@ -326,7 +403,7 @@ def _artifact_first_scene_index(profile: dict[str, Any]) -> int:
 
 def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         specs.append(
             {
                 "character_id": profile["protagonist_transformed_asset_id"],
@@ -349,9 +426,9 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
         )
         specs.append(
             {
-                "character_id": "prince_dance_partner",
+                "character_id": str(profile.get("dance_partner_asset_id") or "dance_partner"),
                 "name": "王子または主要な踊り相手",
-                "reference_images": ["assets/characters/prince_dance_partner.png"],
+                "reference_images": [f"assets/characters/{profile.get('dance_partner_asset_id') or 'dance_partner'}.png"],
                 "scene_indices": [6],
                 "story_purpose": "舞踏会でシンデレラを公的に認識させる相手役",
                 "visual_subject": "王子または主要な踊り相手の全身参照。実写映画の人物、礼装、穏やかな視線、舞踏会に合う衣装",
@@ -361,7 +438,7 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
 
 
 def _protagonist_asset_for_cut(profile: dict[str, Any], scene_index: int, obligation_id: str) -> str:
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         transformed_id = str(profile.get("protagonist_transformed_asset_id") or "")
         post_midnight_id = str(profile.get("protagonist_post_midnight_asset_id") or "")
         if post_midnight_id and (
@@ -383,13 +460,13 @@ def _protagonist_reference_for_asset(profile: dict[str, Any], asset_id: str) -> 
 
 
 def _supporting_object_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
-    if profile.get("slug") != "cinderella":
+    if not _profile_is_cinderella(profile):
         return []
     return [
         {
-            "object_id": "pumpkin_carriage",
+            "object_id": str(profile.get("carriage_asset_id") or "carriage"),
             "name": "馬車",
-            "reference_images": ["assets/objects/pumpkin_carriage.png"],
+            "reference_images": [f"assets/objects/{profile.get('carriage_asset_id') or 'carriage'}.png"],
             "scene_indices": [4],
             "story_purpose": "門前から宮殿へ出発するための大型舞台装置",
             "visual_subject": "実写映画の馬車。門前に停まる重厚な車体、車輪、扉、月光、読める文字なし",
@@ -439,7 +516,7 @@ def _character_name_for_asset(profile: dict[str, Any], character_id: str) -> str
 
 
 def _asset_reference_inputs_for_plan(profile: dict[str, Any], asset_id: str) -> list[str]:
-    if profile.get("slug") == "cinderella" and asset_id in {
+    if _profile_is_cinderella(profile) and asset_id in {
         str(profile.get("protagonist_transformed_asset_id") or ""),
         str(profile.get("protagonist_post_midnight_asset_id") or ""),
     }:
@@ -454,8 +531,17 @@ def _supporting_object_reference(profile: dict[str, Any], object_id: str) -> str
     return ""
 
 
+def _object_name_for_asset(profile: dict[str, Any], object_id: str) -> str:
+    if object_id == str(profile.get("artifact_asset_id") or ""):
+        return str(profile["artifact_name"])
+    for spec in _supporting_object_asset_specs(profile):
+        if str(spec.get("object_id") or "") == object_id:
+            return str(spec.get("name") or object_id)
+    return object_id
+
+
 def _artifact_scene_role(profile: dict[str, Any], scene_index: int) -> str:
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         return {
             3: "変身で初めて現れる贈り物として、衣装と足元の変化を証明する",
             4: "馬車に乗る足元の連続性として控えめに見える。主役は馬車の出発",
@@ -468,7 +554,7 @@ def _artifact_scene_role(profile: dict[str, Any], scene_index: int) -> str:
 
 
 def _cut_uses_artifact(profile: dict[str, Any], scene_index: int, obligation_id: str, *, include_artifact: bool) -> bool:
-    if profile.get("slug") != "cinderella":
+    if not _profile_is_cinderella(profile):
         return include_artifact
     if scene_index == 3:
         if not include_artifact:
@@ -483,7 +569,13 @@ def _cut_uses_artifact(profile: dict[str, Any], scene_index: int, obligation_id:
     if scene_index == 7:
         if not include_artifact:
             return False
-        return obligation_id in {"midnight_lost_slipper_handoff", "causal_handoff"}
+        return obligation_id in {
+            "midnight_lost_slipper_handoff",
+            "causal_handoff",
+            "symbolic_proof",
+            "time_or_deadline_pressure",
+            "reaction_after_change",
+        }
     return include_artifact
 
 
@@ -585,7 +677,7 @@ def _scene_prompt(
     terminal_resolution: bool = False,
 ) -> str:
     active_motifs = [motif for motif in profile["motifs"] if include_artifact or motif != "ガラス"]
-    if terminal_resolution and profile.get("slug") == "cinderella":
+    if terminal_resolution and _profile_is_cinderella(profile):
         active_motifs = ["落ち着いた室内光", "椅子と床", "ガラス", "布"]
     motifs = "、".join(active_motifs)
     artifact_role = _artifact_scene_role(profile, scene_index)
@@ -617,7 +709,7 @@ def _scene_prompt(
         else f"{profile['topic_label']}の始まりから試練、証明へつながる。人物の顔、髪、体格、衣装の主要形状を変えない。"
     )
     character_state_gate = ""
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         if scene_index == 7:
             character_state_gate = (
                 "このsceneの前半6cutまでは舞踏会ドレス姿の逃走状態を維持する。"
@@ -649,6 +741,26 @@ def _scene_prompt(
     )
 
 
+def _is_cinderella_fitted_slipper_proof(profile: dict[str, Any], object_ids: list[str], *texts: Any) -> bool:
+    if not _profile_is_cinderella(profile):
+        return False
+    if str(profile.get("artifact_asset_id") or "") not in {str(object_id) for object_id in object_ids}:
+        return False
+    joined = " / ".join(str(text or "") for text in texts)
+    return any(
+        term in joined
+        for term in (
+            "足にガラスの靴が合",
+            "ガラスの靴を履いた足",
+            "靴合わせ",
+            "身元を証明",
+            "価値を証明",
+            "名前を取り戻",
+            "終結条件",
+        )
+    )
+
+
 def _visible_behavior_from_cut(
     *,
     profile: dict[str, Any],
@@ -658,13 +770,32 @@ def _visible_behavior_from_cut(
     object_ids: list[str],
 ) -> dict[str, str]:
     evidence = str(cut_blueprint.get("visual_beat") or cut_blueprint.get("first_frame_brief") or "").strip()
-    object_focus = profile["artifact_name"] if profile.get("artifact_asset_id") in object_ids else "主要な視覚証拠"
+    object_focus = (
+        profile["artifact_name"]
+        if profile.get("artifact_asset_id") in object_ids
+        else _object_name_for_asset(profile, object_ids[0])
+        if object_ids
+        else "主要な視覚証拠"
+    )
+    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
+        profile,
+        object_ids,
+        location_name,
+        evidence,
+        cut_blueprint.get("target_beat"),
+        cut_blueprint.get("causal_proof"),
+        cut_blueprint.get("dramatic_job"),
+    )
     return {
         "face": "声に出さず、圧力を受け止めている表情",
         "gaze": f"{object_focus}または次の導線へ向く視線",
         "posture": str(cut_blueprint.get("first_frame_brief") or "行為が始まる直前の姿勢"),
         "hands": f"{profile['protagonist_name']}の手元が行為直前の位置にあり、緊張が読める",
-        "feet": "足先と重心が次の動きに向き、まだ結果へ到達していない",
+        "feet": (
+            f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っていることが読める足元"
+            if fitted_slipper_proof
+            else "足先と重心が次の動きに向き、まだ結果へ到達していない"
+        ),
         "distance": f"{location_name}の中で、人物と{object_focus}の距離が読める",
         "visible_proof": evidence,
         "screen_direction": str(cut_plan.get("screen_direction") or "次へ進む方向"),
@@ -1054,7 +1185,25 @@ def _cut_film_grammar_contract_for_scaffold(
     previous_selector = re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector) if cut_number > 1 else ""
     function = str(primary_event_beat.get("beat_function") or cut_blueprint.get("cut_function") or "")
     reaction_required = function in {"turn", "payoff"} or bool(primary_event_beat.get("story_information_revealed_ids"))
-    object_name = profile["artifact_name"] if object_ids else ""
+    object_name = _object_name_for_asset(profile, object_ids[0]) if object_ids else ""
+    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
+        profile,
+        object_ids,
+        selector,
+        location_name,
+        primary_event_beat.get("what_happens"),
+        primary_event_beat.get("visible_action"),
+        cut_blueprint.get("target_beat"),
+        cut_blueprint.get("visual_beat"),
+        cut_blueprint.get("causal_proof"),
+        cut_blueprint.get("dramatic_job"),
+    )
+    object_contact_state = "fitted_on_foot" if fitted_slipper_proof else ("reaching_toward" if object_ids else "not_visible")
+    object_story_meaning = (
+        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合い、身元を証明する"
+        if fitted_slipper_proof
+        else object_name or "場所と身体が証拠になる"
+    )
     return {
         "policy_version": "cut_film_grammar_v1",
         "required_modules": {
@@ -1131,7 +1280,7 @@ def _cut_film_grammar_contract_for_scaffold(
                     "distance": visible_behavior["distance"],
                     "gaze": visible_behavior["gaze"],
                     "body_orientation": visible_behavior["posture"],
-                    "touch_or_non_touch": "接触直前または非接触の緊張",
+                    "touch_or_non_touch": "足に合っている接触状態" if fitted_slipper_proof else "接触直前または非接触の緊張",
                     "hierarchy_in_frame": "人物、小道具、場所の優先順位が読める",
                 },
                 "must_not_resolve_yet": [],
@@ -1144,9 +1293,9 @@ def _cut_film_grammar_contract_for_scaffold(
                     {
                         "cut_selector": selector,
                         "visibility": "foreground" if object_ids else "not_visible",
-                        "contact_state": "reaching_toward" if object_ids else "not_visible",
+                        "contact_state": object_contact_state,
                         "screen_position": "foreground",
-                        "story_meaning": object_name or "場所と身体が証拠になる",
+                        "story_meaning": object_story_meaning,
                         "next_state_requirement": "同じ形状と位置関係を保って次cutへ渡す",
                     }
                 ],
@@ -1196,10 +1345,162 @@ def _image_api_prompt_payload_for_scaffold(
 ) -> dict[str, Any]:
     def visible_text(value: Any, fallback: str = "") -> str:
         text = str(value or fallback).strip()
-        for term in ("場面の核", "観客理解", "因果の証明", "価値変化", "場所の圧力", "場のルール", "主人公の制限"):
-            text = text.replace(term, "")
+        for term in (
+            "場面の核",
+            "観客理解",
+            "因果の証明",
+            "価値の転換",
+            "空間の締めつけ",
+            "場のルール",
+            "人物の制限",
+            "source出来事",
+            "scene開始",
+            "scene_start_state",
+            "same_camera_distance",
+            "same_character_pose",
+            "same_location_zone",
+            "このcut",
+            "前cut",
+            "次cut",
+            "変化cut",
+            "sceneの",
+            "scene固有",
+        ):
+            replacement = {
+                "このcut": "この画像",
+                "前cut": "前の画像",
+                "次cut": "次の画像",
+                "変化cut": "変化の画像",
+                "sceneの": "場面の",
+                "scene固有": "場面固有",
+            }.get(term, "")
+            text = text.replace(term, replacement)
         text = re.sub(r"\s+", " ", text).strip(" 、。:：")
         return text or fallback
+
+    value_labels = {
+        "establishing": "場所と人物の関係を示す導入",
+        "character_action": "人物の行為",
+        "reaction": "人物の反応",
+        "insert": "手元や小道具の寄り",
+        "object_proof": "小道具が物語上の証拠になる画面",
+        "b_roll": "補助的な証拠画面",
+        "handoff": "次の動きへ渡す導線",
+        "wide": "広い引き",
+        "medium_wide": "やや引いた中広",
+        "medium": "中景",
+        "medium_closeup": "近めの中景",
+        "closeup": "寄り",
+        "extreme_closeup": "極端な寄り",
+        "a_roll": "人物の本筋画面",
+        "visible_not_touched": "見えているがまだ触れていない",
+        "reaching_toward": "手を伸ばしかけている",
+        "touching": "触れている",
+        "holding": "持っている",
+        "released": "手放した直後",
+        "left_behind": "置き去りにされている",
+        "fitted_on_foot": "足に合っている",
+        "not_visible": "画面に出さない",
+        "scene_start_state": "場面の開始状態",
+        "handoff_state": "次へ渡す直前",
+        "deadline_pressure": "時間に急かされる方向",
+        "reaction_hold": "反応を受け止める位置",
+        "toward_next_scene": "次の場面へ向かう方向",
+        "toward_primary_action": "主要な行為へ向かう位置",
+        "proof_connected_to_scene": "証拠が場面の因果へつながる位置",
+        "progressed_state": "前の状態から進んだ途中",
+        "true": "ある",
+        "false": "ない",
+        "yes": "ある",
+        "no": "ない",
+    }
+
+    def display_value(value: Any) -> str:
+        text = visible_text(value, "")
+        if not text:
+            return ""
+        lowered = text.lower()
+        if lowered in value_labels:
+            return value_labels[lowered]
+        for token, label in sorted(value_labels.items(), key=lambda item: len(item[0]), reverse=True):
+            text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", label, text, flags=re.IGNORECASE)
+        for token, label in {
+            "same camera distance": "前と同じカメラ距離",
+            "same character pose": "前と同じ人物姿勢",
+            "same location zone": "前と同じ場所の切り取り",
+            "full reveal": "最終的な明示",
+            "next scene": "次の場面",
+            "next cut": "次の画像",
+            "previous cut": "前の画像",
+        }.items():
+            text = re.sub(re.escape(token), label, text, flags=re.IGNORECASE)
+        return text
+
+    def natural_line(line: Any) -> str:
+        text = visible_text(line, "")
+        if not text:
+            return ""
+        if text == "must_not_repeat":
+            return "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。"
+        if ":" not in text:
+            return text
+        key, raw_value = text.split(":", 1)
+        key = key.strip()
+        value = display_value(raw_value)
+        if not value:
+            return ""
+        templates = {
+            "shot_role": "この一枚は{value}として、画面上の意味が一目で伝わる構図にする。",
+            "shot_scale": "画面サイズは{value}で、人物、場所、小道具の関係が読める距離にする。",
+            "a_roll_or_b_roll": "{value}として、主役の行為または証拠物が自然に読める一枚にする。",
+            "camera_position": "カメラ位置は{value}に置く。",
+            "camera_height": "カメラの高さは{value}。",
+            "lens_feel": "レンズ感は{value}。",
+            "cut_visible_moment": "この一枚では、{value}。",
+            "visible_subjects": "画面には{value}が見える。",
+            "action_completion_state": "行為は{value}の状態で、完了後の結果までは見せない。",
+            "still_must_not_show": "この静止画では{value}を見せない。",
+            "previous_cut_state": "前の画像では{value}。",
+            "this_cut_delta": "この画像では{value}が新しく見える。",
+            "must_not_revert": "前の状態へ戻らず、{value}を保つ。",
+            "must_not_repeat": "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。",
+            "costume": "衣装は{value}。",
+            "pose": "姿勢は{value}。",
+            "gaze": "視線は{value}。",
+            "expression": "表情は{value}。",
+            "hand_position": "手元は{value}。",
+            "foot_position": "足元は{value}。",
+            "body_axis": "身体の向きは{value}。",
+            "object_visibility": "小道具や物体は{value}。",
+            "object_contact_state": "小道具への接触状態は{value}。",
+            "object_position": "小道具は画面の{value}に置く。",
+            "object_story_role": "小道具や場所の証拠は{value}として読ませる。",
+            "base_location_reference": "{value}",
+            "location_zone": "場所は{value}を中心に切り取る。",
+            "foreground": "前景には{value}を置く。",
+            "midground": "中景には{value}を置く。",
+            "background": "背景には{value}を残す。",
+            "light_source": "光源は{value}。",
+            "light_direction": "光の向きは{value}。",
+            "material_focus": "質感は{value}を重点的に見せる。",
+            "movable_subject": "動画開始時に動き出せる主体は{value}。",
+            "movement_vector_visible_as_static_pose": "次の動きの方向は{value}として姿勢に残す。",
+            "image_must_leave_room_for": "画面には{value}を残す。",
+            "must_not_resolve": "この一枚で{value}まで解決しない。",
+        }
+        return templates.get(key, "{value}").format(value=value)
+
+    def naturalize_prompt(text: str) -> str:
+        blocks: list[str] = []
+        for block in text.split("\n\n"):
+            lines = block.splitlines()
+            if not lines:
+                continue
+            title = lines[0]
+            body = [natural_line(line) for line in lines[1:]]
+            body = [line for line in body if line]
+            blocks.append("\n".join([title, *body] if body else [title]))
+        return "\n\n".join(blocks)
 
     cut_function = str(cut_blueprint.get("cut_function") or "")
     cut_state_progression = cut_contract.get("cut_state_progression") if isinstance(cut_contract.get("cut_state_progression"), dict) else {}
@@ -1253,9 +1554,20 @@ def _image_api_prompt_payload_for_scaffold(
         if is_sequential_progression
         else ""
     )
-    object_contact_state = "reaching_toward" if cut_uses_artifact else "visible_not_touched"
+    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
+        profile,
+        object_ids,
+        selector,
+        location_name,
+        cut_blueprint.get("target_beat"),
+        cut_blueprint.get("visual_beat"),
+        cut_blueprint.get("causal_proof"),
+        cut_blueprint.get("dramatic_job"),
+        cut_blueprint.get("first_frame_brief"),
+    )
+    object_contact_state = "fitted_on_foot" if fitted_slipper_proof else ("reaching_toward" if cut_uses_artifact else "visible_not_touched")
     object_display_names = [
-        profile["artifact_name"] if object_id == profile.get("artifact_asset_id") else object_id
+        _object_name_for_asset(profile, object_id)
         for object_id in object_ids
     ]
     emotion_transition = cut_contract.get("cut_character_emotion_transition") if isinstance(cut_contract.get("cut_character_emotion_transition"), dict) else {}
@@ -1274,6 +1586,16 @@ def _image_api_prompt_payload_for_scaffold(
         costume_state = "舞踏会ドレス姿を維持し、質素な普段着へ戻さない。"
     elif any("post_midnight" in character_id for character_id in character_ids):
         costume_state = "魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。"
+    foot_position_line = (
+        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っていることが読める足元"
+        if fitted_slipper_proof
+        else "足先と重心が次の動きに向く"
+    )
+    object_story_role_line = (
+        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合い、身元を証明する"
+        if fitted_slipper_proof
+        else visible_text(cut_blueprint["causal_proof"] or visible_moment, "この画面の視覚証拠")
+    )
     prompt = "\n\n".join(
         [
             "[参照画像の使い方]\n"
@@ -1300,7 +1622,7 @@ def _image_api_prompt_payload_for_scaffold(
             f"visible_subjects: {', '.join(item for item in (visible_text(value, '') for value in cut_blueprint.get('must_show', [])) if item)}\n"
             f"action_completion_state: {cut_blueprint['action_completion_state']}\n"
             f"still_must_not_show: {still_boundary}",
-            "[前cutからの変化]\n"
+            "[前の画像からの変化]\n"
             f"previous_cut_state: {previous_state}\n"
             f"this_cut_delta: {visible_delta}\n"
             f"{must_not_revert_line}"
@@ -1311,7 +1633,7 @@ def _image_api_prompt_payload_for_scaffold(
             "gaze: 主要な視覚証拠へ向く\n"
             "expression: この画面の圧力が読める表情\n"
             f"hand_position: {profile['protagonist_name']}の手元が行為直前の位置にある\n"
-            "foot_position: 足先と重心が次の動きに向く\n"
+            f"foot_position: {foot_position_line}\n"
             "body_axis: 次の動きに向いた身体軸",
             "[人物の見える演技]\n"
             f"表情は、{visible_text(visible_behavior.get('face'), '声に出さず圧力を受け止める表情')}。\n"
@@ -1324,7 +1646,7 @@ def _image_api_prompt_payload_for_scaffold(
             f"object_visibility: {', '.join(object_display_names) if object_display_names else 'この画面で必要な場所の証拠が見える'}\n"
             f"object_contact_state: {object_contact_state}\n"
             "object_position: foreground\n"
-            f"object_story_role: {visible_text(cut_blueprint['causal_proof'] or visible_moment, 'この画面の視覚証拠')}",
+            f"object_story_role: {object_story_role_line}",
             "[場所の使い方]\n"
             f"base_location_reference: {location_spec['asset_id']} は完成構図ではなく、素材と光の一貫性として使う。\n"
             f"location_zone: {location_zone}\n"
@@ -1343,6 +1665,7 @@ def _image_api_prompt_payload_for_scaffold(
             "[禁止]\ntext, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters.",
         ]
     )
+    prompt = naturalize_prompt(prompt)
     shot_design_contract = {
         "shot_role": shot_role,
         "shot_scale": shot_scale,
@@ -1375,7 +1698,11 @@ def _image_api_prompt_payload_for_scaffold(
             "character_blocking": {
                 "gaze_target": "主要な視覚証拠",
                 "hand_position": {"left": "身体近く", "right": "行為直前の位置"},
-                "foot_position": {"left": "重心を支える", "right": "次の動きに向く"},
+                "foot_position": (
+                    {"left": "床に落ち着く", "right": f"{profile['artifact_name']}が足に合っている"}
+                    if fitted_slipper_proof
+                    else {"left": "重心を支える", "right": "次の動きに向く"}
+                ),
             },
             "object_interaction": {
                 "object_id": object_ids[0] if object_ids else "",
@@ -1472,19 +1799,202 @@ def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
     return events[start : min(len(events), start + window)]
 
 
+def _runtime_scene_id(idx: int) -> int:
+    return idx * 10
+
+
+def _scene_research_refs(idx: int, source_events: list[str]) -> list[str]:
+    if not source_events:
+        return [f"research.story_materials.chronological_events[E{idx:02d}]"]
+    refs: list[str] = []
+    for event in source_events:
+        refs.append(f"research.story_materials.chronological_events[{_stable_slug(event)}]")
+    refs.append(f"research.source_passages[P{idx}]")
+    return list(dict.fromkeys(refs))
+
+
+def _next_scene_title(profile: dict[str, Any], idx: int) -> str:
+    titles = [str(title) for title in profile.get("scene_titles") or []]
+    if idx < len(titles):
+        return titles[idx]
+    return "物語の終端"
+
+
+def _previous_scene_title(profile: dict[str, Any], idx: int) -> str:
+    titles = [str(title) for title in profile.get("scene_titles") or []]
+    if idx > 1 and idx - 2 < len(titles):
+        return titles[idx - 2]
+    return "開始前の状況"
+
+
+def _scene_blueprint(
+    *,
+    profile: dict[str, Any],
+    idx: int,
+    title: str,
+    location_name: str,
+    include_artifact: bool,
+) -> dict[str, Any]:
+    protagonist = str(profile.get("protagonist_name") or profile.get("topic_label") or "主要人物")
+    artifact = str(profile.get("artifact_name") or "物語上の証拠")
+    source_events = _scene_source_events(profile, idx)
+    source_summary = " / ".join(source_events) if source_events else str(profile.get("summary") or title)
+    previous_title = _previous_scene_title(profile, idx)
+    next_title = _next_scene_title(profile, idx)
+    is_terminal = idx == len(profile.get("scene_titles") or [])
+    evidence_terms = _event_visual_evidence_terms(source_summary, profile, include_artifact=include_artifact)
+    primary_evidence = evidence_terms[0] if evidence_terms else location_name
+    second_evidence = evidence_terms[1] if len(evidence_terms) > 1 else protagonist
+    artifact_term = artifact if include_artifact else f"{artifact}をまだ隠す条件"
+    if _profile_is_cinderella(profile):
+        scene_specifics = {
+            1: {
+                "question": "灰と家事に縛られたシンデレラは、舞踏会の知らせへ顔を上げられるか",
+                "desire": "王宮の舞踏会へ行き、自分も人として扱われたい",
+                "obstacle": "継母と義姉たちが家事と灰の台所へ彼女を押し戻す",
+                "stakes": "願いを口にする前に、灰かぶりとしての扱いだけが確定してしまう",
+                "turn": "舞踏会の知らせを見たシンデレラが、灰だらけの手を止めて参加したい願いを持つ",
+                "payoff": "台所の灰、知らせ、彼女の止まった手元が、閉ざされた扉の場面を始める",
+                "handoff": "舞踏会の知らせを握った手と、扉の向こうで義姉たちが着飾る音",
+                "pressure": ["灰の床", "舞踏会の知らせ", "継母たちの足音"],
+            },
+            2: {
+                "question": "閉ざされた扉の前でシンデレラは、継母の条件を越えられるか",
+                "desire": "舞踏会へ行く許しと着ていける衣装を得たい",
+                "obstacle": "継母が仕事と衣装の欠如を理由に参加を拒み、義姉たちが扉の外へ出る",
+                "stakes": "扉が閉まれば、彼女の願いは家の中で消える",
+                "turn": "破れた服と残された仕事の前で、シンデレラの願いが助力を呼ぶ状態になる",
+                "payoff": "閉ざされた扉と散らばる仕事が、月明かりの庭での助力を必要にする",
+                "handoff": "閉まる扉、破れた布、月明かりが差す庭への視線",
+                "pressure": ["閉ざされた扉", "破れた衣装", "山積みの仕事"],
+            },
+            3: {
+                "question": "月明かりの庭でシンデレラは、助力を受け取って別人の姿へ踏み出せるか",
+                "desire": "舞踏会へ行ける姿と移動手段を得たい",
+                "obstacle": "時間の制限と、魔法が一時的であるという条件",
+                "stakes": "助力を受け取れなければ、舞踏会の夜は家の外へ出ないまま終わる",
+                "turn": "かぼちゃの馬車、ドレス、ガラスの靴が整い、彼女が出発できる姿になる",
+                "payoff": "変身後の姿と馬車が、門前の出発へ直接つながる",
+                "handoff": "月明かりの庭に置かれた馬車の扉と、足元で光るガラスの靴",
+                "pressure": ["月明かり", "かぼちゃの馬車", "変化したドレス", "ガラスの靴"],
+            },
+            4: {
+                "question": "門前でシンデレラは、家の境界を越えて宮殿へ向かえるか",
+                "desire": "馬車に乗って舞踏会へ出発したい",
+                "obstacle": "家に戻される恐れと、真夜中までという条件",
+                "stakes": "出発をためらえば、魔法の時間を失う",
+                "turn": "シンデレラが馬車へ乗り込み、家の門を越えて宮殿へ向かう",
+                "payoff": "門を離れる馬車の車輪跡が、宮殿階段の到着を準備する",
+                "handoff": "門を越える馬車の車輪跡と遠くに見える宮殿の灯り",
+                "pressure": ["馬車の扉", "門の境界", "宮殿の灯り"],
+            },
+            5: {
+                "question": "宮殿の階段でシンデレラは、見知らぬ公の場へ入れるか",
+                "desire": "誰にも灰かぶりと知られず舞踏会へ入場したい",
+                "obstacle": "階段上の視線、礼装の場の規則、身元を隠した状態",
+                "stakes": "入口で立ち止まれば、公の認識を得る前に夜が終わる",
+                "turn": "シンデレラが階段を上がり、宮殿の人々の視線を受けて広間へ入る",
+                "payoff": "階段上の視線と礼装の姿が、舞踏会の中心での出会いを始める",
+                "handoff": "階段上から広間へ流れる視線と、王子が振り返る動き",
+                "pressure": ["宮殿の階段", "群衆の視線", "礼装の境界"],
+            },
+            6: {
+                "question": "舞踏会の中心でシンデレラは、名乗らずに自分の価値を認識させられるか",
+                "desire": "王子と踊り、自分が一人の人物として見られたい",
+                "obstacle": "正体を明かせないことと、真夜中が近づく時間制限",
+                "stakes": "誰にも認識されなければ、変身はただの幻で終わる",
+                "turn": "王子と踊るシンデレラに群衆の視線が集まり、灰かぶりではない存在として認識される",
+                "payoff": "広間の視線と王子の記憶が、真夜中の逃走で失われる証拠を必要にする",
+                "handoff": "踊りの輪の中で響く時計の気配と、階段へ向くシンデレラの身体",
+                "pressure": ["王子の手", "群衆の輪", "迫る時刻"],
+            },
+            7: {
+                "question": "真夜中の大階段でシンデレラは、魔法が解ける前に逃げ切れるか",
+                "desire": "正体が露見する前に宮殿を離れたい",
+                "obstacle": "真夜中の鐘、解け始める魔法、追いかける視線",
+                "stakes": "遅れれば、変身の秘密と身元がその場で崩れる",
+            "turn": "大階段を駆け下りる途中で片方のガラスの靴が脱げて階段に残り、宮殿に証拠として置き去りになる",
+                "payoff": "階段に残ったガラスの靴が、翌朝の探索を開始する",
+                "handoff": "大階段に残された片方のガラスの靴と、追ってくる足音",
+                "pressure": ["真夜中の鐘", "大階段", "片方のガラスの靴"],
+            },
+            8: {
+                "question": "靴合わせの部屋でシンデレラは、隠された名を公に取り戻せるか",
+                "desire": "ガラスの靴が自分のものだと証明されたい",
+                "obstacle": "継母と義姉たちの偽りの主張、隠された立場、周囲の疑い",
+                "stakes": "靴が合わなければ、舞踏会で得た認識は誰のものか分からないまま失われる",
+                "turn": "シンデレラの足にガラスの靴が合い、彼女が舞踏会の人物だと明らかになる",
+                "payoff": "靴、足、証人の視線が一致し、シンデレラの名と価値が公に戻る",
+                "handoff": "ガラスの靴を履いた足と、それを見届ける使者・義姉たちの視線",
+                "pressure": ["ガラスの靴", "使者", "義姉たちの失敗", "証人の視線"],
+            },
+        }
+        if idx in scene_specifics:
+            spec = scene_specifics[idx]
+            return {
+                "source_events": source_events,
+                "research_refs": _scene_research_refs(idx, source_events),
+                "dramatic_question": spec["question"],
+                "story_purpose": f"{title}で、シンデレラ原典の出来事「{source_summary}」を映像上の因果へ変換する",
+                "scene_spine": f"{spec['desire']} / {spec['obstacle']} / {spec['turn']}",
+                "desire": spec["desire"],
+                "obstacle": spec["obstacle"],
+                "stakes": spec["stakes"],
+                "escalation": f"{source_summary}が、{', '.join(spec['pressure'][:2])}によって逃げ場のない選択へ狭まる",
+                "no_return_point": spec["turn"],
+                "visible_pressure": spec["pressure"],
+                "causal_turn": spec["turn"],
+                "payoff": spec["payoff"],
+                "handoff_anchor": spec["handoff"],
+                "incoming_trigger": f"{previous_title}から渡る物理的原因: {source_events[0] if source_events else spec['pressure'][0]}",
+                "outgoing_pressure": "終端" if is_terminal else f"{spec['handoff']}が{next_title}の開始圧になる",
+                "value_from": "家や周囲に役割を押しつけられている状態",
+                "value_to": "名と選択の根拠が画面内の物証として強まる状態" if not is_terminal else "ガラスの靴によって名と価値が公に証明された状態",
+                "visible_evidence": list(dict.fromkeys([*spec["pressure"], protagonist, *([artifact] if include_artifact else [])]))[:6],
+                "character_start": f"{protagonist}は{location_name}で、{spec['obstacle']}に押し返されている",
+                "character_end": f"{protagonist}は{spec['turn']}の後、次の出来事を始める物的根拠を残している",
+                "story_terms": list(dict.fromkeys([protagonist, artifact, location_name, *spec["pressure"]]))[:8],
+            }
+    return {
+        "source_events": source_events,
+        "research_refs": _scene_research_refs(idx, source_events),
+        "dramatic_question": f"{title}で{protagonist}は、{primary_evidence}を根拠に選択を変えられるか",
+        "story_purpose": f"{title}で、source event「{source_summary}」を人物・場所・証拠の因果として成立させる",
+        "scene_spine": f"{source_summary} / {location_name}の制約 / {artifact_term}",
+        "desire": f"{protagonist}は{source_summary}を受けて、現在の制約から抜け出したい",
+        "obstacle": f"{location_name}、関係性、または{second_evidence}が選択を狭める",
+        "stakes": f"失敗すると、{source_summary}の意味が周囲に認識されないまま終わる",
+        "escalation": f"{primary_evidence}が画面に増え、{protagonist}の選択肢が一つへ絞られる",
+        "no_return_point": f"{source_summary}が、{location_name}内の物理的な痕跡として残る",
+        "visible_pressure": list(dict.fromkeys([primary_evidence, second_evidence, location_name, *([artifact] if include_artifact else [])]))[:5],
+        "causal_turn": f"{title}で{source_summary}が物的証拠に変わり、後続場面の原因になる",
+        "payoff": f"{primary_evidence}と{location_name}の変化が、{next_title}の開始条件になる",
+        "handoff_anchor": f"{primary_evidence}と{location_name}に残る痕跡",
+        "incoming_trigger": f"{previous_title}から渡る原因: {source_events[0] if source_events else source_summary}",
+        "outgoing_pressure": "終端" if is_terminal else f"{primary_evidence}が{next_title}で回収される",
+        "value_from": "周囲の制約に意味を奪われている状態",
+        "value_to": "選択の根拠が画面内の物証として残る状態" if not is_terminal else "証拠と人物が結びつき物語が閉じる状態",
+        "visible_evidence": list(dict.fromkeys([location_name, protagonist, *evidence_terms, *([artifact] if include_artifact else [])]))[:6],
+        "character_start": f"{protagonist}は{location_name}で{second_evidence}に制限されている",
+        "character_end": f"{protagonist}は{primary_evidence}を残し、後続場面を始める原因を持つ",
+        "story_terms": list(dict.fromkeys([protagonist, artifact, location_name, *evidence_terms]))[:8],
+    }
+
+
 def _canonical_event_coverage_matrix(profile: dict[str, Any]) -> dict[str, Any]:
     events = [str(event).strip() for event in profile.get("events", []) if str(event).strip()]
     scene_count = max(1, len(profile.get("scene_titles") or []))
     rows: list[dict[str, Any]] = []
     for event_index, event in enumerate(events, start=1):
-        assigned_scene_ids = [
+        assigned_scene_indexes = [
             scene_index
             for scene_index in range(1, scene_count + 1)
             if event in _scene_source_events(profile, scene_index)
         ]
-        if not assigned_scene_ids:
+        if not assigned_scene_indexes:
             estimated_scene = min(scene_count, max(1, int((event_index - 1) * scene_count / max(1, len(events))) + 1))
-            assigned_scene_ids = [estimated_scene]
+            assigned_scene_indexes = [estimated_scene]
+        assigned_scene_ids = [_runtime_scene_id(scene_index) for scene_index in assigned_scene_indexes]
         importance = "critical" if event_index in {1, len(events)} else "high" if event_index in {2, 3, 4, len(events) - 1} else "medium"
         rows.append(
             {
@@ -1496,8 +2006,8 @@ def _canonical_event_coverage_matrix(profile: dict[str, Any]) -> dict[str, Any]:
                 "canonical_order_index": event_index,
                 "assigned_scene_ids": assigned_scene_ids,
                 "assigned_event_beat_ids": [
-                    f"scene{scene_id:02d}_event_{'turn' if importance in {'critical', 'high'} else 'pressure'}"
-                    for scene_id in assigned_scene_ids
+                    f"scene{scene_index:02d}_event_{'turn' if importance in {'critical', 'high'} else 'pressure'}"
+                    for scene_index in assigned_scene_indexes
                 ],
                 "omission_reason": "",
                 "adaptation_change_reason": "scene数とcut密度に合わせ、source event を最も近い scene_event beat へ割り当てる",
@@ -1566,6 +2076,13 @@ def _scene_generation_for_scene(
     profile: dict[str, Any],
 ) -> dict[str, Any]:
     source_events = _scene_source_events(profile, idx)
+    blueprint = _scene_blueprint(
+        profile=profile,
+        idx=idx,
+        title=title,
+        location_name=str(location_spec.get("name") or ""),
+        include_artifact=include_artifact,
+    )
     source_beat_ids = [f"source_scene{idx:02d}_beat{event_index:02d}" for event_index, _ in enumerate(source_events, start=1)]
     protagonist = str(profile.get("protagonist_name") or topic)
     artifact = str(profile.get("artifact_name") or "")
@@ -1611,6 +2128,16 @@ def _scene_generation_for_scene(
             "artifact_name": artifact,
             "story_role": _artifact_scene_role(profile, idx) if include_artifact else "このsceneでは証拠アイテムを先取りしない",
         },
+        "scene_specific_blueprint": {
+            "dramatic_question": blueprint["dramatic_question"],
+            "desire": blueprint["desire"],
+            "obstacle": blueprint["obstacle"],
+            "stakes": blueprint["stakes"],
+            "causal_turn": blueprint["causal_turn"],
+            "visible_pressure": blueprint["visible_pressure"],
+            "handoff_anchor": blueprint["handoff_anchor"],
+            "story_terms": blueprint["story_terms"],
+        },
     }
     prompt = "\n".join(
         [
@@ -1619,6 +2146,10 @@ def _scene_generation_for_scene(
             f"場所: {location_name}",
             f"主人公: {protagonist}",
             f"必須 source beat: {' / '.join(source_events) if source_events else title}",
+            f"この scene の固有問い: {blueprint['dramatic_question']}",
+            f"この scene で起きる物理的 turn: {blueprint['causal_turn']}",
+            f"画面で残す証拠: {', '.join(blueprint['visible_evidence'])}",
+            f"次へ渡す handoff: {blueprint['handoff_anchor']}",
             f"必須出力: {', '.join(required_outputs)}",
             "scene_event は出来事だけを書く。演出や後段実行の情報は入れない。",
             "抽象的な役割を残しつつ、各 event beat を source に基づく具体出来事へ接地する。",
@@ -1671,7 +2202,7 @@ def _scene_generation_for_scene(
 
 
 def _event_visual_evidence_terms(event_text: str, profile: dict[str, Any], *, include_artifact: bool) -> list[str]:
-    terms = ["主人公の姿勢", "場所に残る痕跡"]
+    terms = ["人物の手元", "床や道具に残る痕跡"]
     rules = [
         (("知らせ", "招待", "呼び出", "命令", "告げ"), ["届いた知らせまたは呼び出しの証", "周囲の反応"]),
         (("拒", "妨げ", "閉", "支配", "押しつけ", "仕事"), ["妨げる人物または閉ざされた入口", "主人公の止まった身体"]),
@@ -1823,7 +2354,7 @@ STORY_FUNCTION_BY_ELEMENT_TYPE = {
 
 
 def _source_origin_for_profile(profile: dict[str, Any]) -> str:
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         return "canonical_reference"
     return "user_input"
 
@@ -2108,15 +2639,22 @@ def _story_event_obligations_for_scene(
     source_events = _scene_source_events(profile, idx)
     if not source_events:
         return []
+    blueprint = _scene_blueprint(
+        profile=profile,
+        idx=idx,
+        title=title,
+        location_name=location_name,
+        include_artifact=include_artifact,
+    )
     event_text = " / ".join(source_events)
-    visual_evidence = _event_visual_evidence_terms(event_text, profile, include_artifact=include_artifact)
+    visual_evidence = list(blueprint["visible_evidence"])
     required_roles = _event_required_roles(event_text)
     return [
         {
             "event_id": f"scene{idx:02d}_story_event",
             "source_events": source_events,
-            "audience_knowledge_delta": f"観客は「{event_text}」がこのsceneで起きた不可逆な出来事だと理解する",
-            "causal_proof": f"{title}で、出来事の原因と結果が{location_name}内の物理的証拠として同時に読める",
+            "audience_knowledge_delta": f"観客は「{blueprint['causal_turn']}」が「{event_text}」から生じた不可逆な出来事だと理解する",
+            "causal_proof": f"{blueprint['handoff_anchor']}が、{title}の原因と結果を説明なしに結びつける",
             "visual_evidence": visual_evidence,
             "required_roles": required_roles,
             "static_first_frame_rule": "動作中の説明ではなく、原因・結果・証人・物的証拠が一枚で読める静止状態にする",
@@ -2142,14 +2680,15 @@ def _scene_intent_for_cut_design(
         profile=profile,
         include_artifact=include_artifact,
     )
-    visible_evidence = [
-        f"{location_spec['name']}の空間圧力",
-        f"{profile['protagonist_name']}の姿勢と視線",
-        "光の向きの変化",
-    ]
-    if include_artifact:
-        visible_evidence.append(profile["artifact_name"])
-    if profile.get("slug") == "cinderella":
+    blueprint = _scene_blueprint(
+        profile=profile,
+        idx=idx,
+        title=title,
+        location_name=str(location_spec["name"]),
+        include_artifact=include_artifact,
+    )
+    visible_evidence = list(blueprint["visible_evidence"])
+    if _profile_is_cinderella(profile):
         if idx == 4:
             visible_evidence.extend(["馬車", "乗車/出発", "門前から宮殿へ向かう導線"])
         elif idx == 5:
@@ -2163,7 +2702,7 @@ def _scene_intent_for_cut_design(
         audience_information.append("周囲の視線や場のルール")
     if idx in {4, 7}:
         audience_information.append("移動や時間制限によって状況が変わること")
-    if profile.get("slug") == "cinderella":
+    if _profile_is_cinderella(profile):
         if idx == 4:
             audience_information.extend(["馬車が待っていること", "主人公が宮殿へ出発すること"])
         elif idx == 5:
@@ -2177,10 +2716,10 @@ def _scene_intent_for_cut_design(
         withheld_information.append("時間制限の結果")
     reveal_constraints = [] if artifact_has_been_revealed else [f"{profile['artifact_name']}はこのsceneでは見せない"]
     if is_terminal:
-        reveal_constraints = []
-    value_to = "主人公の価値が証明され物語が閉じる状態" if is_terminal else "次へ進む理由が画面内に残る状態"
-    causal_turn = f"{title}の終わりに次の場所へ進む証拠が生まれる"
-    if profile.get("slug") == "cinderella":
+        reveal_constraints = ["終端後の新しい解決や別の証拠を足さない"]
+    value_to = str(blueprint["value_to"])
+    causal_turn = str(blueprint["causal_turn"])
+    if _profile_is_cinderella(profile):
         if idx == 4:
             causal_turn = "馬車へ乗り込み、門前から宮殿へ出発することで物語が公的な場へ進む"
         elif idx == 5:
@@ -2190,11 +2729,11 @@ def _scene_intent_for_cut_design(
         elif idx == 7:
             causal_turn = "真夜中の合図で逃走し、脱げて階段に残ったガラスの靴が靴合わせへ因果を渡す"
     if is_terminal:
-        causal_turn = f"{title}の終わりに{profile['artifact_name']}が主人公の価値を証明して物語を閉じる"
+        causal_turn = str(blueprint["causal_turn"])
     done_when = (
-        f"{title}の問い、価値変化、終結が、人物・場所・光・{profile['artifact_name']}の関係で説明なしに読める"
+        f"{title}の問い、終結、物証の一致が、人物・場所・光・{profile['artifact_name']}の関係で説明なしに読める"
         if is_terminal
-        else f"{title}の問い、価値変化、因果の受け渡しが、人物・場所・光・必要な証拠の関係で説明なしに読める"
+        else f"{title}の問い、状態差、因果の受け渡しが、人物・場所・光・必要な証拠の関係で説明なしに読める"
     )
     screen_geography = (
         f"{location_spec['name']}の前景/中景/背景が、出口ではなく主人公と{profile['artifact_name']}へ収束する"
@@ -2202,9 +2741,11 @@ def _scene_intent_for_cut_design(
         else f"{location_spec['name']}の前景/中景/背景と出口方向を固定する"
     )
     return {
-        "dramatic_question": f"{title}で主人公は前進できるか",
+        "story_purpose": blueprint["story_purpose"],
+        "dramatic_question": blueprint["dramatic_question"],
+        "scene_spine": blueprint["scene_spine"],
         "value_shift": {
-            "from": "不可視で動けない状態",
+            "from": blueprint["value_from"],
             "to": value_to,
             "visible_evidence": visible_evidence,
         },
@@ -2219,11 +2760,84 @@ def _scene_intent_for_cut_design(
                 if obligation.get("audience_knowledge_delta")
             ],
             "misdirected_or_reframed": [],
-            "still_unknown_after_scene": withheld_information,
-            "forbidden_early_reveals": reveal_constraints,
+            "still_unknown_after_scene": withheld_information or ["このsceneで新たに伏せる情報はなく、既存の証拠だけを回収する"],
+            "forbidden_early_reveals": reveal_constraints or ["後続sceneの物証を先に確定しない"],
         },
         "withheld_information": withheld_information,
         "reveal_constraints": reveal_constraints,
+        "affect_transition": f"{blueprint['visible_pressure'][0]}による緊張から、{blueprint['handoff_anchor']}を見た理解へ移る",
+        "character_state": {
+            "start": blueprint["character_start"],
+            "end": blueprint["character_end"],
+            "visible_behavior": [
+                f"{profile['protagonist_name']}の手元",
+                "顔の向き",
+                "足元の重心",
+                blueprint["visible_pressure"][0],
+            ],
+        },
+        "story_specificity": {
+            "non_compressible_beat": blueprint["causal_turn"],
+            "scene_promotion_reason": f"{title}は「{blueprint['causal_turn']}」を独立して成立させるため、別sceneとして必要",
+            "unique_scene_responsibility": f"{blueprint['handoff_anchor']}を後続sceneの物理的原因として残す",
+            "actor_forces": {
+                "protagonist": profile["protagonist_name"],
+                "opposing_or_limiting_force": blueprint["obstacle"],
+                "pressure_method": blueprint["visible_pressure"],
+                "witness_or_authority": [role for role in _event_required_roles(' / '.join(blueprint["source_events"])) if role != "protagonist"] or ["場所または周囲の反応"],
+            },
+            "meaning_ladder": {
+                "object_or_trace": blueprint["handoff_anchor"],
+                "scene_function": blueprint["payoff"],
+                "story_function": blueprint["causal_turn"],
+            },
+            "concrete_handoff": {
+                "incoming_trigger": blueprint["incoming_trigger"],
+                "outgoing_anchor": blueprint["handoff_anchor"],
+                "outgoing_pressure": blueprint["outgoing_pressure"],
+            },
+            "anti_template_language": {
+                "banned_generic_phrases_absent": True,
+                "story_specific_terms": blueprint["story_terms"],
+                "specificity_note": "物語名だけでなく、人物・場所・物証・行為の組み合わせでsceneを固定する",
+            },
+        },
+        "visual_value_source": {
+            "source": "scene_blueprint",
+            "visual_terms": visible_evidence,
+            "source_events": blueprint["source_events"],
+        },
+        "production_risks": [
+            "物証を早出ししない",
+            "人物の内面説明だけでsceneを閉じない",
+            "同じ証拠の反復ならcutを増やさずpromptを厚くする",
+        ],
+        "handoff_notes": {
+            "incoming": blueprint["incoming_trigger"],
+            "outgoing": blueprint["handoff_anchor"],
+            "next_scene": "" if is_terminal else _next_scene_title(profile, idx),
+        },
+        "scene_conflict_engine": {
+            "desire": blueprint["desire"],
+            "obstacle": blueprint["obstacle"],
+            "stakes": blueprint["stakes"],
+            "escalation": blueprint["escalation"],
+            "no_return_point": blueprint["no_return_point"],
+            "visible_pressure": blueprint["visible_pressure"],
+        },
+        "handoff_chain": {
+            "incoming": {
+                "anchor_type": "source_event" if idx == 1 else "physical_or_audible_trace",
+                "visible_or_audible_form": blueprint["incoming_trigger"],
+            },
+            "outgoing": {
+                "anchor_id": f"scene{idx:02d}_handoff",
+                "anchor_type": "terminal" if is_terminal else "physical_or_audible_trace",
+                "visible_or_audible_form": blueprint["handoff_anchor"],
+                "next_scene_selector": "" if is_terminal else f"scene{_runtime_scene_id(idx + 1)}",
+                "required_next_scene_start_pressure": blueprint["outgoing_pressure"],
+            },
+        },
         "story_event_obligations": story_event_obligations,
         "role_coverage": {
             "required_roles": sorted({role for obligation in story_event_obligations for role in obligation.get("required_roles", [])}),
@@ -2272,44 +2886,51 @@ def _scene_event_for_cut_design(
     artifact = str(profile["artifact_name"])
     source_story_beat_id = f"story_scene{idx:02d}_primary"
     source_events = _scene_source_events(profile, idx)
+    blueprint = _scene_blueprint(
+        profile=profile,
+        idx=idx,
+        title=title,
+        location_name=location_name,
+        include_artifact=include_artifact,
+    )
     source_summary = " / ".join(source_events) if source_events else str(profile.get("summary") or title)
     visible_evidence = scene_intent.get("value_shift", {}).get("visible_evidence", []) if isinstance(scene_intent.get("value_shift"), dict) else []
     evidence_terms = [str(item) for item in visible_evidence if str(item).strip()][:4] or [location_name, protagonist]
     artifact_clause = f"と{artifact}" if include_artifact else ""
     source_fact_setup = source_events[0] if source_events else f"{title}で{protagonist}が{location_name}の制約に置かれる"
     source_fact_pressure = source_events[1] if len(source_events) > 1 else source_fact_setup
-    source_fact_turn = str(scene_intent.get("causal_turn") or source_fact_pressure or f"{title}で不可逆な行為が起きる")
-    source_fact_payoff = f"{source_fact_turn}。その結果が次sceneへ渡る"
+    source_fact_turn = str(blueprint["causal_turn"])
+    source_fact_payoff = str(blueprint["payoff"])
     beat_specs = [
         (
             "setup",
             source_fact_setup,
-            f"{protagonist}が{location_name}で、source出来事に由来する制約を身体・視線・距離で受けている",
-            f"{location_name}の障害、周囲の視線、関係性の圧力が{protagonist}を押し返す",
+            blueprint["character_start"],
+            f"{location_name}にある{blueprint['visible_pressure'][0]}が{protagonist}の選択を狭める",
             "sceneの問いと開始状況が観客に確定する",
             "まだ動けない圧力が見える",
         ),
         (
             "pressure",
             source_fact_pressure,
-            f"{protagonist}の手元、表情、姿勢のいずれかが、{source_fact_pressure}の圧力へ具体的に反応する",
-            f"妨害者、助力者、証人、共同体、または{location_name}の制約が圧力を増す",
+            f"{protagonist}の手元、顔の向き、足元の重心が「{source_fact_pressure}」へ具体的に反応する",
+            f"{blueprint['obstacle']}が、{', '.join(blueprint['visible_pressure'][:3])}として画面に強まる",
             "迷いが具体的な行為の直前まで進む",
             "不安や期待が上がる",
         ),
         (
             "turn",
             source_fact_turn,
-            f"{protagonist}が{source_fact_turn}を身体行為として確定し、画面内に原因と結果が同時に残る",
-            "周囲または場所がその変化を受け止める",
-            "sceneの価値変化が物語上の事実になる",
+            f"{protagonist}が「{source_fact_turn}」を行為または物証として確定し、原因と結果が同じ場所に残る",
+            f"{blueprint['handoff_anchor']}が周囲の反応を変える",
+            "scene内の状態差が物語上の事実になる",
             "不可逆な決断が画面に固定される",
         ),
         (
             "payoff",
             source_fact_payoff,
-            f"{protagonist}の姿勢、{location_name}の導線、{evidence_terms[0]}が、{source_fact_turn}の結果を示す",
-            "残された痕跡や視線が次の圧力を作る",
+            f"{blueprint['handoff_anchor']}が、{source_fact_turn}の結果を後続場面へ渡す",
+            blueprint["outgoing_pressure"],
             "次のsceneの開始理由、または終結の証明が成立する",
             "変化後の余韻が残る",
         ),
@@ -2333,8 +2954,8 @@ def _scene_event_for_cut_design(
                 "beat_function": function,
                 "source_story_beat_ids": [source_story_beat_id],
                 "abstract_function": {
-                    "dramatic_job": f"{title}の{function}として観客理解を一段進める",
-                    "value_shift_role": str(scene_intent.get("value_shift", {}).get("to") if isinstance(scene_intent.get("value_shift"), dict) else "価値変化を進める"),
+                    "dramatic_job": f"{title}の{function}として見る側の理解を一段進める",
+                    "value_shift_role": str(scene_intent.get("value_shift", {}).get("to") if isinstance(scene_intent.get("value_shift"), dict) else "状態差を物証で進める"),
                     "emotional_pressure_role": pressure,
                     "causal_role": consequence,
                 },
@@ -2342,7 +2963,7 @@ def _scene_event_for_cut_design(
                     "who": [protagonist, *[role for role in _event_required_roles(source_event_text) if role != "protagonist"]],
                     "where": location_name,
                     "what_happens": source_event_text,
-                    "conflict_or_constraint": f"{location_name}と関係性の圧力が{protagonist}の選択を狭める",
+                    "conflict_or_constraint": blueprint["obstacle"],
                     "object_or_trace": [artifact] if include_artifact else [f"{artifact}はまだ出さない"],
                     "visible_action": visible_action,
                     "visible_reaction": visible_reaction,
@@ -2389,8 +3010,8 @@ def _scene_event_for_cut_design(
         )
     return {
         "schema_version": "scene_event_v1",
-        "event_logline": f"{title}で{protagonist}の状態が不可逆に変わり、次へ渡る証拠が残る",
-        "start_situation": f"{protagonist}は{location_name}でまだ自由に動けず、sceneの問いを受けている",
+        "event_logline": f"{title}で「{blueprint['causal_turn']}」が起き、{blueprint['handoff_anchor']}が残る",
+        "start_situation": blueprint["character_start"],
         "source_story_beat_ids": [source_story_beat_id],
         "story_specificity": _story_specificity_layers(
             profile=profile,
@@ -2406,8 +3027,8 @@ def _scene_event_for_cut_design(
         },
         "end_situation": {
             "value_shift_to_ref": "scene_intent.value_shift.to",
-            "outcome": str(scene_intent.get("value_shift", {}).get("to") if isinstance(scene_intent.get("value_shift"), dict) else "次へ進む理由が残る"),
-            "character_position": f"{protagonist}は開始時より次の導線または証明へ近づいている",
+            "outcome": str(scene_intent.get("value_shift", {}).get("to") if isinstance(scene_intent.get("value_shift"), dict) else blueprint["value_to"]),
+            "character_position": blueprint["character_end"],
             "object_state": f"{artifact}は証拠として扱われる" if include_artifact else "必要な証拠が場所に残る",
             "relationship_state": "周囲との関係が、制限から認識または次の圧力へ変化する",
             "new_pressure": str(scene_intent.get("terminal_resolution") or scene_intent.get("handoff_to_next_scene") or "次sceneへ渡る圧力が残る"),
@@ -2548,10 +3169,10 @@ def _scene_cut_coverage_plan(
             "obligation_id": "scene_pressure",
             "cut_function": "pressure",
             "source": "dramatic_question",
-            "target_beat": f"{title}: 場所の圧力と主人公の制限を見せる",
+            "target_beat": f"{title}: 空間の締めつけと人物の制約を見せる",
             "screen_question": f"{title}で、{protagonist}は何に妨げられているのか",
-            "dramatic_job": "sceneの問いを、場所の圧力と主人公の身体状態で立ち上げる",
-            "visual_proof": f"{location_name}の空間圧力の中で、{protagonist}の姿勢と視線が前進できない理由を示す",
+            "dramatic_job": "sceneの問いを、空間の締めつけと人物の身体状態で立ち上げる",
+            "visual_proof": f"{location_name}の締めつけの中で、{protagonist}の手元、顔の向き、足元の重心が動けない理由を示す",
             "first_frame_brief": f"{location_name}の広がりと障害が読める構図。{protagonist}はまだ行動せず、視線だけが出口や光へ向く。",
             "must_show_extra": [location_name],
             "done_when": "sceneの問いと圧力が、人物と場所だけで読める",
@@ -2567,13 +3188,13 @@ def _scene_cut_coverage_plan(
             "obligation_id": "visible_value_shift",
             "cut_function": "threshold",
             "source": "value_shift.visible_evidence",
-            "target_beat": f"{title}: 価値変化の兆しを画面に出す",
+            "target_beat": f"{title}: 変化後の物証を画面に出す",
             "screen_question": f"{title}で、何が変わり始めたのか",
-            "dramatic_job": "sceneの価値変化を、手元、表情、光、必要な象徴物で可視化する",
-            "visual_proof": f"{protagonist}の手元または表情に光が入り、{title}の価値変化が始まる",
+            "dramatic_job": "scene内の状態差を、手元、表情、光、必要な物証で可視化する",
+            "visual_proof": f"{protagonist}の手元または表情に光が入り、{title}の状態差が物証として始まる",
             "first_frame_brief": f"{protagonist}の手元または顔が読める中距離。行動が始まる直前で、光が変化点に集まる。",
             "must_show_extra": [artifact] if include_artifact else ["光"],
-            "done_when": "sceneの価値変化が、人物の姿勢と光の変化で読める",
+            "done_when": "scene内の状態差が、人物の手元、顔の向き、光の変化で読める",
             "foreground": "手元または変化点",
             "midground": protagonist,
             "background": location_name,
@@ -2597,7 +3218,7 @@ def _scene_cut_coverage_plan(
             "midground": protagonist,
             "background": f"{location_name}から次へ続く導線",
             "screen_direction": "toward_next_scene",
-            "motion_brief": "カメラが次の導線へわずかに流れ、主人公の姿勢が結果を受け取る",
+            "motion_brief": "視線と導線が後続場面の原因へわずかに流れ、人物の手元や足元が結果を受け取る",
             "motion_end_state": "次sceneまたは次cutへ渡る光、視線、導線が画面に残る",
             "narration": f"{title}。残った光が、次に進む理由を静かに指している。",
         },
@@ -2714,7 +3335,7 @@ def _scene_cut_coverage_plan(
             )
         )
 
-    if (withheld_information or reveal_constraints) and not include_artifact and profile.get("slug") != "cinderella":
+    if (withheld_information or reveal_constraints) and not include_artifact and not _profile_is_cinderella(profile):
         withheld = withheld_information[0] if withheld_information else reveal_constraints[0]
         append_unique(
             extra_obligation(
@@ -2747,7 +3368,7 @@ def _scene_cut_coverage_plan(
                 source="value_shift.visible_evidence/visual_thesis",
                 target_beat=f"{title}: {artifact}をsceneの意味を証明するものとして見せる",
                 screen_question=f"{artifact}は{title}で何を証明しているのか",
-                dramatic_job="象徴物を装飾ではなく、価値変化や身元変化の証拠として配置する",
+                dramatic_job="象徴物を装飾ではなく、身元や状態差の証拠として配置する",
                 visual_proof=f"{artifact}、{protagonist}、{location_name}の光が同じ画面内で関係づけられる",
                 first_frame_brief=f"{artifact}の形が前景または手元で読め、{protagonist}と{location_name}の関係も同時に分かる。",
                 must_show_extra=[artifact],
@@ -2974,7 +3595,7 @@ def _scene_cut_coverage_plan(
             return "trigger_moment"
         return "consequence"
 
-    scene_id = idx * 10
+    scene_id = _runtime_scene_id(idx)
     assignment_records: list[dict[str, Any]] = []
     assigned_by_source: dict[str, list[str]] = {}
     assigned_by_obligation: dict[str, list[str]] = {}
@@ -3262,7 +3883,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
         location_spec = _location_spec_for_scene(profile, idx)
         location_ref = str(location_spec["output"])
         location_name = str(location_spec["name"])
-        scene_id = idx * 10
+        scene_id = _runtime_scene_id(idx)
         scene_context = {
             "scene_id": scene_id,
             "scene_index": idx,
@@ -4054,9 +4675,9 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 previous_cut=manifest_cuts[cut_index - 1] if cut_index > 0 else None,
                 next_cut=manifest_cuts[cut_index + 1] if cut_index + 1 < len(manifest_cuts) else None,
             )
-        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
+        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _scene_research_refs(idx, _scene_source_events(profile, idx)), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
         scene_composite_review = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
-        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
+        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _scene_research_refs(idx, _scene_source_events(profile, idx)), "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
         scene_event_outputs.append(
             {
                 "scene_id": scene_id,
@@ -4095,7 +4716,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
         )
     canonical_event_coverage_matrix = _canonical_event_coverage_matrix(profile)
     scene_generation_policy = _scene_generation_policy(profile)
-    script = {"schema_version": "scene_event_v1", "script_metadata": {"topic": topic, "target_duration": 300, "created_at": now, "run_variant": run_variant}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "scene_set_review": {"status": "approved", "summary": f"8 scenes / {len(selectors)} cutsで主要筋を展開する。"}, "scene_detail_review": {"status": "approved", "summary": "各sceneは独立した問いと視覚行動を持つ。"}, "cut_blueprint_review": {"status": "approved", "summary": "scene設計から逆算したcoverage planに基づき、必要cut数を可変で設計する。"}, "script_review": {"status": "approved", "summary": "台本は後続画像生成に渡せる。"}, "production_readiness_review": {"status": "approved", "summary": "target duration is covered now."}, "evaluation_contract": {"target_arc": "opening,development,ordeal,transformation,ending", "must_cover": [profile["protagonist_name"], profile["artifact_name"], "時間制限", profile["motifs"][0]], "must_avoid": ["画面内テキスト", "字幕", "ロゴ"], "reveal_constraints": []}, "human_change_requests": [], "scenes": script_scenes}
+    script = {"schema_version": "scene_event_v1", "script_metadata": {"topic": topic, "target_duration": 300, "created_at": now, "run_variant": run_variant}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "scene_set_review": {"status": "approved", "summary": f"8 scenes / {len(selectors)} cutsで主要筋を展開する。"}, "scene_detail_review": {"status": "approved", "summary": "各sceneは独立した問いと視覚行動を持つ。"}, "cut_blueprint_review": {"status": "approved", "summary": "scene設計から逆算したcoverage planに基づき、必要cut数を可変で設計する。"}, "script_review": {"status": "approved", "summary": "台本は後続画像生成に渡せる。"}, "production_readiness_review": {"status": "approved", "summary": "target duration is covered now."}, "evaluation_contract": {"target_arc": "opening,development,ordeal,transformation,ending", "must_cover": [profile["protagonist_name"], profile["artifact_name"], "時間制限", profile["motifs"][0]], "must_avoid": ["未承認の結末改変", "原典筋にない身元証明の差し替え"], "reveal_constraints": []}, "human_change_requests": [], "scenes": script_scenes}
     character_bible = [
         {
             "character_id": protagonist_asset,
