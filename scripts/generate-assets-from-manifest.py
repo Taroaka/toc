@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,21 @@ if str(REPO_ROOT) not in sys.path:
 from toc.env import load_env_files
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.http import HttpError, request_bytes
+from toc.image_prompt_compiler import (
+    IMAGE_API_PROMPT_POLICY_VERSION as IMAGE_API_PROMPT_POLICY_VERSION_V2,
+    compile_image_api_prompt_v2,
+)
+from toc.image_request_snapshot import (
+    ImageRequestSnapshotError,
+    current_reference_sha256s,
+    load_request_snapshot,
+    match_output_provenance,
+    materialize_request_snapshot,
+    sha256_file,
+    sha256_text,
+    sha256_canonical_json,
+    write_request_snapshot_atomic,
+)
 from toc.immersive_manifest import (
     dotted_id_slug,
     make_scene_cut_selector,
@@ -60,12 +76,12 @@ from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
 from toc.run_index import write_run_index
+from toc.runtime_locks import async_file_lock, async_file_slot
 from toc.stage_evaluator import check_manifest_single
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from server.codex_app_server import (
     create_codex_app_server_client,
     app_server_disabled,
-    latest_generated_image_mtime_ns,
     reject_local_raster_image_result,
 )
 from server.image_gen import copy_saved_image, write_app_server_image_debug_log
@@ -82,6 +98,10 @@ CODEX_BUILTIN_IMAGE_TOOL_ALIASES = {
     "openai_gpt-image-2",
 }
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
+SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS = {
+    IMAGE_API_PROMPT_POLICY_VERSION,
+    IMAGE_API_PROMPT_POLICY_VERSION_V2,
+}
 NO_REFERENCE_IMAGE_EXECUTION_LANE = "bootstrap_builtin"
 NO_REFERENCE_IMAGE_EXECUTION_LANE_ALIASES = {"bootstrap_builtin", "no_reference_builtin"}
 DEPRECATED_EXTERNAL_IMAGE_TOOLS = {
@@ -111,7 +131,6 @@ class SceneSpec:
     still_image_plan_mode: str | None
     image_tool: str | None
     image_prompt: str | None
-    image_api_prompt_payload: dict[str, Any]
     image_output: str | None
     image_references: list[str]
     image_character_ids: list[str]
@@ -128,14 +147,12 @@ class SceneSpec:
     image_location_variant_ids_present: bool
     image_aspect_ratio: str | None
     image_size: str | None
-    image_applied_request_ids: list[str]
     video_tool: str | None
     video_input_image: str | None
     video_first_frame: str | None
     video_last_frame: str | None
     video_motion_prompt: str | None
     video_output: str | None
-    video_applied_request_ids: list[str]
     narration_tool: str | None
     narration_text: str | None
     narration_tts_text: str | None
@@ -158,6 +175,10 @@ class SceneSpec:
     deletion_reason: str | None = None
     manifest_cut_id: str | None = None
     cut_contract: dict[str, Any] = field(default_factory=dict)
+    image_api_prompt_payload: dict[str, Any] = field(default_factory=dict)
+    image_applied_request_ids: list[str] = field(default_factory=list)
+    video_applied_request_ids: list[str] = field(default_factory=list)
+    image_first_frame_visual_plan: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1147,6 +1168,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
                 image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
                 image_api_prompt_payload = ig.get("api_prompt_payload") if isinstance(ig.get("api_prompt_payload"), dict) else {}
+                image_first_frame_visual_plan = (
+                    ig.get("first_frame_visual_plan")
+                    if isinstance(ig.get("first_frame_visual_plan"), dict)
+                    else {}
+                )
                 cut_contract = _node_cut_contract(raw_cut)
                 cut_still_plan = raw_cut.get("still_image_plan") if isinstance(raw_cut.get("still_image_plan"), dict) else {}
                 still_image_plan_mode = _as_opt_str(cut_still_plan.get("mode")) if isinstance(cut_still_plan, dict) else None
@@ -1278,6 +1304,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         deletion_reason=deletion_reason,
                         manifest_cut_id=cut_id,
                         cut_contract=cut_contract,
+                        image_first_frame_visual_plan=dict(image_first_frame_visual_plan),
                     )
                 )
             continue
@@ -1293,6 +1320,11 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         image_tool = _as_opt_str(ig.get("tool")) if isinstance(ig, dict) else None
         image_prompt = _as_opt_str(ig.get("prompt")) if isinstance(ig, dict) else None
         image_api_prompt_payload = ig.get("api_prompt_payload") if isinstance(ig.get("api_prompt_payload"), dict) else {}
+        image_first_frame_visual_plan = (
+            ig.get("first_frame_visual_plan")
+            if isinstance(ig.get("first_frame_visual_plan"), dict)
+            else {}
+        )
         cut_contract = _node_cut_contract(raw_scene)
         scene_still_plan = raw_scene.get("still_image_plan") if isinstance(raw_scene.get("still_image_plan"), dict) else {}
         still_image_plan_mode = _as_opt_str(scene_still_plan.get("mode")) if isinstance(scene_still_plan, dict) else None
@@ -1425,6 +1457,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 deletion_reason=deletion_reason,
                 manifest_cut_id=None,
                 cut_contract=cut_contract,
+                image_first_frame_visual_plan=dict(image_first_frame_visual_plan),
             )
         )
 
@@ -1652,15 +1685,38 @@ def _effective_still_generation_status(scene: SceneSpec, *, base_dir: Path) -> s
     return "missing"
 
 
+def _scene_has_compilable_image_prompt(scene: SceneSpec) -> bool:
+    existing_payload = (
+        scene.image_api_prompt_payload
+        if isinstance(scene.image_api_prompt_payload, dict)
+        else {}
+    )
+    existing_policy = str(existing_payload.get("policy_version") or "").strip()
+    existing_prompt = str(existing_payload.get("prompt") or "").strip()
+    return bool(
+        scene.image_prompt
+        or scene.cut_contract
+        or (
+            existing_policy in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS
+            and existing_prompt
+        )
+    )
+
+
 def _should_generate_image_scene(scene: SceneSpec, *, allowed_story_modes: set[str], base_dir: Path) -> bool:
-    if not scene.image_output or not scene.image_prompt:
+    if not scene.image_output:
         return False
     outp = resolve_path(base_dir, scene.image_output)
     if outp and (_is_character_ref_path(outp) or _is_object_ref_path(outp)):
-        return True
+        return bool(scene.image_prompt)
+    if not _scene_has_compilable_image_prompt(scene):
+        return False
     explicit_status = _normalize_generation_status(scene.still_image_generation_status)
     if explicit_status == "created":
-        return False
+        # `created` is an authoring hint, not reusable-output proof. Keep the
+        # item in the execution plan so request-bound provenance can decide
+        # whether to skip or regenerate it.
+        return _should_generate_story_still_by_plan(scene, allowed_story_modes)
     if explicit_status in {"missing", "recreate"}:
         return True
     return _should_generate_story_still_by_plan(scene, allowed_story_modes)
@@ -1812,10 +1868,11 @@ def _generate_single_image_scene(
             )
             prompt = str(api_prompt_payload.get("prompt") or "").strip()
             prompt_policy_version = str(api_prompt_payload.get("policy_version") or "").strip() or None
-            if prefix:
-                prompt = prefix + "\n\n" + prompt
-            if suffix:
-                prompt = prompt + "\n\n" + suffix
+            if prefix or suffix:
+                raise SystemExit(
+                    f"{_scene_selector(scene)}: compiled API prompt payload is immutable; "
+                    "image prompt prefix/suffix overrides are not allowed"
+                )
         else:
             api_prompt_payload = _image_api_prompt_payload_for_scene(scene)
             prompt = str(api_prompt_payload.get("prompt") or "").strip()
@@ -3293,6 +3350,142 @@ def generate_gemini_image(
             pass
 
 
+_REQUEST_BOUND_PROVENANCE_POLICY = "request_bound_v2"
+
+
+def _direct_image_global_lock_dir() -> Path:
+    configured = os.environ.get("TOC_IMAGE_GEN_GLOBAL_LOCK_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    workspace_key = hashlib.sha256(str(REPO_ROOT.resolve()).encode("utf-8")).hexdigest()[:12]
+    return Path("/tmp") / "toc-image-generation-locks" / workspace_key
+
+
+def _direct_image_global_parallelism() -> int:
+    raw = os.environ.get("TOC_IMAGE_GEN_GLOBAL_PARALLELISM", "6").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError as exc:
+        raise SystemExit("TOC_IMAGE_GEN_GLOBAL_PARALLELISM must be an integer") from exc
+
+
+def _direct_request_snapshot_binding(
+    *,
+    run_dir: Path,
+    item_id: str,
+    prompt: str,
+    destination: Path,
+    references: list[Path],
+    prompt_policy_version: str | None,
+) -> tuple[Any, Any, list[str]] | None:
+    matches: list[tuple[Any, Any]] = []
+    for filename in (
+        "image_generation_request_snapshot.json",
+        "asset_generation_request_snapshot.json",
+    ):
+        snapshot_path = run_dir / filename
+        if not snapshot_path.is_file():
+            continue
+        try:
+            snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir)
+            item = snapshot.item(item_id)
+        except KeyError:
+            continue
+        except ImageRequestSnapshotError as exc:
+            raise SystemExit(f"invalid image request snapshot: {exc}") from exc
+        matches.append((snapshot, item))
+    if len(matches) > 1:
+        raise SystemExit(f"image request item appears in multiple snapshots: {item_id}")
+    if not matches:
+        if prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION_V2:
+            raise SystemExit(f"image_api_prompt_v2 requires an immutable request snapshot: {item_id}")
+        return None
+
+    snapshot, item = matches[0]
+    try:
+        destination_rel = destination.resolve().relative_to(run_dir.resolve()).as_posix()
+        reference_rels = [
+            reference.resolve().relative_to(run_dir.resolve()).as_posix()
+            for reference in references
+        ]
+    except ValueError as exc:
+        raise SystemExit(f"image request paths must stay inside the run directory: {item_id}") from exc
+    if item.prompt != prompt or item.prompt_sha256 != sha256_text(prompt):
+        raise SystemExit(f"image request snapshot prompt changed before send: {item_id}")
+    if item.destination != destination_rel:
+        raise SystemExit(f"image request snapshot destination changed before send: {item_id}")
+    if [reference.path for reference in item.references] != reference_rels:
+        raise SystemExit(f"image request snapshot reference order changed before send: {item_id}")
+    try:
+        reference_sha256s = [
+            str(value) for value in current_reference_sha256s(run_dir, item)
+        ]
+    except ImageRequestSnapshotError as exc:
+        raise SystemExit(f"image request snapshot reference changed before send: {exc}") from exc
+    return snapshot, item, reference_sha256s
+
+
+def _direct_output_has_exact_provenance(
+    *,
+    run_dir: Path,
+    snapshot_binding: tuple[Any, Any, list[str]] | None,
+) -> bool:
+    if snapshot_binding is None:
+        return False
+    snapshot, item, _reference_sha256s = snapshot_binding
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    if not log_dir.is_dir():
+        return False
+    for log_path in sorted(log_dir.glob("*.json"), reverse=True):
+        try:
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if match_output_provenance(run_dir, snapshot, item, payload):
+            return True
+    return False
+
+
+def _validate_direct_request_bound_result(
+    result: Any,
+    *,
+    generation_job_id: str,
+    item_id: str,
+    destination: Path,
+    prompt_sha256: str,
+    reference_sha256s: list[str],
+) -> None:
+    expected = {
+        "provenance_policy": _REQUEST_BOUND_PROVENANCE_POLICY,
+        "generation_job_id": generation_job_id,
+        "item_id": item_id,
+        "prompt_sha256": prompt_sha256,
+        "destination": str(destination),
+    }
+    issues = [
+        field
+        for field, value in expected.items()
+        if str(getattr(result, field, "") or "") != value
+    ]
+    if list(getattr(result, "reference_sha256s", None) or []) != reference_sha256s:
+        issues.append("reference_sha256s")
+    if not str(getattr(result, "turn_id", "") or "").strip():
+        issues.append("turn_id")
+    if not str(getattr(result, "image_generation_item_id", "") or "").strip():
+        issues.append("image_generation_item_id")
+    if int(getattr(result, "image_generation_item_count", 0) or 0) != 1:
+        issues.append("image_generation_item_count")
+    if str(getattr(result, "source", "") or "") != "app_server":
+        issues.append("source")
+    if not bool(getattr(result, "provenance_authoritative", False)):
+        issues.append("provenance_authoritative")
+    if issues:
+        raise RuntimeError(
+            f"Codex app-server request-bound provenance mismatch for {item_id}: "
+            + ", ".join(dict.fromkeys(issues))
+        )
+
+
 def generate_codex_builtin_image(
     *,
     prompt: str,
@@ -3308,9 +3501,6 @@ def generate_codex_builtin_image(
     prompt_policy_version: str | None = None,
     debug_prompt_source: dict[str, Any] | None = None,
 ) -> None:
-    if out_path.exists() and not force:
-        return
-
     if dry_run:
         ref_count = len(reference_images or [])
         print(f"[dry-run] IMAGE {out_path} <- {CODEX_BUILTIN_IMAGE_TOOL} (gpt-image-2, {aspect_ratio}, {image_size}, refs={ref_count})")
@@ -3320,63 +3510,128 @@ def generate_codex_builtin_image(
         raise SystemExit("Codex app-server is disabled; enable it to use codex_builtin_image / gpt-image-2 image generation.")
 
     async def _run_generation() -> None:
-        client = create_codex_app_server_client(cwd=REPO_ROOT)
+        references = list(reference_images or [])
+        destination_key = hashlib.sha256(
+            str(out_path.resolve()).encode("utf-8")
+        ).hexdigest()[:24]
+        item_lock = run_dir / ".locks" / "image_generation" / f"{destination_key}.lock"
+        client = None
         result = None
+        binding = None
+        snapshot = None
+        snapshot_item = None
+        reference_sha256s: list[str] = []
         try:
-            await client.start()
-            fallback_cutoff_ns = latest_generated_image_mtime_ns()
-            result = await client.generate_image(
-                prompt=prompt,
-                output_path=out_path,
-                reference_images=list(reference_images or []),
-                item_id=item_id,
-                run_dir=run_dir,
-                fallback_cutoff_ns=fallback_cutoff_ns,
-            )
-            debug_path = write_app_server_image_debug_log(
-                run_dir=run_dir,
-                item_id=item_id,
-                index=1,
-                destination=out_path,
-                references=list(reference_images or []),
-                prompt=prompt,
-                kind="manifest",
-                prompt_policy_version=prompt_policy_version,
-                debug_prompt_source=debug_prompt_source,
-                result=result,
-            )
-            reject_local_raster_image_result(result, item_id=item_id)
-            if log_path:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log_path.write_text(
-                    json.dumps(
-                        {
-                            "tool": CODEX_BUILTIN_IMAGE_TOOL,
-                            "model": "gpt-image-2",
-                            "debug_log": str(debug_path.relative_to(run_dir)),
-                            "status": result.status,
-                            "source": result.source,
-                            "saved_path": str(result.saved_path or ""),
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+            async with async_file_lock(item_lock, timeout_seconds=900):
+                binding = _direct_request_snapshot_binding(
+                    run_dir=run_dir,
+                    item_id=item_id,
+                    prompt=prompt,
+                    destination=out_path,
+                    references=references,
+                    prompt_policy_version=prompt_policy_version,
                 )
-            if result.saved_path is None:
-                raise SystemExit(f"Codex app-server did not return an image for {item_id}; see {debug_path}")
-            copy_saved_image(result.saved_path, out_path)
+                if binding is not None:
+                    snapshot, snapshot_item, reference_sha256s = binding
+                else:
+                    for reference in references:
+                        if not reference.is_file():
+                            raise RuntimeError(f"image reference not found for {item_id}: {reference}")
+                    reference_sha256s = [sha256_file(reference) for reference in references]
+                if (
+                    out_path.is_file()
+                    and not force
+                    and _direct_output_has_exact_provenance(
+                        run_dir=run_dir,
+                        snapshot_binding=binding,
+                    )
+                ):
+                    return
+
+                generation_job_id = uuid.uuid4().hex
+                prompt_sha256 = sha256_text(prompt)
+                async with async_file_slot(
+                    _direct_image_global_lock_dir(),
+                    namespace="request-bound",
+                    slots=_direct_image_global_parallelism(),
+                    timeout_seconds=900,
+                ):
+                    client = create_codex_app_server_client(cwd=REPO_ROOT)
+                    await client.start()
+                    result = await client.generate_image(
+                        prompt=prompt,
+                        output_path=out_path,
+                        reference_images=references,
+                        item_id=item_id,
+                        run_dir=run_dir,
+                        fallback_cutoff_ns=None,
+                        generation_job_id=generation_job_id,
+                        allow_generated_images_fallback=False,
+                        provenance_policy=_REQUEST_BOUND_PROVENANCE_POLICY,
+                    )
+                    if result.saved_path is None:
+                        raise RuntimeError(f"Codex app-server did not return an image for {item_id}")
+                    reject_local_raster_image_result(result, item_id=item_id)
+                    _validate_direct_request_bound_result(
+                        result,
+                        generation_job_id=generation_job_id,
+                        item_id=item_id,
+                        destination=out_path,
+                        prompt_sha256=prompt_sha256,
+                        reference_sha256s=reference_sha256s,
+                    )
+                    copy_saved_image(result.saved_path, out_path)
+
+                debug_path = write_app_server_image_debug_log(
+                    run_dir=run_dir,
+                    item_id=item_id,
+                    index=1,
+                    destination=out_path,
+                    references=references,
+                    prompt=prompt,
+                    kind=getattr(snapshot_item, "kind", None) or "manifest",
+                    prompt_policy_version=prompt_policy_version,
+                    debug_prompt_source=debug_prompt_source,
+                    request_revision=getattr(snapshot, "request_revision", None),
+                    request_digest=getattr(snapshot_item, "request_digest", None),
+                    compiler_version=getattr(snapshot_item, "compiler_version", None),
+                    source_digest=getattr(snapshot_item, "source_digest", None),
+                    result=result,
+                )
+                if log_path:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    log_path.write_text(
+                        json.dumps(
+                            {
+                                "tool": CODEX_BUILTIN_IMAGE_TOOL,
+                                "model": "gpt-image-2",
+                                "debug_log": str(debug_path.relative_to(run_dir)),
+                                "status": result.status,
+                                "source": result.source,
+                                "saved_path": str(result.saved_path or ""),
+                                "request_revision": getattr(snapshot, "request_revision", None),
+                                "request_digest": getattr(snapshot_item, "request_digest", None),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
         except Exception as exc:
             debug_path = write_app_server_image_debug_log(
                 run_dir=run_dir,
                 item_id=item_id,
                 index=1,
                 destination=out_path,
-                references=list(reference_images or []),
+                references=references,
                 prompt=prompt,
-                kind="manifest",
+                kind=getattr(snapshot_item, "kind", None) or "manifest",
                 prompt_policy_version=prompt_policy_version,
                 debug_prompt_source=debug_prompt_source,
+                request_revision=getattr(snapshot, "request_revision", None),
+                request_digest=getattr(snapshot_item, "request_digest", None),
+                compiler_version=getattr(snapshot_item, "compiler_version", None),
+                source_digest=getattr(snapshot_item, "source_digest", None),
                 result=result,
                 error=str(exc),
             )
@@ -3388,7 +3643,7 @@ def generate_codex_builtin_image(
                             "tool": CODEX_BUILTIN_IMAGE_TOOL,
                             "model": "gpt-image-2",
                             "debug_log": str(debug_path.relative_to(run_dir)),
-                            "status": getattr(result, "status", "exception") if result is not None else "exception",
+                            "status": "failed",
                             "source": getattr(result, "source", "") if result is not None else "",
                             "saved_path": str(getattr(result, "saved_path", "") or "") if result is not None else "",
                             "error": str(exc),
@@ -3400,7 +3655,8 @@ def generate_codex_builtin_image(
                 )
             raise
         finally:
-            await client.stop()
+            if client is not None:
+                await client.stop()
 
     asyncio.run(_run_generation())
 
@@ -4312,6 +4568,15 @@ def _first_frame_visible_text(scene: SceneSpec) -> str:
 
 
 def _build_first_frame_visual_plan(scene: SceneSpec, cut_contract: dict[str, Any] | None = None) -> dict[str, Any]:
+    if (
+        cut_contract is None
+        and scene.image_first_frame_visual_plan
+        and str(scene.image_api_prompt_payload.get("policy_version") or "").strip()
+        == IMAGE_API_PROMPT_POLICY_VERSION_V2
+    ):
+        return json.loads(
+            json.dumps(scene.image_first_frame_visual_plan, ensure_ascii=False)
+        )
     contract = cut_contract if isinstance(cut_contract, dict) else scene.cut_contract
     source = _source_event_contract(contract)
     first_frame = _first_frame_contract(contract)
@@ -4824,13 +5089,21 @@ def _render_first_frame_image_prompt(plan: dict[str, Any], *, base_prompt: str) 
 
 
 API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_scene_cut_ids",
+        re.compile(
+            r"\bscene\d+(?:\.\d+)?(?:[_-](?:cut|event)[A-Za-z0-9_.-]*)?\b|\b_event_[A-Za-z0-9_]+\b",
+            re.I,
+        ),
+    ),
     (
         "api_prompt_contains_no_yaml_field_names",
         re.compile(
             r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
             r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
-            r"scene_state_progression_plan|cut_state_progression",
+            r"drawable_prompt_ir|dependencies|included_fragments|omitted_groups|required_groups|compiler_version|"
+            r"scene_state_progression_plan|cut_state_progression|shot_design_contract|cut_location_frame_plan|"
+            r"cut_visual_delta|blocking_and_interaction",
             re.I,
         ),
     ),
@@ -5174,203 +5447,64 @@ def _blocking_and_interaction_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
 def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: str | None = None) -> dict[str, Any]:
     plan = _build_first_frame_visual_plan(scene)
+    if request_visual_beat:
+        plan = dict(plan)
+        temporal_override = dict(_dict_value(plan.get("temporal_boundary")))
+        temporal_override["event_fact_visible_in_still"] = request_visual_beat
+        temporal_override["first_visible_moment"] = request_visual_beat
+        plan["temporal_boundary"] = temporal_override
     shot = _shot_design_contract_from_plan(plan)
     location = _cut_location_frame_plan_from_plan(scene, plan)
     delta = _cut_visual_delta_from_plan(scene, plan)
     blocking = _blocking_and_interaction_from_plan(plan)
-    temporal = _dict_value(plan.get("temporal_boundary"))
-    progression = _dict_value(plan.get("scene_state_progression"))
-    references = _dict_value(plan.get("reference_binding"))
-    subjects = _dict_value(plan.get("subject_binding"))
-    material = _dict_value(plan.get("scene_material_pack"))
-    motion = _dict_value(plan.get("motion_affordance"))
-    character = _dict_value(plan.get("character_state_gate"))
-    objects = _dict_value(plan.get("object_visibility_gate"))
-    movable = next((item for item in _list_value(motion.get("movable_subjects")) if isinstance(item, dict)), {})
-    object_item = next((item for item in _list_value(objects.get("objects")) if isinstance(item, dict)), {})
-    primary_subject = _dict_value(subjects.get("primary_subject"))
-    visible_subjects = _dedupe_nonempty(
-        [
-            primary_subject.get("name") or primary_subject.get("id"),
-            *[
-                _dict_value(item).get("name") or _dict_value(item).get("id")
-                for item in _list_value(subjects.get("secondary_subjects"))
-                if isinstance(item, dict)
-            ],
-            *[
-                _dict_value(item).get("name") or _dict_value(item).get("id")
-                for item in _list_value(subjects.get("background_subjects"))
-                if isinstance(item, dict)
-            ],
-        ]
-    )
-    is_sequential_progression = str(progression.get("progression_mode") or "") == "sequential_state_progression"
-    progressed_visible_state = _api_prompt_text(
-        progression.get("state_visible_in_first_frame"),
-        _api_prompt_text(temporal.get("event_fact_visible_in_still"), "このcutで見える状態"),
-    )
-    previous_progressed_state = _api_prompt_text(
-        progression.get("state_after_previous_cut"),
-        delta["previous_visible_state_summary"],
-    )
-    progressed_delta = _api_prompt_text(
-        progression.get("visible_state_delta_from_previous_cut"),
-        delta["this_cut_new_information"],
-    )
-    progression_boundary = _api_prompt_text(
-        progression.get("must_not_advance_beyond"),
-        "次cut以降の結果、次sceneのreveal",
-    )
-    still_must_not_show = (
-        f"still_must_not_show: {progression_boundary}"
-        if is_sequential_progression
-        else "still_must_not_show: 行為完了後、後続reveal、次sceneの結果。"
+    return compile_image_api_prompt_v2(
+        first_frame_visual_plan=plan,
+        character_ids=scene.image_character_ids,
+        object_ids=scene.image_object_ids,
+        location_ids=scene.image_location_ids,
+        reference_images=scene.image_references,
+        review_metadata={
+            "shot_design_contract": shot,
+            "cut_location_frame_plan": location,
+            "cut_visual_delta": delta,
+            "blocking_and_interaction": blocking,
+        },
     )
 
-    character_refs = [
-        f"人物参照: {_api_prompt_text(item.get('target_character_id'))} は顔、体格、髪、衣装の主要形状を維持し、pose/gaze/lightingだけをこのcutに合わせる。"
-        for item in _list_value(references.get("character_references"))
-        if isinstance(item, dict)
-    ]
-    object_refs = [
-        f"小道具参照: {_api_prompt_text(item.get('target_object_id'))} は形状、材質、縮尺を維持する。"
-        for item in _list_value(references.get("object_references"))
-        if isinstance(item, dict)
-    ]
-    location_refs = [
-        f"場所参照: {_api_prompt_text(item.get('target_location_id'))} は完成構図ではなく、空間の素材、光、配置の一貫性だけに使う。"
-        for item in _list_value(references.get("location_references"))
-        if isinstance(item, dict)
-    ]
 
-    prompt = "\n\n".join(
-        [
-            _api_prompt_section("参照画像の使い方", character_refs + object_refs + location_refs),
-            _api_prompt_section(
-                "shot / 画角",
-                [
-                    f"shot_role: {shot['shot_role']}",
-                    f"shot_scale: {shot['shot_scale']}",
-                    f"a_roll_or_b_roll: {shot['a_roll_or_b_roll']}",
-                    f"camera_position: {location['camera_station']}",
-                    f"camera_height: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('camera_height'), '人物の手元と顔が読める高さ')}",
-                    f"lens_feel: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('lens_feel'), '自然な遠近感')}",
-                    f"should_show_face: {'yes' if shot['should_show_face'] else 'no'}",
-                    f"should_show_hands: {'yes' if shot['should_show_hands'] else 'no'}",
-                    f"should_show_object_detail: {'yes' if shot['should_show_object_detail'] else 'no'}",
-                ],
-            ),
-            _api_prompt_section(
-                "この1枚に写る瞬間",
-                [
-                    f"cut_visible_moment: {progressed_visible_state if is_sequential_progression else _api_prompt_text(temporal.get('event_fact_visible_in_still'), '行為が完了する前の静止した開始状態')}",
-                    "visible_subjects: " + " / ".join(_api_prompt_text(item) for item in visible_subjects),
-                    f"action_completion_state: {_api_prompt_text(temporal.get('action_completion_state'), 'pre_action')}",
-                    "not_yet_happened: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(temporal.get("not_yet_happened_in_still"))),
-                    still_must_not_show,
-                ],
-            ),
-            _api_prompt_section(
-                "前の画像からの変化",
-                [
-                    f"previous_cut_state: {previous_progressed_state if is_sequential_progression else delta['previous_visible_state_summary']}",
-                    f"this_cut_delta: {progressed_delta if is_sequential_progression else delta['this_cut_new_information']}",
-                    f"must_not_revert: {_api_prompt_text(progression.get('must_not_revert_to'), '前cut以前の開始状態へ戻らない')}" if is_sequential_progression else "",
-                    "must_not_repeat: same_camera_distance / same_character_pose / same_location_zone",
-                ],
-            ),
-            _api_prompt_section(
-                "人物の状態と配置",
-                [
-                    f"costume: {_api_prompt_text(character.get('costume_state'), '参照画像と同じ衣装状態')}",
-                    f"pose: {_api_prompt_text(character.get('pose'), '行為が始まる直前の姿勢')}",
-                    f"gaze: {_api_prompt_text(character.get('gaze'), '主要な視覚証拠へ向く')}",
-                    f"expression: {_api_prompt_text(character.get('expression'), 'このcutの圧力が読める表情')}",
-                    f"hand_position: {_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('hand_position'), _api_prompt_text(character.get('hand_position'), '手元は行為直前'))}",
-                    f"foot_position: {_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('foot_position'), _api_prompt_text(character.get('foot_position'), '足元は次に動ける向き'))}",
-                    f"body_axis: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('body_axis'), '身体軸は次の動きに向ける')}",
-                    f"distance_to_other_subjects: {_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('distance_to_primary_object'), '手を伸ばせる距離')}",
-                ],
-            ),
-            _api_prompt_section(
-                "人物の見える演技",
-                [
-                    f"表情は、{_api_prompt_text(character.get('expression'), '声に出さず圧力を受け止める表情')}。",
-                    f"視線は、{_api_prompt_text(character.get('gaze'), '主要な視覚証拠へ向く視線')}。",
-                    f"姿勢は、{_api_prompt_text(character.get('pose'), '行為が始まる直前の姿勢')}。",
-                    f"手元は、{_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('hand_position'), _api_prompt_text(character.get('hand_position'), '手元に緊張が読める'))}。",
-                    f"足元は、{_api_prompt_pair_text(_dict_value(blocking.get('character_blocking')).get('foot_position'), _api_prompt_text(character.get('foot_position'), '足先と重心が次の動きに向く'))}。",
-                    f"人物と圧力源の距離は、{_api_prompt_text(_dict_value(blocking.get('character_blocking')).get('distance_to_primary_object'), '人物と圧力源の距離が読める')}。",
-                ],
-            ),
-            _api_prompt_section(
-                "小道具 / 物体",
-                [
-                    f"object_visibility: {_api_prompt_text(object_item.get('visibility_in_this_cut'), 'この画面で必要な小道具の形と位置が見える')}",
-                    f"object_contact_state: {_api_prompt_text(_dict_value(blocking.get('object_interaction')).get('contact_state'), 'visible_not_touched')}",
-                    f"object_position: {_api_prompt_text(_dict_value(blocking.get('object_interaction')).get('object_screen_position'), 'foreground')}",
-                    f"object_story_role: {_api_prompt_text(object_item.get('story_meaning_in_this_cut'), 'このcutの視覚証拠')}",
-                    "object_must_not_show: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(object_item.get("must_not_show_states"))),
-                ],
-            ),
-            _api_prompt_section(
-                "場所の使い方",
-                [
-                    f"base_location_reference: {location['base_location_reference_id']} は完成構図ではなく、素材と光の一貫性として使う。",
-                    f"location_zone: {location['location_zone_description']}",
-                    f"camera_station: {location['camera_station']}",
-                    f"foreground: {location['foreground_zone']}",
-                    f"midground: {location['midground_zone']}",
-                    f"background: {location['background_zone']}",
-                    "set_dressing_delta: base locationから、このcutで必要なzoneだけを強調し、不要な場所は主役にしない。",
-                ],
-            ),
-            _api_prompt_section(
-                "光 / 質感",
-                [
-                    f"light_source: {_api_prompt_text(material.get('light_source'), '画面内で方向が読める自然な光源')}",
-                    f"light_direction: {_api_prompt_text(material.get('light_direction'), '人物と小道具の形が読める方向')}",
-                    "material_focus: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(material.get("dominant_materials"))),
-                    f"texture_specific_to_this_scene: {_api_prompt_text(material.get('story_specific_texture'), '場所固有の床、壁、衣服、小道具の質感')}",
-                    "material_must_not_leak: 他scene固有の素材や未承認revealを混ぜない。",
-                ],
-            ),
-            _api_prompt_section(
-                "動画開始に向いた静止状態",
-                [
-                    f"movable_subject: {_api_prompt_text(movable.get('subject_id'), '主要人物または小道具')}",
-                    f"movement_vector_visible_as_static_pose: {_api_prompt_text(movable.get('movement_vector'), '姿勢と視線から次の動きが始まる方向')}",
-                    f"image_must_leave_room_for: {_api_prompt_text(_dict_value(plan.get('spatial_composition')).get('negative_space'), '動き出す方向の余白')}",
-                    "must_not_resolve: " + " / ".join(_api_prompt_text(item) for item in _ensure_str_list(motion.get("must_not_resolve_in_image"))),
-                ],
-            ),
-            _api_prompt_section(
-                "禁止",
-                [
-                    "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters.",
-                ],
-            ),
-        ]
-    ).strip()
-    if request_visual_beat:
-        prompt = prompt.replace(
-            "[この1枚に写る瞬間]\n",
-            "[この1枚に写る瞬間]\n" + _api_prompt_text(request_visual_beat) + "\n",
-            1,
+def _validate_frozen_v2_payload_matches_plan(
+    scene: SceneSpec,
+    payload: dict[str, Any],
+) -> None:
+    if not scene.image_first_frame_visual_plan:
+        raise SystemExit(
+            f"{scene.selector or scene.scene_id}: image_api_prompt_v2 requires stored first_frame_visual_plan"
         )
-    payload = {
-        "policy_version": IMAGE_API_PROMPT_POLICY_VERSION,
-        "prompt": prompt,
-        "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters",
-        "reference_instructions": "\n".join(character_refs + object_refs + location_refs),
-        "reference_images": list(scene.image_references or []),
-        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-        "shot_design_contract": shot,
-        "cut_location_frame_plan": location,
-        "cut_visual_delta": delta,
-        "blocking_and_interaction": blocking,
-    }
-    return payload
+    expected = compile_image_api_prompt_v2(
+        first_frame_visual_plan=scene.image_first_frame_visual_plan,
+        character_ids=scene.image_character_ids,
+        object_ids=scene.image_object_ids,
+        location_ids=scene.image_location_ids,
+        reference_images=scene.image_references,
+    )
+    canonical_keys = (
+        "policy_version",
+        "compiler_version",
+        "source_digest",
+        "prompt",
+        "negative_prompt",
+        "reference_instructions",
+        "reference_images",
+        "sha256",
+        "drawable_prompt_ir",
+    )
+    mismatches = [key for key in canonical_keys if payload.get(key) != expected.get(key)]
+    if mismatches:
+        raise SystemExit(
+            f"{scene.selector or scene.scene_id}: frozen v2 payload does not match "
+            "first_frame_visual_plan/dependencies: "
+            + ", ".join(mismatches)
+        )
 
 
 def _image_api_prompt_payload_for_scene(scene: SceneSpec, *, request_visual_beat: str | None = None) -> dict[str, Any]:
@@ -5378,15 +5512,24 @@ def _image_api_prompt_payload_for_scene(scene: SceneSpec, *, request_visual_beat
     if existing:
         policy_version = str(existing.get("policy_version") or "").strip()
         prompt = str(existing.get("prompt") or "").strip()
-        if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and not prompt:
+        if policy_version in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS and not prompt:
             raise SystemExit(f"{scene.selector or scene.scene_id}: api_prompt_missing_for_new_prompt_policy")
-        if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and prompt:
+        if policy_version in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS and prompt:
             payload = dict(existing)
             payload.setdefault("negative_prompt", "")
             payload.setdefault("reference_instructions", "")
             payload.setdefault("reference_images", list(scene.image_references or []))
-            payload["sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-            _validate_image_api_prompt_payload(scene, payload)
+            actual_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            declared_sha256 = str(payload.get("sha256") or "").strip()
+            if declared_sha256 and declared_sha256 != actual_sha256:
+                raise SystemExit(
+                    f"{scene.selector or scene.scene_id}: api_prompt_payload.sha256 does not match prompt"
+                )
+            payload["sha256"] = actual_sha256
+            if policy_version == IMAGE_API_PROMPT_POLICY_VERSION_V2:
+                _validate_frozen_v2_payload_matches_plan(scene, payload)
+            if policy_version in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS:
+                _validate_image_api_prompt_payload(scene, payload)
             return payload
 
     payload = _build_image_api_prompt_payload(scene, request_visual_beat=request_visual_beat)
@@ -5397,15 +5540,22 @@ def _image_api_prompt_payload_for_scene(scene: SceneSpec, *, request_visual_beat
 def _validate_image_api_prompt_payload(scene: SceneSpec, payload: dict[str, Any]) -> None:
     policy_version = str(payload.get("policy_version") or "").strip()
     prompt = str(payload.get("prompt") or "").strip()
-    if policy_version == IMAGE_API_PROMPT_POLICY_VERSION and not prompt:
+    if policy_version in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS and not prompt:
         raise SystemExit(f"{scene.selector or scene.scene_id}: api_prompt_missing_for_new_prompt_policy")
-    if policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
+    if policy_version not in SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS:
         return
 
     issues: list[str] = []
     for gate_name, pattern in API_PROMPT_FORBIDDEN_GATES:
         if pattern.search(prompt):
             issues.append(gate_name)
+    if policy_version == IMAGE_API_PROMPT_POLICY_VERSION_V2:
+        if issues:
+            raise SystemExit(
+                f"{scene.selector or scene.scene_id}: Image API prompt v2 gate failed:\n- "
+                + "\n- ".join(_dedupe_nonempty(issues))
+            )
+        return
     shot = payload.get("shot_design_contract") if isinstance(payload.get("shot_design_contract"), dict) else {}
     location = payload.get("cut_location_frame_plan") if isinstance(payload.get("cut_location_frame_plan"), dict) else {}
     delta = payload.get("cut_visual_delta") if isinstance(payload.get("cut_visual_delta"), dict) else {}
@@ -5485,6 +5635,14 @@ def _asset_image_api_prompt_payload_for_scene(scene: SceneSpec, *, topic: str = 
     _validate_final_image_prompt_no_leaks(prompt=prompt, selector=scene.image_asset_id or scene.selector or scene.scene_id)
     return {
         "policy_version": IMAGE_API_PROMPT_POLICY_VERSION,
+        "compiler_version": "asset_final_image_prompt_compiler_v1",
+        "source_digest": sha256_canonical_json(
+            {
+                "source_prompt": source_prompt,
+                "output": scene.image_output or "",
+                "references": list(scene.image_references or []),
+            }
+        ),
         "prompt": prompt,
         "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, production metadata, scene ids, debug metadata",
         "reference_instructions": "",
@@ -5729,6 +5887,73 @@ def _write_request_preview_md(
             lines.append("```")
         lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_image_request_snapshot(
+    *,
+    run_dir: Path,
+    request_path: Path,
+    entries: list[dict[str, Any]],
+    kind: str,
+) -> Path | None:
+    snapshot_filename = (
+        "asset_generation_request_snapshot.json"
+        if kind == "asset"
+        else "image_generation_request_snapshot.json"
+    )
+    snapshot_path = run_dir / snapshot_filename
+    if not entries:
+        snapshot_path.unlink(missing_ok=True)
+        return None
+    snapshot_items: list[dict[str, Any]] = []
+    for entry in entries:
+        payload = entry.get("api_prompt_payload") if isinstance(entry.get("api_prompt_payload"), dict) else {}
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            prompt = _rewrite_request_prompt_for_review(
+                prompt=str(entry.get("prompt") or ""),
+                output=str(entry.get("output") or ""),
+                references=list(entry.get("references") or []),
+            ).strip()
+        compiler_version = str(
+            payload.get("compiler_version")
+            or payload.get("compiler")
+            or "request_projection_compat_v1"
+        ).strip()
+        source_digest = str(payload.get("source_digest") or "").strip()
+        if not source_digest:
+            source_digest = sha256_canonical_json(
+                {
+                    "selector": str(entry.get("selector") or ""),
+                    "asset_id": str(entry.get("asset_id") or ""),
+                    "asset_type": str(entry.get("asset_type") or ""),
+                    "first_frame_visual_plan": entry.get("first_frame_visual_plan") or {},
+                    "prompt_sha256": str(payload.get("sha256") or ""),
+                }
+            )
+        snapshot_items.append(
+            {
+                "item_id": str(entry.get("selector") or ""),
+                "kind": kind,
+                "destination": str(entry.get("output") or ""),
+                "prompt": prompt,
+                "prompt_sha256": str(payload.get("sha256") or ""),
+                "prompt_policy_version": str(
+                    payload.get("policy_version") or "markdown_prompt_compat_v1"
+                ),
+                "compiler_version": compiler_version,
+                "source_digest": source_digest,
+                "references": list(entry.get("references") or []),
+            }
+        )
+    snapshot = materialize_request_snapshot(
+        run_dir,
+        kind=kind,
+        items=snapshot_items,
+        source_artifact=request_path.relative_to(run_dir).as_posix(),
+        defer_missing_references=True,
+    )
+    return write_request_snapshot_atomic(snapshot_path, snapshot, run_dir=run_dir)
 
 
 def _label_reference_paths(references: list[str]) -> list[dict[str, str]]:
@@ -6750,7 +6975,11 @@ def main() -> None:
                 continue
             if _scene_is_deleted(scene):
                 continue
-            if not scene.image_output or not scene.image_prompt:
+            if not scene.image_output:
+                continue
+            if is_asset_stage_request and not scene.image_prompt:
+                continue
+            if not is_asset_stage_request and not _scene_has_compilable_image_prompt(scene):
                 continue
             image_request_scenes.append(scene)
         for scene in image_request_scenes:
@@ -6843,13 +7072,22 @@ def main() -> None:
                     **asset_stage_preview_metadata,
                 }
             )
+        image_request_path = base_dir / image_request_filename
         _write_request_preview_md(
-            out_path=base_dir / image_request_filename,
+            out_path=image_request_path,
             title="Asset Generation Requests" if image_request_filename == "asset_generation_requests.md" else "Image Generation Requests",
             entries=image_preview_entries,
             topic=str(metadata.get("topic") or ""),
         )
-        written_request_paths.append(base_dir / image_request_filename)
+        snapshot_path = _write_image_request_snapshot(
+            run_dir=base_dir,
+            request_path=image_request_path,
+            entries=image_preview_entries,
+            kind="asset" if is_asset_stage_request else "scene",
+        )
+        written_request_paths.append(image_request_path)
+        if snapshot_path is not None:
+            written_request_paths.append(snapshot_path)
 
     if manifest_phase == "production":
         video_targets_preview: list[VideoRenderTargetSpec] = []
@@ -6921,7 +7159,10 @@ def main() -> None:
 
     image_max_concurrency = max(1, min(int(args.image_max_concurrency or 1), 10))
     if needs_codex_image:
-        image_max_concurrency = 1
+        image_max_concurrency = min(
+            image_max_concurrency,
+            _direct_image_global_parallelism(),
+        )
     _generate_image_scenes_with_dependencies(
         image_scenes=image_scenes,
         image_max_concurrency=image_max_concurrency,

@@ -34,6 +34,12 @@ from toc.harness import (  # noqa: E402
     sync_run_status,
     write_json,
 )
+from toc.image_request_snapshot import (  # noqa: E402
+    ImageRequestSnapshotError,
+    current_reference_sha256s,
+    load_request_snapshot,
+    sha256_file,
+)
 from toc.semantic_review import check_image_prompt_judgment, check_semantic_review  # noqa: E402
 from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
 from toc.stage_evaluator import check_visual_value  # noqa: E402
@@ -745,6 +751,138 @@ def _image_generation_provenance_failures(
     return failures
 
 
+REQUEST_SNAPSHOT_FILE_BY_KIND = {
+    "asset": "asset_generation_request_snapshot.json",
+    "scene": "image_generation_request_snapshot.json",
+}
+
+
+def _normalized_run_relative_path(run_dir: Path, value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    resolved = candidate.resolve() if candidate.is_absolute() else (run_dir / candidate).resolve()
+    try:
+        return resolved.relative_to(run_dir.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _strict_snapshot_provenance_record_matches(
+    run_dir: Path,
+    *,
+    snapshot: Any,
+    item: Any,
+    payload: dict[str, Any],
+) -> bool:
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    if str(payload.get("status") or "").strip().lower() not in {"completed", "succeeded"}:
+        return False
+    if str(payload.get("itemId") or "") != str(item.item_id):
+        return False
+    if str(payload.get("kind") or "") != str(item.kind):
+        return False
+    if _normalized_run_relative_path(run_dir, payload.get("destination")) != item.destination:
+        return False
+    if str(payload.get("apiPromptPolicyVersion") or "") != item.prompt_policy_version:
+        return False
+    if str(payload.get("source") or "") != "app_server":
+        return False
+    if str(provenance.get("policy") or "") != "request_bound_v2":
+        return False
+    if provenance.get("authoritative") is not True:
+        return False
+    if str(provenance.get("itemId") or "") != item.item_id:
+        return False
+    for field in ("generationJobId", "turnId", "imageGenerationItemId", "savedPath"):
+        if not str(provenance.get(field) or "").strip():
+            return False
+    try:
+        if int(provenance.get("imageGenerationItemCount") or 0) != 1:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if _normalized_run_relative_path(run_dir, provenance.get("destination")) != item.destination:
+        return False
+    if str(provenance.get("promptSha256") or "") != item.prompt_sha256:
+        return False
+    try:
+        reference_sha256s = list(current_reference_sha256s(run_dir, item))
+    except ImageRequestSnapshotError:
+        return False
+    if provenance.get("referenceSha256s") != reference_sha256s:
+        return False
+    # request_revision is a collection-level audit field. Reuse is bound to
+    # the per-item digest so an edit to item A does not invalidate item B.
+    expected_snapshot_fields = {
+        "requestDigest": item.request_digest,
+        "compilerVersion": item.compiler_version,
+        "sourceDigest": item.source_digest,
+    }
+    if any(str(provenance.get(field) or "") != expected for field, expected in expected_snapshot_fields.items()):
+        return False
+    output_path = run_dir / item.destination
+    if not output_path.is_file():
+        return False
+    output_sha256 = sha256_file(output_path)
+    if str(provenance.get("outputSha256") or "") != output_sha256:
+        return False
+    if str(payload.get("outputSha256") or "") != output_sha256:
+        return False
+    return True
+
+
+def _strict_snapshot_provenance_failures(
+    run_dir: Path,
+    *,
+    kind: str,
+    expected_outputs: list[str] | None = None,
+) -> list[str]:
+    snapshot_filename = REQUEST_SNAPSHOT_FILE_BY_KIND[kind]
+    snapshot_path = run_dir / snapshot_filename
+    if not snapshot_path.is_file():
+        return [f"{snapshot_filename}: immutable request snapshot is missing"]
+    try:
+        snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir, verify_references=True)
+    except ImageRequestSnapshotError as exc:
+        return [f"{snapshot_filename}: current snapshot validation failed: {exc}"]
+    if snapshot.kind != kind:
+        return [f"{snapshot_filename}: expected kind {kind}, got {snapshot.kind}"]
+
+    failures: list[str] = []
+    snapshot_destinations = {item.destination for item in snapshot.items}
+    for raw_output in expected_outputs or []:
+        output = _normalized_run_relative_path(run_dir, raw_output)
+        if output and output not in snapshot_destinations:
+            failures.append(f"{output}: missing from current immutable request snapshot")
+
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    log_payloads: list[dict[str, Any]] = []
+    if log_dir.is_dir():
+        for log_path in sorted(log_dir.glob("*.json"), reverse=True):
+            try:
+                payload = json.loads(log_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                log_payloads.append(payload)
+    for item in snapshot.items:
+        if not any(
+            _strict_snapshot_provenance_record_matches(
+                run_dir,
+                snapshot=snapshot,
+                item=item,
+                payload=payload,
+            )
+            for payload in log_payloads
+        ):
+            failures.append(
+                f"{item.destination}: no strict request_bound_v2 provenance matches the current per-item snapshot digest and bytes"
+            )
+    return failures
+
+
 def _asset_manifest_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data.get("asset_generation_manifest"), dict):
         items = data["asset_generation_manifest"].get("items")
@@ -1332,15 +1470,27 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         kind="rubric",
     )
 
-    provenance = _image_generation_provenance_by_destination(run_dir)
-    asset_provenance_failures = _image_generation_provenance_failures(run_dir, planned_outputs, provenance=provenance)
+    asset_snapshot_path = run_dir / REQUEST_SNAPSHOT_FILE_BY_KIND["asset"]
+    if asset_snapshot_path.is_file():
+        asset_provenance_failures = _strict_snapshot_provenance_failures(
+            run_dir,
+            kind="asset",
+            expected_outputs=planned_outputs,
+        )
+    else:
+        provenance = _image_generation_provenance_by_destination(run_dir)
+        asset_provenance_failures = _image_generation_provenance_failures(
+            run_dir,
+            planned_outputs,
+            provenance=provenance,
+        )
     if asset_provenance_failures:
         details["asset_generation_provenance_failures"] = asset_provenance_failures[:20]
     add_check(
         checks,
         "asset.generation_provenance_app_server",
         target_number < 560 or (bool(entries) and not asset_provenance_failures),
-        "generated p500 asset images have Codex app-server provenance and are not local raster fallbacks",
+        "generated p500 asset images match the current immutable request snapshot and strict request-bound app-server provenance",
         kind="rubric",
     )
 
@@ -1533,8 +1683,25 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
         for path in expected_outputs
         if path.exists() and path.is_file() and path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES
     ]
-    provenance = _image_generation_provenance_by_destination(run_dir)
-    scene_provenance_failures = _image_generation_provenance_failures(run_dir, scene_output_relpaths, provenance=provenance)
+    scene_snapshot_path = run_dir / REQUEST_SNAPSHOT_FILE_BY_KIND["scene"]
+    requires_strict_snapshot = scene_snapshot_path.is_file() or any(
+        _request_field_value(fields, "prompt_policy_version", "api_prompt_policy_version", "policy_version")
+        == "image_api_prompt_v2"
+        for fields in request_sections.values()
+    )
+    if requires_strict_snapshot:
+        scene_provenance_failures = _strict_snapshot_provenance_failures(
+            run_dir,
+            kind="scene",
+            expected_outputs=[str(path) for path in expected_outputs],
+        )
+    else:
+        provenance = _image_generation_provenance_by_destination(run_dir)
+        scene_provenance_failures = _image_generation_provenance_failures(
+            run_dir,
+            scene_output_relpaths,
+            provenance=provenance,
+        )
     if scene_provenance_failures:
         details["image_generation_provenance_failures"] = scene_provenance_failures[:20]
     visual_quality_issues = [
@@ -1570,7 +1737,7 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
         checks,
         "image.generation_provenance_app_server",
         bool(expected_outputs) and not scene_provenance_failures,
-        "generated p600 scene images have Codex app-server provenance and are not local raster fallbacks",
+        "generated p600 scene images match the current immutable request snapshot and strict request-bound app-server provenance",
         kind="rubric",
     )
     add_check(

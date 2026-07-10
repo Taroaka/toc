@@ -2196,6 +2196,280 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
         self.assertIn("manifest.api_prompt_v1_contract", failed_ids)
 
+    def test_image_api_prompt_v2_gate_allows_omitted_optional_fragments(self) -> None:
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "実写映画調。薄明の空に浮かぶ雲の裂け目。主役は雲の裂け目。裂け目を正面に置く。文字やロゴは入れない。",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "薄明の空に浮かぶ雲の裂け目。"},
+                        {"group": "primary_subject", "text": "主役は雲の裂け目。"},
+                        {"group": "composition", "text": "裂け目を正面に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertEqual(issues, [])
+
+    def test_manifest_rubric_reads_v2_api_payload_without_legacy_prompt(self) -> None:
+        prompt = "灰の台所の前景に灰の床、中景に若い女性、背景に閉じた扉が見える。" * 4
+        node = {
+            "cut_contract": {"viewer_contract": {"must_show": ["灰の床"]}},
+            "image_generation": {
+                "character_ids": ["hero"],
+                "object_ids": [],
+                "api_prompt_payload": {
+                    "policy_version": "image_api_prompt_v2",
+                    "prompt": prompt,
+                },
+            },
+            "audio": {"narration": {"text": "灰の台所に立つ。"}},
+            "video_generation": {"motion_prompt": "視線が扉へ向く。"},
+        }
+
+        rubric = STAGE_EVALUATOR._manifest_rubric([node], "")
+
+        self.assertGreater(rubric["visual_specificity"], 0.9)
+
+    def test_image_api_prompt_v2_gate_rejects_declared_dependency_drift(self) -> None:
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "閉じた扉が見える。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": ["new_room"],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "".join(fragment["text"] for fragment in fragments),
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": ["old_room"],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues(
+            "scene1_cut1", image_generation
+        )
+
+        self.assertIn(
+            "scene1_cut1:api_prompt_v2_location_ids_dependency_mismatch",
+            issues,
+        )
+
+    def test_image_api_prompt_v2_gate_requires_only_declared_dependencies(self) -> None:
+        image_generation = {
+            "character_ids": ["cinderella"],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "実写映画調。灰の舞う静かな一瞬。主役は灰を浴びた人物。人物を中景に置く。文字やロゴは入れない。",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": ["cinderella"],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints", "characters"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "灰の舞う静かな一瞬。"},
+                        {"group": "primary_subject", "text": "主役は灰を浴びた人物。"},
+                        {"group": "composition", "text": "人物を中景に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn("scene1_cut1:api_prompt_v2_missing_character_fragment", issues)
+        self.assertNotIn("scene1_cut1:api_prompt_v2_missing_object_fragment", issues)
+        self.assertNotIn("scene1_cut1:api_prompt_v2_missing_location_fragment", issues)
+        self.assertNotIn("scene1_cut1:api_prompt_v2_missing_references_fragment", issues)
+
+    def test_image_api_prompt_v2_gate_rejects_unneeded_or_empty_fragments(self) -> None:
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "実写映画調。石段だけが見える。主役は濡れた石段。石段を中央に置く。人物なし。文字やロゴは入れない。",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "石段だけが見える。"},
+                        {"group": "primary_subject", "text": "主役は濡れた石段。"},
+                        {"group": "composition", "text": "石段を中央に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                        {"group": "characters", "text": "人物なし。"},
+                        {"group": "objects", "text": ""},
+                    ],
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn("scene1_cut1:api_prompt_v2_unneeded_character_fragment", issues)
+        self.assertIn("scene1_cut1:api_prompt_v2_included_fragment_empty:objects", issues)
+
+    def test_image_api_prompt_v2_gate_requires_included_fragment_text_in_prompt(self) -> None:
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "実写映画調。雲間から朝日が見える。文字やロゴは入れない。",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "雲間から朝日が見える。"},
+                        {"group": "primary_subject", "text": "主役は雲間の朝日。"},
+                        {"group": "composition", "text": "朝日を中央に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn("scene1_cut1:api_prompt_v2_fragment_not_rendered:primary_subject", issues)
+        self.assertIn("scene1_cut1:api_prompt_v2_fragment_not_rendered:composition", issues)
+
+    def test_image_api_prompt_v2_gate_rejects_drawable_ir_metadata_leak(self) -> None:
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": (
+                    "実写映画調。朝日の差す石段。主役は石段の光。光を中央に置く。"
+                    "drawable_prompt_ir.dependencies は空。文字やロゴは入れない。"
+                ),
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "朝日の差す石段。"},
+                        {"group": "primary_subject", "text": "主役は石段の光。"},
+                        {"group": "composition", "text": "光を中央に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn("scene1_cut1:api_prompt_contains_no_yaml_field_names", issues)
+
+    def test_image_api_prompt_v2_gate_requires_object_location_and_reference_groups_conditionally(self) -> None:
+        cases = (
+            ("object_ids", ["glass_slipper"], "objects", "api_prompt_v2_missing_object_fragment"),
+            ("location_ids", ["palace_steps"], "location", "api_prompt_v2_missing_location_fragment"),
+            ("references", ["assets/objects/glass_slipper.png"], "references", "api_prompt_v2_missing_references_fragment"),
+        )
+        for dependency_key, values, group, issue_code in cases:
+            with self.subTest(group=group):
+                dependencies = {
+                    "character_ids": [],
+                    "object_ids": [],
+                    "location_ids": [],
+                    "references": [],
+                    "required_groups": ["current_moment", "primary_subject", "composition", "constraints", group],
+                }
+                dependencies[dependency_key] = values
+                image_generation = {
+                    "character_ids": [],
+                    "object_ids": dependencies["object_ids"],
+                    "location_ids": dependencies["location_ids"],
+                    "references": dependencies["references"],
+                    "api_prompt_payload": {
+                        "policy_version": "image_api_prompt_v2",
+                        "prompt": "実写映画調。階段に光が落ちる。主役を前景に置く。前景へ視線を導く。文字やロゴは入れない。",
+                        "drawable_prompt_ir": {
+                            "schema_version": "drawable_prompt_ir_v1",
+                            "dependencies": dependencies,
+                            "included_fragments": [
+                                {"group": "style", "text": "実写映画調。"},
+                                {"group": "current_moment", "text": "階段に光が落ちる。"},
+                                {"group": "primary_subject", "text": "主役を前景に置く。"},
+                                {"group": "composition", "text": "前景へ視線を導く。"},
+                                {"group": "constraints", "text": "文字やロゴは入れない。"},
+                            ],
+                        },
+                    },
+                }
+
+                issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+                self.assertIn(f"scene1_cut1:{issue_code}", issues)
+
     def test_manifest_evaluator_gates_api_prompt_film_role_alignment(self) -> None:
         prompt = "\n".join(
             [

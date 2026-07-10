@@ -8,6 +8,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +38,72 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
+    def test_scaffold_prompt_compiler_omits_unbound_character_and_object_sections(self) -> None:
+        module = load_frontend_run_module()
+        first_frame_visual_plan = {
+            "schema_version": "first_frame_visual_plan_v1",
+            "editable": False,
+            "temporal_boundary": {
+                "event_fact_visible_in_still": "月光を受けた空の門が半分だけ開いている",
+                "not_yet_happened_in_still": [],
+            },
+            "subject_binding": {
+                "primary_subject": {"name": "半分だけ開いた空の門"},
+            },
+            "object_visibility_gate": {"objects": []},
+            "spatial_composition": {
+                "foreground": "濡れた石畳",
+                "midground": "半分だけ開いた門",
+                "background": "月明かりの道",
+            },
+            "scene_material_pack": {
+                "light_source": "門の上から差す月光",
+                "dominant_materials": ["濡れた石と古い鉄"],
+            },
+        }
+
+        payload = module._image_api_prompt_payload_for_scaffold(
+            first_frame_visual_plan=first_frame_visual_plan,
+            character_ids=[],
+            object_ids=[],
+            location_ids=["opaque_gate_id"],
+            references=[],
+            review_metadata={},
+        )
+
+        self.assertEqual(payload["policy_version"], "image_api_prompt_v2")
+        self.assertNotIn("[登場人物]", payload["prompt"])
+        self.assertNotIn("[小道具 / 舞台装置]", payload["prompt"])
+        self.assertNotIn("opaque_gate_id", payload["prompt"])
+
+    def test_scaffold_plan_uses_cut_specific_drawable_evidence(self) -> None:
+        module = load_frontend_run_module()
+
+        evidence = module._cut_specific_drawable_evidence_for_scaffold(
+            {
+                "must_show": ["灰の床", "scene10_cut01", "場のルール"],
+                "visual_evidence": ["舞踏会の知らせ", "灰の床"],
+            }
+        )
+
+        self.assertEqual(
+            evidence,
+            [
+                {
+                    "source_field": "viewer_contract.must_show",
+                    "must_be_drawn_as": "灰の床",
+                },
+                {
+                    "source_field": "viewer_contract.must_show",
+                    "must_be_drawn_as": "人物を囲む配置",
+                },
+                {
+                    "source_field": "viewer_contract.visual_evidence",
+                    "must_be_drawn_as": "舞踏会の知らせ",
+                },
+            ],
+        )
+
     def test_same_topic_runs_use_story_specific_cinderella_without_fixed_scaffold_ids(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
@@ -193,6 +261,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
                 "image_generation_requests.md",
+                "image_generation_request_snapshot.json",
                 "video_generation_requests.md",
                 "p000_index.md",
             ):
@@ -304,15 +373,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
             scene_request_text = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
             self.assertNotIn("[cut契約からの可視要件]", scene_request_text)
-            self.assertIn("- prompt_policy_version: `image_api_prompt_v1`", scene_request_text)
+            self.assertIn("- prompt_policy_version: `image_api_prompt_v2`", scene_request_text)
             self.assertIn("```debug_prompt_source", scene_request_text)
             self.assertIn("```api_prompt", scene_request_text)
             self.assertNotIn("```text\n[参照画像の使い方]", scene_request_text)
-            self.assertIn("[shot / 画角]", scene_request_text)
+            self.assertIn("[全体 / 不変条件]", scene_request_text)
+            self.assertIn("[シーン]", scene_request_text)
+            self.assertNotIn("[shot / 画角]", scene_request_text)
             self.assertNotIn("shot_role:", scene_request_text)
             self.assertNotIn("location_zone:", scene_request_text)
             self.assertNotIn("this_cut_delta:", scene_request_text)
-            self.assertIn("[動画開始に向いた静止状態]", scene_request_text)
+            self.assertNotIn("[動画開始に向いた静止状態]", scene_request_text)
             self.assertNotIn("観客理解の増分:", scene_request_text)
             self.assertNotIn("因果の証明:", scene_request_text)
             self.assertNotIn("必要な役割:", scene_request_text)
@@ -325,6 +396,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("event_time_position:", first_api_prompt)
             self.assertNotIn("not_yet_happened_in_still:", first_api_prompt)
             self.assertNotIn("first_frame_visual_plan", first_api_prompt)
+            self.assertNotIn("source_event_contract", first_api_prompt)
+            self.assertNotIn("event_context_for_cut", first_api_prompt)
+            self.assertNotIn("motion_brief", first_api_prompt)
+            self.assertNotIn("[小道具 / 舞台装置]", first_api_prompt)
             self.assertIn("[禁止]", first_api_prompt)
             self.assertIn("ガラスの靴", first_scene)
             self.assertNotRegex(first_api_prompt, r"^.*ガラスの靴.*$", re.MULTILINE)
@@ -332,6 +407,39 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("scene_cut_coverage_plan:", manifest_text)
             self.assertIn("scene_shot_mix_plan:", manifest_text)
             self.assertIn("api_prompt_payload:", manifest_text)
+            self.assertNotIn("prompt_deprecated:", manifest_text)
+            manifest_data = yaml.safe_load(
+                manifest_text.split("```yaml\n", 1)[1].rsplit("```", 1)[0]
+            )
+            manifest_cuts = [
+                cut
+                for scene in manifest_data["scenes"]
+                for cut in scene["cuts"]
+            ]
+            self.assertEqual(len(manifest_cuts), 45)
+            self.assertTrue(
+                all("prompt" not in cut["image_generation"] for cut in manifest_cuts)
+            )
+            self.assertTrue(
+                all(
+                    cut["image_generation"]["api_prompt_payload"]["policy_version"]
+                    == "image_api_prompt_v2"
+                    for cut in manifest_cuts
+                )
+            )
+            snapshot = json.loads(
+                (run_dir / "image_generation_request_snapshot.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                snapshot["schema_version"],
+                "toc.image_generation_request_snapshot.v1",
+            )
+            self.assertEqual(len(snapshot["items"]), len(manifest_cuts))
+            self.assertIn("first_frame_visual_plan:", manifest_text)
+            self.assertIn("schema_version: first_frame_visual_plan_v1", manifest_text)
+            self.assertIn("editable: false", manifest_text)
             self.assertIn("scene_obligations:", manifest_text)
             self.assertIn("story_event_obligations:", manifest_text)
             self.assertIn("audience_knowledge_delta:", manifest_text)
@@ -367,8 +475,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
             pre_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
             self.assertIn("cinderella_transformed_fullbody", pre_loss_scene70)
-            self.assertIn("衣装は舞踏会ドレス姿を維持し、質素な普段着へ戻さない。", pre_loss_scene70)
-            self.assertIn("衣装は魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", post_loss_scene70)
+            self.assertIn("衣装は、舞踏会ドレス姿を維持し、質素な普段着へ戻さない。", pre_loss_scene70)
+            self.assertIn("衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", post_loss_scene70)
             scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
             self.assertIn("source_event_contract:", scene70_manifest)
             self.assertIn("event_context_for_cut:", scene70_manifest)
@@ -381,7 +489,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             transformation_reveal_api_prompt = re.search(r"```api_prompt\n(?P<body>.*?)\n```", transformation_reveal, re.DOTALL).group("body")
             self.assertIn("glass_slipper", transformation_reveal)
             self.assertNotIn("object_visibility:", transformation_reveal_api_prompt)
-            self.assertIn("小道具や物体はガラスの靴", transformation_reveal)
+            self.assertIn("[小道具 / 舞台装置]", transformation_reveal_api_prompt)
+            self.assertIn("ガラスの靴は", transformation_reveal_api_prompt)
             self.assertIn("cinderella_transformed_fullbody", transformation_reveal)
 
             departure_scene = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene50_cut1", 1)[0]
@@ -424,7 +533,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("靴合わせが行われる部屋", final_scene_manifest)
             self.assertIn("ガラスの靴", final_scene_manifest)
             self.assertIn("主人公の価値を証明", final_scene_manifest)
-            self.assertIn("出口ではなくシンデレラとガラスの靴へ収束する", final_scene_manifest)
+            self.assertIn("出口ではなく主人公とガラスの靴へ収束する", final_scene_manifest)
             self.assertIn("fitted_on_foot", final_scene_manifest)
             self.assertIn("carries_to_next_scene: []", final_scene_manifest)
             self.assertNotIn("次の場所へ進む証拠が生まれる", final_scene_manifest)
@@ -434,12 +543,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_post_midnight_fullbody", final_scene_requests)
             self.assertNotIn("cinderella_transformed_fullbody", final_scene_requests)
             self.assertNotIn("背景に次の場所へ続く導線", final_scene_requests)
-            self.assertIn("衣装は魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", final_scene_requests)
+            self.assertIn("衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", final_scene_requests)
             final_scene_api_prompts = "\n".join(re.findall(r"```api_prompt\n(.*?)\n```", final_scene_requests, re.DOTALL))
             self.assertNotIn("object_visibility:", final_scene_api_prompts)
-            self.assertIn("小道具や物体はガラスの靴", final_scene_requests)
-            self.assertIn("ガラスの靴がシンデレラの足に合", final_scene_requests)
-            self.assertIn("小道具への接触状態は足に合っている", final_scene_requests)
+            self.assertIn("[小道具 / 舞台装置]", final_scene_api_prompts)
+            self.assertIn("ガラスの靴は", final_scene_api_prompts)
+            self.assertIn("シンデレラの足に隙間なく合っている", final_scene_requests)
             self.assertIn("靴合わせが行われる部屋", final_scene_requests)
             self.assertNotIn("月光、ガラス、階段", final_scene_requests)
 

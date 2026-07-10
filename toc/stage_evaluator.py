@@ -847,15 +847,42 @@ def _has_template_placeholder(text: str) -> bool:
 
 
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
+IMAGE_API_PROMPT_POLICY_VERSION_V2 = "image_api_prompt_v2"
+IMAGE_API_PROMPT_V2_GROUPS = {
+    "style",
+    "references",
+    "current_moment",
+    "primary_subject",
+    "characters",
+    "objects",
+    "location",
+    "composition",
+    "light_material",
+    "current_state_delta",
+    "constraints",
+}
+IMAGE_API_PROMPT_V2_BASE_GROUPS = {
+    "style",
+    "current_moment",
+    "constraints",
+}
 IMAGE_API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_scene_cut_ids",
+        re.compile(
+            r"\bscene\d+(?:\.\d+)?(?:[_-](?:cut|event)[A-Za-z0-9_.-]*)?\b|\b_event_[A-Za-z0-9_]+\b",
+            re.I,
+        ),
+    ),
     (
         "api_prompt_contains_no_yaml_field_names",
         re.compile(
             r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
             r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
             r"scene_character_state_timeline|scene_film_coverage_plan|cut_character_emotion_transition|cut_film_grammar_contract|"
-            r"scene_state_progression_plan|cut_state_progression|emotion_label|emotion_from|emotion_to|transition_mode",
+            r"scene_state_progression_plan|cut_state_progression|emotion_label|emotion_from|emotion_to|transition_mode|"
+            r"drawable_prompt_ir|dependencies|included_fragments|omitted_groups|required_groups|compiler_version|"
+            r"shot_design_contract|cut_location_frame_plan|cut_visual_delta|blocking_and_interaction",
             re.I,
         ),
     ),
@@ -891,6 +918,117 @@ def _truthy_prompt_contract_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "はい"}
+
+
+def _drawable_prompt_v2_ir(image_generation: dict[str, Any]) -> dict[str, Any]:
+    payload = _image_api_prompt_payload(image_generation)
+    ir = payload.get("drawable_prompt_ir")
+    return ir if isinstance(ir, dict) else {}
+
+
+def _drawable_prompt_v2_dependencies(image_generation: dict[str, Any], ir: dict[str, Any]) -> dict[str, Any]:
+    raw = ir.get("dependencies")
+    dependencies = dict(raw) if isinstance(raw, dict) else {}
+    for key in ("character_ids", "object_ids", "location_ids", "references"):
+        dependencies[key] = [str(value).strip() for value in as_list(dependencies.get(key)) if str(value).strip()]
+    dependencies["required_groups"] = [
+        str(value).strip()
+        for value in as_list(dependencies.get("required_groups"))
+        if str(value).strip()
+    ]
+    return dependencies
+
+
+def _drawable_prompt_v2_fragment_groups(ir: dict[str, Any]) -> tuple[set[str], list[str], list[str]]:
+    groups: set[str] = set()
+    empty_groups: list[str] = []
+    unknown_groups: list[str] = []
+    fragments = ir.get("included_fragments")
+    if not isinstance(fragments, list):
+        return groups, empty_groups, unknown_groups
+    for index, fragment in enumerate(fragments, start=1):
+        if not isinstance(fragment, dict):
+            empty_groups.append(f"entry_{index}")
+            continue
+        group = str(fragment.get("group") or "").strip()
+        text = str(fragment.get("text") or "").strip()
+        if not group:
+            empty_groups.append(f"entry_{index}")
+            continue
+        groups.add(group)
+        if group not in IMAGE_API_PROMPT_V2_GROUPS:
+            unknown_groups.append(group)
+        if not text:
+            empty_groups.append(group)
+    return groups, empty_groups, unknown_groups
+
+
+def _image_api_prompt_v2_issues(selector: str, image_generation: dict[str, Any]) -> list[str]:
+    if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION_V2:
+        return []
+    prompt = str(_image_api_prompt_payload(image_generation).get("prompt") or "").strip()
+    issues: list[str] = []
+    if not prompt:
+        return [f"{selector}:api_prompt_missing_for_new_prompt_policy"]
+    for gate_name, pattern in IMAGE_API_PROMPT_FORBIDDEN_GATES:
+        if pattern.search(prompt):
+            issues.append(f"{selector}:{gate_name}")
+
+    ir = _drawable_prompt_v2_ir(image_generation)
+    if not ir:
+        issues.append(f"{selector}:api_prompt_v2_drawable_prompt_ir_missing")
+        return issues
+    if str(ir.get("schema_version") or "").strip() != "drawable_prompt_ir_v1":
+        issues.append(f"{selector}:api_prompt_v2_drawable_prompt_ir_schema")
+    if not isinstance(ir.get("dependencies"), dict):
+        issues.append(f"{selector}:api_prompt_v2_dependencies_missing")
+    if not isinstance(ir.get("included_fragments"), list):
+        issues.append(f"{selector}:api_prompt_v2_included_fragments_missing")
+
+    dependencies = _drawable_prompt_v2_dependencies(image_generation, ir)
+    for key in ("character_ids", "object_ids", "location_ids", "references"):
+        declared = [
+            str(value).strip()
+            for value in as_list(image_generation.get(key))
+            if str(value).strip()
+        ]
+        if dependencies.get(key, []) != declared:
+            issues.append(f"{selector}:api_prompt_v2_{key}_dependency_mismatch")
+    groups, empty_groups, unknown_groups = _drawable_prompt_v2_fragment_groups(ir)
+    issues.extend(f"{selector}:api_prompt_v2_included_fragment_empty:{group}" for group in empty_groups)
+    issues.extend(f"{selector}:api_prompt_v2_unknown_fragment_group:{group}" for group in sorted(set(unknown_groups)))
+    for fragment in as_list(ir.get("included_fragments")):
+        if not isinstance(fragment, dict):
+            continue
+        group = str(fragment.get("group") or "").strip()
+        text = str(fragment.get("text") or "").strip()
+        if group and text and text not in prompt:
+            issues.append(f"{selector}:api_prompt_v2_fragment_not_rendered:{group}")
+
+    required_groups = set(IMAGE_API_PROMPT_V2_BASE_GROUPS)
+    required_groups.update(dependencies.get("required_groups") or [])
+    dependency_groups = {
+        "characters": bool(dependencies.get("character_ids")),
+        "objects": bool(dependencies.get("object_ids")),
+        "location": bool(dependencies.get("location_ids")),
+        "references": bool(dependencies.get("references")),
+    }
+    required_groups.update(group for group, required in dependency_groups.items() if required)
+    for group in sorted(required_groups):
+        if group not in groups:
+            issue_group = {
+                "characters": "character",
+                "objects": "object",
+            }.get(group, group)
+            issues.append(f"{selector}:api_prompt_v2_missing_{issue_group}_fragment")
+    for group, required in dependency_groups.items():
+        if not required and group in groups and group not in set(dependencies.get("required_groups") or []):
+            issue_group = {
+                "characters": "character",
+                "objects": "object",
+            }.get(group, group)
+            issues.append(f"{selector}:api_prompt_v2_unneeded_{issue_group}_fragment")
+    return issues
 
 
 def _image_api_prompt_v1_issues(selector: str, image_generation: dict[str, Any]) -> list[str]:
@@ -1375,7 +1513,7 @@ def _manifest_rubric(nodes: list[dict[str, Any]], body_text: str) -> dict[str, f
         video_generation = node.get("video_generation") if isinstance(node, dict) and isinstance(node.get("video_generation"), dict) else {}
         combined_node_text = "\n".join(
             [
-                str(image_generation.get("prompt") or "").strip(),
+                _image_api_prompt_text(image_generation).strip(),
                 str(video_generation.get("motion_prompt") or "").strip(),
                 str((((audio or {}).get("narration") or {}) if isinstance((audio or {}).get("narration"), dict) else {}).get("text") or "").strip(),
             ]
@@ -3847,6 +3985,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             selector = str(node.get("selector") or node.get("cut_id") or node.get("scene_id") or "node")
             prompt = _image_api_prompt_text(image_generation)
             api_prompt_v1_issues.extend(_image_api_prompt_v1_issues(selector, image_generation))
+            api_prompt_v1_issues.extend(_image_api_prompt_v2_issues(selector, image_generation))
             if any(token in prompt for token in MOTION_LEAK_TOKENS):
                 prompt_motion_leak_issues.append(selector)
 
@@ -3891,7 +4030,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             checks,
             f"{path_label}.api_prompt_v1_contract",
             not api_prompt_v1_issues,
-            "image_api_prompt_v1 entries keep API prompts separate from debug/internal fields and include drawable shot/location/delta/blocking contracts"
+            "image API prompt entries keep API prompts separate from debug/internal fields and satisfy their versioned drawable contracts"
             + (f" (issues: {', '.join(api_prompt_v1_issues[:8])})" if api_prompt_v1_issues else ""),
             kind="rubric",
         )
@@ -4124,7 +4263,10 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         elif strict_cut_contract:
             contract_missing = True
         must_show = _contract_list_paths(contract, "must_show", "viewer_contract.must_show")
-        if _image_api_prompt_policy(image_generation_for_prompt) == IMAGE_API_PROMPT_POLICY_VERSION:
+        if _image_api_prompt_policy(image_generation_for_prompt) in {
+            IMAGE_API_PROMPT_POLICY_VERSION,
+            IMAGE_API_PROMPT_POLICY_VERSION_V2,
+        }:
             must_show = [term for term in must_show if not IMAGE_API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
         must_avoid = _contract_list_paths(contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
         if must_show and not all(term in combined for term in must_show):

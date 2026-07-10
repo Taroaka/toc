@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from contextlib import asynccontextmanager, suppress
 import fcntl
 import hashlib
@@ -78,6 +79,13 @@ from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.script_narration import materialize_elevenlabs_tts_text
+from toc.runtime_locks import (
+    FileLockLease,
+    FileLockUnavailable,
+    acquire_file_lock,
+    async_file_slot,
+    release_file_lock,
+)
 from toc.semantic_review import (
     IMAGE_PROMPT_JUDGMENT_REPORT,
     SemanticReviewStatus,
@@ -103,6 +111,7 @@ from toc.semantic_review_loop import (
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
     IMAGE_API_PROMPT_POLICY_VERSION,
+    IMAGE_API_PROMPT_POLICY_PREFIX,
     IMAGE_SUFFIXES,
     build_zip,
     candidate_path,
@@ -187,6 +196,10 @@ BOOTSTRAP_ASSET_MAX_ATTEMPTS = 10
 # The generated_images time-order fallback remains only as an explicit legacy
 # recovery mode because it cannot prove which request produced a file.
 IMAGE_GENERATION_PARALLELISM = max(1, int(os.environ.get("TOC_IMAGE_GEN_PARALLELISM", "6") or "6"))
+IMAGE_GENERATION_GLOBAL_PARALLELISM = max(
+    1,
+    int(os.environ.get("TOC_IMAGE_GEN_GLOBAL_PARALLELISM", str(IMAGE_GENERATION_PARALLELISM)) or IMAGE_GENERATION_PARALLELISM),
+)
 IMAGE_GENERATION_PROVENANCE_POLICY_SERIAL_FALLBACK = "serial_fallback"
 IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2 = "request_bound_v2"
 IMAGE_GENERATION_ITEM_MAX_ATTEMPTS = max(1, int(os.environ.get("TOC_IMAGE_GEN_ITEM_MAX_ATTEMPTS", "3") or "3"))
@@ -473,6 +486,8 @@ _chat_semaphore = asyncio.Semaphore(2)
 _scene_detail_canonical_progress_lock = threading.Lock()
 _run_write_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _run_write_locks_guard = asyncio.Lock()
+_run_execution_leases: dict[str, FileLockLease] = {}
+_run_execution_leases_guard = asyncio.Lock()
 MAX_ZIP_BYTES = 250 * 1024 * 1024
 MAX_CREATE_JOBS = 64
 MAX_RUNNING_CREATE_JOBS = 2
@@ -493,6 +508,77 @@ def _effective_image_generation_parallelism() -> int:
     if _image_generation_request_bound_provenance_enabled():
         return max(1, int(IMAGE_GENERATION_PARALLELISM))
     return 1
+
+
+def _image_generation_global_lock_dir() -> Path:
+    configured = os.environ.get("TOC_IMAGE_GEN_GLOBAL_LOCK_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    workspace_key = hashlib.sha256(str(ROOT.resolve()).encode("utf-8")).hexdigest()[:12]
+    return Path("/tmp") / "toc-image-generation-locks" / workspace_key
+
+
+@asynccontextmanager
+async def _global_image_generation_slot(provenance_policy: str):
+    is_serial_fallback = provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_SERIAL_FALLBACK
+    lock_dir = _image_generation_global_lock_dir()
+    timeout_seconds = max(1.0, float(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS))
+    if is_serial_fallback:
+        async with _global_image_generation_mode_lock(
+            lock_dir,
+            exclusive=True,
+            timeout_seconds=timeout_seconds,
+        ):
+            yield "serial-exclusive"
+        return
+
+    # Claim a bounded request slot before the shared mode lock so queued
+    # request-bound work does not prevent an exclusive serial fallback from
+    # draining the currently active requests.
+    async with async_file_slot(
+        lock_dir,
+        namespace="request-bound",
+        slots=max(1, int(IMAGE_GENERATION_GLOBAL_PARALLELISM)),
+        timeout_seconds=timeout_seconds,
+    ) as slot:
+        async with _global_image_generation_mode_lock(
+            lock_dir,
+            exclusive=False,
+            timeout_seconds=timeout_seconds,
+        ):
+            yield slot
+
+
+@asynccontextmanager
+async def _global_image_generation_mode_lock(
+    lock_dir: Path,
+    *,
+    exclusive: bool,
+    timeout_seconds: float,
+):
+    """Cross-process shared/exclusive gate for both provenance lanes."""
+
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (lock_dir / "generation-mode.lock").open("a+b")
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    acquired = False
+    try:
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), operation | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    mode = "exclusive" if exclusive else "shared"
+                    raise TimeoutError(f"timed out acquiring global image generation {mode} mode lock")
+                await asyncio.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
 
 
 @asynccontextmanager
@@ -528,6 +614,23 @@ async def _serialized_run_write(run_dir: Path, resource: str):
         finally:
             await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()
+
+
+async def _acquire_run_execution_lease(job_id: str, run_dir: Path) -> None:
+    lock_path = run_dir / ".locks" / "create_resume.lock"
+    lease = await acquire_file_lock(lock_path, wait=False)
+    async with _run_execution_leases_guard:
+        previous = _run_execution_leases.pop(job_id, None)
+        if previous is not None:
+            await release_file_lock(previous)
+        _run_execution_leases[job_id] = lease
+
+
+async def _release_run_execution_lease(job_id: str) -> None:
+    async with _run_execution_leases_guard:
+        lease = _run_execution_leases.pop(job_id, None)
+    if lease is not None:
+        await release_file_lock(lease)
 
 
 async def get_codex_client() -> CodexAppServerClient:
@@ -874,25 +977,21 @@ async def _sync_process_current_process(job_id: str, run_id: str) -> None:
 def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
     assets_dir = run_dir / "assets"
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
-    deleted: list[str] = []
-    errors: list[str] = []
+    preserved: list[str] = []
     if not assets_dir.exists():
-        return {"deletedCount": 0, "deleted": [], "errors": []}
+        return {"deletedCount": 0, "deleted": [], "preservedCount": 0, "preserved": [], "errors": []}
     for path in sorted(assets_dir.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in image_suffixes:
             continue
-        try:
-            rel = path.relative_to(run_dir).as_posix()
-            path.unlink()
-            deleted.append(rel)
-        except OSError as exc:
-            errors.append(f"{path}: {exc}")
-    for directory in sorted((path for path in assets_dir.rglob("*") if path.is_dir()), reverse=True):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-    return {"deletedCount": len(deleted), "deleted": deleted[:200], "errors": errors[:50]}
+        preserved.append(path.relative_to(run_dir).as_posix())
+    return {
+        "deletedCount": 0,
+        "deleted": [],
+        "preservedCount": len(preserved),
+        "preserved": preserved[:200],
+        "errors": [],
+        "reason": "hash-aware partial resume preserves existing outputs until each item is proven stale",
+    }
 
 
 def _validate_created_run(run_id: str) -> None:
@@ -2634,7 +2733,7 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
         api_prompt_policy = str(api_prompt_payload.get("policy_version") or "").strip()
         api_prompt = str(api_prompt_payload.get("prompt") or "")
         legacy_prompt = str(image_generation.get("prompt") or "")
-        prompt = api_prompt if api_prompt_policy == IMAGE_API_PROMPT_POLICY_VERSION else api_prompt or legacy_prompt
+        prompt = api_prompt if api_prompt_policy.startswith(IMAGE_API_PROMPT_POLICY_PREFIX) else api_prompt or legacy_prompt
         configured_duration = int(
             render.get("video_duration_seconds")
             or video_generation.get("duration_seconds")
@@ -3870,6 +3969,8 @@ async def _generate_asset_outputs(run_dir: Path, run_id: str) -> None:
 
 
 def _prompt_needs_quality_upgrade(item: Any) -> bool:
+    if str(getattr(item, "prompt_policy_version", "") or "") == "image_api_prompt_v2":
+        return False
     prompt = str(getattr(item, "prompt", "") or "").strip()
     if len(prompt) < 360:
         return True
@@ -3996,16 +4097,17 @@ async def _upgrade_initial_request_prompts(job_id: str, *, run_id: str) -> None:
                 )
                 prompts[item.id] = prompt
             async with _serialized_run_write(run_dir, "run_artifacts"):
-                update_result = update_request_prompts(run_dir, kind, prompts, allow_inline_prompt=True)
-                if update_result["missing"]:
-                    raise RuntimeError(f"{kind} prompt upgrade failed for {', '.join(update_result['missing'])}")
-                append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        f"review.frontend.{kind}_prompt_upgrade.status": "done",
-                        f"review.frontend.{kind}_prompt_upgrade.count": str(len(update_result["updated"])),
-                    },
-                )
+                async with _serialized_run_write(run_dir, f"{kind}_request_revision"):
+                    update_result = update_request_prompts(run_dir, kind, prompts, allow_inline_prompt=True)
+                    if update_result["missing"]:
+                        raise RuntimeError(f"{kind} prompt upgrade failed for {', '.join(update_result['missing'])}")
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.frontend.{kind}_prompt_upgrade.status": "done",
+                            f"review.frontend.{kind}_prompt_upgrade.count": str(len(update_result["updated"])),
+                        },
+                    )
     finally:
         await client.stop()
 
@@ -4101,11 +4203,31 @@ def _is_transient_codex_image_error(exc: Exception) -> bool:
     return any(marker in message for marker in TRANSIENT_CODEX_IMAGE_ERRORS)
 
 
-def _has_completed_app_server_image_provenance(run_dir: Path, *, item_id: str, destination: Path) -> bool:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _has_completed_app_server_image_provenance(
+    run_dir: Path,
+    *,
+    item_id: str,
+    destination: Path,
+    prompt_sha256: str,
+    reference_sha256s: list[str],
+    request_revision: str | None = None,
+    request_digest: str | None = None,
+    compiler_version: str | None = None,
+    source_digest: str | None = None,
+) -> bool:
     log_dir = run_dir / "logs" / "app_server" / "image_gen"
-    if not log_dir.exists():
+    if not log_dir.exists() or not destination.is_file():
         return False
     destination_key = _run_relative_key(run_dir, str(destination))
+    output_sha256 = _file_sha256(destination)
     for log_path in sorted(log_dir.glob("*.json"), reverse=True):
         try:
             payload = json.loads(log_path.read_text(encoding="utf-8"))
@@ -4121,14 +4243,123 @@ def _has_completed_app_server_image_provenance(run_dir: Path, *, item_id: str, d
             continue
         if str(payload.get("status") or "").lower() not in {"completed", "succeeded"}:
             continue
-        source = str(payload.get("source") or "").lower()
-        if "local_raster" in source:
+        provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+        source = str(provenance.get("source") or payload.get("source") or "").lower()
+        if source != "app_server":
+            continue
+        policy = str(provenance.get("policy") or "")
+        if policy != IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2:
+            continue
+        if provenance.get("authoritative") is not True:
+            continue
+        if not str(provenance.get("generationJobId") or "").strip():
+            continue
+        provenance_item_id = str(provenance.get("itemId") or "")
+        if provenance_item_id != str(item_id):
+            continue
+        if not str(provenance.get("turnId") or "").strip():
+            continue
+        if not str(provenance.get("imageGenerationItemId") or "").strip():
+            continue
+        try:
+            image_item_count = int(provenance.get("imageGenerationItemCount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if image_item_count != 1:
+            continue
+        if not str(provenance.get("savedPath") or "").strip():
+            continue
+        if str(provenance.get("promptSha256") or "") != prompt_sha256:
+            continue
+        logged_reference_sha256s = provenance.get("referenceSha256s")
+        if not isinstance(logged_reference_sha256s, list) or logged_reference_sha256s != reference_sha256s:
+            continue
+        if str(provenance.get("outputSha256") or "") != output_sha256:
+            continue
+        try:
+            provenance_destination = _run_relative_key(run_dir, str(provenance.get("destination") or ""))
+        except ValueError:
+            continue
+        if provenance_destination != destination_key:
+            continue
+        expected_snapshot_fields = {
+            "requestDigest": request_digest,
+            "compilerVersion": compiler_version,
+            "sourceDigest": source_digest,
+        }
+        if any(
+            expected is not None and str(provenance.get(field) or "") != str(expected)
+            for field, expected in expected_snapshot_fields.items()
+        ):
             continue
         return True
     return False
 
 
+def _validate_request_bound_image_result(
+    result: Any,
+    *,
+    generation_job_id: str,
+    item_id: str,
+    destination: Path,
+    prompt_sha256: str,
+    reference_sha256s: list[str],
+) -> None:
+    issues: list[str] = []
+    if str(getattr(result, "provenance_policy", "") or "") != IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2:
+        issues.append("provenance_policy")
+    if str(getattr(result, "source", "") or "") != "app_server":
+        issues.append("source")
+    if str(getattr(result, "generation_job_id", "") or "") != generation_job_id:
+        issues.append("generation_job_id")
+    if str(getattr(result, "item_id", "") or "") != item_id:
+        issues.append("item_id")
+    if str(getattr(result, "prompt_sha256", "") or "") != prompt_sha256:
+        issues.append("prompt_sha256")
+    actual_reference_sha256s = getattr(result, "reference_sha256s", None)
+    if not isinstance(actual_reference_sha256s, list) or actual_reference_sha256s != reference_sha256s:
+        issues.append("reference_sha256s")
+    try:
+        actual_destination = Path(str(getattr(result, "destination", "") or "")).resolve()
+    except (OSError, ValueError):
+        actual_destination = Path(".")
+    if actual_destination != destination.resolve():
+        issues.append("destination")
+    if not str(getattr(result, "turn_id", "") or "").strip():
+        issues.append("turn_id")
+    if not str(getattr(result, "image_generation_item_id", "") or "").strip():
+        issues.append("image_generation_item_id")
+    if int(getattr(result, "image_generation_item_count", 0) or 0) != 1:
+        issues.append("image_generation_item_count")
+    if not bool(getattr(result, "provenance_authoritative", False)):
+        issues.append("provenance_authoritative")
+    if issues:
+        raise RuntimeError(
+            f"Codex app-server request-bound provenance mismatch for {item_id}: {', '.join(issues)}"
+        )
+
+
 async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) -> None:
+    provenance_policy = _image_generation_provenance_policy()
+    async with _global_image_generation_slot(provenance_policy) as global_slot:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="image_generation_global_slot",
+            status="acquired",
+            item_id=str(getattr(item, "id", "")),
+            request={
+                "kind": kind,
+                "slot": global_slot,
+                "provenancePolicy": provenance_policy,
+                "globalParallelism": 1
+                if provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_SERIAL_FALLBACK
+                else max(1, int(IMAGE_GENERATION_GLOBAL_PARALLELISM)),
+            },
+        )
+        await _generate_request_item_output_with_slot(run_dir=run_dir, kind=kind, item=item)
+
+
+async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, item: Any) -> None:
     if not getattr(item, "output", None):
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -4141,8 +4372,46 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
     if not str(getattr(item, "prompt", "") or "").strip():
         raise RuntimeError(f"{kind} request has no prompt: {item.id}")
     destination = resolve_run_relative(run_dir, str(item.output))
+    references: list[Path] = []
+    for ref in getattr(item, "references", []) or []:
+        reference = resolve_run_relative(run_dir, str(ref))
+        if not reference.exists() or not reference.is_file():
+            raise RuntimeError(f"{kind} reference not found for {item.id}: {ref}")
+        require_image_file(reference)
+        references.append(reference)
+    prompt_sha256 = hashlib.sha256(str(item.prompt).encode("utf-8")).hexdigest()
+    reference_sha256s = [_file_sha256(reference) for reference in references]
+    snapshot_prompt_sha256 = str(getattr(item, "prompt_sha256", "") or "")
+    if snapshot_prompt_sha256 and snapshot_prompt_sha256 != prompt_sha256:
+        raise RuntimeError(f"{kind} request snapshot prompt hash changed before send: {item.id}")
+    snapshot_reference_sha256s = getattr(item, "reference_sha256s", None)
+    if isinstance(snapshot_reference_sha256s, list) and snapshot_reference_sha256s:
+        if len(snapshot_reference_sha256s) != len(reference_sha256s):
+            raise RuntimeError(f"{kind} request snapshot reference count changed before send: {item.id}")
+        for index, (expected, actual) in enumerate(
+            zip(snapshot_reference_sha256s, reference_sha256s, strict=False)
+        ):
+            if expected is not None and str(expected) != actual:
+                raise RuntimeError(
+                    f"{kind} request snapshot reference hash changed before send: {item.id} reference {index}"
+                )
+    if (
+        str(getattr(item, "prompt_policy_version", "") or "") == "image_api_prompt_v2"
+        and not str(getattr(item, "request_revision", "") or "").strip()
+    ):
+        raise RuntimeError(f"{kind} request v2 requires an immutable request snapshot: {item.id}")
     if destination.exists():
-        if _has_completed_app_server_image_provenance(run_dir, item_id=str(item.id), destination=destination):
+        if _has_completed_app_server_image_provenance(
+            run_dir,
+            item_id=str(item.id),
+            destination=destination,
+            prompt_sha256=prompt_sha256,
+            reference_sha256s=reference_sha256s,
+            request_revision=getattr(item, "request_revision", None),
+            request_digest=getattr(item, "request_digest", None),
+            compiler_version=getattr(item, "compiler_version", None),
+            source_digest=getattr(item, "source_digest", None),
+        ):
             write_app_server_debug_log(
                 run_dir=run_dir,
                 operation="request_item_generation",
@@ -4156,7 +4425,6 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                 },
             )
             return
-        destination.unlink()
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="request_item_generation",
@@ -4164,22 +4432,17 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             item_id=str(item.id),
             request={
                 "kind": kind,
-                "reason": "removed existing destination without completed app-server provenance",
+                "reason": "existing destination is stale and will be replaced only after successful generation",
                 "output": str(item.output),
                 "destination": str(destination),
+                "promptSha256": prompt_sha256,
+                "referenceSha256s": reference_sha256s,
             },
         )
     started = time.monotonic()
     generation_job_id = uuid.uuid4().hex
     provenance_policy = _image_generation_provenance_policy()
     allow_generated_images_fallback = provenance_policy != IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2
-    references: list[Path] = []
-    for ref in getattr(item, "references", []) or []:
-        reference = resolve_run_relative(run_dir, str(ref))
-        if not reference.exists() or not reference.is_file():
-            raise RuntimeError(f"{kind} reference not found for {item.id}: {ref}")
-        require_image_file(reference)
-        references.append(reference)
     write_app_server_debug_log(
         run_dir=run_dir,
         operation="request_item_generation",
@@ -4192,6 +4455,8 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             "referenceCount": len(references),
             "references": [str(ref) for ref in references],
             "promptLength": len(str(item.prompt or "")),
+            "promptSha256": prompt_sha256,
+            "referenceSha256s": reference_sha256s,
             "executionLane": str(getattr(item, "execution_lane", "") or ""),
             "assetType": str(getattr(item, "asset_type", "") or ""),
             "timeoutSeconds": IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS,
@@ -4231,6 +4496,15 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                     reject_local_raster_image_result(result, item_id=item.id)
                     if provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2 and not bool(getattr(result, "provenance_authoritative", False)):
                         raise RuntimeError(f"Codex app-server did not return authoritative request-bound provenance for {item.id}")
+                    if provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2:
+                        _validate_request_bound_image_result(
+                            result,
+                            generation_job_id=generation_job_id,
+                            item_id=str(item.id),
+                            destination=destination,
+                            prompt_sha256=prompt_sha256,
+                            reference_sha256s=reference_sha256s,
+                        )
                     break
                 except Exception as exc:
                     if attempt >= IMAGE_GENERATION_ITEM_MAX_ATTEMPTS or not _is_transient_codex_image_error(exc):
@@ -4253,6 +4527,9 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                     await client.stop()
                     client = create_codex_app_server_client(cwd=ROOT)
                     await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
+        if result.saved_path is None:
+            raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
+        copy_saved_image(result.saved_path, destination)
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -4263,11 +4540,12 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             kind=kind,
             prompt_policy_version=getattr(item, "prompt_policy_version", None),
             debug_prompt_source=getattr(item, "debug_prompt_source", None),
+            request_revision=getattr(item, "request_revision", None),
+            request_digest=getattr(item, "request_digest", None),
+            compiler_version=getattr(item, "compiler_version", None),
+            source_digest=getattr(item, "source_digest", None),
             result=result,
         )
-        if result.saved_path is None:
-            raise RuntimeError(f"Codex app-server did not return an image for {item.id}; see {debug_log}")
-        copy_saved_image(result.saved_path, destination)
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="request_item_generation",
@@ -4280,8 +4558,10 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                 "savedPath": str(result.saved_path),
                 "source": getattr(result, "source", "app_server"),
                 "destinationExists": destination.exists(),
+                "outputSha256": _file_sha256(destination),
                 "generationJobId": generation_job_id,
                 "turnId": getattr(result, "turn_id", None),
+                "imageGenerationItemId": getattr(result, "image_generation_item_id", None),
                 "provenancePolicy": provenance_policy,
                 "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
             },
@@ -4297,6 +4577,10 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
             kind=kind,
             prompt_policy_version=getattr(item, "prompt_policy_version", None),
             debug_prompt_source=getattr(item, "debug_prompt_source", None),
+            request_revision=getattr(item, "request_revision", None),
+            request_digest=getattr(item, "request_digest", None),
+            compiler_version=getattr(item, "compiler_version", None),
+            source_digest=getattr(item, "source_digest", None),
             result=result,
             error=str(exc),
         )
@@ -4320,7 +4604,9 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
 
 
 async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
-    async with _serialized_run_write(run_dir, f"{kind}_generation"):
+    # Keep the immutable request snapshot stable from load through provider
+    # submission. Prompt edits/materialization use this same revision lock.
+    async with _serialized_run_write(run_dir, f"{kind}_request_revision"):
         await _generate_request_outputs_unlocked(run_dir=run_dir, kind=kind)
 
 
@@ -4503,6 +4789,21 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
                 issues.append(item.output)
                 continue
             validate_image_bytes(output)
+            if str(getattr(item, "prompt_policy_version", "") or "") == "image_api_prompt_v2":
+                references = [resolve_run_relative(run_dir, str(ref)) for ref in item.references]
+                reference_sha256s = [_file_sha256(reference) for reference in references]
+                if not _has_completed_app_server_image_provenance(
+                    run_dir,
+                    item_id=str(item.id),
+                    destination=output,
+                    prompt_sha256=hashlib.sha256(str(item.prompt).encode("utf-8")).hexdigest(),
+                    reference_sha256s=reference_sha256s,
+                    request_revision=getattr(item, "request_revision", None),
+                    request_digest=getattr(item, "request_digest", None),
+                    compiler_version=getattr(item, "compiler_version", None),
+                    source_digest=getattr(item, "source_digest", None),
+                ):
+                    issues.append(f"{item.output}: missing strict request-bound provenance for current snapshot")
         except (OSError, ValueError) as exc:
             issues.append(f"{item.output}: {exc}")
     if issues:
@@ -4611,17 +4912,18 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
             )
             prompts[item.id] = prompt
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            update_result = update_request_prompts(run_dir, "asset", prompts, allow_inline_prompt=True)
-            if update_result["missing"]:
-                raise RuntimeError(f"asset prompt repair failed for {', '.join(update_result['missing'])}")
-            append_state_snapshot(
-                run_dir / "state.txt",
-                {
-                    "review.asset_visual_gate.repair.status": "done",
-                    "review.asset_visual_gate.repair.attempt": str(attempt),
-                    "review.asset_visual_gate.repair.count": str(len(update_result["updated"])),
-                },
-            )
+            async with _serialized_run_write(run_dir, "asset_request_revision"):
+                update_result = update_request_prompts(run_dir, "asset", prompts, allow_inline_prompt=True)
+                if update_result["missing"]:
+                    raise RuntimeError(f"asset prompt repair failed for {', '.join(update_result['missing'])}")
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.asset_visual_gate.repair.status": "done",
+                        "review.asset_visual_gate.repair.attempt": str(attempt),
+                        "review.asset_visual_gate.repair.count": str(len(update_result["updated"])),
+                    },
+                )
     finally:
         await client.stop()
 
@@ -5929,6 +6231,14 @@ async def _run_semantic_review_once(
             max_attempts=max_attempts,
             final_attempt=final_attempt,
         )
+    if stage == "image_prompt":
+        return await _run_image_prompt_sharded_semantic_review_once(
+            job_id,
+            run_dir=run_dir,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            final_attempt=final_attempt,
+        )
 
     subprocess.run(
         [
@@ -6114,6 +6424,960 @@ def _semantic_review_prompt_for_attempt(prompt: str, *, stage: str, final_attemp
         + "Treat non-fatal polish issues, minor wording weakness, and repairable prompt-strengthening suggestions as notes rather than blockers.\n"
         + "If you pass with reservations, include the reservations in `notes` and keep `blocked_entries` and `failed_selectors` empty.\n"
     )
+
+
+def _image_prompt_review_concurrency() -> int:
+    raw = os.environ.get("TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY", "").strip()
+    if not raw:
+        return scene_detail_review_concurrency()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return scene_detail_review_concurrency()
+
+
+def _image_prompt_transport_retry_attempts() -> int:
+    raw = os.environ.get("TOC_IMAGE_PROMPT_TRANSPORT_RETRY_ATTEMPTS", "").strip()
+    if not raw:
+        return scene_detail_transport_retry_attempts()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return scene_detail_transport_retry_attempts()
+
+
+def _load_semantic_scope(scope_path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _scope_string_list(scope: dict[str, Any], key: str) -> list[str]:
+    raw = scope.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _validate_image_prompt_shard_scope(
+    scope: dict[str, Any],
+    collection_sections: dict[str, str],
+) -> list[str]:
+    """Validate exact canonical-selector to scene-shard coverage."""
+
+    errors: list[str] = []
+    entry_count = scope.get("entry_count")
+    entry_ids = _scope_string_list(scope, "entry_ids")
+    if not isinstance(entry_count, int):
+        errors.append("image_prompt scope is missing integer entry_count")
+    elif entry_count <= 0:
+        errors.append("image_prompt scope has zero entries")
+    if isinstance(entry_count, int) and entry_count != len(entry_ids):
+        errors.append(
+            f"image_prompt scope entry_count mismatch: declared {entry_count}, entry_ids has {len(entry_ids)}"
+        )
+    duplicate_entry_ids = sorted(entry_id for entry_id, count in Counter(entry_ids).items() if count > 1)
+    if duplicate_entry_ids:
+        errors.append(f"image_prompt scope has duplicate entry ids: {', '.join(duplicate_entry_ids)}")
+
+    raw_shards = scope.get("shards")
+    shards = raw_shards if isinstance(raw_shards, list) else []
+    if not shards:
+        errors.append("image_prompt scope has no scene shards")
+    shard_ids: list[str] = []
+    assigned: list[str] = []
+    for index, raw_shard in enumerate(shards, start=1):
+        if not isinstance(raw_shard, dict):
+            errors.append(f"image_prompt shard {index} must be an object")
+            continue
+        shard_id = str(raw_shard.get("shard_id") or "").strip()
+        if not shard_id:
+            errors.append(f"image_prompt shard {index} is missing shard_id")
+        else:
+            shard_ids.append(shard_id)
+        shard_entry_ids = _scope_string_list(raw_shard, "entry_ids")
+        shard_entry_count = raw_shard.get("entry_count")
+        if not shard_entry_ids:
+            errors.append(f"image_prompt shard {shard_id or index} has zero entries")
+        if not isinstance(shard_entry_count, int) or shard_entry_count != len(shard_entry_ids):
+            errors.append(
+                f"image_prompt shard {shard_id or index} entry_count mismatch: "
+                f"declared {shard_entry_count!r}, entry_ids has {len(shard_entry_ids)}"
+            )
+        shard_duplicates = sorted(
+            entry_id for entry_id, count in Counter(shard_entry_ids).items() if count > 1
+        )
+        if shard_duplicates:
+            errors.append(
+                f"image_prompt shard {shard_id or index} has duplicate entry ids: {', '.join(shard_duplicates)}"
+            )
+        assigned.extend(shard_entry_ids)
+    duplicate_shard_ids = sorted(shard_id for shard_id, count in Counter(shard_ids).items() if count > 1)
+    if duplicate_shard_ids:
+        errors.append(f"image_prompt scope has duplicate shard ids: {', '.join(duplicate_shard_ids)}")
+
+    expected_counter = Counter(entry_ids)
+    assigned_counter = Counter(assigned)
+    missing = sorted((expected_counter - assigned_counter).elements())
+    unexpected = sorted((assigned_counter - expected_counter).elements())
+    multiply_assigned = sorted(entry_id for entry_id, count in assigned_counter.items() if count > 1)
+    if missing:
+        errors.append(f"image_prompt shard coverage is missing entry ids: {', '.join(missing)}")
+    if unexpected:
+        errors.append(f"image_prompt shard coverage has unexpected entry ids: {', '.join(unexpected)}")
+    if multiply_assigned:
+        errors.append(f"image_prompt shard coverage assigns entry ids multiple times: {', '.join(multiply_assigned)}")
+
+    missing_sections = [entry_id for entry_id in entry_ids if not collection_sections.get(entry_id, "").strip()]
+    if missing_sections:
+        errors.append(
+            f"image_prompt collection section missing for entry ids: {', '.join(missing_sections)}"
+        )
+    unexpected_sections = sorted(set(collection_sections) - set(entry_ids))
+    if unexpected_sections:
+        errors.append(
+            f"image_prompt collection has unexpected sections outside scope: {', '.join(unexpected_sections)}"
+        )
+    coverage = scope.get("coverage")
+    if isinstance(coverage, dict) and str(coverage.get("status") or "").strip() == "invalid":
+        raw_coverage_errors = coverage.get("errors")
+        if isinstance(raw_coverage_errors, list):
+            errors.extend(
+                f"image_prompt pack coverage invalid: {str(error).strip()}"
+                for error in raw_coverage_errors
+                if str(error).strip()
+            )
+        else:
+            errors.append("image_prompt pack coverage status is invalid")
+    return _dedupe_preserve_order(errors)
+
+
+def _image_prompt_scope_shards(scope: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_shards = scope.get("shards")
+    if not isinstance(raw_shards, list):
+        return []
+    shards: list[dict[str, Any]] = []
+    for raw_shard in raw_shards:
+        if not isinstance(raw_shard, dict):
+            continue
+        shards.append(
+            {
+                "shard_id": str(raw_shard.get("shard_id") or "").strip(),
+                "scene_id": str(raw_shard.get("scene_id") or "").strip(),
+                "entry_ids": _scope_string_list(raw_shard, "entry_ids"),
+            }
+        )
+    return shards
+
+
+def _write_image_prompt_shard_aggregate_report(
+    report_path: Path,
+    *,
+    status: str,
+    reviewed_entries: list[str],
+    blocked_entries: list[str],
+    findings: list[str],
+    reason_keys: list[str],
+    notes: list[str],
+) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_text = "\n".join(
+        [
+            "# Semantic Review Report: image_prompt",
+            "",
+            f"status: {status}",
+            "reviewed_entries:",
+            *[f"  - {entry}" for entry in reviewed_entries],
+            "blocked_entries:",
+            *[f"  - {entry}" for entry in blocked_entries],
+            "findings:",
+            *[f"  - {finding}" for finding in findings],
+            "failed_selectors:",
+            *[f"  - {entry}" for entry in blocked_entries],
+            "reason_keys:",
+            *[f"  - {key}" for key in reason_keys],
+            "notes:",
+            *[f"  - {note}" for note in notes],
+            "",
+        ]
+    )
+    report_path.write_text(report_text, encoding="utf-8")
+    legacy_report_path = report_path.parents[3] / IMAGE_PROMPT_JUDGMENT_REPORT
+    legacy_report_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_report_path.write_text(report_text, encoding="utf-8")
+
+
+def _image_prompt_shard_failure_result(
+    *,
+    shard: dict[str, Any],
+    status: str,
+    errors: list[str],
+    findings: list[str] | None = None,
+    reason_keys: list[str] | None = None,
+    transport_error_kind: str = "",
+    transport_error: str = "",
+) -> dict[str, Any]:
+    result = {
+        "shard_id": str(shard.get("shard_id") or ""),
+        "scene_id": str(shard.get("scene_id") or ""),
+        "entry_ids": list(shard.get("entry_ids") or []),
+        "status": status,
+        "errors": errors,
+        "blocked_entries": list(shard.get("entry_ids") or []),
+        "findings": list(findings or []),
+        "reason_keys": list(reason_keys or ["image_prompt_shard_failed"]),
+    }
+    if transport_error_kind:
+        result["transport_error_kind"] = transport_error_kind
+    if transport_error:
+        result["transport_error"] = transport_error
+    return result
+
+
+def _image_prompt_transport_failure_result(
+    *,
+    shard: dict[str, Any],
+    exc: BaseException,
+) -> dict[str, Any]:
+    transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
+    reason_keys = ["image_prompt_shard_transport_failed"]
+    if transport_kind == "timeout":
+        reason_keys.append("image_prompt_shard_transport_timeout")
+    message = f"{type(exc).__name__}: {exc}"
+    return _image_prompt_shard_failure_result(
+        shard=shard,
+        status="transport_failed",
+        errors=[f"app-server transport {transport_kind}: {message}"],
+        findings=[f"image_prompt scene shard transport failed before a terminal report: {message}"],
+        reason_keys=reason_keys,
+        transport_error_kind=transport_kind,
+        transport_error=message,
+    )
+
+
+def _semantic_report_list_values_with_duplicates(report_text: str, field: str) -> list[str]:
+    values: list[str] = []
+    lines = report_text.splitlines()
+    in_field = False
+    field_prefix = f"{field}:"
+    label_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_ -]*:\s*")
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            if in_field:
+                break
+            continue
+        if stripped.startswith(field_prefix):
+            in_field = True
+            inline = stripped.split(":", 1)[1].strip()
+            values.extend(_semantic_report_inline_values(inline))
+            if inline and inline not in {"[]", "[ ]"}:
+                in_field = False
+            continue
+        if not in_field:
+            continue
+        if label_re.match(stripped):
+            break
+        value = _semantic_report_scalar(stripped[1:].strip() if stripped.startswith("-") else stripped)
+        if value:
+            values.append(value)
+    return values
+
+
+def _image_prompt_reviewed_entry_coverage_errors(
+    expected_entry_ids: list[str],
+    reviewed_entry_ids: list[str],
+) -> list[str]:
+    expected = Counter(expected_entry_ids)
+    reviewed = Counter(reviewed_entry_ids)
+    errors: list[str] = []
+    missing = sorted((expected - reviewed).elements())
+    unexpected = sorted((reviewed - expected).elements())
+    duplicates = sorted(entry_id for entry_id, count in reviewed.items() if count > 1)
+    if missing:
+        errors.append(f"reviewed_entries missing selectors: {', '.join(missing)}")
+    if unexpected:
+        errors.append(f"reviewed_entries has unexpected selectors: {', '.join(unexpected)}")
+    if duplicates:
+        errors.append(f"reviewed_entries has duplicate selectors: {', '.join(duplicates)}")
+    return errors
+
+
+async def _run_image_prompt_sharded_semantic_review_once(
+    job_id: str,
+    *,
+    run_dir: Path,
+    attempt: int,
+    max_attempts: int,
+    final_attempt: bool,
+) -> SemanticReviewStatus:
+    stage = "image_prompt"
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "build-semantic-review-pack.py"),
+            "--run-dir",
+            str(run_dir),
+            "--stage",
+            stage,
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    relpaths = semantic_review_relpaths(stage)
+    collection_path = run_dir / relpaths["collection"]
+    scope_path = run_dir / relpaths["scope"]
+    report_path = run_dir / relpaths["report"]
+    shard_dir = run_dir / "logs" / "review" / "semantic" / "image_prompt_shards" / f"attempt_{attempt:02d}"
+    concurrency = _image_prompt_review_concurrency()
+    transport_retry_attempts = _image_prompt_transport_retry_attempts()
+    scope = _load_semantic_scope(scope_path)
+    collection_text = collection_path.read_text(encoding="utf-8", errors="replace") if collection_path.exists() else ""
+    sections = _semantic_collection_sections_by_entry(collection_text)
+    validation_errors = _validate_image_prompt_shard_scope(scope, sections)
+    entry_ids = _scope_string_list(scope, "entry_ids")
+    shards = _image_prompt_scope_shards(scope)
+    if validation_errors:
+        blocked_entries = entry_ids or ["image_prompt"]
+        _write_image_prompt_shard_aggregate_report(
+            report_path,
+            status="failed",
+            reviewed_entries=[],
+            blocked_entries=blocked_entries,
+            findings=validation_errors,
+            reason_keys=["semantic_review_selector_coverage_invalid"],
+            notes=["image_prompt per-scene shard review did not start"],
+        )
+        result = check_image_prompt_judgment(run_dir)
+        state_updates = review_status_to_state(stage, result)
+        state_updates.update(
+            {
+                "review.semantic.image_prompt.shards.status": "failed",
+                "review.semantic.image_prompt.shards.count": str(len(shards)),
+                "review.semantic.image_prompt.shards.concurrency": str(concurrency),
+                "review.semantic.image_prompt.shards.failed_count": str(max(1, len(shards))),
+                "review.semantic.image_prompt.shards.attempt": str(attempt),
+                "review.semantic.image_prompt.shards.dir": shard_dir.relative_to(run_dir).as_posix(),
+                "review.semantic.image_prompt.shards.coverage.status": "invalid",
+                "review.semantic.image_prompt.shards.coverage.errors": " | ".join(validation_errors)[:2000],
+                "review.semantic.image_prompt.shards.updated_at": now_iso(),
+            }
+        )
+        slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+        if slot:
+            state_updates[f"slot.{slot}.status"] = "failed" if final_attempt else "in_progress"
+            state_updates[f"slot.{slot}.note"] = "contextless image_prompt shard selector coverage is invalid"
+        append_state_snapshot(run_dir / "state.txt", state_updates)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="failed" if final_attempt else "changes_requested",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "mode": "per_scene_shards",
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "shardCount": len(shards),
+            },
+            response={
+                "status": result.status,
+                "entryCount": result.entry_count,
+                "coverageErrors": validation_errors,
+            },
+            error="; ".join(result.errors) if result.errors else None,
+        )
+        return result
+
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.semantic.image_prompt.shards.status": "reviewing",
+            "review.semantic.image_prompt.shards.count": str(len(shards)),
+            "review.semantic.image_prompt.shards.concurrency": str(concurrency),
+            "review.semantic.image_prompt.shards.attempt": str(attempt),
+            "review.semantic.image_prompt.shards.dir": shard_dir.relative_to(run_dir).as_posix(),
+            "review.semantic.image_prompt.shards.coverage.status": "valid",
+            "review.semantic.image_prompt.shards.updated_at": now_iso(),
+        },
+    )
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def run_shards(selected: list[dict[str, Any]], transport_attempt: int) -> list[dict[str, Any]]:
+        tasks = [
+            asyncio.create_task(
+                _run_image_prompt_scene_shard_review(
+                    job_id,
+                    run_dir=run_dir,
+                    shard_dir=shard_dir,
+                    shard=shard,
+                    shard_index=shards.index(shard) + 1,
+                    total_shards=len(shards),
+                    collection_sections=sections,
+                    canonical_scope_path=scope_path,
+                    canonical_report_path=report_path,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    final_attempt=final_attempt,
+                    semaphore=semaphore,
+                    transport_attempt=transport_attempt,
+                    transport_max_attempts=transport_retry_attempts,
+                )
+            )
+            for shard in selected
+        ]
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+        results: list[dict[str, Any]] = []
+        for shard, raw_result in zip(selected, raw_results):
+            if isinstance(raw_result, BaseException):
+                if is_codex_transport_error(raw_result):
+                    results.append(_image_prompt_transport_failure_result(shard=shard, exc=raw_result))
+                    continue
+                raise raw_result
+            results.append(raw_result)
+        return results
+
+    shard_results = await run_shards(shards, 1)
+    for transport_attempt in range(2, transport_retry_attempts + 1):
+        failed_ids = {
+            str(result_item.get("shard_id") or "")
+            for result_item in shard_results
+            if str(result_item.get("status") or "") == "transport_failed"
+        }
+        if not failed_ids:
+            break
+        retry_shards = [shard for shard in shards if str(shard.get("shard_id") or "") in failed_ids]
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.semantic.image_prompt.shards.transport.status": "retrying",
+                "review.semantic.image_prompt.shards.transport.attempt": str(transport_attempt),
+                "review.semantic.image_prompt.shards.transport.max_attempts": str(transport_retry_attempts),
+                "review.semantic.image_prompt.shards.transport.retry_entries": ", ".join(sorted(failed_ids)),
+                "review.semantic.image_prompt.shards.updated_at": now_iso(),
+            },
+        )
+        retry_results = await run_shards(retry_shards, transport_attempt)
+        replacement_by_id = {str(item.get("shard_id") or ""): item for item in retry_results}
+        shard_results = [replacement_by_id.get(str(item.get("shard_id") or ""), item) for item in shard_results]
+        for shard_id, replacement in replacement_by_id.items():
+            label = _safe_scene_detail_shard_label(shard_id)
+            status = "failed" if str(replacement.get("status") or "") == "transport_failed" else "recovered"
+            updates = {
+                f"review.semantic.image_prompt.shards.{label}.transport.status": status,
+                f"review.semantic.image_prompt.shards.{label}.transport.retry_count": str(transport_attempt - 1),
+            }
+            if status == "failed":
+                updates[f"review.semantic.image_prompt.shards.{label}.transport.error_kind"] = str(
+                    replacement.get("transport_error_kind") or "unknown"
+                )
+                updates[f"review.semantic.image_prompt.shards.{label}.transport.error"] = str(
+                    replacement.get("transport_error") or ""
+                )[:2000]
+            append_state_snapshot(run_dir / "state.txt", updates)
+
+    blocked_entries = _dedupe_preserve_order(
+        entry
+        for result_item in shard_results
+        if str(result_item.get("status") or "") != "passed"
+        for entry in (result_item.get("blocked_entries") or result_item.get("entry_ids") or [])
+    )
+    findings: list[str] = []
+    reason_keys: list[str] = []
+    for result_item in shard_results:
+        shard_label = _safe_scene_detail_shard_label(str(result_item.get("shard_id") or "unknown"))
+        shard_status = str(result_item.get("status") or "missing")
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.image_prompt.shards.{shard_label}.status": shard_status,
+                f"review.semantic.image_prompt.shards.{shard_label}.entry_ids": ", ".join(
+                    str(item) for item in result_item.get("entry_ids") or []
+                )[:2000],
+                f"review.semantic.image_prompt.shards.{shard_label}.blocked_entries": ", ".join(
+                    str(item) for item in result_item.get("blocked_entries") or []
+                )[:2000],
+                f"review.semantic.image_prompt.shards.{shard_label}.reason_keys": ", ".join(
+                    str(item) for item in result_item.get("reason_keys") or []
+                )[:2000],
+                f"review.semantic.image_prompt.shards.{shard_label}.updated_at": now_iso(),
+            },
+        )
+        if str(result_item.get("status") or "") == "passed":
+            continue
+        shard_id = str(result_item.get("shard_id") or "unknown")
+        findings.extend(f"{shard_id}: {error}" for error in result_item.get("errors") or [])
+        findings.extend(f"{shard_id}: {finding}" for finding in result_item.get("findings") or [])
+        reason_keys.extend(str(key) for key in result_item.get("reason_keys") or [])
+    if blocked_entries and not reason_keys:
+        reason_keys.append("image_prompt_shard_failed")
+    transport_failures = [
+        result_item
+        for result_item in shard_results
+        if str(result_item.get("status") or "") == "transport_failed"
+    ]
+    for result_item in transport_failures:
+        label = _safe_scene_detail_shard_label(str(result_item.get("shard_id") or "unknown"))
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.image_prompt.shards.{label}.transport.status": "failed",
+                f"review.semantic.image_prompt.shards.{label}.transport.error_kind": str(
+                    result_item.get("transport_error_kind") or "unknown"
+                ),
+                f"review.semantic.image_prompt.shards.{label}.transport.error": str(
+                    result_item.get("transport_error") or ""
+                )[:2000],
+            },
+        )
+
+    notes = [
+        f"image_prompt reviewed as {len(shard_results)} per-scene shard(s)",
+        f"exact selector coverage: {len(entry_ids)} of {len(entry_ids)} canonical entries scheduled",
+        f"bounded concurrency: {concurrency}",
+        f"transport retry attempts: {transport_retry_attempts}",
+    ]
+    _write_image_prompt_shard_aggregate_report(
+        report_path,
+        status="failed" if blocked_entries else "passed",
+        reviewed_entries=entry_ids,
+        blocked_entries=blocked_entries,
+        findings=findings,
+        reason_keys=sorted(set(reason_keys)),
+        notes=notes,
+    )
+    result = check_image_prompt_judgment(run_dir)
+    state_updates = review_status_to_state(stage, result)
+    state_updates.update(
+        {
+            "review.semantic.image_prompt.shards.status": "passed" if result.passed else "failed",
+            "review.semantic.image_prompt.shards.failed_count": str(
+                sum(1 for item in shard_results if str(item.get("status") or "") != "passed")
+            ),
+            "review.semantic.image_prompt.shards.coverage.status": "valid" if not blocked_entries else "failed",
+            "review.semantic.image_prompt.shards.updated_at": now_iso(),
+        }
+    )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        if result.passed:
+            state_updates[f"slot.{slot}.status"] = "done"
+            state_updates[f"slot.{slot}.note"] = "contextless semantic image_prompt per-scene shard review passed"
+            state_updates["review.semantic.image_prompt.transport.status"] = "passed"
+            state_updates["review.semantic.image_prompt.repair.active"] = "false"
+        elif final_attempt:
+            state_updates[f"slot.{slot}.status"] = "failed"
+            state_updates[f"slot.{slot}.note"] = "contextless semantic image_prompt per-scene shard review failed"
+        else:
+            state_updates[f"slot.{slot}.status"] = "in_progress"
+            state_updates[f"slot.{slot}.note"] = "contextless semantic image_prompt shard review requested producer repair"
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="semantic_review",
+        status="completed" if result.passed else ("failed" if final_attempt else "changes_requested"),
+        item_id=job_id,
+        request={
+            "stage": stage,
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "mode": "per_scene_shards",
+            "concurrency": concurrency,
+            "transportRetryAttempts": transport_retry_attempts,
+            "shardCount": len(shards),
+            "entryCount": len(entry_ids),
+            "report": str(report_path.relative_to(run_dir)),
+        },
+        response={
+            "status": result.status,
+            "entryCount": result.entry_count,
+            "failedShardCount": sum(
+                1 for item in shard_results if str(item.get("status") or "") != "passed"
+            ),
+            "blockedEntries": blocked_entries,
+            "transportFailedShardCount": len(transport_failures),
+        },
+        error="; ".join(result.errors) if result.errors else None,
+    )
+    if transport_failures:
+        failed_shards = ", ".join(str(item.get("shard_id") or "unknown") for item in transport_failures)
+        raise CodexAppServerTransportError(
+            f"image_prompt scene shard transport failed after {transport_retry_attempts} attempt(s): {failed_shards}"
+        )
+    return result
+
+
+def _write_image_prompt_scene_shard_artifacts(
+    *,
+    run_dir: Path,
+    shard: dict[str, Any],
+    shard_index: int,
+    total_shards: int,
+    collection_sections: dict[str, str],
+    collection_path: Path,
+    scope_path: Path,
+    prompt_path: Path,
+    report_path: Path,
+    canonical_scope_path: Path,
+    canonical_report_path: Path,
+) -> None:
+    shard_id = str(shard.get("shard_id") or "")
+    scene_id = str(shard.get("scene_id") or "")
+    entry_ids = [str(item) for item in shard.get("entry_ids") or []]
+    collection_path.parent.mkdir(parents=True, exist_ok=True)
+    sections = [collection_sections[entry_id].strip() for entry_id in entry_ids]
+    collection_path.write_text(
+        "\n".join(
+            [
+                "# Semantic Review Collection: image_prompt scene shard",
+                "",
+                f"Shard: `{shard_id}`",
+                f"Scene: `{scene_id}`",
+                f"Shard index: `{shard_index}` of `{total_shards}`",
+                f"Entry count: `{len(entry_ids)}`",
+                "",
+                *sections,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_artifacts = _semantic_scope_source_artifacts(canonical_scope_path)
+    scope_payload = {
+        "stage": "image_prompt",
+        "run_dir": str(run_dir.resolve()),
+        "entry_count": len(entry_ids),
+        "entry_ids": entry_ids,
+        "review_scope": "single_scene_image_prompt_shard",
+        "shard_id": shard_id,
+        "scene_id": scene_id,
+        "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
+        "canonical_report": str(canonical_report_path.relative_to(run_dir)),
+        "source_artifacts": source_artifacts,
+        "artifacts": {
+            "collection": str(collection_path.relative_to(run_dir)),
+            "scope": str(scope_path.relative_to(run_dir)),
+            "prompt": str(prompt_path.relative_to(run_dir)),
+            "report": str(report_path.relative_to(run_dir)),
+        },
+        "generated_at": now_iso(),
+    }
+    scope_path.write_text(json.dumps(scope_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    source_lines = [f"- `{(run_dir / rel).resolve()}`" for rel in source_artifacts]
+    prompt_path.write_text(
+        "\n".join(
+            [
+                "You are a contextless semantic review agent for one ToC `image_prompt` scene shard.",
+                "",
+                "Do semantic judgment only. Do not edit source artifacts and do not repair outputs.",
+                f"Review only image_prompt scene shard `{shard_id}`.",
+                "Expected reviewed_entries exactly once: " + json.dumps(entry_ids, ensure_ascii=False),
+                "Do not report selectors from any other scene.",
+                "",
+                "Read these artifacts in order:",
+                f"1. `{scope_path}`",
+                f"2. `{collection_path}`",
+                f"3. `{report_path}`",
+                "",
+                "Use these source artifacts as cross-check context when present:",
+                *(source_lines or ["- `(none discovered)`"]),
+                "",
+                f"Write the final report to `{report_path}` and replace the pending template.",
+                "",
+                "Review every cut entry and the scene_composite entry together as one scene-local gate.",
+                "Judge api_prompt_payload.prompt only as the provider prompt; design/debug fields are review evidence and must not be required verbatim in the provider prompt.",
+                "Require only drawable information needed by each cut, correct subject/reference/location dependencies, one first-frame moment, reveal and temporal boundaries, and meaningful visual differences across cuts.",
+                "Fail if internal field names or motion-only instructions leak into the provider prompt, required drawable evidence is absent, references are semantically wrong, or the cuts fail to visualize the scene obligations.",
+                "Do not require every optional prompt fragment in every cut. Omitted conditional fragments are correct when their drawable dependency is absent.",
+                "Do not fail solely because generated image/video/audio files do not exist yet.",
+                "",
+                "Report format:",
+                "status: passed|failed",
+                "reviewed_entries: [...]",
+                "blocked_entries: [...]",
+                "findings: [...]",
+                "failed_selectors: [...]",
+                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|cut_prompt_requires_reinforcement|api_prompt_internal_field_leak|api_prompt_drawable_dependency_missing|...]",
+                "notes: [...]",
+                "",
+                f"Run dir: `{run_dir.resolve()}`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        "\n".join(
+            [
+                "# Semantic Review Report: image_prompt scene shard",
+                "",
+                "status: pending",
+                "reviewed_entries: []",
+                "blocked_entries: []",
+                "findings: []",
+                "failed_selectors: []",
+                "reason_keys: []",
+                "notes: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _touch_image_prompt_canonical_progress(
+    canonical_report_path: Path,
+    *,
+    message: str,
+) -> None:
+    canonical_report_path.parent.mkdir(parents=True, exist_ok=True)
+    with _scene_detail_canonical_progress_lock:
+        canonical_report_path.write_text(
+            "\n".join(
+                [
+                    "# Semantic Review Report: image_prompt",
+                    "",
+                    "status: pending",
+                    "reviewed_entries: []",
+                    "blocked_entries: []",
+                    "findings: []",
+                    "failed_selectors: []",
+                    "reason_keys: []",
+                    f"notes: [{json.dumps(message, ensure_ascii=False)}]",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+
+def _write_image_prompt_shard_activity(
+    *,
+    report_path: Path,
+    canonical_report_path: Path,
+    notification: dict[str, Any],
+) -> None:
+    _write_semantic_turn_activity_marker(report_path, notification)
+    with _scene_detail_canonical_progress_lock:
+        _write_semantic_turn_activity_marker(canonical_report_path, notification)
+
+
+async def _run_image_prompt_scene_shard_review(
+    job_id: str,
+    *,
+    run_dir: Path,
+    shard_dir: Path,
+    shard: dict[str, Any],
+    shard_index: int,
+    total_shards: int,
+    collection_sections: dict[str, str],
+    canonical_scope_path: Path,
+    canonical_report_path: Path,
+    attempt: int,
+    max_attempts: int,
+    final_attempt: bool,
+    semaphore: asyncio.Semaphore,
+    transport_attempt: int,
+    transport_max_attempts: int,
+) -> dict[str, Any]:
+    async with semaphore:
+        shard_id = str(shard.get("shard_id") or "")
+        entry_ids = [str(item) for item in shard.get("entry_ids") or []]
+        shard_label = _safe_scene_detail_shard_label(shard_id)
+        base = shard_dir / f"{shard_index:03d}_{shard_label}"
+        collection_path = base.with_suffix(".collection.md")
+        scope_path = base.with_suffix(".scope.json")
+        prompt_path = base.with_suffix(".prompt.md")
+        report_path = base.with_suffix(".report.md")
+        _write_image_prompt_scene_shard_artifacts(
+            run_dir=run_dir,
+            shard=shard,
+            shard_index=shard_index,
+            total_shards=total_shards,
+            collection_sections=collection_sections,
+            collection_path=collection_path,
+            scope_path=scope_path,
+            prompt_path=prompt_path,
+            report_path=report_path,
+            canonical_scope_path=canonical_scope_path,
+            canonical_report_path=canonical_report_path,
+        )
+        _touch_image_prompt_canonical_progress(
+            canonical_report_path,
+            message=f"image_prompt shard {shard_index}/{total_shards} started: {shard_id}",
+        )
+        client = create_codex_app_server_client(cwd=ROOT)
+        transcript: list[dict[str, Any]] = []
+        try:
+            thread_id = await asyncio.wait_for(
+                client.start_thread(cwd=ROOT, approval_policy="never"),
+                timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
+            )
+            prompt = _semantic_review_prompt_for_attempt(
+                prompt_path.read_text(encoding="utf-8"),
+                stage="image_prompt",
+                final_attempt=final_attempt,
+            )
+            prompt_path.write_text(prompt.rstrip() + "\n", encoding="utf-8")
+            transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
+                client,
+                thread_id=thread_id,
+                text=prompt,
+                cwd=ROOT,
+                timeout_seconds=semantic_review_timeout_seconds(),
+                report_path=report_path,
+                is_completed=_semantic_review_report_completed,
+                progress_callback=lambda notification: _write_image_prompt_shard_activity(
+                    report_path=report_path,
+                    canonical_report_path=canonical_report_path,
+                    notification=notification,
+                ),
+            )
+            if completed_from_report:
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_review",
+                    status="completed_after_report_before_turn_completed",
+                    item_id=job_id,
+                    request={
+                        "stage": "image_prompt",
+                        "mode": "per_scene_shard",
+                        "shardId": shard_id,
+                        "entryIds": entry_ids,
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "transportAttempt": transport_attempt,
+                        "transportMaxAttempts": transport_max_attempts,
+                    },
+                    response={"note": "scene shard report reached terminal status before turn/completed"},
+                    transcript=transcript,
+                )
+        except Exception as exc:
+            if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
+                transcript = getattr(exc, "transcript", transcript)
+            elif is_codex_transport_error(exc):
+                failure = _image_prompt_transport_failure_result(shard=shard, exc=exc)
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_review",
+                    status="app_server_failed",
+                    item_id=job_id,
+                    request={
+                        "stage": "image_prompt",
+                        "mode": "per_scene_shard",
+                        "shardId": shard_id,
+                        "entryIds": entry_ids,
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "transportAttempt": transport_attempt,
+                        "transportMaxAttempts": transport_max_attempts,
+                    },
+                    response={
+                        "transportErrorKind": failure.get("transport_error_kind"),
+                        "failureContext": _codex_failure_context(exc, client=client),
+                    },
+                    transcript=getattr(exc, "transcript", [])
+                    if isinstance(getattr(exc, "transcript", None), list)
+                    else [],
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return failure
+            else:
+                raise
+        finally:
+            await client.stop()
+
+        report_text = report_path.read_text(encoding="utf-8", errors="replace") if report_path.exists() else ""
+        reported_status = parse_judgment_report_status(report_text) if report_text else ""
+        reviewed_entries = _semantic_report_list_values_with_duplicates(report_text, "reviewed_entries")
+        coverage_errors = _image_prompt_reviewed_entry_coverage_errors(entry_ids, reviewed_entries)
+        reported_blocked_entries = _semantic_report_list_values(report_text, "blocked_entries")
+        reported_failed_selectors = _semantic_report_list_values(report_text, "failed_selectors")
+        findings = _semantic_report_list_values(report_text, "findings")
+        reason_keys = _semantic_report_list_values(report_text, "reason_keys")
+        errors: list[str] = []
+        if reported_status != "passed":
+            errors.append(f"shard report status must be passed, got {reported_status or '(missing)'}")
+        if reported_blocked_entries:
+            errors.append(
+                "passed shard report must have empty blocked_entries: "
+                + ", ".join(reported_blocked_entries)
+            )
+        if reported_failed_selectors:
+            errors.append(
+                "passed shard report must have empty failed_selectors: "
+                + ", ".join(reported_failed_selectors)
+            )
+        errors.extend(coverage_errors)
+        if coverage_errors:
+            reason_keys.append("semantic_review_selector_coverage_invalid")
+            findings.extend(coverage_errors)
+        if reported_blocked_entries or reported_failed_selectors:
+            reason_keys.append("image_prompt_shard_report_inconsistent")
+        if errors and not reason_keys:
+            reason_keys.append("image_prompt_shard_failed")
+        status = "passed" if not errors else "failed"
+        if status == "passed":
+            result: dict[str, Any] = {
+                "shard_id": shard_id,
+                "scene_id": str(shard.get("scene_id") or ""),
+                "entry_ids": entry_ids,
+                "status": "passed",
+                "errors": [],
+                "blocked_entries": [],
+                "findings": [],
+                "reason_keys": [],
+            }
+        else:
+            result = _image_prompt_shard_failure_result(
+                shard=shard,
+                status="failed",
+                errors=errors,
+                findings=findings,
+                reason_keys=_dedupe_preserve_order(reason_keys),
+            )
+        _touch_image_prompt_canonical_progress(
+            canonical_report_path,
+            message=f"image_prompt shard {shard_index}/{total_shards} completed: {shard_id} -> {status}",
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="completed" if status == "passed" else "changes_requested",
+            item_id=job_id,
+            request={
+                "stage": "image_prompt",
+                "mode": "per_scene_shard",
+                "shardId": shard_id,
+                "entryIds": entry_ids,
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "transportAttempt": transport_attempt,
+                "transportMaxAttempts": transport_max_attempts,
+                "prompt": str(prompt_path.relative_to(run_dir)),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            response={
+                "status": status,
+                "reportedStatus": reported_status,
+                "expectedEntryCount": len(entry_ids),
+                "reviewedEntryCount": len(reviewed_entries),
+                "coverageErrors": coverage_errors,
+                "reportedBlockedEntries": reported_blocked_entries,
+                "reportedFailedSelectors": reported_failed_selectors,
+                "blockedEntries": result["blocked_entries"],
+                "reasonKeys": result["reason_keys"],
+            },
+            transcript=transcript if isinstance(transcript, list) else [],
+            error="; ".join(errors) if errors else None,
+        )
+        return result
 
 
 async def _run_scene_detail_sharded_semantic_review_once(
@@ -7397,6 +8661,10 @@ async def _run_create_job(
     run_dir_for_log = safe_run_dir(run_id, ROOT)
     job_started = time.monotonic()
     try:
+        async with _run_execution_leases_guard:
+            lease_already_reserved = job_id in _run_execution_leases
+        if not lease_already_reserved:
+            await _acquire_run_execution_lease(job_id, run_dir_for_log)
         write_app_server_debug_log(
             run_dir=run_dir_for_log,
             operation="create_job_step",
@@ -7530,6 +8798,8 @@ async def _run_create_job(
                 "message": "作成失敗",
             },
         )
+    finally:
+        await _release_run_execution_lease(job_id)
 
 
 @router.get("/image_gen", response_class=HTMLResponse)
@@ -7587,6 +8857,12 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    try:
+        await _acquire_run_execution_lease(job_id, _run_dir)
+    except FileLockUnavailable as exc:
+        async with _create_jobs_lock:
+            _create_jobs.pop(job_id, None)
+        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
     process_store_result = await asyncio.to_thread(
         _create_process_record_best_effort,
         job=job,
@@ -7667,6 +8943,12 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    try:
+        await _acquire_run_execution_lease(job_id, _run_dir)
+    except FileLockUnavailable as exc:
+        async with _create_jobs_lock:
+            _create_jobs.pop(job_id, None)
+        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
     process_store_result = await asyncio.to_thread(
         _create_process_record_best_effort,
         job=job,
@@ -7771,6 +9053,10 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
     source = record.source if record and record.source else title
     create_mode = record.create_mode if record else CREATE_MODE_NORMAL
     job_id = uuid.uuid4().hex
+    try:
+        await _acquire_run_execution_lease(job_id, run_dir)
+    except FileLockUnavailable as exc:
+        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
     job = {
         "jobId": job_id,
         "runId": run_id,
@@ -7799,16 +9085,17 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
     )
     if process_store_result:
         job["processStore"] = process_store_result
-    deleted_images: dict[str, Any] | None = None
+    resume_images: dict[str, Any] | None = None
     if req.stop_target == "p680" and current_process_number >= 650:
-        deleted_images = await asyncio.to_thread(_delete_existing_images_for_image_resume, run_dir)
+        resume_images = await asyncio.to_thread(_delete_existing_images_for_image_resume, run_dir)
         await _set_create_job(
             job_id,
             {
-                "message": f"{current_process}から{req.stop_target}へ再開中: 既存画像を削除しました",
+                "message": f"{current_process}から{req.stop_target}へ再開中: 既存画像を照合して差分だけ再生成します",
                 "metadata": {
                     "resumeFromProcessNumber": current_process_number,
-                    "deletedImagesCount": deleted_images.get("deletedCount", 0),
+                    "preservedImagesCount": resume_images.get("preservedCount", 0),
+                    "resumePolicy": "hash_aware_partial",
                 },
             },
         )
@@ -7822,7 +9109,8 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             "fromProcess": current_process,
             "fromProcessNumber": current_process_number,
             "stopTarget": req.stop_target,
-            "deletedImages": deleted_images,
+            "resumeImages": resume_images,
+            "resumePolicy": "hash_aware_partial",
             "processStore": process_store_result,
         },
         response={"path": f"output/{run_id}"},
@@ -7986,29 +9274,40 @@ async def api_insert_cut(req: InsertCutRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            manifest_path = run_dir / "video_manifest.md"
-            request_path = run_dir / "image_generation_requests.md"
-            manifest_before = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else None
-            request_before = request_path.read_text(encoding="utf-8") if request_path.exists() else None
-            try:
-                result = _insert_cut_in_manifest(run_dir, req)
-                await _materialize_scene_requests(req.run_id)
-                append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        "review.frontend.cut_insert.status": "done",
-                        "review.frontend.cut_insert.selector": result["selector"],
-                        "review.frontend.cut_insert.name": req.cut_name.strip(),
-                        "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
-                        "artifact.image_generation_requests": str((run_dir / "image_generation_requests.md").resolve()),
-                    },
+            async with _serialized_run_write(run_dir, "scene_request_revision"):
+                rollback_paths = (
+                    run_dir / "video_manifest.md",
+                    run_dir / "image_generation_requests.md",
+                    run_dir / "image_generation_request_snapshot.json",
                 )
-            except (FileNotFoundError, RuntimeError, ValueError):
-                if manifest_before is not None:
-                    manifest_path.write_text(manifest_before, encoding="utf-8")
-                if request_before is not None:
-                    request_path.write_text(request_before, encoding="utf-8")
-                raise
+                before = {
+                    path: path.read_bytes() if path.is_file() else None
+                    for path in rollback_paths
+                }
+                try:
+                    result = _insert_cut_in_manifest(run_dir, req)
+                    await _materialize_scene_requests(req.run_id)
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.frontend.cut_insert.status": "done",
+                            "review.frontend.cut_insert.selector": result["selector"],
+                            "review.frontend.cut_insert.name": req.cut_name.strip(),
+                            "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+                            "artifact.image_generation_requests": str((run_dir / "image_generation_requests.md").resolve()),
+                            "artifact.image_generation_request_snapshot": str(
+                                (run_dir / "image_generation_request_snapshot.json").resolve()
+                            ),
+                        },
+                    )
+                except (FileNotFoundError, RuntimeError, ValueError):
+                    for path, original_bytes in before.items():
+                        if original_bytes is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_bytes(original_bytes)
+                    raise
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     item = next((item for item in load_request_items(run_dir, "scene") if item.id == result["selector"]), None)
@@ -8332,7 +9631,7 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
     if not req.prompt.strip():
         detail = (
             "api_prompt_missing_for_new_prompt_policy"
-            if req.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION
+            if str(req.prompt_policy_version or "").startswith(IMAGE_API_PROMPT_POLICY_PREFIX)
             else "prompt is required"
         )
         raise HTTPException(status_code=400, detail=detail)
@@ -8352,6 +9651,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             raise HTTPException(status_code=404, detail=f"reference not found: {ref}")
         require_image_file(reference)
         references.append(reference)
+    prompt_sha256 = hashlib.sha256(req.prompt.encode("utf-8")).hexdigest()
+    reference_sha256s = [_file_sha256(reference) for reference in references]
     if app_server_disabled():
         raise HTTPException(status_code=503, detail="Codex app-server is disabled")
     write_app_server_debug_log(
@@ -8373,7 +9674,7 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "allowGeneratedImagesFallback": allow_generated_images_fallback,
         },
     )
-    async with _generation_semaphore:
+    async with _generation_semaphore, _global_image_generation_slot(provenance_policy):
         client = create_codex_app_server_client(cwd=ROOT)
         result = None
         debug_log = None
@@ -8399,18 +9700,18 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                 and not bool(getattr(result, "provenance_authoritative", False))
             ):
                 raise RuntimeError(f"Codex app-server did not return authoritative request-bound provenance for {req.item_id}")
-            debug_log = write_app_server_image_debug_log(
-                run_dir=run_dir,
-                item_id=req.item_id,
-                index=index,
-                destination=destination,
-                references=references,
-                prompt=req.prompt,
-                kind=req.kind,
-                prompt_policy_version=req.prompt_policy_version,
-                debug_prompt_source=req.debug_prompt_source,
-                result=result,
-            )
+            if (
+                result.saved_path is not None
+                and provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2
+            ):
+                _validate_request_bound_image_result(
+                    result,
+                    generation_job_id=generation_job_id,
+                    item_id=req.item_id,
+                    destination=destination,
+                    prompt_sha256=prompt_sha256,
+                    reference_sha256s=reference_sha256s,
+                )
         except Exception as exc:
             debug_log = write_app_server_image_debug_log(
                 run_dir=run_dir,
@@ -8445,6 +9746,20 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
     debug_log_path = debug_log.relative_to(run_dir).as_posix() if debug_log else None
     result_source = getattr(result, "source", "app_server")
     if result.saved_path is None:
+        debug_log = write_app_server_image_debug_log(
+            run_dir=run_dir,
+            item_id=req.item_id,
+            index=index,
+            destination=destination,
+            references=references,
+            prompt=req.prompt,
+            kind=req.kind,
+            prompt_policy_version=req.prompt_policy_version,
+            debug_prompt_source=req.debug_prompt_source,
+            result=result,
+            error="Codex app-server did not return imageGeneration.savedPath",
+        )
+        debug_log_path = debug_log.relative_to(run_dir).as_posix()
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="candidate_generation",
@@ -8471,7 +9786,54 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "generationJobId": generation_job_id,
             "provenancePolicy": provenance_policy,
         }
-    copy_saved_image(result.saved_path, destination)
+    try:
+        copy_saved_image(result.saved_path, destination)
+        debug_log = write_app_server_image_debug_log(
+            run_dir=run_dir,
+            item_id=req.item_id,
+            index=index,
+            destination=destination,
+            references=references,
+            prompt=req.prompt,
+            kind=req.kind,
+            prompt_policy_version=req.prompt_policy_version,
+            debug_prompt_source=req.debug_prompt_source,
+            result=result,
+        )
+        debug_log_path = debug_log.relative_to(run_dir).as_posix()
+    except Exception as exc:
+        debug_log = write_app_server_image_debug_log(
+            run_dir=run_dir,
+            item_id=req.item_id,
+            index=index,
+            destination=destination,
+            references=references,
+            prompt=req.prompt,
+            kind=req.kind,
+            prompt_policy_version=req.prompt_policy_version,
+            debug_prompt_source=req.debug_prompt_source,
+            result=result,
+            error=str(exc),
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="candidate_generation",
+            status="failed",
+            item_id=req.item_id,
+            request={
+                "kind": req.kind,
+                "candidateIndex": index,
+                "destination": destination.relative_to(run_dir).as_posix(),
+            },
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                "debugLog": debug_log.relative_to(run_dir).as_posix(),
+                "generationJobId": generation_job_id,
+                "provenancePolicy": provenance_policy,
+            },
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     write_app_server_debug_log(
         run_dir=run_dir,
         operation="candidate_generation",
@@ -8602,7 +9964,8 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
         raise HTTPException(status_code=500, detail={"status": "failed", "failures": failures})
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            update_result = update_request_prompts(run_dir, kind, prompts)
+            async with _serialized_run_write(run_dir, f"{kind}_request_revision"):
+                update_result = update_request_prompts(run_dir, kind, prompts)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if update_result["missing"]:

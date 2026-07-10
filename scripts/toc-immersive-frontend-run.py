@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot
 from toc.cut_context_packet import materialize_cut_context_packet
+from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.cut_design_logging import (
     SCENE_GENERATION_PROMPTS_FILENAME,
     write_cut_design_context as _write_cut_design_context,
@@ -665,80 +666,6 @@ def _prompt_for_asset(entry: dict[str, Any], profile: dict[str, Any]) -> str:
     )
 
 
-def _scene_prompt(
-    title: str,
-    beat: str,
-    target_beat: str,
-    location_name: str,
-    profile: dict[str, Any],
-    *,
-    include_artifact: bool,
-    scene_index: int,
-    terminal_resolution: bool = False,
-) -> str:
-    active_motifs = [motif for motif in profile["motifs"] if include_artifact or motif != "ガラス"]
-    if terminal_resolution and _profile_is_cinderella(profile):
-        active_motifs = ["落ち着いた室内光", "椅子と床", "ガラス", "布"]
-    motifs = "、".join(active_motifs)
-    artifact_role = _artifact_scene_role(profile, scene_index)
-    artifact_lines = [
-        "[小道具 / 舞台装置]",
-        f"{profile['artifact_name']}。このsceneでは「{artifact_role}」。実物の重量感と読みやすいシルエットを持つ。",
-        "",
-    ] if include_artifact else []
-    if terminal_resolution:
-        scene_detail = (
-            f"{title}。場所は{location_name}。{target_beat}。{beat} "
-            f"中景に{profile['protagonist_name']}、前景か手元に{profile['artifact_name']}、"
-            f"背景の光と部屋の奥行きは出口ではなく{profile['protagonist_name']}と{profile['artifact_name']}へ収束する。"
-        )
-    elif include_artifact:
-        scene_detail = (
-            f"{title}。場所は{location_name}。{target_beat}。{beat} "
-            f"中景に{profile['protagonist_name']}、{profile['artifact_name']}は「{artifact_role}」としてだけ扱い、"
-            "背景にはこのscene固有の行動と次へ進む導線を置く。"
-        )
-    else:
-        scene_detail = (
-            f"{title}。場所は{location_name}。{target_beat}。{beat} "
-            f"中景に{profile['protagonist_name']}、背景に場所の質感と次の場所へ続く導線。証の小道具はまだ画面に出さない。"
-        )
-    continuity = (
-        f"{profile['topic_label']}の始まりから試練、証明へつながる。人物と{profile['artifact_name']}の形状を変えない。"
-        if include_artifact
-        else f"{profile['topic_label']}の始まりから試練、証明へつながる。人物の顔、髪、体格、衣装の主要形状を変えない。"
-    )
-    character_state_gate = ""
-    if _profile_is_cinderella(profile):
-        if scene_index == 7:
-            character_state_gate = (
-                "このsceneの前半6cutまでは舞踏会ドレス姿の逃走状態を維持する。"
-                "質素な服、普段着、魔法が解けた後の服を出さない。"
-                "後半の反応cut以降だけ、魔法が解けた後の質素な服へ変わる。"
-            )
-        elif terminal_resolution:
-            character_state_gate = "靴合わせの部屋では魔法が解けた後の質素な服。舞踏会ドレス、夜の階段、月光の逃走状態に戻さない。"
-    character_state_lines = ["", "[人物状態ゲート]", character_state_gate] if character_state_gate else []
-    return "\n".join(
-        [
-            "[全体 / 不変条件]",
-            f"実写、シネマティック、35mm映画、自然な肌、{motifs}の高密度な質感。画面内テキストなし、字幕なし、ロゴなし、ウォーターマークなし。",
-            "",
-            "[登場人物]",
-            f"{profile['protagonist_name']}は参照画像と同じ人物。顔立ち、髪、体格、衣装の主要形状を保つ。",
-            *character_state_lines,
-            "",
-            *artifact_lines,
-            "[シーン]",
-            scene_detail,
-            "",
-            "[連続性]",
-            continuity,
-            "",
-            "[禁止]",
-            "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト、人体崩れ。",
-        ]
-    )
 
 
 def _is_cinderella_fitted_slipper_proof(profile: dict[str, Any], object_ids: list[str], *texts: Any) -> bool:
@@ -1330,6 +1257,172 @@ def _cut_film_grammar_contract_for_scaffold(
 
 def _image_api_prompt_payload_for_scaffold(
     *,
+    first_frame_visual_plan: dict[str, Any],
+    character_ids: list[str],
+    object_ids: list[str],
+    location_ids: list[str],
+    references: list[str],
+    review_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compile only drawable first-frame information into the provider payload."""
+
+    return compile_image_api_prompt_v2(
+        first_frame_visual_plan=first_frame_visual_plan,
+        character_ids=character_ids,
+        object_ids=object_ids,
+        location_ids=location_ids,
+        reference_images=references,
+        review_metadata=review_metadata,
+    )
+
+
+def _scaffold_shot_design(
+    *,
+    cut_number: int,
+    cut_blueprint: dict[str, Any],
+    cut_uses_artifact: bool,
+    object_ids: list[str],
+) -> dict[str, Any]:
+    cut_function = str(cut_blueprint.get("cut_function") or "")
+    if cut_uses_artifact:
+        if cut_number % 3 == 0:
+            shot_role, shot_scale = "insert", "extreme_closeup"
+        elif cut_number % 2 == 0:
+            shot_role, shot_scale = "object_proof", "medium_closeup"
+        else:
+            shot_role, shot_scale = "object_proof", "closeup"
+    elif cut_number == 1:
+        shot_role, shot_scale = "establishing", "medium_wide"
+    elif cut_function in {"reaction", "payoff"}:
+        shot_role, shot_scale = "reaction", "medium_closeup"
+    elif cut_number % 4 == 0:
+        shot_role, shot_scale = "handoff", "medium_wide"
+    elif cut_number % 3 == 0:
+        shot_role, shot_scale = "insert", "closeup"
+    else:
+        shot_role, shot_scale = "character_action", "medium"
+    return {
+        "shot_role": shot_role,
+        "shot_scale": shot_scale,
+        "a_roll_or_b_roll": "b_roll" if shot_role == "object_proof" else "a_roll",
+        "should_show_face": shot_role != "object_proof",
+        "should_show_hands": bool(object_ids) or shot_role not in {"establishing", "handoff"},
+        "should_show_object_detail": bool(object_ids),
+    }
+
+
+def _scaffold_location_light(location_spec: dict[str, Any], location_name: str) -> str:
+    visual_spec = location_spec.get("visual_spec")
+    subject = str(visual_spec.get("subject") or "") if isinstance(visual_spec, dict) else ""
+    for phrase in (
+        "シャンデリア光",
+        "濃い青の月明かり",
+        "月明かり",
+        "月光",
+        "舞踏会の光",
+        "遮られた光",
+        "低い自然光",
+        "落ち着いた光",
+    ):
+        if phrase in subject:
+            return f"{location_name}を照らす{phrase}"
+    return f"{location_name}の奥から前景へ差す、場所の形が読める光"
+
+
+def _drawable_phrase_for_scaffold(value: Any) -> str:
+    """Translate sequencing shorthand into an absolute, drawable current state."""
+
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    current_quoted = re.search(r"このcutでは[「\"](?P<state>[^」\"]+)[」\"]", text)
+    if current_quoted:
+        text = current_quoted.group("state")
+    text = re.sub(
+        r"(?:前|次|後続)(?:の)?(?:cut|scene)[^、。]*[、。]?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.replace("このcut", "現在の画面").replace("この cut", "現在の画面")
+    text = text.replace("scene固有", "場面固有").replace("scene内", "場面内").replace("sceneの", "場面の")
+    text = re.sub(r"物語イベントの証拠\s*[:：]\s*", "", text)
+    for internal_term, drawable_term in {
+        "場面の核": "主被写体",
+        "観客理解": "画面で見える情報",
+        "因果の証明": "画面内の物理的な証拠",
+        "価値変化": "表情と姿勢の変化",
+        "場所の圧力": "狭さと障害物",
+        "場のルール": "人物を囲む配置",
+        "主人公の制限": "動きを止める身体配置",
+    }.items():
+        text = text.replace(internal_term, drawable_term)
+    text = text.replace("物証として始まる", "光に照らされて見える")
+    text = text.replace("が動けない理由を示す", "に緊張が残り、身体が出口へ向けずにいる")
+    text = text.replace("状態差が", "手元と周囲の明暗差が")
+    text = text.replace("を固定する", "が明確に見える")
+    text = text.replace(
+        "姿勢が次の方向を示している",
+        "姿勢と身体軸が画面奥の出口へ向いている",
+    )
+    text = text.replace("次へ進む導線", "画面奥の出口方向")
+    text = text.replace("次へ続く導線", "画面奥へ続く通路")
+    text = text.replace(
+        "足先と重心が次の動きに向き",
+        "足先と重心が画面内の出口方向へ向き",
+    )
+    text = text.replace("次の導線", "画面奥の導線").replace("次の方向", "身体が向く方向")
+    text = text.replace("次の動き", "身体が向く画面内の方向")
+    text = text.replace("次の場面", "画面外の後続場面")
+    text = text.replace("画面奥または横方向に画面奥の導線", "画面奥または横方向の導線")
+    if re.search(r"(?:scene|場面)開始(?:の)?状態(?:を)?提示", text, flags=re.IGNORECASE):
+        return ""
+    text = re.sub(r"\bscene\d+[_-](?:cut|event)[A-Za-z0-9_.-]*\b", "", text, flags=re.IGNORECASE)
+    if "を受け、" in text:
+        text = text.split("を受け、", 1)[1]
+    if re.search(r"(?:scene|場面)?理解に必要な手がかり", text, flags=re.IGNORECASE):
+        return ""
+    return re.sub(r"\s+", " ", text).strip(" 、。:：/")
+
+
+def _cut_specific_drawable_evidence_for_scaffold(
+    viewer_contract: dict[str, Any],
+) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for field_name in ("must_show", "visual_evidence"):
+        raw_values = viewer_contract.get(field_name)
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        for raw_value in values:
+            if isinstance(raw_value, dict):
+                raw_value = (
+                    raw_value.get("must_be_drawn_as")
+                    or raw_value.get("visible_substitute")
+                    or raw_value.get("name")
+                    or ""
+                )
+            phrase = _drawable_phrase_for_scaffold(raw_value)
+            if (
+                not phrase
+                or phrase in seen
+                or re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", phrase)
+                or re.search(
+                    r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|motion_brief",
+                    phrase,
+                    flags=re.IGNORECASE,
+                )
+            ):
+                continue
+            seen.add(phrase)
+            evidence.append(
+                {
+                    "source_field": f"viewer_contract.{field_name}",
+                    "must_be_drawn_as": phrase,
+                }
+            )
+    return evidence
+
+
+def _first_frame_visual_plan_for_scaffold(
+    *,
     selector: str,
     profile: dict[str, Any],
     location_spec: dict[str, Any],
@@ -1343,217 +1436,74 @@ def _image_api_prompt_payload_for_scaffold(
     references: list[str],
     cut_uses_artifact: bool,
 ) -> dict[str, Any]:
-    def visible_text(value: Any, fallback: str = "") -> str:
-        text = str(value or fallback).strip()
-        for term in (
-            "場面の核",
-            "観客理解",
-            "因果の証明",
-            "価値の転換",
-            "空間の締めつけ",
-            "場のルール",
-            "人物の制限",
-            "source出来事",
-            "scene開始",
-            "scene_start_state",
-            "same_camera_distance",
-            "same_character_pose",
-            "same_location_zone",
-            "このcut",
-            "前cut",
-            "次cut",
-            "変化cut",
-            "sceneの",
-            "scene固有",
-        ):
-            replacement = {
-                "このcut": "この画像",
-                "前cut": "前の画像",
-                "次cut": "次の画像",
-                "変化cut": "変化の画像",
-                "sceneの": "場面の",
-                "scene固有": "場面固有",
-            }.get(term, "")
-            text = text.replace(term, replacement)
-        text = re.sub(r"\s+", " ", text).strip(" 、。:：")
-        return text or fallback
+    """Derive the immutable, reviewable first-frame plan from the cut contract."""
 
-    value_labels = {
-        "establishing": "場所と人物の関係を示す導入",
-        "character_action": "人物の行為",
-        "reaction": "人物の反応",
-        "insert": "手元や小道具の寄り",
-        "object_proof": "小道具が物語上の証拠になる画面",
-        "b_roll": "補助的な証拠画面",
-        "handoff": "次の動きへ渡す導線",
-        "wide": "広い引き",
-        "medium_wide": "やや引いた中広",
-        "medium": "中景",
-        "medium_closeup": "近めの中景",
-        "closeup": "寄り",
-        "extreme_closeup": "極端な寄り",
-        "a_roll": "人物の本筋画面",
-        "visible_not_touched": "見えているがまだ触れていない",
-        "reaching_toward": "手を伸ばしかけている",
-        "touching": "触れている",
-        "holding": "持っている",
-        "released": "手放した直後",
-        "left_behind": "置き去りにされている",
-        "fitted_on_foot": "足に合っている",
-        "not_visible": "画面に出さない",
-        "scene_start_state": "場面の開始状態",
-        "handoff_state": "次へ渡す直前",
-        "deadline_pressure": "時間に急かされる方向",
-        "reaction_hold": "反応を受け止める位置",
-        "toward_next_scene": "次の場面へ向かう方向",
-        "toward_primary_action": "主要な行為へ向かう位置",
-        "proof_connected_to_scene": "証拠が場面の因果へつながる位置",
-        "progressed_state": "前の状態から進んだ途中",
-        "true": "ある",
-        "false": "ない",
-        "yes": "ある",
-        "no": "ない",
-    }
+    source_event = (
+        cut_contract.get("source_event_contract")
+        if isinstance(cut_contract.get("source_event_contract"), dict)
+        else {}
+    )
+    first_frame = (
+        cut_contract.get("first_frame_contract")
+        if isinstance(cut_contract.get("first_frame_contract"), dict)
+        else {}
+    )
+    viewer = (
+        cut_contract.get("viewer_contract")
+        if isinstance(cut_contract.get("viewer_contract"), dict)
+        else {}
+    )
+    cinematic = (
+        cut_contract.get("cinematic_contract")
+        if isinstance(cut_contract.get("cinematic_contract"), dict)
+        else {}
+    )
+    geography = (
+        cinematic.get("screen_geography")
+        if isinstance(cinematic.get("screen_geography"), dict)
+        else {}
+    )
+    progression = (
+        cut_contract.get("cut_state_progression")
+        if isinstance(cut_contract.get("cut_state_progression"), dict)
+        else {}
+    )
+    visible_moment = _drawable_phrase_for_scaffold(
+        first_frame.get("event_fact_visible_in_still")
+        or cut_blueprint.get("visual_beat")
+        or progression.get("state_visible_in_first_frame")
+        or cut_blueprint.get("first_frame_brief")
+        or ""
+    )
+    if not visible_moment:
+        visible_moment = _drawable_phrase_for_scaffold(
+            cut_blueprint.get("first_frame_brief") or viewer.get("visual_proof") or ""
+        )
 
-    def display_value(value: Any) -> str:
-        text = visible_text(value, "")
-        if not text:
-            return ""
-        lowered = text.lower()
-        if lowered in value_labels:
-            return value_labels[lowered]
-        for token, label in sorted(value_labels.items(), key=lambda item: len(item[0]), reverse=True):
-            text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", label, text, flags=re.IGNORECASE)
-        for token, label in {
-            "same camera distance": "前と同じカメラ距離",
-            "same character pose": "前と同じ人物姿勢",
-            "same location zone": "前と同じ場所の切り取り",
-            "full reveal": "最終的な明示",
-            "next scene": "次の場面",
-            "next cut": "次の画像",
-            "previous cut": "前の画像",
-        }.items():
-            text = re.sub(re.escape(token), label, text, flags=re.IGNORECASE)
-        return text
+    emotion_transition = (
+        cut_contract.get("cut_character_emotion_transition")
+        if isinstance(cut_contract.get("cut_character_emotion_transition"), dict)
+        else {}
+    )
+    emotion_from = (
+        emotion_transition.get("emotion_from")
+        if isinstance(emotion_transition.get("emotion_from"), dict)
+        else {}
+    )
+    visible_behavior = (
+        emotion_from.get("visible_behavior")
+        if isinstance(emotion_from.get("visible_behavior"), dict)
+        else {}
+    )
+    if not visible_behavior and character_ids:
+        visible_behavior = _visible_behavior_from_cut(
+            profile=profile,
+            cut_plan=cut_plan,
+            cut_blueprint=cut_blueprint,
+            location_name=location_name,
+            object_ids=object_ids,
+        )
 
-    def natural_line(line: Any) -> str:
-        text = visible_text(line, "")
-        if not text:
-            return ""
-        if text == "must_not_repeat":
-            return "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。"
-        if ":" not in text:
-            return text
-        key, raw_value = text.split(":", 1)
-        key = key.strip()
-        value = display_value(raw_value)
-        if not value:
-            return ""
-        templates = {
-            "shot_role": "この一枚は{value}として、画面上の意味が一目で伝わる構図にする。",
-            "shot_scale": "画面サイズは{value}で、人物、場所、小道具の関係が読める距離にする。",
-            "a_roll_or_b_roll": "{value}として、主役の行為または証拠物が自然に読める一枚にする。",
-            "camera_position": "カメラ位置は{value}に置く。",
-            "camera_height": "カメラの高さは{value}。",
-            "lens_feel": "レンズ感は{value}。",
-            "cut_visible_moment": "この一枚では、{value}。",
-            "visible_subjects": "画面には{value}が見える。",
-            "action_completion_state": "行為は{value}の状態で、完了後の結果までは見せない。",
-            "still_must_not_show": "この静止画では{value}を見せない。",
-            "previous_cut_state": "前の画像では{value}。",
-            "this_cut_delta": "この画像では{value}が新しく見える。",
-            "must_not_revert": "前の状態へ戻らず、{value}を保つ。",
-            "must_not_repeat": "前の画像と同じ距離、同じ姿勢、同じ場所の切り取りを繰り返さない。",
-            "costume": "衣装は{value}。",
-            "pose": "姿勢は{value}。",
-            "gaze": "視線は{value}。",
-            "expression": "表情は{value}。",
-            "hand_position": "手元は{value}。",
-            "foot_position": "足元は{value}。",
-            "body_axis": "身体の向きは{value}。",
-            "object_visibility": "小道具や物体は{value}。",
-            "object_contact_state": "小道具への接触状態は{value}。",
-            "object_position": "小道具は画面の{value}に置く。",
-            "object_story_role": "小道具や場所の証拠は{value}として読ませる。",
-            "base_location_reference": "{value}",
-            "location_zone": "場所は{value}を中心に切り取る。",
-            "foreground": "前景には{value}を置く。",
-            "midground": "中景には{value}を置く。",
-            "background": "背景には{value}を残す。",
-            "light_source": "光源は{value}。",
-            "light_direction": "光の向きは{value}。",
-            "material_focus": "質感は{value}を重点的に見せる。",
-            "movable_subject": "動画開始時に動き出せる主体は{value}。",
-            "movement_vector_visible_as_static_pose": "次の動きの方向は{value}として姿勢に残す。",
-            "image_must_leave_room_for": "画面には{value}を残す。",
-            "must_not_resolve": "この一枚で{value}まで解決しない。",
-        }
-        return templates.get(key, "{value}").format(value=value)
-
-    def naturalize_prompt(text: str) -> str:
-        blocks: list[str] = []
-        for block in text.split("\n\n"):
-            lines = block.splitlines()
-            if not lines:
-                continue
-            title = lines[0]
-            body = [natural_line(line) for line in lines[1:]]
-            body = [line for line in body if line]
-            blocks.append("\n".join([title, *body] if body else [title]))
-        return "\n\n".join(blocks)
-
-    cut_function = str(cut_blueprint.get("cut_function") or "")
-    cut_state_progression = cut_contract.get("cut_state_progression") if isinstance(cut_contract.get("cut_state_progression"), dict) else {}
-    is_sequential_progression = str(cut_state_progression.get("progression_mode") or "") == "sequential_state_progression"
-    if cut_uses_artifact:
-        if cut_number % 3 == 0:
-            shot_role = "insert"
-            shot_scale = "extreme_closeup"
-        elif cut_number % 2 == 0:
-            shot_role = "object_proof"
-            shot_scale = "medium_closeup"
-        else:
-            shot_role = "object_proof"
-            shot_scale = "closeup"
-    elif cut_number == 1:
-        shot_role = "establishing"
-        shot_scale = "medium_wide"
-    elif cut_function in {"reaction", "payoff"}:
-        shot_role = "reaction"
-        shot_scale = "medium_closeup"
-    elif cut_number % 4 == 0:
-        shot_role = "handoff"
-        shot_scale = "medium_wide"
-    elif cut_number % 3 == 0:
-        shot_role = "insert"
-        shot_scale = "closeup"
-    else:
-        shot_role = "character_action"
-        shot_scale = "medium"
-    location_zone = str(cut_plan.get("foreground") or cut_plan.get("midground") or location_name)
-    previous_state = (
-        "この場面の最初の画像なので場所と主体を明確に始める。"
-        if cut_number == 1
-        else str(cut_state_progression.get("state_after_previous_cut") or "前cutの構図をそのまま繰り返さず、距離、姿勢、場所zoneのどれかを変える。")
-    )
-    visible_moment = visible_text(
-        cut_state_progression.get("state_visible_in_first_frame") if is_sequential_progression else cut_blueprint["visual_beat"],
-        cut_blueprint["first_frame_brief"],
-    )
-    visible_delta = visible_text(
-        cut_state_progression.get("visible_state_delta_from_previous_cut") if is_sequential_progression else cut_blueprint["visual_beat"],
-        cut_blueprint["first_frame_brief"],
-    )
-    still_boundary = (
-        visible_text(cut_state_progression.get("must_not_advance_beyond"), "次cut以降の結果や次場面のreveal")
-        if is_sequential_progression
-        else "行為完了後、後続reveal、次場面の結果。"
-    )
-    must_not_revert_line = (
-        f"must_not_revert: {visible_text(cut_state_progression.get('must_not_revert_to'), '前cut以前の開始状態へ戻らない')}\n"
-        if is_sequential_progression
-        else ""
-    )
     fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
         profile,
         object_ids,
@@ -1565,153 +1515,300 @@ def _image_api_prompt_payload_for_scaffold(
         cut_blueprint.get("dramatic_job"),
         cut_blueprint.get("first_frame_brief"),
     )
-    object_contact_state = "fitted_on_foot" if fitted_slipper_proof else ("reaching_toward" if cut_uses_artifact else "visible_not_touched")
-    object_display_names = [
-        _object_name_for_asset(profile, object_id)
-        for object_id in object_ids
-    ]
-    emotion_transition = cut_contract.get("cut_character_emotion_transition") if isinstance(cut_contract.get("cut_character_emotion_transition"), dict) else {}
-    emotion_from = emotion_transition.get("emotion_from") if isinstance(emotion_transition.get("emotion_from"), dict) else {}
-    visible_behavior = emotion_from.get("visible_behavior") if isinstance(emotion_from.get("visible_behavior"), dict) else {}
-    if not visible_behavior:
-        visible_behavior = _visible_behavior_from_cut(
-            profile=profile,
-            cut_plan=cut_plan,
-            cut_blueprint=cut_blueprint,
-            location_name=location_name,
-            object_ids=object_ids,
+    costume_state = ""
+    if character_ids:
+        if any("transformed" in character_id for character_id in character_ids):
+            costume_state = "舞踏会ドレス姿を維持し、質素な普段着へ戻さない"
+        elif any("post_midnight" in character_id for character_id in character_ids):
+            costume_state = "魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない"
+
+    object_entries: list[dict[str, Any]] = []
+    for object_id in object_ids:
+        object_name = _object_name_for_asset(profile, object_id)
+        object_entries.append(
+            {
+                "object_id": object_id,
+                "object_name": object_name,
+                "visibility_in_this_cut": "clearly_visible",
+                "object_state": (
+                    f"{profile['protagonist_name']}の足に隙間なく合っている"
+                    if fitted_slipper_proof
+                    else "形、素材、現在位置が前景で明確に見える"
+                ),
+                "story_meaning_in_this_cut": "",
+                "required_screen_position": "foreground",
+            }
         )
-    costume_state = "参照画像と同じ衣装状態"
-    if any("transformed" in character_id for character_id in character_ids):
-        costume_state = "舞踏会ドレス姿を維持し、質素な普段着へ戻さない。"
-    elif any("post_midnight" in character_id for character_id in character_ids):
-        costume_state = "魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。"
-    foot_position_line = (
-        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っていることが読める足元"
-        if fitted_slipper_proof
-        else "足先と重心が次の動きに向く"
+
+    shot_design = _scaffold_shot_design(
+        cut_number=cut_number,
+        cut_blueprint=cut_blueprint,
+        cut_uses_artifact=cut_uses_artifact,
+        object_ids=object_ids,
     )
-    object_story_role_line = (
-        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合い、身元を証明する"
-        if fitted_slipper_proof
-        else visible_text(cut_blueprint["causal_proof"] or visible_moment, "この画面の視覚証拠")
+    subject_priority = (
+        cinematic.get("subject_priority")
+        if isinstance(cinematic.get("subject_priority"), dict)
+        else {}
     )
-    prompt = "\n\n".join(
-        [
-            "[参照画像の使い方]\n"
-            + "\n".join(
-                [
-                    f"人物参照: {character_id} は顔、体格、髪、衣装の主要形状を維持し、pose/gaze/lightingだけをこの画面に合わせる。"
-                    for character_id in character_ids
-                ]
-                + [
-                    f"小道具参照: {object_name} ({object_id}) は形状、材質、縮尺を維持する。"
-                    for object_id, object_name in zip(object_ids, object_display_names)
-                ]
-                + [f"場所参照: {location_spec['asset_id']} は完成構図ではなく、空間の素材、光、配置の一貫性だけに使う。"]
+    primary_subject_name = str(subject_priority.get("primary") or profile["protagonist_name"]).strip()
+    if object_entries and shot_design["shot_role"] in {"insert", "object_proof"}:
+        primary_subject_name = str(object_entries[0]["object_name"])
+
+    character_state_gate: dict[str, str] = {}
+    if character_ids:
+        character_state_gate["pose"] = _drawable_phrase_for_scaffold(
+            visible_behavior.get("posture") or visible_moment
+        )
+        if costume_state:
+            character_state_gate["costume_state"] = costume_state
+        cut_function = str(cut_blueprint.get("cut_function") or "")
+        if shot_design["should_show_face"] and (
+            cut_function in {"reaction", "payoff", "threshold"}
+            or re.search(r"視線|目|顔|見(?:る|上げ|つめ|渡)", visible_moment)
+        ):
+            character_state_gate["gaze"] = _drawable_phrase_for_scaffold(
+                visible_behavior.get("gaze")
+            )
+        if shot_design["should_show_face"] and (
+            cut_function in {"reaction", "payoff", "pressure"}
+            or re.search(r"表情|顔|反応|圧力|拒|願い|ためら", visible_moment)
+        ):
+            character_state_gate["expression"] = _drawable_phrase_for_scaffold(
+                visible_behavior.get("face")
+            )
+        if shot_design["should_show_hands"] and (
+            object_ids or re.search(r"手|握|触|持|腕|指", visible_moment)
+        ):
+            character_state_gate["hand_position"] = _drawable_phrase_for_scaffold(
+                visible_behavior.get("hands")
+            )
+        if fitted_slipper_proof:
+            character_state_gate["foot_position"] = (
+                f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っている"
+            )
+        elif re.search(r"足|歩|走|踏|重心", visible_moment):
+            character_state_gate["foot_position"] = _drawable_phrase_for_scaffold(
+                visible_behavior.get("feet")
+            )
+        if re.search(r"距離|迫|囲|押|立ち|座|倒", visible_moment):
+            character_state_gate["physical_state"] = _drawable_phrase_for_scaffold(
+                visible_behavior.get("distance")
+            )
+        character_state_gate = {
+            key: value for key, value in character_state_gate.items() if value
+        }
+
+    forbidden_future_outcomes = [
+        _drawable_phrase_for_scaffold(item)
+        for item in (
+            viewer.get("reveal_constraints", {}).get("forbidden_until_later_cut", [])
+            if isinstance(viewer.get("reveal_constraints"), dict)
+            else []
+        )
+        if _drawable_phrase_for_scaffold(item)
+    ]
+    must_not_advance = _drawable_phrase_for_scaffold(progression.get("must_not_advance_beyond"))
+    if must_not_advance:
+        forbidden_future_outcomes.append(must_not_advance)
+
+    visual_spec = location_spec.get("visual_spec")
+    location_texture = (
+        str(visual_spec.get("subject") or "").strip()
+        if isinstance(visual_spec, dict)
+        else ""
+    )
+    location_texture = "、".join(
+        part.strip()
+        for part in location_texture.split("、")
+        if part.strip()
+        and not re.search(r"(?:人物|靴|ガラスの靴|物語アイテム)なし$", part.strip())
+    )
+    state_delta = _drawable_phrase_for_scaffold(
+        progression.get("visible_state_delta_from_previous_cut")
+    )
+
+    return {
+        "schema_version": "first_frame_visual_plan_v1",
+        "derived_from": [
+            "scene_event.event_sequence[]",
+            "cut_contract.source_event_contract",
+            "cut_contract.first_frame_contract",
+            "cut_contract.motion_contract",
+            "cut_contract.event_context_for_cut",
+        ],
+        "editable": False,
+        "source_grounding": {
+            "scene_id": str(selector).split("_cut", 1)[0],
+            "cut_id": selector,
+            "source_event_beat_id": str(source_event.get("primary_event_beat_id") or ""),
+            "source_event_beat_ids": list(source_event.get("source_event_beat_ids") or []),
+            "event_beat_function": str(source_event.get("event_beat_function") or ""),
+            "cut_function": str(cut_contract.get("cut_function") or ""),
+            "what_happens": str(source_event.get("source_event_summary") or ""),
+            "visible_action": str(source_event.get("source_visible_action") or ""),
+            "visible_reaction": str(source_event.get("source_visible_reaction") or ""),
+            "event_facts_to_preserve": list(source_event.get("event_facts_to_preserve") or []),
+            "event_facts_not_to_invent": list(source_event.get("event_facts_not_to_invent") or []),
+            "allowed_reveal_info_ids": list(source_event.get("allowed_reveal_info_ids") or []),
+            "forbidden_reveal_info_ids": list(source_event.get("forbidden_reveal_info_ids") or []),
+        },
+        "temporal_boundary": {
+            "event_time_position": str(first_frame.get("event_time_position") or ""),
+            "first_visible_moment": visible_moment,
+            "action_completion_state": str(first_frame.get("action_completion_state") or ""),
+            "event_fact_visible_in_still": visible_moment,
+            "not_yet_happened_in_still": forbidden_future_outcomes,
+            "forbidden_future_event_beat_ids": list(first_frame.get("not_yet_happened_in_still") or []),
+            "forbidden_future_outcomes": forbidden_future_outcomes,
+            "still_must_not_show_completion": True,
+            "one_visible_moment_rule": True,
+        },
+        "visual_translation": {
+            "concrete_visible_evidence": _cut_specific_drawable_evidence_for_scaffold(viewer),
+            "nonvisual_terms_to_exclude_from_prompt": [
+                "audience_knowledge_delta",
+                "dramatic_job",
+                "source_event_contract",
+                "motion_brief",
+            ],
+            "imageable_causal_proof": str(viewer.get("causal_proof") or viewer.get("visual_proof") or ""),
+        },
+        "subject_binding": {
+            "primary_subject": {"name": primary_subject_name},
+            "secondary_subjects": [
+                {"name": str(value)}
+                for value in (
+                    *(
+                        [profile["protagonist_name"]]
+                        if primary_subject_name != profile["protagonist_name"] and character_ids
+                        else []
+                    ),
+                    *(entry["object_name"] for entry in object_entries),
+                )
+                if str(value).strip() and str(value).strip() != primary_subject_name
+            ],
+            "background_subjects": [{"name": location_name}],
+        },
+        "reference_binding": {
+            "character_references": list(references[: len(character_ids)]),
+            "object_references": [
+                ref for ref in references if "/objects/" in ref or f"/{profile['artifact_output_dir']}/" in ref
+            ],
+            "location_references": [ref for ref in references if "/locations/" in ref],
+        },
+        "character_state_gate": character_state_gate,
+        "object_visibility_gate": {"objects": object_entries},
+        "spatial_composition": {
+            "foreground": _drawable_phrase_for_scaffold(
+                geography.get("foreground") or cut_plan.get("foreground") or ""
             ),
-            "[shot / 画角]\n"
-            f"shot_role: {shot_role}\n"
-            f"shot_scale: {shot_scale}\n"
-            f"a_roll_or_b_roll: {'b_roll' if shot_role == 'object_proof' else 'a_roll'}\n"
-            f"camera_position: {cut_plan.get('screen_direction') or 'subject_side'}\n"
-            "camera_height: 人物の手元と顔が読める高さ\n"
-            "lens_feel: 自然な遠近感",
-            "[この1枚に写る瞬間]\n"
-            f"cut_visible_moment: {visible_moment}\n"
-            f"visible_subjects: {', '.join(item for item in (visible_text(value, '') for value in cut_blueprint.get('must_show', [])) if item)}\n"
-            f"action_completion_state: {cut_blueprint['action_completion_state']}\n"
-            f"still_must_not_show: {still_boundary}",
-            "[前の画像からの変化]\n"
-            f"previous_cut_state: {previous_state}\n"
-            f"this_cut_delta: {visible_delta}\n"
-            f"{must_not_revert_line}"
-            "must_not_repeat: same_camera_distance / same_character_pose / same_location_zone",
-            "[人物の状態と配置]\n"
-            f"costume: {costume_state}\n"
-            f"pose: {visible_moment if is_sequential_progression else visible_text(cut_blueprint['first_frame_brief'], '行為が始まる直前の姿勢')}\n"
-            "gaze: 主要な視覚証拠へ向く\n"
-            "expression: この画面の圧力が読める表情\n"
-            f"hand_position: {profile['protagonist_name']}の手元が行為直前の位置にある\n"
-            f"foot_position: {foot_position_line}\n"
-            "body_axis: 次の動きに向いた身体軸",
-            "[人物の見える演技]\n"
-            f"表情は、{visible_text(visible_behavior.get('face'), '声に出さず圧力を受け止める表情')}。\n"
-            f"視線は、{visible_text(visible_behavior.get('gaze'), '主要な視覚証拠へ向く視線')}。\n"
-            f"姿勢は、{visible_text(visible_behavior.get('posture'), '行為が始まる直前の姿勢')}。\n"
-            f"手元は、{visible_text(visible_behavior.get('hands'), '手元に緊張が読める')}。\n"
-            f"足元は、{visible_text(visible_behavior.get('feet'), '足先と重心が次の動きに向く')}。\n"
-            f"人物と圧力源の距離は、{visible_text(visible_behavior.get('distance'), '人物と圧力源の距離が読める')}。",
-            "[小道具 / 物体]\n"
-            f"object_visibility: {', '.join(object_display_names) if object_display_names else 'この画面で必要な場所の証拠が見える'}\n"
-            f"object_contact_state: {object_contact_state}\n"
-            "object_position: foreground\n"
-            f"object_story_role: {object_story_role_line}",
-            "[場所の使い方]\n"
-            f"base_location_reference: {location_spec['asset_id']} は完成構図ではなく、素材と光の一貫性として使う。\n"
-            f"location_zone: {location_zone}\n"
-            f"foreground: {cut_plan.get('foreground') or location_zone}\n"
-            f"midground: {cut_plan.get('midground') or profile['protagonist_name']}\n"
-            f"background: {cut_plan.get('background') or location_name}",
-            "[光 / 質感]\n"
-            "light_source: 画面内で方向が読める自然な光源\n"
-            "light_direction: 人物と小道具の形が読める方向\n"
-            f"material_focus: {location_name}の床、壁、衣服、小道具の質感",
-            "[動画開始に向いた静止状態]\n"
-            f"movable_subject: {profile['protagonist_name']}\n"
-            f"movement_vector_visible_as_static_pose: {cut_plan.get('screen_direction') or '次の動きが始まる方向'}\n"
-            "image_must_leave_room_for: 動き出す方向の余白\n"
-            f"must_not_resolve: {still_boundary}",
-            "[禁止]\ntext, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters.",
-        ]
-    )
-    prompt = naturalize_prompt(prompt)
-    shot_design_contract = {
-        "shot_role": shot_role,
-        "shot_scale": shot_scale,
-        "a_roll_or_b_roll": "b_roll" if shot_role == "object_proof" else "a_roll",
-        "should_show_face": shot_role != "object_proof",
-        "should_show_hands": True,
-        "should_show_object_detail": bool(object_ids),
+            "midground": _drawable_phrase_for_scaffold(
+                geography.get("midground") or cut_plan.get("midground") or ""
+            ),
+            "background": _drawable_phrase_for_scaffold(
+                geography.get("background") or cut_plan.get("background") or location_name
+            ),
+            "subject_priority_order": [
+                primary_subject_name,
+                *[entry["object_name"] for entry in object_entries if entry["object_name"] != primary_subject_name],
+                location_name,
+            ],
+            "frame_edge_handoff": str(geography.get("screen_direction") or cut_plan.get("screen_direction") or ""),
+            "shot_size": shot_design["shot_scale"],
+            "camera_angle": str(geography.get("screen_direction") or cut_plan.get("screen_direction") or ""),
+        },
+        "scene_material_pack": {
+            "light_source": _scaffold_location_light(location_spec, location_name),
+            "light_direction": f"{location_name}の奥から主被写体へ向く",
+            "dominant_materials": [location_texture] if location_texture else [f"{location_name}の床、壁、衣服の実物質感"],
+            "story_specific_texture": location_texture,
+        },
+        "scene_state_progression": {
+            "progression_mode": str(progression.get("progression_mode") or "suspended_moment"),
+            "state_visible_in_first_frame": "",
+            "visible_state_delta_from_previous_cut": state_delta,
+        },
+        "motion_affordance": {
+            "movable_subjects": [],
+            "must_not_resolve_in_image": forbidden_future_outcomes,
+            "motion_ceiling": {
+                "must_stop_before_event_beat_ids": list(first_frame.get("not_yet_happened_in_still") or []),
+                "must_not_complete_outcomes": forbidden_future_outcomes,
+            },
+        },
+        "prompt_rendering_policy": {
+            "render_only_drawable_information": True,
+            "do_not_render_design_meta": True,
+            "do_not_render_future_motion_as_action": True,
+        },
     }
-    payload = {
-        "policy_version": "image_api_prompt_v1",
-        "prompt": prompt,
-        "negative_prompt": "text, subtitles, logos, watermark, anime, illustration, wrong costume state, wrong object reveal, later event reveal, unapproved extra characters",
-        "reference_instructions": "API prompt本文の参照画像の使い方を正本にする。",
-        "reference_images": references,
-        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-        "shot_design_contract": shot_design_contract,
+
+
+def _image_prompt_review_metadata_for_scaffold(
+    *,
+    selector: str,
+    location_spec: dict[str, Any],
+    location_name: str,
+    cut_number: int,
+    cut_blueprint: dict[str, Any],
+    cut_contract: dict[str, Any],
+    object_ids: list[str],
+    cut_uses_artifact: bool,
+    first_frame_visual_plan: dict[str, Any],
+) -> dict[str, Any]:
+    shot_design = _scaffold_shot_design(
+        cut_number=cut_number,
+        cut_blueprint=cut_blueprint,
+        cut_uses_artifact=cut_uses_artifact,
+        object_ids=object_ids,
+    )
+    progression = (
+        cut_contract.get("cut_state_progression")
+        if isinstance(cut_contract.get("cut_state_progression"), dict)
+        else {}
+    )
+    visible_moment = str(
+        first_frame_visual_plan.get("temporal_boundary", {}).get("event_fact_visible_in_still")
+        or ""
+    )
+    visible_delta = str(progression.get("visible_state_delta_from_previous_cut") or visible_moment)
+    geography = first_frame_visual_plan.get("spatial_composition")
+    geography = geography if isinstance(geography, dict) else {}
+    location_zone = str(geography.get("foreground") or geography.get("midground") or location_name)
+    character_gate = first_frame_visual_plan.get("character_state_gate")
+    character_gate = character_gate if isinstance(character_gate, dict) else {}
+    return {
+        "shot_design_contract": shot_design,
         "cut_location_frame_plan": {
             "base_location_reference_id": location_spec["asset_id"],
             "use_reference_as": "material_anchor",
             "location_zone_id": re.sub(r"\s+", "_", location_zone)[:80],
             "location_zone_description": location_zone,
         },
-            "cut_visual_delta": {
-                "previous_cut_selector": "" if cut_number == 1 else re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector),
-                "previous_visible_state_summary": previous_state,
-                "this_cut_new_information": visible_delta,
-                "cut_delta_visible_in_still": visible_delta,
-            },
+        "cut_visual_delta": {
+            "previous_cut_selector": (
+                ""
+                if cut_number == 1
+                else re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector)
+            ),
+            "previous_visible_state_summary": str(progression.get("state_after_previous_cut") or ""),
+            "this_cut_new_information": visible_delta,
+            "cut_delta_visible_in_still": visible_delta,
+        },
         "blocking_and_interaction": {
             "character_blocking": {
-                "gaze_target": "主要な視覚証拠",
-                "hand_position": {"left": "身体近く", "right": "行為直前の位置"},
-                "foot_position": (
-                    {"left": "床に落ち着く", "right": f"{profile['artifact_name']}が足に合っている"}
-                    if fitted_slipper_proof
-                    else {"left": "重心を支える", "right": "次の動きに向く"}
-                ),
+                "gaze_target": str(character_gate.get("gaze") or ""),
+                "hand_position": str(character_gate.get("hand_position") or ""),
+                "foot_position": str(character_gate.get("foot_position") or ""),
             },
             "object_interaction": {
                 "object_id": object_ids[0] if object_ids else "",
-                "contact_state": object_contact_state,
-                "object_screen_position": "foreground",
+                "contact_state": "visible" if object_ids else "",
+                "object_screen_position": "foreground" if object_ids else "",
             },
         },
     }
-    return payload
 
 
 def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
@@ -4163,7 +4260,16 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             event_beat_function = str(primary_event_beat.get("beat_function") or cut_plan.get("event_beat_function") or "custom")
             event_time_position = str(cut_plan.get("event_time_position") or ("trigger_moment" if event_beat_function == "turn" else "consequence" if event_beat_function == "payoff" else "early_action"))
             cut_state_progression = dict(cut_state_progression_by_selector.get(selector, {}))
-            must_show = [profile["protagonist_name"], *cut_plan["must_show_extra"]]
+            must_show = list(
+                dict.fromkeys(
+                    phrase
+                    for phrase in (
+                        _drawable_phrase_for_scaffold(item)
+                        for item in [profile["protagonist_name"], *cut_plan["must_show_extra"]]
+                    )
+                    if phrase
+                )
+            )
             is_terminal_scene = bool(scene_intent.get("terminal_resolution"))
             if not cut_uses_artifact:
                 must_show = [item for item in must_show if item != profile["artifact_name"]]
@@ -4199,16 +4305,6 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "asset_dependency_hint": {"characters": character_ids, "objects": object_ids, "locations": [location_spec["asset_id"]]},
             }
             script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": 12, "estimated_duration_seconds": 12, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}}
-            prompt = _scene_prompt(
-                title,
-                visual_beat,
-                beat,
-                location_name,
-                profile,
-                include_artifact=cut_uses_artifact,
-                scene_index=idx,
-                terminal_resolution=is_terminal_scene,
-            )
             narration = str(cut_plan["narration"])
             continuity_end_state = (
                 "証明を受け止め、物語が閉じる"
@@ -4562,7 +4658,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 source_event_contract=cut_contract["source_event_contract"],
                 reveal_constraints=scene_intent.get("reveal_constraints", []),
             )
-            api_prompt_payload = _image_api_prompt_payload_for_scaffold(
+            first_frame_visual_plan = _first_frame_visual_plan_for_scaffold(
                 selector=selector,
                 profile=profile,
                 location_spec=location_spec,
@@ -4576,8 +4672,28 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 references=references,
                 cut_uses_artifact=cut_uses_artifact,
             )
+            image_prompt_review_metadata = _image_prompt_review_metadata_for_scaffold(
+                selector=selector,
+                location_spec=location_spec,
+                location_name=location_name,
+                cut_number=cut_number,
+                cut_blueprint=cut_blueprint,
+                cut_contract=cut_contract,
+                object_ids=object_ids,
+                cut_uses_artifact=cut_uses_artifact,
+                first_frame_visual_plan=first_frame_visual_plan,
+            )
+            api_prompt_payload = _image_api_prompt_payload_for_scaffold(
+                first_frame_visual_plan=first_frame_visual_plan,
+                character_ids=character_ids,
+                object_ids=object_ids,
+                location_ids=[location_spec["asset_id"]],
+                references=references,
+                review_metadata=image_prompt_review_metadata,
+            )
             debug_prompt_source = {
                 "first_frame_contract": cut_contract["first_frame_contract"],
+                "first_frame_visual_plan": first_frame_visual_plan,
                 "first_frame_visual_plan_source": [
                     "cut_contract.source_event_contract",
                     "cut_contract.first_frame_contract",
@@ -4623,7 +4739,12 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         "must_avoid": ["英字看板", "署名クレジット", "企業ロゴ"],
                         "done_when": [cut_plan["done_when"]],
                     },
-                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "prompt": prompt, "prompt_deprecated": True, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
+                    "still_image_plan": {
+                        "mode": "generate_still",
+                        "generation_status": "missing",
+                        "prompt_source": "image_generation.api_prompt_payload.prompt",
+                    },
+                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "first_frame_visual_plan": first_frame_visual_plan, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
                     "video_generation": {"tool": "kling_3_0_omni", "duration_seconds": 12, "first_frame": f"assets/scenes/{selector}.png", "motion_prompt": cut_plan["motion_brief"], "output": f"assets/scenes/{selector}.mp4"},
                     "audio": {"narration": {"contract_ref": "cut_contract.narration_contract", "text": narration, "tts_text": narration, "tool": "elevenlabs", "status": "approved", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": [], "p700_review": {"role_matches_contract": True, "narration_not_captioning_image": True, "does_not_add_new_story_fact": True, "timing_supports_visual_beat": True}}},
                     "review": {"triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}},

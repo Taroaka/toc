@@ -3,13 +3,24 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import os
 import re
 import shutil
+import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from toc.image_request_snapshot import (
+    ImageRequestSnapshot,
+    ImageRequestSnapshotError,
+    load_request_snapshot,
+    materialize_request_snapshot,
+    sha256_file,
+    write_request_snapshot_atomic,
+)
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -18,7 +29,13 @@ REQUEST_FILE_BY_KIND = {
     "asset": "asset_generation_requests.md",
     "scene": "image_generation_requests.md",
 }
+REQUEST_SNAPSHOT_FILE_BY_KIND = {
+    "asset": "asset_generation_request_snapshot.json",
+    "scene": "image_generation_request_snapshot.json",
+}
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
+IMAGE_API_PROMPT_POLICY_PREFIX = "image_api_prompt_v"
+COMPILED_IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
 PROMPT_SETTING_TARGETS = {
     "character": {
         "label": "キャラクター",
@@ -72,6 +89,13 @@ class ImageRequestItem:
     existing_image: str | None
     prompt_policy_version: str | None = None
     debug_prompt_source: dict[str, Any] = field(default_factory=dict)
+    prompt_sha256: str | None = None
+    reference_sha256s: list[str | None] = field(default_factory=list)
+    request_revision: str | None = None
+    request_digest: str | None = None
+    compiler_version: str | None = None
+    source_digest: str | None = None
+    snapshot_schema_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -343,7 +367,7 @@ def _extract_request_prompt(section: str, *, prompt_policy_version: str | None =
     for label, body in fenced_blocks:
         if label == "api_prompt":
             return body, metadata_block, debug_prompt_source
-    if str(prompt_policy_version or "").strip() == IMAGE_API_PROMPT_POLICY_VERSION:
+    if str(prompt_policy_version or "").strip().startswith(IMAGE_API_PROMPT_POLICY_PREFIX):
         raise ValueError("api_prompt_missing_for_new_prompt_policy")
     for label, body in fenced_blocks:
         if label in {"", "text", "txt"}:
@@ -437,7 +461,74 @@ def load_request_items(run_dir: Path, kind: str) -> list[ImageRequestItem]:
     path = run_dir / filename
     if not path.exists():
         return []
-    return parse_request_markdown(path.read_text(encoding="utf-8"), kind=kind, run_dir=run_dir)
+    markdown_items = parse_request_markdown(path.read_text(encoding="utf-8"), kind=kind, run_dir=run_dir)
+    snapshot_filename = REQUEST_SNAPSHOT_FILE_BY_KIND[kind]
+    snapshot_path = run_dir / snapshot_filename
+    if not snapshot_path.exists():
+        if any(
+            str(item.prompt_policy_version or "").startswith(IMAGE_API_PROMPT_POLICY_PREFIX)
+            and item.prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION
+            for item in markdown_items
+        ):
+            raise ImageRequestSnapshotError(
+                f"request_snapshot_missing_for_new_prompt_policy: {snapshot_filename}"
+            )
+        return markdown_items
+    snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir, verify_references=True)
+    if snapshot.kind != kind:
+        raise ImageRequestSnapshotError(
+            f"request snapshot kind mismatch: expected {kind}, got {snapshot.kind}"
+        )
+    markdown_by_id = {item.id: item for item in markdown_items}
+    if len(markdown_by_id) != len(markdown_items):
+        raise ImageRequestSnapshotError("request Markdown contains duplicate item ids")
+    if set(markdown_by_id) != {item.item_id for item in snapshot.items}:
+        raise ImageRequestSnapshotError("request snapshot item ids do not match request Markdown")
+    snapshot_by_id = {item.item_id: item for item in snapshot.items}
+    loaded: list[ImageRequestItem] = []
+    for review_item in markdown_items:
+        snapshot_item = snapshot_by_id[review_item.id]
+        if review_item.prompt != snapshot_item.prompt:
+            raise ImageRequestSnapshotError(
+                f"request Markdown prompt does not match snapshot for {snapshot_item.item_id}"
+            )
+        if str(review_item.output or "") != snapshot_item.destination:
+            raise ImageRequestSnapshotError(
+                f"request Markdown destination does not match snapshot for {snapshot_item.item_id}"
+            )
+        if list(review_item.references) != [reference.path for reference in snapshot_item.references]:
+            raise ImageRequestSnapshotError(
+                f"request Markdown references do not match snapshot for {snapshot_item.item_id}"
+            )
+        if str(review_item.prompt_policy_version or "") != snapshot_item.prompt_policy_version:
+            raise ImageRequestSnapshotError(
+                f"request Markdown policy does not match snapshot for {snapshot_item.item_id}"
+            )
+        loaded.append(
+            ImageRequestItem(
+                id=review_item.id,
+                kind=kind,
+                asset_type=review_item.asset_type,
+                tool=review_item.tool,
+                output=snapshot_item.destination,
+                prompt=snapshot_item.prompt,
+                references=[reference.path for reference in snapshot_item.references],
+                reference_count=len(snapshot_item.references),
+                execution_lane=review_item.execution_lane,
+                generation_status=review_item.generation_status,
+                existing_image=review_item.existing_image,
+                prompt_policy_version=snapshot_item.prompt_policy_version,
+                debug_prompt_source=review_item.debug_prompt_source,
+                prompt_sha256=snapshot_item.prompt_sha256,
+                reference_sha256s=[reference.sha256 for reference in snapshot_item.references],
+                request_revision=snapshot.request_revision,
+                request_digest=snapshot_item.request_digest,
+                compiler_version=snapshot_item.compiler_version,
+                source_digest=snapshot_item.source_digest,
+                snapshot_schema_version=snapshot.schema_version,
+            )
+        )
+    return loaded
 
 
 def prompt_setting_targets() -> dict[str, dict[str, str]]:
@@ -549,8 +640,39 @@ def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, st
     if not path.exists():
         raise FileNotFoundError(f"request file not found: {filename}")
     text = path.read_text(encoding="utf-8")
-    updated: list[str] = []
     missing: list[str] = []
+    compiled_v2_items: list[str] = []
+    for item_id in prompts_by_id:
+        section_match = re.search(rf"(?m)^##\s+{re.escape(item_id)}\s*$", text)
+        if not section_match:
+            missing.append(item_id)
+            break
+        next_heading = re.search(r"(?m)^##\s+", text[section_match.end() :])
+        section_end = section_match.end() + next_heading.start() if next_heading else len(text)
+        section = text[section_match.start() : section_end]
+        metadata = _parse_metadata(_metadata_without_fences(section))
+        prompt_policy_version = str(
+            metadata.get("prompt_policy_version")
+            or metadata.get("api_prompt_policy_version")
+            or metadata.get("policy_version")
+            or ""
+        ).strip()
+        if prompt_policy_version == COMPILED_IMAGE_API_PROMPT_POLICY_VERSION:
+            compiled_v2_items.append(item_id)
+    if missing:
+        return {"updated": [], "missing": missing}
+    if compiled_v2_items:
+        item_list = ", ".join(compiled_v2_items)
+        raise ValueError(
+            f"manual_prompt_update_rejected_for_compiled_v2: {item_list}; "
+            "plan and manifest recompilation is required to refresh first_frame_visual_plan, "
+            "api_prompt_payload, drawable_prompt_ir, compiler/source lineage, and request snapshot"
+        )
+    snapshot_path = run_dir / REQUEST_SNAPSHOT_FILE_BY_KIND[kind]
+    existing_snapshot: ImageRequestSnapshot | None = None
+    if snapshot_path.exists():
+        existing_snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir, verify_references=True)
+    updated: list[str] = []
     next_text = text
     for item_id, prompt in prompts_by_id.items():
         section_match = re.search(rf"(?m)^##\s+{re.escape(item_id)}\s*$", next_text)
@@ -560,7 +682,17 @@ def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, st
         next_heading = re.search(r"(?m)^##\s+", next_text[section_match.end() :])
         section_end = section_match.end() + next_heading.start() if next_heading else len(next_text)
         section = next_text[section_match.start() : section_end]
-        fence_pattern = re.compile(r"(?ms)(```(?:text|txt)?\s*\n)(.*?)(\n```)")
+        metadata = _parse_metadata(_metadata_without_fences(section))
+        prompt_policy_version = str(
+            metadata.get("prompt_policy_version")
+            or metadata.get("api_prompt_policy_version")
+            or metadata.get("policy_version")
+            or ""
+        ).strip()
+        fence_label = "api_prompt" if prompt_policy_version.startswith(IMAGE_API_PROMPT_POLICY_PREFIX) else r"(?:api_prompt|text|txt)?"
+        fence_pattern = re.compile(
+            rf"(?ms)(^```{fence_label}[^\n]*\n)(.*?)(\n```[ \t]*$)"
+        )
         next_section, count = fence_pattern.subn(
             lambda match, value=prompt.strip(): f"{match.group(1)}{value}{match.group(3)}",
             section,
@@ -576,16 +708,61 @@ def update_request_prompts(run_dir: Path, kind: str, prompts_by_id: dict[str, st
                 break
             heading = section[:first_newline].rstrip()
             body = section[first_newline + 1 :]
-            _old_prompt, metadata_block = _extract_request_prompt(body)
+            if prompt_policy_version.startswith(IMAGE_API_PROMPT_POLICY_PREFIX):
+                metadata_block = _metadata_without_fences(body)
+            else:
+                _old_prompt, metadata_block, _debug_prompt_source = _extract_request_prompt(
+                    body,
+                    prompt_policy_version=prompt_policy_version or None,
+                )
             metadata = metadata_block.rstrip()
-            next_section = f"{heading}\n{metadata}\n\n```text\n{prompt.strip()}\n```\n"
+            inline_fence_label = "api_prompt" if prompt_policy_version.startswith(IMAGE_API_PROMPT_POLICY_PREFIX) else "text"
+            next_section = f"{heading}\n{metadata}\n\n```{inline_fence_label}\n{prompt.strip()}\n```\n"
         next_text = next_text[: section_match.start()] + next_section + next_text[section_end:]
         updated.append(item_id)
     if missing:
         return {"updated": [], "missing": missing}
     if updated:
-        path.write_text(next_text if next_text.endswith("\n") else next_text + "\n", encoding="utf-8")
+        _atomic_write_text(path, next_text if next_text.endswith("\n") else next_text + "\n")
+        if existing_snapshot is not None:
+            updated_items = parse_request_markdown(next_text, kind=kind, run_dir=run_dir)
+            snapshot_source_by_id = {item.item_id: item for item in existing_snapshot.items}
+            if {item.id for item in updated_items} != set(snapshot_source_by_id):
+                raise ImageRequestSnapshotError("cannot rematerialize snapshot: request item ids changed")
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind=kind,
+                items=[
+                    {
+                        "item_id": item.id,
+                        "kind": kind,
+                        "destination": item.output,
+                        "prompt": item.prompt,
+                        "prompt_policy_version": item.prompt_policy_version,
+                        "compiler_version": snapshot_source_by_id[item.id].compiler_version,
+                        "source_digest": snapshot_source_by_id[item.id].source_digest,
+                        "references": list(item.references),
+                    }
+                    for item in updated_items
+                ],
+                source_artifact=filename,
+            )
+            write_request_snapshot_atomic(snapshot_path, snapshot, run_dir=run_dir)
     return {"updated": updated, "missing": missing}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(text)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def list_reference_options(run_dir: Path) -> list[ReferenceOption]:
@@ -667,6 +844,10 @@ def write_app_server_image_debug_log(
     kind: str | None = None,
     prompt_policy_version: str | None = None,
     debug_prompt_source: dict[str, Any] | None = None,
+    request_revision: str | None = None,
+    request_digest: str | None = None,
+    compiler_version: str | None = None,
+    source_digest: str | None = None,
     result: Any | None = None,
     error: str | None = None,
 ) -> Path:
@@ -678,6 +859,7 @@ def write_app_server_image_debug_log(
     transcript = getattr(result, "transcript", []) if result is not None else []
     result_reference_sha256s = getattr(result, "reference_sha256s", None) if result is not None else None
     reference_sha256s = result_reference_sha256s if isinstance(result_reference_sha256s, list) else []
+    output_sha256 = _sha256_file(destination) if destination.exists() and destination.is_file() else None
     provenance = {
         "policy": getattr(result, "provenance_policy", None) if result is not None else None,
         "generationJobId": getattr(result, "generation_job_id", None) if result is not None else None,
@@ -685,8 +867,15 @@ def write_app_server_image_debug_log(
         "turnId": getattr(result, "turn_id", None) if result is not None else None,
         "promptSha256": getattr(result, "prompt_sha256", None) if result is not None else None,
         "referenceSha256s": reference_sha256s,
+        "imageGenerationItemId": getattr(result, "image_generation_item_id", None) if result is not None else None,
+        "imageGenerationItemCount": getattr(result, "image_generation_item_count", 0) if result is not None else 0,
         "savedPath": str(getattr(result, "saved_path", "") or "") if result is not None else "",
         "destination": getattr(result, "destination", None) if result is not None else None,
+        "outputSha256": output_sha256,
+        "requestRevision": request_revision,
+        "requestDigest": request_digest,
+        "compilerVersion": compiler_version,
+        "sourceDigest": source_digest,
         "source": getattr(result, "source", None) if result is not None else None,
         "authoritative": bool(getattr(result, "provenance_authoritative", False)) if result is not None else False,
     }
@@ -704,13 +893,24 @@ def write_app_server_image_debug_log(
         "promptLength": len(prompt or ""),
         "promptSha256": hashlib.sha256((prompt or "").encode("utf-8")).hexdigest() if prompt is not None else None,
         "referenceSha256s": reference_sha256s,
+        "outputSha256": output_sha256,
         "generationJobId": provenance["generationJobId"],
         "turnId": provenance["turnId"],
+        "imageGenerationItemId": provenance["imageGenerationItemId"],
+        "imageGenerationItemCount": provenance["imageGenerationItemCount"],
         "provenance": provenance,
         "provenanceAuthoritative": provenance["authoritative"],
+        "requestRevision": request_revision,
+        "requestDigest": request_digest,
+        "compilerVersion": compiler_version,
+        "sourceDigest": source_digest,
         "apiPromptPolicyVersion": prompt_policy_version,
         "debugPromptSource": debug_prompt_source or {},
-        "status": getattr(result, "status", "exception" if error else "missing") if result is not None else "exception",
+        "status": (
+            "failed"
+            if error
+            else (getattr(result, "status", "missing") if result is not None else "missing")
+        ),
         "savedPath": str(getattr(result, "saved_path", "") or ""),
         "source": getattr(result, "source", None) if result is not None else None,
         "revisedPrompt": getattr(result, "revised_prompt", None) if result is not None else None,
@@ -768,8 +968,32 @@ def copy_saved_image(saved_path: Path, destination: Path) -> Path:
     if destination.suffix.lower() not in IMAGE_SUFFIXES:
         raise ValueError("destination must be an image file")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(saved_path, destination)
+    if saved_path.resolve() == destination.resolve():
+        return destination
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=destination.suffix,
+        dir=destination.parent,
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        shutil.copy2(saved_path, temporary_path)
+        validate_image_bytes(temporary_path)
+        with temporary_path.open("rb") as temporary_file:
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return destination
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def resolve_run_relative(run_dir: Path, path: str) -> Path:

@@ -393,10 +393,45 @@ cuts:
           new_asset_needed: false
           reuse_allowed: false
         p600_image:
+          authoring_boundary: "p420 は完成 prompt を書かず、描画可能な first-frame 要件だけを渡す"
+          source_projection: "first_frame_visual_plan_v1"
+          compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
+          prompt_policy_version: "image_api_prompt_v2"
+          compiler_version: "conditional_drawable_prompt_compiler_v1"
+          drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
+          always_required_groups:
+            - "style"
+            - "current_moment"
+            - "primary_subject"
+            - "composition"
+            - "constraints"
+          conditional_groups:
+            references: "resolved references が1件以上ある場合だけ"
+            characters: "asset_dependency.character_ids_required が1件以上ある場合だけ"
+            objects: "asset_dependency.object_ids_required が1件以上ある場合だけ"
+            location: "asset_dependency.location_ids_required が1件以上ある場合だけ"
+            light_material: "明示された非定型の描画可能な光・素材情報がある場合だけ"
+            current_state_delta: "sequential progression の明示された描画可能な差分がある場合だけ"
           prompt_requirements: []
           reference_requirements: []
           first_frame_must_include: []
           first_frame_must_avoid: []
+          excluded_from_provider_prompt:
+            - "source_event_contract"
+            - "event_context_for_cut"
+            - "motion_brief"
+            - "scene_event"
+            - "first_frame_visual_plan"
+            - "drawable_prompt_ir"
+            - "ID/path/hash/compiler metadata"
+          provider_prompt_path: "image_generation.api_prompt_payload.prompt"
+          review_projection: "image_generation_requests.md#api_prompt"
+          execution_snapshot: "image_generation_request_snapshot.json"
+          parallel_execution_contract:
+            bind_worker_to_snapshot_revision: true
+            unique_destination_owner: true
+            reject_cross_revision_output: true
+          legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
         p700_narration:
           narration_requirements: []
           narrative_position: "opening|middle|ending"

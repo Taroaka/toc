@@ -777,10 +777,13 @@ output/<topic>_<timestamp>/
   - `assets.object_bible[].review_aliases[]`（optional。story/script review で使う別名）
   - 詳細仕様（正本）: `docs/implementation/asset-bibles.md`
 
-### 4.2 `scenes[].image_generation`
+### 4.2 `scenes[].image_generation` / `scenes[].cuts[].image_generation`
 
-- `prompt` は構造化テンプレで書く（正本: `docs/implementation/image-prompting.md`）
-- 言語: 原則 **日本語**（見出しタグは固定推奨、`AVOID` は英語キーワード併記可）
+- production cut image の送信正本は `api_prompt_payload.prompt`（正本: `docs/implementation/image-prompting.md`）
+- `api_prompt_payload.policy_version` は `image_api_prompt_v2`、`compiler_version` は `conditional_drawable_prompt_compiler_v1` とする
+- `first_frame_visual_plan` は derived design、`api_prompt_payload.drawable_prompt_ir` は条件付き抽出結果であり、provider へは送らない
+- `prompt` は `image_api_prompt_v1` 互換の read-only field。v2 failure 時の暗黙 fallback に使わない
+- 言語: provider-facing `api_prompt_payload.prompt` は原則 **日本語**
 - `character_ids: []` は常に明示（B-roll は `[]`）
 - `character_variant_ids: []` は optional。複数 state/time variant がある場合だけ、scene/cut ごとに使う variant を明示する
 - `object_ids: []` は常に明示（setpiece/アイテムが無い scene でも `[]`）
@@ -827,8 +830,11 @@ generator の読み順:
 
 - image generation
   1. `video_manifest.md`
-  2. `script.md`
-  3. narration は補助参照
+  2. derived `first_frame_visual_plan`
+  3. `drawable_prompt_ir`
+  4. `api_prompt_payload`
+  5. immutable request snapshot
+  6. narration は authoring の補助参照に留め、provider payload には入れない
 - video generation
   1. `video_manifest.md`
   2. `script.md`
@@ -839,7 +845,8 @@ generator の読み順:
 - `audio.narration.tts_text` は TTS 専用字段
 - `tts_text` を image/video generation の主ソースにしてはならない
 - `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
-- materialize された `image_generation_requests.md` / `video_generation_requests.md` は review artifact として `source_requests` metadata を含んでよい
+- materialize された `image_generation_requests.md` は human review projection として `source_requests` metadata と exact `api_prompt` fence を含んでよい。production v2 の実行正本は `image_generation_request_snapshot.json` とする
+- `video_generation_requests.md` は引き続き video request の review artifact として扱う
 - story cut の `video_generation` 採否は human review 正本に従う
   - `delete_scene` / `delete_cut` で消されていない cut は既定で `video_generation` を持つ
   - `still_image_plan.mode` は image planning 用であり、動画 cut の削除理由には使わない
@@ -970,11 +977,14 @@ location の例外ルール:
 - asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内の関連 asset 派生も含めて continuity を守ること
 - したがって asset contract は reuse と continuity を優先し、単発 cut 専用画像を増やすためには使わない
 - 例外的に既存 scene still を asset へ昇格することはあるが、それは移行中 run の互換措置であり、標準フローではない
-- provider 実行直前に request file を materialize する
+- provider 実行前に review projection と immutable snapshot を materialize する
   - asset stage: `artifact.asset_generation_requests`
-  - cut image stage: `artifact.image_generation_requests`
+  - cut image stage review projection: `artifact.image_generation_requests`（通常 `image_generation_requests.md`）
+  - cut image stage execution snapshot: `image_generation_request_snapshot.json`
   - video stage: `artifact.video_generation_requests`
-- request file は selector ごとの final prompt / references / output を記録し、人レビューの対象にできる
+- Markdown request file は selector ごとの final prompt / references / output を記録する人レビュー用 projection である。production v2 runtime が Markdown を再解釈して prompt を組み立ててはならない
+- snapshot は exact prompt、prompt hash、reference path と content hash、destination、prompt policy / compiler version、source digest、request revision を凍結する実行正本である
+- Markdown の `api_prompt` fence と snapshot の prompt/hash/reference/output が一致しない場合は stale request として停止し、再 materialize する
   - scene に `render_units[]` がある場合、video request file は cut ではなく render unit selector を出し、review metadata として `source_cuts` を併記してよい
 - asset request file の prompt 本文は image API に渡る凍結文であり、制作管理メタを使わず、具体的に見える人物・場所・道具・行為を書く
   - NG: `物語「シンデレラ」の scene10 のための背景画像。`
@@ -999,12 +1009,12 @@ location の例外ルール:
   - deleted cut は request / image generation / video generation / audio generation / final concat から除外する
   - 除外対象は `generation_exclusion_report.md` と `*_generation_exclusions.md` に記録する
   - `scripts/build-clip-lists.py` は scene に `render_units[]` がある場合、`video_clips.txt` を render unit 単位で、`video_narration_list.txt` を `source_cut_ids[]` の順で作る
-- request には prompt 以外の判断材料も十分に残す
+- review projection / snapshot には prompt 以外の判断材料も十分に残す
   - explicit `references`
   - `character_ids` / `object_ids` / `location_ids` から解決される asset reference
   - つまり request review 時点で「何を参照して作るか」が人間に見えている状態を正とする
-- `plan` は AI/実装側の設計用文書、`request` は人間が最終確認する凍結文書として役割を分ける
-- 人レビューの既定対象は `request` 側とし、`plan` 側は必要時だけ参照する
+- `plan` は AI/実装側の設計用文書、Markdown request は人間が最終確認する projection、JSON snapshot は機械実行の凍結正本として役割を分ける
+- 人レビューの既定対象は Markdown request 側とし、plan / IR は必要時だけ参照する。承認後の実行は対応する snapshot revision に束縛する
 - image/video request は stateful な前提を置かない
 - 他 cut / 他 scene との関係性は、原則として `references` に入った画像を通してのみ担保する
 - request 本文では「参照画像の誰/場所/小道具が、この場面でどう見えるか」を明記する
@@ -1098,6 +1108,7 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 - semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
 - semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
 - `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` 回まで再実行する。既定は 3 回。pass 済み shard は再実行しない。retry で復帰した shard は `review.semantic.scene_detail.shards.<scene>.transport.status=recovered` にする。使い切った shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
+- `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
 
 Canonical semantic review stages:
 
@@ -1292,16 +1303,13 @@ Image contract:
 - `done_when`
   - 生成前に満たしたい具体条件
 
-Required prompt blocks:
+Production v2 prompt groups:
 
-- `[全体 / 不変条件]`
-- `[登場人物]`
-- `[小道具 / 舞台装置]`
-- `[シーン]`
-- `[連続性]`
-- `[禁止]`
+- 常時: `style`, `current_moment`, `primary_subject`, `composition`, `constraints`
+- dependency 条件付き: `references`, `characters`, `objects`, `location`
+- explicit drawable value 条件付き: `light_material`, `current_state_delta`
 
-subagent review は上記 6 block を必須 criterion とする。1 つでも欠けていれば `agent_review_ok: false` とし、`missing_required_prompt_block` を reason key に含める。
+subagent review は `drawable_prompt_ir.dependencies.required_groups` をその entry の必須 criterion とする。required group の欠落、不要 group の混入、空 fragment、`included_fragments[].text` と `api_prompt_payload.prompt` の不一致を `agent_review_ok: false` にする。`missing_required_prompt_block` は `image_api_prompt_v1` の legacy criterion とし、v2 に固定6ブロックを要求しない。
 
 ---
 
@@ -2043,7 +2051,6 @@ first_frame_visual_plan:
     - scene_event.event_sequence[]
     - cut_contract.source_event_contract
     - cut_contract.first_frame_contract
-    - cut_contract.motion_contract
     - cut_contract.event_context_for_cut
   editable: false
   source_grounding:
@@ -2102,4 +2109,108 @@ first_frame_visual_plan:
     do_not_render_future_motion_as_action: true
 ```
 
-11 block の最終 image prompt はこの plan から描画可能な情報だけをレンダリングする。prompt 本文には `first_frame_visual_plan` / `source_event_contract` / `event_context_for_cut` / `motion_brief` / `p600` / `p800` / `scene_event` 全体を出さない。ただし trace 用の `source_event_beat_id` と `forbidden_future_event_beat_ids` は `[このcutの開始状態]` に残してよい。
+`motion_affordance` は review 用の境界情報であり、`motion_brief` は p800 専用である。image prompt compiler は `motion_brief` を入力にせず、`first_frame_visual_plan` 内でも描画可能な現在状態だけを採用する。
+
+## Drawable Prompt IR v1
+
+production cut image は `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` の一方向変換とする。IR は provider prompt そのものではなく、どの描画断片を採用したかを検証する derived artifact である。
+
+```yaml
+drawable_prompt_ir:
+  schema_version: "drawable_prompt_ir_v1"
+  dependencies:
+    character_ids: []
+    object_ids: []
+    location_ids: []
+    references: []
+    required_groups:
+      - style
+      - current_moment
+      - primary_subject
+      - composition
+      - constraints
+  included_fragments:
+    - group: "style"
+      text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+    - group: "current_moment"
+      text: "画面には、<この cut で現在見える出来事の証拠>。"
+    - group: "primary_subject"
+      text: "観客が最初に読む主被写体は、<描画可能な主被写体>。"
+    - group: "composition"
+      text: "<主被写体と空間の優先順位が読める構図>。"
+    - group: "constraints"
+      text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。"
+  omitted_groups:
+    - references
+    - characters
+    - objects
+    - location
+    - light_material
+    - current_state_delta
+```
+
+group の canonical order と採用条件:
+
+1. `style`（常時）
+2. `references`（references が1件以上）
+3. `current_moment`（常時）
+4. `primary_subject`（常時）
+5. `characters`（`character_ids` が1件以上）
+6. `objects`（`object_ids` が1件以上）
+7. `location`（`location_ids` が1件以上）
+8. `composition`（常時）
+9. `light_material`（明示された非定型の描画値がある）
+10. `current_state_delta`（sequential progression の明示された描画値がある）
+11. `constraints`（常時）
+
+`dependencies.required_groups` は採用した全 group を canonical order で持つ。各 `included_fragments[].text` は exact `api_prompt_payload.prompt` に含まれなければならない。dependency が無い group、空 text、定型 placeholder は採用しない。「人物なし」「小道具なし」の穴埋めも禁止し、不在自体が画面上の重要な証拠である場合だけ `constraints` 等の描画文へ落とす。
+
+## Image API Prompt Payload v2
+
+```yaml
+api_prompt_payload:
+  policy_version: "image_api_prompt_v2"
+  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  prompt: "<included_fragments の描画文だけを自然文化した exact provider prompt>"
+  negative_prompt: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト"
+  reference_instructions: ""
+  reference_images: []
+  sha256: "<sha256-of-exact-prompt>"
+  drawable_prompt_ir: "<Drawable Prompt IR v1>"
+```
+
+- provider へ送る本文は `api_prompt_payload.prompt` だけである
+- `drawable_prompt_ir`、`first_frame_visual_plan`、`cut_contract`、`scene_event`、`source_event_contract`、`event_context_for_cut`、`motion_brief`、`source_event_beat_id`、`forbidden_future_event_beat_ids`、path、hash、compiler metadata は prompt 本文へ出さない
+- `shot_design_contract`、`cut_location_frame_plan`、`cut_visual_delta`、`blocking_and_interaction` 等を payload metadata に保持してもよいが、IR fragment または provider prompt として送らない
+- `image_api_prompt_v1` は legacy artifact の互換読み込み用である。v2 compile / gate failure 時に v1 へ暗黙 fallback しない
+- production v2 に固定6ブロック／11ブロックの completeness gate を適用しない
+
+## Image Generation Request Snapshot v1
+
+`image_generation_requests.md` は human review projection であり、各 item の `api_prompt` fence に exact prompt を表示する。実行正本は同時に materialize する `image_generation_request_snapshot.json` とする。
+
+```yaml
+schema_version: "toc.image_generation_request_snapshot.v1"
+request_revision: "<snapshot-content-revision>"
+kind: "scene"
+created_at: "<ISO8601>"
+source_artifact: "image_generation_requests.md"
+source_artifact_sha256: "<sha256>"
+items:
+  - item_id: "scene1_cut1"
+    kind: "scene"
+    destination: "assets/scenes/scene1_cut1_base.png"
+    prompt: "<exact api_prompt_payload.prompt>"
+    prompt_sha256: "<sha256-of-exact-prompt>"
+    prompt_policy_version: "image_api_prompt_v2"
+    compiler_version: "conditional_drawable_prompt_compiler_v1"
+    source_digest: "<sha256-of-compilation-source>"
+    references:
+      - path: "assets/characters/protagonist_front.png"
+        sha256: "<content-sha256>"
+        deferred: false
+        producer_item_id: null
+    request_digest: "<canonical-item-digest>"
+```
+
+runtime は Markdown から provider request を再構成せず、snapshot item の prompt / destination / references / hashes / revision を検証してから送信する。Markdown drift、source digest drift、reference content drift、prompt hash mismatch は stale request として停止する。並列 worker は item ごとの immutable snapshot と destination ownership に束縛し、同じ destination の重複実行や別 revision の結果混在を許可しない。output provenance は少なくとも `request_revision`、`request_digest`、`prompt_sha256`、`compiler_version` と照合できるようにする。

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from toc.semantic_pack_image import collect_entries
+from toc.semantic_pack_image import collect_entries, collect_image_prompt_entries, load_manifest
 
 
 def write_manifest(run_dir: Path) -> None:
@@ -398,6 +398,69 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertIn("cut_first_frame_reverts_to_scene_start", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_progression_not_visible_across_api_prompts", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_cut_coverage_plan", composite["scene_composite_gate"]["must_judge"][0])
+
+    def test_collect_image_prompt_entries_defaults_missing_agent_review_to_false(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
+            run_dir = Path(td)
+            write_manifest(run_dir)
+            manifest = load_manifest(run_dir / "video_manifest.md")
+            image_generation = manifest["scenes"][0]["cuts"][0]["image_generation"]
+            image_generation.pop("review", None)
+
+            entries = collect_image_prompt_entries(manifest)
+
+        self.assertFalse(entries[0]["review"]["agent_review_ok"])
+
+    def test_collect_image_prompt_entries_exposes_v2_drawable_dependencies(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 10,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {
+                                "output": "assets/scenes/scene10_cut01.png",
+                                "character_ids": [],
+                                "object_ids": ["glass_slipper"],
+                                "location_ids": [],
+                                "references": [],
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v2",
+                                    "prompt": "実写映画調。前景のガラスの靴を大きく捉える。文字やロゴは入れない。",
+                                    "drawable_prompt_ir": {
+                                        "schema_version": "drawable_prompt_ir_v1",
+                                        "dependencies": {
+                                            "character_ids": [],
+                                            "object_ids": ["glass_slipper"],
+                                            "location_ids": [],
+                                            "references": [],
+                                        },
+                                        "included_fragments": [
+                                            {"group": "style", "text": "実写映画調。"},
+                                            {"group": "current_moment", "text": "前景のガラスの靴。"},
+                                            {"group": "primary_subject", "text": "主役はガラスの靴。"},
+                                            {"group": "composition", "text": "前景へ大きく置く。"},
+                                            {"group": "objects", "text": "透明なガラスの靴。"},
+                                            {"group": "constraints", "text": "文字やロゴは入れない。"},
+                                        ],
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entries = collect_image_prompt_entries(manifest)
+
+        self.assertEqual(entries[0]["drawable_prompt_dependencies"]["object_ids"], ["glass_slipper"])
+        self.assertEqual(
+            entries[0]["included_drawable_fragment_groups"],
+            ["style", "current_moment", "primary_subject", "composition", "objects", "constraints"],
+        )
 
     def test_scene_image_semantic_stage_is_removed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:

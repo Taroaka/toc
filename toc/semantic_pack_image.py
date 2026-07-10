@@ -59,6 +59,25 @@ def _image_api_prompt(image_generation: dict[str, Any]) -> str:
     return _as_str(payload.get("prompt") or image_generation.get("prompt"))
 
 
+def _drawable_prompt_ir(image_generation: dict[str, Any]) -> dict[str, Any]:
+    return _dict(_image_api_prompt_payload(image_generation).get("drawable_prompt_ir"))
+
+
+def _drawable_prompt_dependencies(image_generation: dict[str, Any]) -> dict[str, Any]:
+    return _dict(_drawable_prompt_ir(image_generation).get("dependencies"))
+
+
+def _included_drawable_fragment_groups(image_generation: dict[str, Any]) -> list[str]:
+    groups: list[str] = []
+    for fragment in _list(_drawable_prompt_ir(image_generation).get("included_fragments")):
+        if not isinstance(fragment, dict):
+            continue
+        group = _as_str(fragment.get("group"))
+        if group:
+            groups.append(group)
+    return groups
+
+
 def _prompt_block_labels(prompt: str) -> list[str]:
     labels: list[str] = []
     for raw in (prompt or "").splitlines():
@@ -285,6 +304,9 @@ def collect_image_prompt_entries(
                 "legacy_prompt": _as_str(image_generation.get("prompt")),
                 "api_prompt_payload": api_prompt_payload,
                 "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                "drawable_prompt_ir": _drawable_prompt_ir(image_generation),
+                "drawable_prompt_dependencies": _drawable_prompt_dependencies(image_generation),
+                "included_drawable_fragment_groups": _included_drawable_fragment_groups(image_generation),
                 "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
                 "scene_film_coverage_plan": _dict(scene.get("scene_film_coverage_plan")),
                 "scene_shot_mix_plan": _dict(scene.get("scene_shot_mix_plan")),
@@ -299,8 +321,8 @@ def collect_image_prompt_entries(
                     "api_prompt_payload.prompt が API 送信用正本であり、legacy image_generation.prompt や debug_prompt_source を読んでいないか",
                     "設計上の絵としての役割が scene_cut_coverage_plan / scene_film_coverage_plan / scene_shot_mix_plan から API prompt の構図・対象・画角へ反映されているか",
                     "scene state progression: scene_state_progression_plan の suspended_moment / sequential_state_progression の判断が cut_state_progression と API prompt の visible state に反映されているか",
-                    "API prompt が意味説明ではなく、shot / location zone / blocking / object contact / previous cut delta で描ける1枚になっているか",
-                    "API prompt が emotion label ではなく face / gaze / posture / hands / feet / distance の visible behavior だけで感情を描かせているか",
+                    "drawable_prompt_ir.dependencies が、このcutで必要な人物・小道具・場所・参照だけを宣言し、不要なfragmentを含めていないか",
+                    "人物dependencyがある場合だけ、emotion label ではなく face / gaze / posture / hands / feet / distance の visible behavior が描画文へ落ちているか",
                     "旧 [cut契約からの可視要件] や 場面の核/観客理解/因果の証明 などの設計メタが API prompt に残っていないか",
                     "source_event_contract と event_context_for_cut の ID や event_time_position / what_happens / visible_action が API prompt に漏れていないか",
                     "小道具の reveal boundary が must_include / must_not_include と矛盾していないか",
@@ -325,7 +347,7 @@ def collect_image_prompt_entries(
                 "contract_required_fields_missing": missing_contract_fields(semantic_contract),
                 "review": {
                     "status": _as_str(review.get("status")),
-                    "agent_review_ok": _as_bool(review.get("agent_review_ok"), True),
+                    "agent_review_ok": _as_bool(review.get("agent_review_ok"), False),
                     "human_review_ok": _as_bool(review.get("human_review_ok"), False),
                     "agent_review_reason_keys": _as_str_list(
                         review.get("agent_review_reason_keys") or review.get("agent_review_reason_codes")
@@ -465,6 +487,9 @@ def collect_scene_composite_entries(
                     "legacy_prompt": _as_str(image_generation.get("prompt")),
                     "api_prompt_payload": api_prompt_payload,
                     "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                    "drawable_prompt_ir": _drawable_prompt_ir(image_generation),
+                    "drawable_prompt_dependencies": _drawable_prompt_dependencies(image_generation),
+                    "included_drawable_fragment_groups": _included_drawable_fragment_groups(image_generation),
                     "image_output": output,
                     "image_output_exists": output_exists,
                     "video_motion_prompt": _as_str(video_generation.get("motion_prompt")),

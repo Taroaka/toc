@@ -117,6 +117,15 @@
 #   stage.scene_implementation.subagent.prompt.generated_at=ISO8601
 #   review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
 #   review.image_prompt.subagent.prompt.generated_at=ISO8601
+#   review.semantic.image_prompt.shards.status=reviewing|passed|failed
+#   review.semantic.image_prompt.shards.count=0
+#   review.semantic.image_prompt.shards.concurrency=0
+#   review.semantic.image_prompt.shards.coverage.status=valid|invalid|failed
+#   review.semantic.image_prompt.shards.<scene>.status=passed|failed
+#   review.semantic.image_prompt.shards.<scene>.entry_ids=comma-separated selectors
+#   review.semantic.image_prompt.shards.<scene>.blocked_entries=comma-separated selectors
+#   review.semantic.image_prompt.shards.<scene>.reason_keys=comma-separated reason keys
+#   review.semantic.image_prompt.shards.<scene>.transport.status=passed|retrying|recovered|failed
 #   stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
 #   stage.scene_implementation.playbooks.selected_count=0
 #   stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
@@ -234,6 +243,8 @@
 #   artifact.asset_generation_requests=output/<topic>_<timestamp>/asset_generation_requests.md
 #   artifact.human_change_log=output/<topic>_<timestamp>/human_change_requests.md
 #   artifact.image_generation_requests=output/<topic>_<timestamp>/image_generation_requests.md
+#   artifact.image_generation_request_snapshot=output/<topic>_<timestamp>/image_generation_request_snapshot.json
+#   artifact.asset_generation_request_snapshot=output/<topic>_<timestamp>/asset_generation_request_snapshot.json
 #   artifact.video_generation_requests=output/<topic>_<timestamp>/video_generation_requests.md
 #   artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
 #   artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json

@@ -31,6 +31,7 @@ from server.codex_app_server import (
     CodexAppServerTransportError,
     ImageGenerationResult,
     _extract_prompt_from_agent_text,
+    _read_codex_cli_version,
     classify_codex_transport_error,
     create_codex_app_server_client,
     default_app_server_model,
@@ -38,6 +39,8 @@ from server.codex_app_server import (
     find_image_generation_items,
     image_generation_saved_path,
     is_codex_transport_error,
+    minimum_app_server_version,
+    parse_codex_cli_version,
     preflight_codex_backend_network,
     reject_local_raster_image_result,
     wait_for_generated_image_after,
@@ -52,6 +55,13 @@ from server.image_gen_app import (
     _validate_p650_run,
 )
 from toc.semantic_review_loop import semantic_repair_relpaths
+from toc.runtime_locks import FileLockUnavailable
+from toc.image_request_snapshot import (
+    ImageRequestSnapshotError,
+    load_request_snapshot,
+    materialize_request_snapshot,
+    write_request_snapshot_atomic,
+)
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -1174,7 +1184,7 @@ class ImageGenParserTests(unittest.TestCase):
             async def fake_run_turn(**_kwargs):
                 return [
                     {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}},
-                    {"type": "imageGeneration", "savedPath": str(generated), "status": "completed"},
+                    {"id": "image-item-1", "type": "imageGeneration", "savedPath": str(generated), "status": "completed"},
                     {"method": "turn/completed", "params": {"turnId": "turn-1"}},
                 ]
 
@@ -1200,7 +1210,82 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(result.turn_id, "turn-1")
         self.assertEqual(result.prompt_sha256, hashlib.sha256(b"prompt").hexdigest())
         self.assertEqual(result.reference_sha256s, [hashlib.sha256(PNG_BYTES).hexdigest()])
+        self.assertEqual(result.image_generation_item_id, "image-item-1")
+        self.assertEqual(result.image_generation_item_count, 1)
         self.assertTrue(result.provenance_authoritative)
+
+    def test_generate_image_request_bound_v2_rejects_multiple_distinct_image_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(PNG_BYTES)
+            second.write_bytes(PNG_BYTES)
+            client = CodexAppServerClient(cwd=root)
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**_kwargs):
+                return [
+                    {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}},
+                    {"id": "image-a", "type": "imageGeneration", "savedPath": str(first), "status": "completed"},
+                    {"id": "image-b", "type": "imageGeneration", "savedPath": str(second), "status": "completed"},
+                    {"method": "turn/completed", "params": {"turnId": "turn-1"}},
+                ]
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(CodexAppServerError, "exactly one distinct imageGeneration item"):
+                asyncio.run(
+                    client.generate_image(
+                        prompt="prompt",
+                        output_path=run_dir / "candidate.png",
+                        reference_images=[],
+                        item_id="scene1",
+                        run_dir=run_dir,
+                        generation_job_id="job-1",
+                        allow_generated_images_fallback=False,
+                    )
+                )
+
+    def test_generate_image_request_bound_v2_deduplicates_repeated_notification_for_same_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            client = CodexAppServerClient(cwd=root)
+
+            async def fake_start_thread(**_kwargs):
+                return "thread-1"
+
+            async def fake_run_turn(**_kwargs):
+                item = {"id": "image-a", "type": "imageGeneration", "savedPath": str(generated), "status": "completed"}
+                return [item, {"method": "item/completed", "params": {"item": dict(item)}}, {"method": "turn/completed", "params": {"turnId": "turn-1"}}]
+
+            client.start_thread = fake_start_thread  # type: ignore[method-assign]
+            client.run_turn = fake_run_turn  # type: ignore[method-assign]
+
+            result = asyncio.run(
+                client.generate_image(
+                    prompt="prompt",
+                    output_path=run_dir / "candidate.png",
+                    reference_images=[],
+                    item_id="scene1",
+                    run_dir=run_dir,
+                    generation_job_id="job-1",
+                    allow_generated_images_fallback=False,
+                )
+            )
+
+        self.assertEqual(result.saved_path, generated)
+        self.assertEqual(result.image_generation_item_id, "image-a")
+        self.assertEqual(result.image_generation_item_count, 1)
 
     def test_generate_image_request_bound_v2_does_not_claim_generated_images_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1501,13 +1586,188 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertEqual({path.name for path in claimed if path}, {"first.png", "second.png"})
 
-    def test_default_app_server_model_avoids_user_config_model(self) -> None:
+    def test_default_app_server_model_uses_latest_approved_model(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(default_app_server_model(), "")
+            self.assertEqual(default_app_server_model(), "gpt-5.6-sol")
 
     def test_default_app_server_model_can_be_overridden(self) -> None:
-        with patch.dict(os.environ, {"TOC_CODEX_APP_SERVER_MODEL": "gpt-5.4"}):
-            self.assertEqual(default_app_server_model(), "gpt-5.4")
+        with patch.dict(os.environ, {"TOC_CODEX_APP_SERVER_MODEL": "gpt-5.5"}):
+            self.assertEqual(default_app_server_model(), "gpt-5.5")
+
+    def test_minimum_app_server_version_defaults_to_upgraded_cli(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(minimum_app_server_version(), "0.144.0")
+
+    def test_minimum_app_server_version_can_be_overridden(self) -> None:
+        with patch.dict(os.environ, {"TOC_CODEX_APP_SERVER_MIN_VERSION": "0.150.1"}):
+            self.assertEqual(minimum_app_server_version(), "0.150.1")
+
+    def test_parse_codex_cli_version_accepts_release_and_prerelease_output(self) -> None:
+        self.assertEqual(parse_codex_cli_version("codex-cli 0.144.0"), "0.144.0")
+        self.assertEqual(parse_codex_cli_version("codex-cli 0.144.0-alpha.4"), "0.144.0-alpha.4")
+        self.assertEqual(parse_codex_cli_version("codex-cli 0.144.0+build.7"), "0.144.0+build.7")
+
+    def test_parse_codex_cli_version_rejects_unknown_output(self) -> None:
+        with self.assertRaisesRegex(CodexAppServerError, "Could not parse Codex CLI version"):
+            parse_codex_cli_version("runtime 9.9.9; codex development build")
+
+    def test_read_codex_cli_version_uses_cli_version_command(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["/opt/homebrew/bin/codex", "--version"],
+            returncode=0,
+            stdout="codex-cli 0.144.0\n",
+            stderr="",
+        )
+        with patch("server.codex_app_server.subprocess.run", return_value=completed) as run:
+            version = _read_codex_cli_version("/opt/homebrew/bin/codex")
+
+        self.assertEqual(version, "0.144.0")
+        run.assert_called_once_with(
+            ["/opt/homebrew/bin/codex", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_read_codex_cli_version_reports_command_failure(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["/broken/codex", "--version"],
+            returncode=2,
+            stdout="",
+            stderr="broken binary",
+        )
+        with patch("server.codex_app_server.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(CodexAppServerError, "version check failed") as raised:
+                _read_codex_cli_version("/broken/codex")
+
+        self.assertEqual(raised.exception.diagnostics["returncode"], 2)
+        self.assertEqual(raised.exception.diagnostics["codexVersionOutput"], "broken binary")
+
+    def test_read_codex_cli_version_reports_launch_failure(self) -> None:
+        with patch("server.codex_app_server.subprocess.run", side_effect=OSError("permission denied")):
+            with self.assertRaisesRegex(CodexAppServerError, "Could not execute Codex CLI version check") as raised:
+                _read_codex_cli_version("/broken/codex")
+
+        self.assertEqual(raised.exception.diagnostics["codexBinPath"], "/broken/codex")
+
+    def test_codex_app_server_preflight_rejects_outdated_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CodexAppServerClient(cwd=Path(tmp))
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": tmp,
+                        "TOC_CODEX_APP_SERVER_PREFLIGHT_NETWORK": "0",
+                    },
+                    clear=True,
+                ),
+                patch("server.codex_app_server.shutil.which", return_value="/opt/homebrew/bin/codex"),
+                patch("server.codex_app_server._read_codex_cli_version", return_value="0.143.9"),
+            ):
+                with self.assertRaisesRegex(CodexAppServerError, "requires Codex CLI >= 0.144.0") as raised:
+                    client.preflight_runtime()
+
+        self.assertEqual(raised.exception.diagnostics["codexVersion"], "0.143.9")
+        self.assertEqual(raised.exception.diagnostics["minimumCodexVersion"], "0.144.0")
+        self.assertEqual(raised.exception.diagnostics["model"], "gpt-5.6-sol")
+
+    def test_codex_app_server_preflight_rejects_prerelease_of_stable_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CodexAppServerClient(cwd=Path(tmp))
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": tmp,
+                        "TOC_CODEX_APP_SERVER_PREFLIGHT_NETWORK": "0",
+                    },
+                    clear=True,
+                ),
+                patch("server.codex_app_server.shutil.which", return_value="/Applications/ChatGPT.app/codex"),
+                patch("server.codex_app_server._read_codex_cli_version", return_value="0.144.0-alpha.4"),
+            ):
+                with self.assertRaisesRegex(CodexAppServerError, "requires Codex CLI >= 0.144.0"):
+                    client.preflight_runtime()
+
+    def test_codex_app_server_preflight_accepts_build_metadata_for_stable_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CodexAppServerClient(cwd=Path(tmp))
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": tmp,
+                        "TOC_CODEX_APP_SERVER_PREFLIGHT_NETWORK": "0",
+                    },
+                    clear=True,
+                ),
+                patch("server.codex_app_server.shutil.which", return_value="/opt/homebrew/bin/codex"),
+                patch("server.codex_app_server._read_codex_cli_version", return_value="0.144.0+build.7"),
+            ):
+                checks = client.preflight_runtime()
+
+        self.assertEqual(checks["codexVersion"], "0.144.0+build.7")
+
+    def test_codex_app_server_runtime_contract_records_version_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CodexAppServerClient(cwd=Path(tmp))
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": tmp,
+                        "TOC_CODEX_APP_SERVER_PREFLIGHT_NETWORK": "0",
+                    },
+                    clear=True,
+                ),
+                patch("server.codex_app_server.shutil.which", return_value="/opt/homebrew/bin/codex"),
+                patch("server.codex_app_server._read_codex_cli_version", return_value="0.144.0"),
+            ):
+                checks = client.preflight_runtime()
+                contract = client.runtime_contract().as_dict()
+
+        self.assertEqual(checks["codexVersion"], "0.144.0")
+        self.assertEqual(checks["minimumCodexVersion"], "0.144.0")
+        self.assertEqual(checks["model"], "gpt-5.6-sol")
+        self.assertEqual(contract["codexVersion"], "0.144.0")
+        self.assertEqual(contract["minimumCodexVersion"], "0.144.0")
+        self.assertEqual(contract["model"], "gpt-5.6-sol")
+
+    def test_start_thread_sends_default_model_and_records_explicit_override(self) -> None:
+        async def run(model: str | None, cwd: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+            client = CodexAppServerClient(cwd=cwd)
+            request_params: dict[str, Any] = {}
+
+            async def fake_request(method, params=None):
+                client.preflight_runtime(require_network=False)
+                self.assertEqual(method, "thread/start")
+                request_params.update(params or {})
+                return {"thread": {"id": "thread-1"}}
+
+            client.request = fake_request  # type: ignore[method-assign]
+            await client.start_thread(model=model)
+            return request_params, client.runtime_contract().as_dict()
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("server.codex_app_server.shutil.which", return_value="/opt/homebrew/bin/codex"),
+            patch("server.codex_app_server._read_codex_cli_version", return_value="0.144.0"),
+        ):
+            cwd = Path(tmp)
+            with patch.dict(os.environ, {"CODEX_HOME": tmp}, clear=True):
+                default_params, _ = asyncio.run(run(None, cwd))
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": tmp, "TOC_CODEX_APP_SERVER_MODEL": "gpt-5.6-sol"},
+                clear=True,
+            ):
+                explicit_params, explicit_contract = asyncio.run(run("gpt-5.5", cwd))
+
+        self.assertEqual(default_params["model"], "gpt-5.6-sol")
+        self.assertEqual(explicit_params["model"], "gpt-5.5")
+        self.assertEqual(explicit_contract["model"], "gpt-5.5")
 
     def test_codex_bin_can_be_overridden_for_app_server(self) -> None:
         with patch.dict(os.environ, {"TOC_CODEX_BIN": "/opt/homebrew/bin/codex"}):
@@ -1879,6 +2139,147 @@ scene two prompt
         self.assertEqual(result["missing"], ["missing"])
         self.assertIn("cinematic prompt\nline two", updated)
         self.assertNotIn("updated prompt", updated)
+
+    def test_update_request_prompts_replaces_named_api_prompt_only(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene1_cut1
+
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene01.png`
+
+```debug_prompt_source
+first_frame_visual_plan:
+  visible_moment: keep this debug block
+```
+
+```api_prompt
+old provider prompt
+```
+
+## scene2_cut1
+
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene02.png`
+
+```api_prompt
+keep scene two
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            path = run_dir / "image_generation_requests.md"
+            path.write_text(request_text, encoding="utf-8")
+
+            result = image_gen.update_request_prompts(
+                run_dir,
+                "scene",
+                {"scene1_cut1": "new exact provider prompt"},
+            )
+            updated = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result, {"updated": ["scene1_cut1"], "missing": []})
+        self.assertIn("```api_prompt\nnew exact provider prompt\n```", updated)
+        self.assertIn("visible_moment: keep this debug block", updated)
+        self.assertIn("```api_prompt\nkeep scene two\n```", updated)
+        self.assertNotIn("old provider prompt", updated)
+
+    def test_v2_request_loader_uses_matching_snapshot_and_rejects_markdown_drift(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene1_cut1
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene01.png`
+- references: `[]`
+
+```api_prompt
+灰色の階段にガラスの靴がある。
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(request_text, encoding="utf-8")
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    {
+                        "item_id": "scene1_cut1",
+                        "destination": "assets/scenes/scene01.png",
+                        "prompt": "灰色の階段にガラスの靴がある。",
+                        "prompt_policy_version": "image_api_prompt_v2",
+                        "compiler_version": "drawable_prompt_compiler_v2",
+                        "source_digest": hashlib.sha256(b"first-frame-plan").hexdigest(),
+                        "references": [],
+                    }
+                ],
+                source_artifact="image_generation_requests.md",
+            )
+            write_request_snapshot_atomic(
+                run_dir / "image_generation_request_snapshot.json",
+                snapshot,
+                run_dir=run_dir,
+            )
+
+            items = image_gen.load_request_items(run_dir, "scene")
+            request_path.write_text(request_text.replace("ガラスの靴", "銀の靴"), encoding="utf-8")
+            with self.assertRaisesRegex(ImageRequestSnapshotError, "source_artifact_sha256 mismatch"):
+                image_gen.load_request_items(run_dir, "scene")
+
+        self.assertEqual(items[0].prompt, "灰色の階段にガラスの靴がある。")
+        self.assertEqual(items[0].request_revision, snapshot.request_revision)
+        self.assertEqual(items[0].compiler_version, "drawable_prompt_compiler_v2")
+
+    def test_v2_prompt_update_rematerializes_snapshot_revision(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene1_cut1
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene01.png`
+- references: `[]`
+
+```api_prompt
+old provider prompt
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(request_text, encoding="utf-8")
+            snapshot_path = run_dir / "image_generation_request_snapshot.json"
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    {
+                        "item_id": "scene1_cut1",
+                        "destination": "assets/scenes/scene01.png",
+                        "prompt": "old provider prompt",
+                        "prompt_policy_version": "image_api_prompt_v2",
+                        "compiler_version": "drawable_prompt_compiler_v2",
+                        "source_digest": hashlib.sha256(b"first-frame-plan").hexdigest(),
+                        "references": [],
+                    }
+                ],
+                source_artifact="image_generation_requests.md",
+            )
+            write_request_snapshot_atomic(snapshot_path, snapshot, run_dir=run_dir)
+
+            result = image_gen.update_request_prompts(
+                run_dir,
+                "scene",
+                {"scene1_cut1": "new exact provider prompt"},
+            )
+            updated_snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir)
+
+        self.assertEqual(result["updated"], ["scene1_cut1"])
+        self.assertNotEqual(updated_snapshot.request_revision, snapshot.request_revision)
+        self.assertEqual(updated_snapshot.items[0].prompt, "new exact provider prompt")
 
     def test_reference_options_use_extensionless_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2259,7 +2660,7 @@ class ImageGenApiTests(unittest.TestCase):
             scene_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
 
         self.assertTrue(scene_exists)
-        self.assertEqual(generated, [("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"]), ("scene10_cut3", ["hero.png"])])
+        self.assertEqual(generated, [("hero", []), ("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"]), ("scene10_cut3", ["hero.png"])])
         validate_asset_gate.assert_called_once()
         self.assertEqual(validate_asset_gate.call_args.args[0].resolve(), run_dir.resolve())
         self.assertIn("slot.p660.status=done", state)
@@ -2346,7 +2747,7 @@ transport blocked scene should not generate.
 
         self.assertTrue(scene10_exists)
         self.assertFalse(scene40_exists)
-        self.assertEqual(generated, ["scene10_cut1", "scene10_cut2", "scene10_cut3"])
+        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut2", "scene10_cut3"])
         self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
         self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
         self.assertIn("scene40_cut1", state["review.semantic.scene_detail.blocked_image_items"])
@@ -2441,7 +2842,7 @@ semantic blocked scene should not generate.
 
         self.assertTrue(scene10_exists)
         self.assertFalse(scene20_exists)
-        self.assertEqual(generated, ["scene10_cut1", "scene10_cut2", "scene10_cut3"])
+        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut2", "scene10_cut3"])
         self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
         self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
         self.assertIn("scene20_cut1", state["review.semantic.scene_detail.blocked_image_items"])
@@ -2605,7 +3006,7 @@ semantic blocked scene should show as failed.
         self.assertTrue(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
         self.assertTrue(scene10_cut3_exists)
-        self.assertEqual(generated, ["scene10_cut1", "scene10_cut3"])
+        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut3"])
         self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
         self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "true")
         self.assertIn("scene10_cut2", state["review.semantic.image_prompt.blocked_image_items"])
@@ -2695,7 +3096,7 @@ assets:
         self.assertTrue(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
         self.assertTrue(scene10_cut3_exists)
-        self.assertEqual(generated, ["scene10_cut1", "scene10_cut3"])
+        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut3"])
         self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
         self.assertEqual(state["review.semantic.asset_plan.partial_media_allowed"], "true")
         self.assertEqual(state["review.semantic.asset_plan.localization.status"], "localized_to_image_items")
@@ -5044,6 +5445,54 @@ base b prompt
 
         self.assertEqual(max_active, 1)
 
+    def test_run_execution_lease_rejects_second_job_until_release(self) -> None:
+        async def run_case(run_dir: Path) -> None:
+            await image_gen_app._acquire_run_execution_lease("job-one", run_dir)
+            try:
+                with self.assertRaises(FileLockUnavailable):
+                    await image_gen_app._acquire_run_execution_lease("job-two", run_dir)
+            finally:
+                await image_gen_app._release_run_execution_lease("job-one")
+            await image_gen_app._acquire_run_execution_lease("job-two", run_dir)
+            await image_gen_app._release_run_execution_lease("job-two")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(run_case(Path(tmp) / "sample_run"))
+
+    def test_image_resume_preserves_existing_images_for_hash_aware_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            existing = run_dir / "assets" / "scenes" / "scene01.png"
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(PNG_BYTES)
+
+            result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
+
+            self.assertTrue(existing.exists())
+            self.assertEqual(existing.read_bytes(), PNG_BYTES)
+
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertEqual(result["preservedCount"], 1)
+
+    def test_v2_compiled_prompt_is_not_rewritten_by_generic_quality_upgrade(self) -> None:
+        item = image_gen.ImageRequestItem(
+            id="scene1_cut1",
+            kind="scene",
+            asset_type="scene_still",
+            tool="codex_builtin_image",
+            output="assets/scenes/scene1_cut1.png",
+            prompt="灰色の階段にガラスの靴。",
+            references=[],
+            reference_count=0,
+            execution_lane="bootstrap_builtin",
+            generation_status=None,
+            existing_image=None,
+            prompt_policy_version="image_api_prompt_v2",
+            compiler_version="drawable_prompt_compiler_v2",
+        )
+
+        self.assertFalse(image_gen_app._prompt_needs_quality_upgrade(item))
+
     def test_create_flow_regenerates_existing_output_without_completed_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "output" / "sample_run"
@@ -5098,8 +5547,134 @@ base b prompt
             destination_bytes = destination.read_bytes()
 
         self.assertEqual(destination_bytes, PNG_BYTES)
-        self.assertIn("removed existing destination without completed app-server provenance", event_payload)
+        self.assertIn("existing destination is stale and will be replaced only after successful generation", event_payload)
         self.assertIn('"status": "completed"', event_payload)
+
+    def test_create_flow_keeps_stale_destination_when_regeneration_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            destination = run_dir / "assets" / "objects" / "stale.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"stale-but-reviewable")
+
+            class FailingClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    raise RuntimeError("provider unavailable")
+
+            item = image_gen.ImageRequestItem(
+                id="stale_asset",
+                kind="asset",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/objects/stale.png",
+                prompt="新しい実写映画風プロンプト。",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.create_codex_app_server_client", FailingClient),
+                patch("server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS", 1),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+                    asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
+
+            preserved = destination.read_bytes()
+
+        self.assertEqual(preserved, b"stale-but-reviewable")
+
+    def test_create_flow_does_not_reuse_provenance_for_different_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            destination = run_dir / "assets" / "objects" / "done.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(PNG_BYTES)
+            image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="done_asset",
+                index=1,
+                destination=destination,
+                references=[],
+                prompt="old prompt",
+                kind="asset",
+                result=ImageGenerationResult(
+                    saved_path=destination,
+                    revised_prompt=None,
+                    status="completed",
+                    transcript=[],
+                    source="app_server",
+                    prompt_sha256=hashlib.sha256(b"old prompt").hexdigest(),
+                    reference_sha256s=[],
+                    provenance_authoritative=True,
+                    turn_id="turn-old",
+                ),
+            )
+            generated = Path(tmp) / "generated.png"
+            generated.write_bytes(PNG_BYTES + b"new")
+
+            class RecordingClient:
+                calls = 0
+
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    type(self).calls += 1
+                    return ImageGenerationResult(
+                        saved_path=generated,
+                        revised_prompt=kwargs["prompt"],
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        prompt_sha256=hashlib.sha256(kwargs["prompt"].encode("utf-8")).hexdigest(),
+                        reference_sha256s=[],
+                        provenance_authoritative=True,
+                        turn_id="turn-new",
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="done_asset",
+                kind="asset",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/objects/done.png",
+                prompt="new prompt",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", Path(tmp)),
+                patch("server.image_gen_app.create_codex_app_server_client", RecordingClient),
+            ):
+                asyncio.run(image_gen_app._generate_request_item_output(run_dir=run_dir, kind="asset", item=item))
+
+            destination_bytes = destination.read_bytes()
+
+        self.assertEqual(RecordingClient.calls, 1)
+        self.assertEqual(destination_bytes, PNG_BYTES + b"new")
 
     def test_create_flow_skips_existing_output_with_completed_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5121,6 +5696,12 @@ base b prompt
                     status="completed",
                     transcript=[],
                     source="app_server",
+                    turn_id="turn-done",
+                    prompt_sha256=hashlib.sha256("実写映画風。".encode("utf-8")).hexdigest(),
+                    reference_sha256s=[],
+                    image_generation_item_id="image-done",
+                    image_generation_item_count=1,
+                    provenance_authoritative=True,
                 ),
             )
 
@@ -5598,8 +6179,13 @@ good prompt
             run_dir = write_valid_p650_artifacts(root, "sample_run")
             manifest_before = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             request_before = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
+            snapshot_path = run_dir / "image_generation_request_snapshot.json"
+            snapshot_path.write_text('{"original": true}\n', encoding="utf-8")
+            snapshot_before = snapshot_path.read_text(encoding="utf-8")
 
             async def fail_materialize(_run_id: str) -> None:
+                (run_dir / "image_generation_requests.md").write_text("partially replaced request\n", encoding="utf-8")
+                snapshot_path.write_text('{"partial": true}\n', encoding="utf-8")
                 raise RuntimeError("materialize failed")
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
@@ -5620,10 +6206,12 @@ good prompt
 
             manifest_after = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             request_after = (run_dir / "image_generation_requests.md").read_text(encoding="utf-8")
+            snapshot_after = snapshot_path.read_text(encoding="utf-8")
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(manifest_after, manifest_before)
         self.assertEqual(request_after, request_before)
+        self.assertEqual(snapshot_after, snapshot_before)
 
     def test_create_video_prompts_saves_review_design_and_request_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6761,6 +7349,370 @@ location beta
         self.assertTrue(all(len(result["candidates"]) == 2 for result in body["results"]))
         self.assertEqual(len(calls), 10)
         self.assertEqual(max_active, 10)
+
+    def test_request_bound_result_rejects_missing_provenance_policy(self) -> None:
+        destination = Path("/tmp/request-bound-result.png")
+        prompt_sha256 = hashlib.sha256(b"prompt").hexdigest()
+        result = ImageGenerationResult(
+            saved_path=destination,
+            revised_prompt=None,
+            status="completed",
+            transcript=[],
+            source="app_server",
+            generation_job_id="job-1",
+            item_id="scene1_cut1",
+            turn_id="turn-1",
+            prompt_sha256=prompt_sha256,
+            reference_sha256s=[],
+            image_generation_item_id="image-1",
+            image_generation_item_count=1,
+            destination=str(destination),
+            provenance_authoritative=True,
+            provenance_policy=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "provenance_policy"):
+            image_gen_app._validate_request_bound_image_result(
+                result,
+                generation_job_id="job-1",
+                item_id="scene1_cut1",
+                destination=destination,
+                prompt_sha256=prompt_sha256,
+                reference_sha256s=[],
+            )
+
+    def test_global_serial_fallback_is_exclusive_with_request_bound_slots(self) -> None:
+        async def run_case(lock_dir: Path) -> list[str]:
+            entered: list[str] = []
+            request_bound_ready = asyncio.Event()
+            release_request_bound = asyncio.Event()
+            serial_entered = asyncio.Event()
+            release_serial = asyncio.Event()
+            final_request_entered = asyncio.Event()
+
+            async def request_bound(name: str, *, final: bool = False) -> None:
+                async with image_gen_app._global_image_generation_slot("request_bound_v2"):
+                    entered.append(name)
+                    if final:
+                        final_request_entered.set()
+                        return
+                    if len([item for item in entered if item.startswith("request-")]) == 2:
+                        request_bound_ready.set()
+                    await release_request_bound.wait()
+
+            async def serial() -> None:
+                async with image_gen_app._global_image_generation_slot("serial_fallback"):
+                    entered.append("serial")
+                    serial_entered.set()
+                    await release_serial.wait()
+
+            first = asyncio.create_task(request_bound("request-1"))
+            second = asyncio.create_task(request_bound("request-2"))
+            await asyncio.wait_for(request_bound_ready.wait(), timeout=2)
+            serial_task = asyncio.create_task(serial())
+            await asyncio.sleep(0.05)
+            self.assertFalse(serial_entered.is_set())
+            release_request_bound.set()
+            await asyncio.wait_for(serial_entered.wait(), timeout=2)
+            final_task = asyncio.create_task(request_bound("request-final", final=True))
+            await asyncio.sleep(0.05)
+            self.assertFalse(final_request_entered.is_set())
+            release_serial.set()
+            await asyncio.wait_for(final_request_entered.wait(), timeout=2)
+            await asyncio.gather(first, second, serial_task, final_task)
+            return entered
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("server.image_gen_app.IMAGE_GENERATION_GLOBAL_PARALLELISM", 2),
+                patch("server.image_gen_app._image_generation_global_lock_dir", return_value=Path(tmp)),
+            ):
+                entered = asyncio.run(run_case(Path(tmp)))
+
+        self.assertEqual(set(entered[:2]), {"request-1", "request-2"})
+        self.assertEqual(entered[2:], ["serial", "request-final"])
+
+    def test_request_generation_revision_lock_blocks_prompt_snapshot_replacement(self) -> None:
+        async def run_case(run_dir: Path) -> None:
+            generation_started = asyncio.Event()
+            release_generation = asyncio.Event()
+            prompt_edit_completed = asyncio.Event()
+
+            async def fake_unlocked(*, run_dir: Path, kind: str) -> None:
+                generation_started.set()
+                await release_generation.wait()
+
+            async def edit_prompt_snapshot() -> None:
+                async with image_gen_app._serialized_run_write(run_dir, "scene_request_revision"):
+                    prompt_edit_completed.set()
+
+            with patch("server.image_gen_app._generate_request_outputs_unlocked", fake_unlocked):
+                generation = asyncio.create_task(
+                    image_gen_app._generate_request_outputs(run_dir=run_dir, kind="scene")
+                )
+                await asyncio.wait_for(generation_started.wait(), timeout=2)
+                edit = asyncio.create_task(edit_prompt_snapshot())
+                await asyncio.sleep(0.05)
+                self.assertFalse(prompt_edit_completed.is_set())
+                release_generation.set()
+                await asyncio.gather(generation, edit)
+                self.assertTrue(prompt_edit_completed.is_set())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(run_case(Path(tmp)))
+
+    def test_image_prompt_shard_passed_status_with_blocked_entries_fails_closed(self) -> None:
+        async def fake_turn_until_completed(_client: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+            report_path = Path(kwargs["report_path"])
+            report_path.write_text(
+                "\n".join(
+                    [
+                        "status: passed",
+                        "reviewed_entries: [scene01_cut01, scene01_composite]",
+                        "blocked_entries: [scene01_cut01]",
+                        "findings: [required drawable evidence is absent]",
+                        "failed_selectors: [scene01_cut01]",
+                        "reason_keys: [api_prompt_drawable_dependency_missing]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            return [], False
+
+        class FakeClient:
+            async def start_thread(self, **_kwargs: Any) -> str:
+                return "thread-1"
+
+            async def stop(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            canonical_scope = run_dir / "canonical.scope.json"
+            canonical_report = run_dir / "canonical.report.md"
+            canonical_scope.write_text('{"source_artifacts": []}\n', encoding="utf-8")
+            shard = {
+                "shard_id": "scene:01",
+                "scene_id": "01",
+                "entry_ids": ["scene01_cut01", "scene01_composite"],
+            }
+            with (
+                patch("server.image_gen_app.create_codex_app_server_client", return_value=FakeClient()),
+                patch(
+                    "server.image_gen_app._run_turn_until_semantic_artifact_completed",
+                    fake_turn_until_completed,
+                ),
+            ):
+                result = asyncio.run(
+                    image_gen_app._run_image_prompt_scene_shard_review(
+                        "job-1",
+                        run_dir=run_dir,
+                        shard_dir=run_dir / "shards",
+                        shard=shard,
+                        shard_index=1,
+                        total_shards=1,
+                        collection_sections={
+                            "scene01_cut01": "## scene01_cut01\n",
+                            "scene01_composite": "## scene01_composite\n",
+                        },
+                        canonical_scope_path=canonical_scope,
+                        canonical_report_path=canonical_report,
+                        attempt=1,
+                        max_attempts=1,
+                        final_attempt=True,
+                        semaphore=asyncio.Semaphore(1),
+                        transport_attempt=1,
+                        transport_max_attempts=1,
+                    )
+                )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["blocked_entries"], ["scene01_cut01", "scene01_composite"])
+        self.assertIn("api_prompt_drawable_dependency_missing", result["reason_keys"])
+
+    def test_p680_generated_output_rejects_v2_snapshot_without_strict_provenance(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene01_cut01
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene01_cut01.png`
+- references: `[]`
+
+```api_prompt
+石造りの回廊に主人公が立っている。
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "image_generation_requests.md").write_text(request_text, encoding="utf-8")
+            output = run_dir / "assets" / "scenes" / "scene01_cut01.png"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(PNG_BYTES)
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    {
+                        "item_id": "scene01_cut01",
+                        "destination": "assets/scenes/scene01_cut01.png",
+                        "prompt": "石造りの回廊に主人公が立っている。",
+                        "prompt_policy_version": "image_api_prompt_v2",
+                        "compiler_version": "conditional_drawable_prompt_compiler_v1",
+                        "source_digest": hashlib.sha256(b"source").hexdigest(),
+                        "references": [],
+                    }
+                ],
+                source_artifact="image_generation_requests.md",
+            )
+            write_request_snapshot_atomic(
+                run_dir / "image_generation_request_snapshot.json",
+                snapshot,
+                run_dir=run_dir,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "strict request-bound provenance"):
+                image_gen_app._validate_generated_outputs(run_dir, "scene")
+
+    def test_unchanged_item_reuses_output_after_other_item_changes_snapshot_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "scenes" / "scene_b.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(PNG_BYTES)
+            prompt = "unchanged scene B prompt"
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            source_digest = hashlib.sha256(b"scene-b-source").hexdigest()
+            request_digest = hashlib.sha256(b"scene-b-request").hexdigest()
+            result = ImageGenerationResult(
+                saved_path=destination,
+                revised_prompt=None,
+                status="completed",
+                transcript=[],
+                source="app_server",
+                generation_job_id="job-old",
+                item_id="scene_b",
+                turn_id="turn-old",
+                prompt_sha256=prompt_sha256,
+                reference_sha256s=[],
+                image_generation_item_id="image-old",
+                image_generation_item_count=1,
+                destination=str(destination),
+                provenance_authoritative=True,
+                provenance_policy="request_bound_v2",
+            )
+            image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="scene_b",
+                index=1,
+                destination=destination,
+                references=[],
+                prompt=prompt,
+                kind="scene",
+                prompt_policy_version="image_api_prompt_v2",
+                request_revision="old-global-revision",
+                request_digest=request_digest,
+                compiler_version="conditional_drawable_prompt_compiler_v1",
+                source_digest=source_digest,
+                result=result,
+            )
+
+            class FailingClient:
+                def __init__(self, **_kwargs: Any) -> None:
+                    raise AssertionError("unchanged item B must be reused")
+
+            item = image_gen.ImageRequestItem(
+                id="scene_b",
+                kind="scene",
+                asset_type=None,
+                tool="codex_builtin_image",
+                output="assets/scenes/scene_b.png",
+                prompt=prompt,
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+                prompt_policy_version="image_api_prompt_v2",
+                prompt_sha256=prompt_sha256,
+                reference_sha256s=[],
+                request_revision="new-global-revision-after-scene-a-edit",
+                request_digest=request_digest,
+                compiler_version="conditional_drawable_prompt_compiler_v1",
+                source_digest=source_digest,
+            )
+            with patch("server.image_gen_app.create_codex_app_server_client", FailingClient):
+                asyncio.run(
+                    image_gen_app._generate_request_item_output(
+                        run_dir=run_dir,
+                        kind="scene",
+                        item=item,
+                    )
+                )
+            destination_bytes = destination.read_bytes()
+
+        self.assertEqual(destination_bytes, PNG_BYTES)
+
+    def test_candidate_copy_failure_logs_failure_before_any_success_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            saved = Path(tmp) / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+
+            class FakeClient:
+                async def start(self) -> None:
+                    return None
+
+                async def stop(self) -> None:
+                    return None
+
+                async def generate_image(self, **kwargs: Any) -> ImageGenerationResult:
+                    prompt_sha256 = hashlib.sha256(str(kwargs["prompt"]).encode("utf-8")).hexdigest()
+                    return ImageGenerationResult(
+                        saved_path=saved,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        generation_job_id=str(kwargs["generation_job_id"]),
+                        item_id=str(kwargs["item_id"]),
+                        turn_id="turn-1",
+                        prompt_sha256=prompt_sha256,
+                        reference_sha256s=[],
+                        image_generation_item_id="image-1",
+                        image_generation_item_count=1,
+                        destination=str(kwargs["output_path"]),
+                        provenance_authoritative=True,
+                        provenance_policy="request_bound_v2",
+                    )
+
+            req = image_gen_app.GenerateRequest(
+                run_id="sample_run",
+                kind="scene",
+                item_id="scene1_cut1",
+                prompt="prompt",
+                references=[],
+                candidate_count=1,
+            )
+            with (
+                patch("server.image_gen_app.create_codex_app_server_client", return_value=FakeClient()),
+                patch("server.image_gen_app.copy_saved_image", side_effect=OSError("copy failed")),
+                patch.dict(os.environ, {"TOC_IMAGE_GEN_PROVENANCE_POLICY": "request_bound_v2"}),
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    asyncio.run(image_gen_app._generate_one(run_dir, req, 1))
+
+            image_logs = list((run_dir / "logs" / "app_server" / "image_gen").glob("*.json"))
+            image_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in image_logs]
+            event_lines = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
+
+        self.assertTrue(image_payloads)
+        self.assertTrue(all(payload["status"] == "failed" for payload in image_payloads))
+        self.assertIn("copy failed", event_lines)
+        self.assertNotIn('"status": "completed"', event_lines)
 
 
 if __name__ == "__main__":

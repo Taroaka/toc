@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -51,6 +52,15 @@ _CODEX_HOME_FALLBACK_FILES = {
 _CODEX_HOME_FALLBACK_RELATIVE_FILES = {
     Path("browser") / "config.toml",
 }
+_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.6-sol"
+_DEFAULT_CODEX_APP_SERVER_MIN_VERSION = "0.144.0"
+_CODEX_CLI_VERSION_RE = re.compile(
+    r"^\s*codex(?:-cli)?\s+(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*$",
+    flags=re.IGNORECASE,
+)
+_SEMVER_RE = re.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,8 @@ class ImageGenerationResult:
     turn_id: str | None = None
     prompt_sha256: str | None = None
     reference_sha256s: list[str] | None = None
+    image_generation_item_id: str | None = None
+    image_generation_item_count: int = 0
     destination: str | None = None
     provenance_authoritative: bool = False
     provenance_policy: str | None = None
@@ -73,6 +85,9 @@ class ImageGenerationResult:
 @dataclass(frozen=True)
 class CodexAppServerRuntimeContract:
     codex_bin: str
+    codex_version: str
+    minimum_codex_version: str
+    model: str
     cwd: Path
     requested_codex_home: Path
     codex_home: Path
@@ -86,6 +101,9 @@ class CodexAppServerRuntimeContract:
     def as_dict(self) -> dict[str, Any]:
         return {
             "codexBin": self.codex_bin,
+            "codexVersion": self.codex_version,
+            "minimumCodexVersion": self.minimum_codex_version,
+            "model": self.model,
             "cwd": str(self.cwd),
             "requestedCodexHome": str(self.requested_codex_home),
             "codexHome": str(self.codex_home),
@@ -132,6 +150,9 @@ class CodexAppServerClient:
         self._codex_home_fallback_used = False
         self._runtime_contract: CodexAppServerRuntimeContract | None = None
         self._network_preflight: dict[str, Any] = {}
+        self._codex_version = "unknown"
+        self._minimum_codex_version = minimum_app_server_version()
+        self._model = default_app_server_model()
 
     def _resolve_codex_home(self, env: dict[str, str] | None = None) -> Path:
         if self._codex_home is not None:
@@ -171,6 +192,9 @@ class CodexAppServerClient:
         requested = self._requested_codex_home or codex_home
         self._runtime_contract = CodexAppServerRuntimeContract(
             codex_bin=self.codex_bin,
+            codex_version=self._codex_version,
+            minimum_codex_version=self._minimum_codex_version,
+            model=self._model,
             cwd=self.cwd,
             requested_codex_home=requested,
             codex_home=codex_home,
@@ -187,10 +211,27 @@ class CodexAppServerClient:
         codex_bin_path = shutil.which(self.codex_bin)
         if codex_bin_path is None:
             raise CodexAppServerError("codex executable not found")
+        codex_version = _read_codex_cli_version(codex_bin_path)
+        minimum_version = minimum_app_server_version()
+        parsed_minimum_version = parse_codex_cli_version(f"codex-cli {minimum_version}")
+        self._codex_version = codex_version
+        self._minimum_codex_version = parsed_minimum_version
+        version_diagnostics = {
+            "codexBinPath": codex_bin_path,
+            "codexVersion": codex_version,
+            "minimumCodexVersion": parsed_minimum_version,
+            "model": self._model,
+        }
+        if not _codex_version_at_least(codex_version, parsed_minimum_version):
+            raise CodexAppServerError(
+                f"ToC requires Codex CLI >= {parsed_minimum_version}; found {codex_version}. "
+                "Upgrade the Codex CLI before starting the app-server (for Homebrew: brew upgrade --cask codex).",
+                diagnostics=version_diagnostics,
+            )
         codex_home = self._resolve_codex_home()
         checks: dict[str, Any] = {
             "status": "passed",
-            "codexBinPath": codex_bin_path,
+            **version_diagnostics,
             "codexHomeWritable": True,
             "network": {"status": "skipped"},
         }
@@ -370,9 +411,10 @@ class CodexAppServerClient:
             "approvalPolicy": approval_policy,
             "sandbox": "workspace-write",
         }
-        default_model = default_app_server_model()
-        if model or default_model:
-            params["model"] = model or default_model
+        effective_model = model or default_app_server_model()
+        self._model = effective_model
+        self._runtime_contract = None
+        params["model"] = effective_model
         result = await self.request("thread/start", params)
         thread = result.get("thread") or {}
         thread_id = thread.get("id")
@@ -566,7 +608,33 @@ Rules:
         image_items: list[dict[str, Any]] = []
         for message in transcript:
             image_items.extend(find_image_generation_items(message))
-        latest = image_items[-1] if image_items else {}
+        distinct_image_items: dict[str, dict[str, Any]] = {}
+        for image_item in image_items:
+            explicit_id = str(
+                image_item.get("id")
+                or image_item.get("itemId")
+                or image_item.get("item_id")
+                or ""
+            ).strip()
+            identity = explicit_id or hashlib.sha256(
+                json.dumps(image_item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            distinct_image_items[identity] = image_item
+        if len(distinct_image_items) > 1 and not allow_generated_images_fallback:
+            raise CodexAppServerError(
+                "request-bound image generation requires exactly one distinct imageGeneration item",
+                diagnostics={
+                    "generationJobId": generation_job_id,
+                    "itemId": item_id,
+                    "turnId": turn_id,
+                    "imageGenerationItemCount": len(distinct_image_items),
+                    "imageGenerationItemIds": list(distinct_image_items),
+                },
+            )
+        latest = list(distinct_image_items.values())[-1] if distinct_image_items else {}
+        image_generation_item_id = str(
+            latest.get("id") or latest.get("itemId") or latest.get("item_id") or ""
+        ).strip() or None
         saved = image_generation_saved_path(latest)
         source = "app_server"
         if not saved:
@@ -574,7 +642,13 @@ Rules:
             if fallback:
                 saved = str(fallback)
                 source = "generated_images_fallback"
-        authoritative = bool(saved and source == "app_server")
+        authoritative = bool(
+            saved
+            and source == "app_server"
+            and len(distinct_image_items) == 1
+            and image_generation_item_id
+            and turn_id
+        )
         return ImageGenerationResult(
             saved_path=Path(saved) if saved else None,
             revised_prompt=latest.get("revisedPrompt") or latest.get("revised_prompt"),
@@ -586,6 +660,8 @@ Rules:
             turn_id=turn_id,
             prompt_sha256=prompt_sha256,
             reference_sha256s=reference_sha256s,
+            image_generation_item_id=image_generation_item_id,
+            image_generation_item_count=len(distinct_image_items),
             destination=str(output_path),
             provenance_authoritative=authoritative,
             provenance_policy=provenance_policy,
@@ -646,7 +722,75 @@ def app_server_network_preflight_enabled() -> bool:
 
 
 def default_app_server_model() -> str:
-    return os.environ.get("TOC_CODEX_APP_SERVER_MODEL", "").strip()
+    return os.environ.get("TOC_CODEX_APP_SERVER_MODEL", "").strip() or _DEFAULT_CODEX_APP_SERVER_MODEL
+
+
+def minimum_app_server_version() -> str:
+    return os.environ.get("TOC_CODEX_APP_SERVER_MIN_VERSION", "").strip() or _DEFAULT_CODEX_APP_SERVER_MIN_VERSION
+
+
+def parse_codex_cli_version(output: str) -> str:
+    match = _CODEX_CLI_VERSION_RE.search(str(output or ""))
+    if not match:
+        raise CodexAppServerError(
+            "Could not parse Codex CLI version output",
+            diagnostics={"codexVersionOutput": str(output or "")},
+        )
+    return str(match.group("version"))
+
+
+def _parse_semver(version: str) -> tuple[tuple[int, int, int], str | None]:
+    match = _SEMVER_RE.fullmatch(version)
+    if not match:
+        raise CodexAppServerError(
+            f"Invalid Codex CLI semantic version: {version}",
+            diagnostics={"codexVersion": version},
+        )
+    core = int(match.group("major")), int(match.group("minor")), int(match.group("patch"))
+    return core, match.group("prerelease")
+
+
+def _prerelease_sort_key(prerelease: str) -> tuple[tuple[int, int | str], ...]:
+    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in prerelease.split("."))
+
+
+def _codex_version_at_least(actual: str, minimum: str) -> bool:
+    actual_core, actual_prerelease = _parse_semver(actual)
+    minimum_core, minimum_prerelease = _parse_semver(minimum)
+    if actual_core != minimum_core:
+        return actual_core > minimum_core
+    if actual_prerelease is None:
+        return True
+    if minimum_prerelease is None:
+        return False
+    return _prerelease_sort_key(actual_prerelease) >= _prerelease_sort_key(minimum_prerelease)
+
+
+def _read_codex_cli_version(codex_bin_path: str) -> str:
+    try:
+        completed = subprocess.run(
+            [codex_bin_path, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CodexAppServerError(
+            f"Could not execute Codex CLI version check: {exc}",
+            diagnostics={"codexBinPath": codex_bin_path},
+        ) from exc
+    output = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode != 0:
+        raise CodexAppServerError(
+            f"Codex CLI version check failed with exit code {completed.returncode}",
+            diagnostics={
+                "codexBinPath": codex_bin_path,
+                "codexVersionOutput": output,
+                "returncode": completed.returncode,
+            },
+        )
+    return parse_codex_cli_version(output)
 
 
 def classify_codex_transport_error(message: str) -> str:

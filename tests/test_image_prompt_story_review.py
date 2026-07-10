@@ -173,6 +173,279 @@ motion_ceiling: 終えない。
 
 
 class TestImagePromptStoryReview(unittest.TestCase):
+    def test_parse_prompt_collection_defaults_missing_agent_review_to_false(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+
+        entries = mod.parse_prompt_collection(
+            """# Image Prompt Collection
+
+## scene01_cut01
+
+- output: `assets/scenes/scene01_cut01.png`
+
+```text
+実写映画調の海辺。
+```
+"""
+        )
+
+        self.assertFalse(entries[0].agent_review_ok)
+
+    def test_manifest_prompt_entries_defaults_missing_agent_review_to_false(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {
+                                "output": "assets/scenes/scene01_cut01.png",
+                                "prompt": "実写映画調の海辺。",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entries = mod.manifest_prompt_entries(manifest, allowed_story_modes={"generate_still"})
+
+        self.assertFalse(entries[0].agent_review_ok)
+
+    def test_v2_structural_gate_allows_absent_optional_dependencies(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "雲間から朝日が見える。"},
+                        {"group": "primary_subject", "text": "主役は雲間の朝日。"},
+                        {"group": "composition", "text": "朝日を中央に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "実写映画調。雲間から朝日が見える。主役は雲間の朝日。朝日を中央に置く。文字やロゴは入れない。",
+            image_generation=image_generation,
+        )
+
+        self.assertEqual(findings, [])
+
+    def test_v2_structural_gate_requires_character_fragment_only_when_declared(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        image_generation = {
+            "character_ids": ["protagonist"],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": ["protagonist"],
+                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints", "characters"],
+                    },
+                    "included_fragments": [
+                        {"group": "style", "text": "実写映画調。"},
+                        {"group": "current_moment", "text": "灰が舞う。"},
+                        {"group": "primary_subject", "text": "主役は灰を浴びた人物。"},
+                        {"group": "composition", "text": "人物を中景に置く。"},
+                        {"group": "constraints", "text": "文字やロゴは入れない。"},
+                    ],
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "実写映画調。灰が舞う。主役は灰を浴びた人物。人物を中景に置く。文字やロゴは入れない。",
+            image_generation=image_generation,
+        )
+        codes = {finding.code for finding in findings}
+
+        self.assertIn("api_prompt_v2_missing_character_fragment", codes)
+        self.assertNotIn("api_prompt_v2_missing_object_fragment", codes)
+
+    def test_v2_structural_gate_rejects_declared_dependency_drift(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "閉じた扉が見える。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": ["new_room"],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": ["old_room"],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+        )
+
+        self.assertIn(
+            "api_prompt_v2_location_ids_dependency_mismatch",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_review_uses_ir_dependencies_instead_of_legacy_scene_wide_heuristics(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "references", "text": "人物参照画像1は人物の同一性だけを保つ。"},
+            {"group": "current_moment", "text": "灰の台所で若い女性が閉じた扉を見る。"},
+            {"group": "primary_subject", "text": "主被写体は閉じた扉を見る若い女性。"},
+            {"group": "characters", "text": "女性は扉へ視線を向け、両手を胸元に置く。"},
+            {"group": "location", "text": "前景に灰の床、中景に女性、背景に閉じた扉。"},
+            {"group": "composition", "text": "視線の優先順位は女性、次に閉じた扉。"},
+            {"group": "constraints", "text": "文字、ロゴ、後続の結果を描かない。"},
+        ]
+        prompt = "\n".join(fragment["text"] for fragment in fragments)
+        manifest = {
+            "assets": {
+                "character_bible": [
+                    {"character_id": "cinderella", "review_aliases": ["シンデレラ", "若い女性"]},
+                    {"character_id": "future_prince", "review_aliases": ["王子"]},
+                ],
+                "object_bible": [
+                    {"object_id": "future_slipper", "review_aliases": ["ガラスの靴"]}
+                ],
+            },
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {
+                                "character_ids": ["cinderella"],
+                                "object_ids": [],
+                                "location_ids": ["kitchen"],
+                                "output": "assets/scenes/scene1_cut1.png",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v2",
+                                    "prompt": prompt,
+                                    "drawable_prompt_ir": {
+                                        "schema_version": "drawable_prompt_ir_v1",
+                                        "dependencies": {
+                                            "character_ids": ["cinderella"],
+                                            "object_ids": [],
+                                            "location_ids": ["kitchen"],
+                                            "references": ["assets/characters/cinderella.png"],
+                                            "required_groups": [fragment["group"] for fragment in fragments],
+                                        },
+                                        "included_fragments": fragments,
+                                    },
+                                },
+                            },
+                            "audio": {
+                                "narration": {
+                                    "text": "シンデレラはここに立つ。次に王子からガラスの靴を受け取る。"
+                                }
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        entries = mod.manifest_prompt_entries(manifest, allowed_story_modes={"generate_still"})
+
+        outcomes = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={"1": "後の場面で王子とガラスの靴が現れる。"},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        codes = {finding.code for finding in outcomes[0].findings}
+
+        self.assertFalse(
+            codes
+            & {
+                "image_contract_missing",
+                "prompt_leaks_motion_brief",
+                "source_anchor_missing_from_prompt",
+                "missing_character_id",
+                "missing_object_id",
+                "prompt_missing_expected_character_anchor",
+                "prompt_missing_expected_object_anchor",
+                "blocking_drift",
+                "image_prompt_subject_specificity_weak",
+                "image_prompt_continuity_weak",
+                "image_prompt_prompt_craft_weak",
+                "image_prompt_production_readiness_weak",
+            }
+        )
+
+    def test_render_report_marks_zero_entry_review_failed(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+
+        report = mod.render_report([], manifest_path=Path("video_manifest.md"))
+
+        self.assertIn("- status: `FAIL`", report)
+        self.assertIn("- empty_review_scope: `true`", report)
+
+    def test_cli_returns_nonzero_when_manifest_has_zero_review_entries(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_empty_prompt_review_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text("```yaml\nscenes: []\n```\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
+                    "--manifest",
+                    str(run_dir / "video_manifest.md"),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            report = (run_dir / "image_prompt_story_review.md").read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("- status: `FAIL`", report)
+
     def test_parse_prompt_collection_prefers_api_prompt_for_v1(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         mod = _load_review_module(repo_root)

@@ -1,7 +1,7 @@
 # scene単体: 動画マニフェストテンプレ（改善版）
 
 このテンプレは `output/<topic>_<timestamp>/scenes/sceneXX/video_manifest.md` 用。
-scene 単体 run でも、p400 の cinematic scene contract → p600 still → p800 motion の責務を崩さない。
+scene 単体 run でも、p400 の cinematic scene contract → p600 `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` → p800 motion の責務を崩さない。
 このファイルは skeleton テンプレートであり、TODO を含めてよい。production manifest へ昇格する時点では TODO / TBD / pending を残さない。
 
 ```yaml
@@ -15,8 +15,28 @@ video_metadata:
   aspect_ratio: "9:16"
   resolution: "1080x1920"
 
+image_request_materialization:
+  prompt_policy_version: "image_api_prompt_v2"
+  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  review_projection: "image_generation_requests.md"
+  review_prompt_fence: "api_prompt"
+  execution_snapshot: "image_generation_request_snapshot.json"
+  snapshot_schema_version: "toc.image_generation_request_snapshot.v1"
+  provider_prompt_path: "snapshot.items[].prompt"
+  provider_prompt_source: "scenes[].cuts[].image_generation.api_prompt_payload.prompt"
+  immutable_after_materialization: true
+  reject_markdown_or_reference_drift: true
+  unique_destination_owner_per_snapshot: true
+  reject_cross_revision_output: true
+  legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
+
 assets:
-  character_bible: []
+  character_bible:
+    - character_id: "protagonist"
+      reference_images: []
+      reference_variants: []
+      fixed_prompts:
+        - "黒髪の短髪、和装の実写的な布地"
   style_guide:
     visual_style: "実写映画調、自然な映画照明、実物セット感"
     reference_images: []
@@ -27,7 +47,12 @@ assets:
       - "ロゴ"
       - "アニメ/漫画/イラスト調"
   object_bible: []
-  location_bible: []
+  location_bible:
+    - location_id: "village_at_dawn"
+      reference_images: []
+      reference_variants: []
+      fixed_prompts:
+        - "夜明けの木造家屋、湿った土の道、低い朝霧"
 
 human_change_requests: []
 
@@ -410,10 +435,28 @@ scenes:
               new_asset_needed: false
               reuse_allowed: false
             p600_image:
+              authoring_boundary: "cut設計では完成 prompt を書かず、描画可能な first-frame 要件だけを渡す"
+              source_projection: "first_frame_visual_plan_v1"
+              compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
+              prompt_policy_version: "image_api_prompt_v2"
+              compiler_version: "conditional_drawable_prompt_compiler_v1"
+              drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
+              always_required_groups: ["style", "current_moment", "primary_subject", "composition", "constraints"]
+              conditional_groups:
+                references: "resolved references が1件以上ある場合だけ"
+                characters: "asset_dependency.character_ids_required が1件以上ある場合だけ"
+                objects: "asset_dependency.object_ids_required が1件以上ある場合だけ"
+                location: "asset_dependency.location_ids_required が1件以上ある場合だけ"
+                light_material: "明示された非定型の描画値がある場合だけ"
+                current_state_delta: "sequential progression の明示された描画値がある場合だけ"
               prompt_requirements: []
               reference_requirements: []
               first_frame_must_include: []
               first_frame_must_avoid: []
+              provider_prompt_path: "image_generation.api_prompt_payload.prompt"
+              review_projection: "image_generation_requests.md#api_prompt"
+              execution_snapshot: "image_generation_request_snapshot.json"
+              legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
             p700_narration:
               narration_requirements: []
               role: "setup|fact|emotion|contrast|aftertaste|silent"
@@ -461,13 +504,16 @@ scenes:
           must_avoid: "<cut_contract.viewer_contract.must_avoid>"
           done_when: "<cut_contract.viewer_contract.done_when>"
         image_generation:
+          # provider へ渡す本文は api_prompt_payload.prompt だけ。
+          # first_frame_visual_plan / drawable_prompt_ir / ID / path / hash / motion_brief は prompt 本文へ出さない。
           tool: "codex_builtin_image"
-          character_ids: []
+          character_ids: ["protagonist"]
           character_variant_ids: []
           object_ids: []
           object_variant_ids: []
-          location_ids: []
+          location_ids: ["village_at_dawn"]
           location_variant_ids: []
+          references: []
           applied_request_ids: []
           prompt_authoring_context:
             image_role: "video_first_frame_candidate"
@@ -494,30 +540,76 @@ scenes:
               reveal_constraints_preserved: false
               continuity_preserved: false
               handoff_visible_or_audible: false
-          prompt: |
-            [全体 / 不変条件]
-            実写映画調、自然な映画照明、実物セット感。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+          # IDs / references / first_frame_visual_plan が変わったら、IR/payload/hash/snapshot を一括再生成する。
+          first_frame_visual_plan:
+            schema_version: "first_frame_visual_plan_v1"
+            editable: false
+            temporal_boundary:
+              first_visible_moment: "夜明けの村で主人公が湿った土の道の先を見つめている"
+              event_fact_visible_in_still: "主人公はまだ歩き出していない"
+              not_yet_happened_in_still: ["主人公が村を出る"]
+            subject_binding:
+              primary_subject:
+                name: "道の先を見つめる主人公"
+            spatial_composition:
+              foreground: "霧に濡れた土の道"
+              midground: "立ち止まる主人公"
+              background: "木造家屋と遠い山の輪郭"
+            prompt_rendering_policy:
+              render_only_drawable_information: true
+              do_not_render_design_meta: true
+              do_not_render_future_motion_as_action: true
+          api_prompt_payload:
+            policy_version: "image_api_prompt_v2"
+            compiler_version: "conditional_drawable_prompt_compiler_v1"
+            prompt: |-
+              [全体 / 不変条件]
+              実写映画調、自然な映画照明、実物セットとして見える質感。
 
-            [登場人物]
-            TODO: 映る人物を具体化する。人物が映らない場合は「人物なし。背景人物も入れない」と書く。
+              [シーン]
+              画面には、主人公はまだ歩き出していない。
+              観客が最初に読む主被写体は、道の先を見つめる主人公。
 
-            [小道具 / 舞台装置]
-            TODO: 必須の小道具・舞台装置・場所アンカーを書く。無い場合も「この場面で主役級の小道具はない」と明示する。
+              [登場人物]
+              人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。
 
-            [シーン]
-            舞台: TODO。
-            主役: TODO。
-            前景: TODO。
-            中景: TODO。
-            背景: TODO。
-            光: TODO。
-            構図: TODO。
+              [場所と構図]
+              場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。
+              道の先を見つめる主人公が最初に読める構図。
 
-            [連続性]
-            TODO: この画像だけで読み取れる人物状態・場所・進行方向・次へのアンカーを書く。前cutの記憶に依存しない。
-
-            [禁止]
-            画面内テキスト、字幕、ウォーターマーク、ロゴ、アニメ調、漫画調、イラスト調、人物や手の崩れ、reveal早出し。
+              [禁止]
+              画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。
+              まだ描かないものは、主人公が村を出る。
+            negative_prompt: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト"
+            reference_instructions: ""
+            reference_images: []
+            sha256: "<sha256-of-exact-prompt>"
+            source_digest: "<sha256-of-first-frame-compilation-source>"
+            drawable_prompt_ir:
+              schema_version: "drawable_prompt_ir_v1"
+              dependencies:
+                character_ids: ["protagonist"]
+                object_ids: []
+                location_ids: ["village_at_dawn"]
+                references: []
+                required_groups: ["style", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
+              included_fragments:
+                - group: "style"
+                  text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+                - group: "current_moment"
+                  text: "画面には、主人公はまだ歩き出していない。"
+                - group: "primary_subject"
+                  text: "観客が最初に読む主被写体は、道の先を見つめる主人公。"
+                - group: "characters"
+                  text: "人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。"
+                - group: "location"
+                  text: "場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。"
+                - group: "composition"
+                  text: "道の先を見つめる主人公が最初に読める構図。"
+                - group: "constraints"
+                  text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。\nまだ描かないものは、主人公が村を出る。"
+              omitted_groups: ["references", "objects", "light_material", "current_state_delta"]
+          prompt: ""  # image_api_prompt_v1 legacy read-only projection。production v2 の送信には使わない
           output: "assets/scenes/scene1_cut1_base.png"
           iterations: 4
           selected: null

@@ -468,7 +468,7 @@ scenes:
             }
         )
         self.assertTrue(mod._should_generate_image_scene(recreate_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
-        self.assertFalse(mod._should_generate_image_scene(created_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
+        self.assertTrue(mod._should_generate_image_scene(created_scene, allowed_story_modes=allowed_modes, base_dir=repo_root))
 
 
 if __name__ == "__main__":

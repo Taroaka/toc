@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1933,7 +1936,8 @@ scenes:
             self.assertIn("## scene1_cut2", request_text)
             self.assertIn("- authoring_role: `video_first_frame_candidate`", request_text)
             self.assertIn("prompt本文には「最初の1フレーム」等を書かず", request_text)
-            self.assertIn("- prompt_policy_version: `image_api_prompt_v1`", request_text)
+            self.assertIn("- prompt_policy_version: `image_api_prompt_v2`", request_text)
+            self.assertTrue((tmp_path / "image_generation_request_snapshot.json").is_file())
             self.assertIn("```debug_prompt_source", request_text)
             self.assertIn("```api_prompt", request_text)
             self.assertNotIn("```text\n[参照画像の使い方]", request_text)
@@ -2009,8 +2013,12 @@ scenes:
 
         api_payload = MODULE._image_api_prompt_payload_for_scene(scene)
         api_prompt = api_payload["prompt"]
-        self.assertEqual(api_payload["policy_version"], "image_api_prompt_v1")
-        self.assertIn("[shot / 画角]", api_prompt)
+        self.assertEqual(api_payload["policy_version"], "image_api_prompt_v2")
+        self.assertEqual(api_payload["compiler_version"], "conditional_drawable_prompt_compiler_v1")
+        self.assertIn("[シーン]", api_prompt)
+        self.assertIn("[場所と構図]", api_prompt)
+        self.assertNotIn("[登場人物]", api_prompt)
+        self.assertNotIn("[小道具 / 舞台装置]", api_prompt)
         self.assertNotIn("shot_role:", api_prompt)
         self.assertNotIn("shot_scale:", api_prompt)
         self.assertTrue(api_payload["shot_design_contract"]["shot_role"])
@@ -2024,8 +2032,8 @@ scenes:
         self.assertNotIn("foot_position:", api_prompt)
         self.assertNotIn("object_contact_state:", api_prompt)
         self.assertNotIn("movement_vector_visible_as_static_pose:", api_prompt)
-        self.assertIn("手元", api_prompt)
-        self.assertIn("足元", api_prompt)
+        self.assertNotIn("手元に緊張が読める", api_prompt)
+        self.assertNotIn("足先と重心が次の動きに向く", api_prompt)
         self.assertIn("場所", api_prompt)
         self.assertNotIn("source_event_beat_id", api_prompt)
         self.assertNotIn("event_time_position", api_prompt)
@@ -2038,6 +2046,7 @@ scenes:
         self.assertNotIn("追加の具体描写", api_prompt)
         self.assertNotIn("motion_brief", api_prompt)
         self.assertNotIn("王子の手が靴へゆっくり近づく", api_prompt)
+        self.assertIn("drawable_prompt_ir", api_payload)
 
         video_prompt = MODULE._compose_final_video_prompt(scene, prefix="", suffix="")
         self.assertIn("motion_brief: 王子の手が靴へゆっくり近づく", video_prompt)
@@ -2123,10 +2132,11 @@ scenes:
         self.assertIn("馬車が門前を離れ始め", api_prompt)
         self.assertIn("車輪", api_prompt)
         self.assertIn("月光の道", api_prompt)
-        self.assertIn("前の状態から進んだ途中の状態", api_prompt)
+        self.assertIn("[現在の状態差分]", api_prompt)
+        self.assertIn("現在の画面では", api_prompt)
         self.assertNotIn("progressed_state", api_prompt)
         self.assertNotIn("must_not_repeat", api_prompt)
-        self.assertIn("馬車へ乗る前の門前待機へ戻らない", api_prompt)
+        self.assertNotIn("馬車へ乗る前の門前待機へ戻らない", api_prompt)
         self.assertNotIn("scene_state_progression_plan", api_prompt)
         self.assertNotIn("cut_state_progression", api_prompt)
         self.assertNotIn("first_frame_visual_plan", api_prompt)
@@ -2459,6 +2469,245 @@ scenes:
             self.assertIn("後続画像でも同じ顔を保つ", prompt)
             self.assertNotIn("後続 scene", prompt)
             self.assertNotIn("source_event_beat_id", prompt)
+
+    def test_direct_v2_generation_is_snapshot_bound_and_reuses_only_exact_provenance(self) -> None:
+        from server.codex_app_server import ImageGenerationResult
+        from toc.image_request_snapshot import (
+            materialize_request_snapshot,
+            write_request_snapshot_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text("# requests\n", encoding="utf-8")
+            prompt = "実写映画調。灰の床と閉じた扉が同じ画面に見える。"
+            destination = run_dir / "assets/scenes/scene1_cut1.png"
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                source_artifact=request_path.name,
+                items=[
+                    {
+                        "item_id": "scene1_cut1",
+                        "kind": "scene",
+                        "destination": "assets/scenes/scene1_cut1.png",
+                        "prompt": prompt,
+                        "prompt_policy_version": "image_api_prompt_v2",
+                        "compiler_version": "conditional_drawable_prompt_compiler_v1",
+                        "source_digest": hashlib.sha256(b"source").hexdigest(),
+                        "references": [],
+                    }
+                ],
+            )
+            write_request_snapshot_atomic(
+                run_dir / "image_generation_request_snapshot.json",
+                snapshot,
+                run_dir=run_dir,
+            )
+            saved = run_dir / "saved.png"
+            saved.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            calls: list[dict] = []
+
+            class FakeClient:
+                async def start(self) -> None:
+                    return None
+
+                async def stop(self) -> None:
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    calls.append(kwargs)
+                    return ImageGenerationResult(
+                        saved_path=saved,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        generation_job_id=kwargs["generation_job_id"],
+                        item_id=kwargs["item_id"],
+                        turn_id="turn-1",
+                        prompt_sha256=hashlib.sha256(kwargs["prompt"].encode("utf-8")).hexdigest(),
+                        reference_sha256s=[],
+                        image_generation_item_id="image-item-1",
+                        image_generation_item_count=1,
+                        destination=str(kwargs["output_path"]),
+                        provenance_authoritative=True,
+                        provenance_policy=kwargs["provenance_policy"],
+                    )
+
+            with (
+                patch.object(MODULE, "app_server_disabled", return_value=False),
+                patch.object(MODULE, "create_codex_app_server_client", return_value=FakeClient()),
+                patch.dict(
+                    MODULE.os.environ,
+                    {"TOC_IMAGE_GEN_GLOBAL_LOCK_DIR": str(run_dir / "locks")},
+                    clear=False,
+                ),
+            ):
+                MODULE.generate_codex_builtin_image(
+                    prompt=prompt,
+                    reference_images=[],
+                    out_path=destination,
+                    force=False,
+                    log_path=None,
+                    dry_run=False,
+                    run_dir=run_dir,
+                    item_id="scene1_cut1",
+                    aspect_ratio="16:9",
+                    image_size="1K",
+                    prompt_policy_version="image_api_prompt_v2",
+                    debug_prompt_source={},
+                )
+                MODULE.generate_codex_builtin_image(
+                    prompt=prompt,
+                    reference_images=[],
+                    out_path=destination,
+                    force=False,
+                    log_path=None,
+                    dry_run=False,
+                    run_dir=run_dir,
+                    item_id="scene1_cut1",
+                    aspect_ratio="16:9",
+                    image_size="1K",
+                    prompt_policy_version="image_api_prompt_v2",
+                    debug_prompt_source={},
+                )
+
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(calls[0]["allow_generated_images_fallback"])
+            self.assertEqual(calls[0]["provenance_policy"], "request_bound_v2")
+            log = json.loads(
+                sorted((run_dir / "logs/app_server/image_gen").glob("*.json"))[-1].read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(log["requestRevision"], snapshot.request_revision)
+            self.assertEqual(log["requestDigest"], snapshot.item("scene1_cut1").request_digest)
+            self.assertEqual(log["outputSha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+
+    def test_direct_v2_generation_fails_before_provider_without_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            with (
+                patch.object(MODULE, "app_server_disabled", return_value=False),
+                patch.object(MODULE, "create_codex_app_server_client") as create_client,
+            ):
+                with self.assertRaisesRegex(SystemExit, "requires an immutable request snapshot"):
+                    MODULE.generate_codex_builtin_image(
+                        prompt="実写映画調の灰の台所。",
+                        reference_images=[],
+                        out_path=run_dir / "assets/scenes/scene1_cut1.png",
+                        force=False,
+                        log_path=None,
+                        dry_run=False,
+                        run_dir=run_dir,
+                        item_id="scene1_cut1",
+                        aspect_ratio="16:9",
+                        image_size="1K",
+                        prompt_policy_version="image_api_prompt_v2",
+                        debug_prompt_source={},
+                    )
+
+            create_client.assert_not_called()
+
+    def test_v2_materializer_preserves_manifest_first_frame_visual_plan(self) -> None:
+        manifest_yaml = """
+video_metadata:
+  topic: "plan identity"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        still_image_plan: {mode: generate_still}
+        image_generation:
+          tool: codex_builtin_image
+          output: assets/scenes/scene1_cut1.png
+          first_frame_visual_plan:
+            schema_version: first_frame_visual_plan_v1
+            source_grounding:
+              source_event_beat_id: scene01_event_setup
+            visual_translation:
+              concrete_visible_evidence:
+                - source_field: viewer_contract.must_show
+                  must_be_drawn_as: half-open coral gate
+          api_prompt_payload:
+            policy_version: image_api_prompt_v2
+            prompt: half-open coral gate under moving water light
+"""
+        _, _, scenes = MODULE.parse_manifest_yaml_full(manifest_yaml)
+
+        plan = MODULE._build_first_frame_visual_plan(scenes[0])
+
+        self.assertEqual(plan, scenes[0].image_first_frame_visual_plan)
+        self.assertEqual(
+            plan["visual_translation"]["concrete_visible_evidence"][0]["must_be_drawn_as"],
+            "half-open coral gate",
+        )
+
+    def test_v2_materializer_rejects_frozen_payload_prompt_hash_drift(self) -> None:
+        manifest_yaml = """
+video_metadata: {topic: hash drift}
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: assets/scenes/scene1_cut1.png
+          api_prompt_payload:
+            policy_version: image_api_prompt_v2
+            prompt: drawable prompt changed after compilation
+            sha256: deadbeef
+"""
+        _, _, scenes = MODULE.parse_manifest_yaml_full(manifest_yaml)
+
+        with self.assertRaisesRegex(SystemExit, "sha256 does not match prompt"):
+            MODULE._image_api_prompt_payload_for_scene(scenes[0])
+
+    def test_v2_materializer_rejects_plan_or_dependency_drift_against_frozen_payload(self) -> None:
+        old_plan = {
+            "temporal_boundary": {
+                "event_fact_visible_in_still": "閉じた扉の前に朝日が差している"
+            },
+            "subject_binding": {"primary_subject": {"name": "閉じた扉"}},
+            "spatial_composition": {
+                "foreground": "石の床",
+                "midground": "閉じた扉",
+                "background": "暗い部屋",
+            },
+        }
+        payload = MODULE.compile_image_api_prompt_v2(
+            first_frame_visual_plan=old_plan,
+            location_ids=["old_room"],
+        )
+        manifest_yaml = """
+video_metadata: {topic: frozen payload drift}
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: assets/scenes/scene1_cut1.png
+          location_ids: [old_room]
+"""
+        _, _, scenes = MODULE.parse_manifest_yaml_full(manifest_yaml)
+        scene = scenes[0]
+        scene.image_first_frame_visual_plan = old_plan
+        scene.image_api_prompt_payload = payload
+
+        scene.image_first_frame_visual_plan = {
+            **old_plan,
+            "temporal_boundary": {
+                "event_fact_visible_in_still": "開いた扉の奥に人物が立っている"
+            },
+        }
+        with self.assertRaisesRegex(SystemExit, "frozen v2 payload does not match"):
+            MODULE._image_api_prompt_payload_for_scene(scene)
+
+        scene.image_first_frame_visual_plan = old_plan
+        scene.image_location_ids = ["new_room"]
+        with self.assertRaisesRegex(SystemExit, "frozen v2 payload does not match"):
+            MODULE._image_api_prompt_payload_for_scene(scene)
 
     def test_image_generation_requests_include_lane_and_reference_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -38,6 +38,29 @@ PROMPT_ENTRY_RE = re.compile(
 TEXT_BLOCK_RE = re.compile(r"```text\n(?P<prompt>.*?)\n```", re.S)
 API_PROMPT_BLOCK_RE = re.compile(r"```api_prompt\n(?P<prompt>.*?)\n```", re.S)
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
+IMAGE_API_PROMPT_POLICY_VERSION_V2 = "image_api_prompt_v2"
+IMAGE_API_PROMPT_POLICY_VERSIONS = {
+    IMAGE_API_PROMPT_POLICY_VERSION,
+    IMAGE_API_PROMPT_POLICY_VERSION_V2,
+}
+IMAGE_API_PROMPT_V2_GROUPS = {
+    "style",
+    "references",
+    "current_moment",
+    "primary_subject",
+    "characters",
+    "objects",
+    "location",
+    "composition",
+    "light_material",
+    "current_state_delta",
+    "constraints",
+}
+IMAGE_API_PROMPT_V2_BASE_GROUPS = {
+    "style",
+    "current_moment",
+    "constraints",
+}
 JP_TOKEN_RE = re.compile(r"[一-龯]{1,8}|[ァ-ヶー]{2,16}")
 
 IMPORTANT_SINGLE_KANJI = {
@@ -230,7 +253,7 @@ PROMPT_MOTION_BRIEF_LEAK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         "prompt contains motion_brief / p800 authoring metadata. Image prompts must use only the visible initial state.",
     ),
     (
-        re.compile(r"このあと|その後|次に(?:は)?|続いて|やがて"),
+        re.compile(r"このあと|その後|続いて|やがて"),
         "prompt describes future motion after the still. Keep future action in p800 motion prompt, not p600 image prompt.",
     ),
 )
@@ -396,7 +419,7 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
             prompt = api_prompt_match.group("prompt").strip()
         if text_prompt_match:
             legacy_prompt = text_prompt_match.group("prompt").strip()
-            if not prompt and prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
+            if not prompt and prompt_policy_version not in IMAGE_API_PROMPT_POLICY_VERSIONS:
                 prompt = legacy_prompt
         output = _extract_backtick_bullet(body, "output")
         narration = _extract_backtick_bullet(body, "narration")
@@ -408,7 +431,7 @@ def parse_prompt_collection(text: str) -> list[PromptEntry]:
                 output=output,
                 narration="" if narration == "(silent)" else narration,
                 rationale=rationale,
-                agent_review_ok=_extract_bool_bullet(body, "agent_review_ok", True),
+                agent_review_ok=_extract_bool_bullet(body, "agent_review_ok", False),
                 human_review_ok=_extract_bool_bullet(body, "human_review_ok", False),
                 human_review_reason=_extract_backtick_bullet(body, "human_review_reason"),
                 agent_review_reason_keys=_extract_reason_keys(body),
@@ -602,12 +625,20 @@ def prompt_structural_contract_issues(prompt: str) -> list[Finding]:
 
 
 API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("api_prompt_contains_no_scene_event_ids", re.compile(r"\bscene\d+_event_[A-Za-z0-9_]+\b|\b_event_[A-Za-z0-9_]+\b", re.I)),
+    (
+        "api_prompt_contains_no_scene_cut_ids",
+        re.compile(
+            r"\bscene\d+(?:\.\d+)?(?:[_-](?:cut|event)[A-Za-z0-9_.-]*)?\b|\b_event_[A-Za-z0-9_]+\b",
+            re.I,
+        ),
+    ),
     (
         "api_prompt_contains_no_yaml_field_names",
         re.compile(
             r"first_frame_visual_plan|cut_contract|scene_event|source_event_contract|event_context_for_cut|validation_gates|"
-            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload",
+            r"source_event_beat_id|event_time_position|what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
+            r"drawable_prompt_ir|dependencies|included_fragments|omitted_groups|required_groups|compiler_version|"
+            r"shot_design_contract|cut_location_frame_plan|cut_visual_delta|blocking_and_interaction",
             re.I,
         ),
     ),
@@ -640,6 +671,158 @@ def api_prompt_structural_contract_issues(prompt: str, *, object_present: bool) 
             Finding(
                 code="api_prompt_has_object_contact_state_if_object_present",
                 message="API prompt must describe object contact or hand/object relationship when image_generation.object_ids is non-empty.",
+            )
+        )
+    return findings
+
+
+def _v2_dependency_values(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def api_prompt_v2_structural_contract_issues(
+    prompt: str,
+    *,
+    image_generation: dict[str, Any],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if not prompt.strip():
+        return [
+            Finding(
+                code="api_prompt_missing_for_new_prompt_policy",
+                message="image_api_prompt_v2 requires image_generation.api_prompt_payload.prompt.",
+            )
+        ]
+    for code, pattern in API_PROMPT_FORBIDDEN_GATES:
+        if pattern.search(prompt):
+            findings.append(Finding(code=code, message=f"API prompt violates v2 gate `{code}`."))
+
+    payload = image_generation.get("api_prompt_payload")
+    payload = payload if isinstance(payload, dict) else {}
+    ir = payload.get("drawable_prompt_ir")
+    if not isinstance(ir, dict) or not ir:
+        findings.append(
+            Finding(
+                code="api_prompt_v2_drawable_prompt_ir_missing",
+                message="image_api_prompt_v2 requires a drawable_prompt_ir trace.",
+            )
+        )
+        return findings
+    if str(ir.get("schema_version") or "").strip() != "drawable_prompt_ir_v1":
+        findings.append(
+            Finding(
+                code="api_prompt_v2_drawable_prompt_ir_schema",
+                message="drawable_prompt_ir.schema_version must be drawable_prompt_ir_v1.",
+            )
+        )
+    raw_dependencies = ir.get("dependencies")
+    if not isinstance(raw_dependencies, dict):
+        findings.append(
+            Finding(
+                code="api_prompt_v2_dependencies_missing",
+                message="drawable_prompt_ir.dependencies must be present.",
+            )
+        )
+        dependencies: dict[str, Any] = {}
+    else:
+        dependencies = dict(raw_dependencies)
+    for key in ("character_ids", "object_ids", "location_ids", "references"):
+        traced = [
+            str(value).strip()
+            for value in _v2_dependency_values(dependencies.get(key))
+            if str(value).strip()
+        ]
+        declared = [
+            str(value).strip()
+            for value in _v2_dependency_values(image_generation.get(key))
+            if str(value).strip()
+        ]
+        dependencies[key] = traced
+        if traced != declared:
+            findings.append(
+                Finding(
+                    code=f"api_prompt_v2_{key}_dependency_mismatch",
+                    message=f"drawable_prompt_ir dependency `{key}` does not exactly match image_generation.{key}.",
+                )
+            )
+    required_groups = {
+        str(value).strip()
+        for value in _v2_dependency_values(dependencies.get("required_groups"))
+        if str(value).strip()
+    }
+
+    raw_fragments = ir.get("included_fragments")
+    if not isinstance(raw_fragments, list):
+        findings.append(
+            Finding(
+                code="api_prompt_v2_included_fragments_missing",
+                message="drawable_prompt_ir.included_fragments must be a list.",
+            )
+        )
+        raw_fragments = []
+    groups: set[str] = set()
+    for index, fragment in enumerate(raw_fragments, start=1):
+        if not isinstance(fragment, dict):
+            findings.append(
+                Finding(
+                    code="api_prompt_v2_included_fragment_empty",
+                    message=f"included fragment {index} must declare a group and drawable text.",
+                )
+            )
+            continue
+        group = str(fragment.get("group") or "").strip()
+        text = str(fragment.get("text") or "").strip()
+        if not group or not text:
+            findings.append(
+                Finding(
+                    code="api_prompt_v2_included_fragment_empty",
+                    message=f"included fragment `{group or index}` has no drawable text.",
+                )
+            )
+        if group:
+            groups.add(group)
+            if group not in IMAGE_API_PROMPT_V2_GROUPS:
+                findings.append(
+                    Finding(
+                        code="api_prompt_v2_unknown_fragment_group",
+                        message=f"included fragment uses unknown group `{group}`.",
+                    )
+                )
+            if text and text not in prompt:
+                findings.append(
+                    Finding(
+                        code="api_prompt_v2_fragment_not_rendered",
+                        message=f"included fragment `{group}` is not present in api_prompt_payload.prompt.",
+                    )
+                )
+
+    dependency_groups = {
+        "characters": bool(dependencies.get("character_ids")),
+        "objects": bool(dependencies.get("object_ids")),
+        "location": bool(dependencies.get("location_ids")),
+        "references": bool(dependencies.get("references")),
+    }
+    expected_groups = set(IMAGE_API_PROMPT_V2_BASE_GROUPS) | required_groups
+    expected_groups.update(group for group, required in dependency_groups.items() if required)
+    issue_group_aliases = {"characters": "character", "objects": "object"}
+    for group in sorted(expected_groups):
+        if group in groups:
+            continue
+        issue_group = issue_group_aliases.get(group, group)
+        findings.append(
+            Finding(
+                code=f"api_prompt_v2_missing_{issue_group}_fragment",
+                message=f"drawable prompt requires a non-empty `{group}` fragment for this cut.",
+            )
+        )
+    for group, required in dependency_groups.items():
+        if required or group not in groups or group in required_groups:
+            continue
+        issue_group = issue_group_aliases.get(group, group)
+        findings.append(
+            Finding(
+                code=f"api_prompt_v2_unneeded_{issue_group}_fragment",
+                message=f"drawable prompt includes `{group}` even though this cut declares no such dependency.",
             )
         )
     return findings
@@ -909,14 +1092,14 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
             prompt_policy_version = str(api_prompt_payload.get("policy_version") or image_generation.get("prompt_policy_version") or "").strip()
             legacy_prompt = str(image_generation.get("prompt") or "").strip()
             api_prompt = str(api_prompt_payload.get("prompt") or "").strip()
-            if prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION:
+            if prompt_policy_version in IMAGE_API_PROMPT_POLICY_VERSIONS:
                 prompt = api_prompt
             else:
                 prompt = api_prompt or legacy_prompt
             output = str(image_generation.get("output") or "").strip()
             if not output:
                 continue
-            if not prompt and prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION:
+            if not prompt and prompt_policy_version not in IMAGE_API_PROMPT_POLICY_VERSIONS:
                 continue
             still_plan = node.get("still_image_plan") if isinstance(node.get("still_image_plan"), dict) else {}
             mode = str(still_plan.get("mode") or "").strip().lower()
@@ -937,7 +1120,7 @@ def manifest_prompt_entries(manifest: dict[str, Any], *, allowed_story_modes: se
                     output=output,
                     narration=narration,
                     rationale=mode or ("reference" if _is_reference_output(output) else ""),
-                    agent_review_ok=bool(review.get("agent_review_ok", True)),
+                    agent_review_ok=bool(review.get("agent_review_ok", False)),
                     human_review_ok=bool(review.get("human_review_ok", False)),
                     human_review_reason=str(review.get("human_review_reason") or ""),
                     agent_review_reason_keys=[str(v).strip() for v in list(review.get("agent_review_reason_keys") or review.get("agent_review_reason_codes") or []) if str(v).strip()],
@@ -1062,12 +1245,22 @@ def _score_subject_specificity(
     return round(_score_from_count(total=expected, missing=max(0, expected - covered)), 3)
 
 
-def _score_prompt_craft(prompt: str, missing_blocks: list[str], independence_issues: list[str]) -> float:
-    block_score = _score_from_count(total=len(REQUIRED_PROMPT_BLOCKS), missing=len(missing_blocks))
+def _score_prompt_craft(
+    prompt: str,
+    missing_blocks: list[str],
+    independence_issues: list[str],
+    *,
+    conditional_v2: bool = False,
+) -> float:
+    block_score = (
+        1.0
+        if conditional_v2
+        else _score_from_count(total=len(REQUIRED_PROMPT_BLOCKS), missing=len(missing_blocks))
+    )
     issue_penalty = min(0.45, 0.15 * len(independence_issues))
-    detail_issues = prompt_craft_detail_issues(prompt)
+    detail_issues = [] if conditional_v2 else prompt_craft_detail_issues(prompt)
     detail_penalty = min(0.35, 0.18 * len(detail_issues))
-    length_bonus = 0.05 if len((prompt or "").splitlines()) >= 8 else 0.0
+    length_bonus = 0.0 if conditional_v2 else (0.05 if len((prompt or "").splitlines()) >= 8 else 0.0)
     return round(max(0.0, min(1.0, block_score - issue_penalty - detail_penalty + length_bonus)), 3)
 
 
@@ -1146,6 +1339,7 @@ def _score_prompt_entry(
     blocking_missing: bool,
     first_frame_readiness: float,
     findings: list[Finding],
+    is_api_prompt_v2: bool = False,
 ) -> tuple[dict[str, float], float]:
     rubric_scores = {
         "story_alignment": _score_story_alignment(local_source_text, prompt_terms, missing_source_terms),
@@ -1155,7 +1349,12 @@ def _score_prompt_entry(
             prompt_character_hits=prompt_character_hits,
             prompt_object_hits=prompt_object_hits,
         ),
-        "prompt_craft": _score_prompt_craft(prompt, missing_blocks, independence_issues),
+        "prompt_craft": _score_prompt_craft(
+            prompt,
+            missing_blocks,
+            independence_issues,
+            conditional_v2=is_api_prompt_v2,
+        ),
         "continuity_readiness": _score_continuity_readiness(
             declared_character_ids=declared_character_ids,
             declared_object_ids=declared_object_ids,
@@ -1221,6 +1420,19 @@ def review_entries(
         cut = cuts.get((entry.scene_id, entry.cut_id), {})
         image_generation = cut.get("image_generation") if isinstance(cut, dict) else {}
         audio = cut.get("audio") if isinstance(cut, dict) else {}
+        is_api_prompt_v1 = entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION
+        is_api_prompt_v2 = entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION_V2
+        is_versioned_api_prompt = is_api_prompt_v1 or is_api_prompt_v2
+        v2_payload = (
+            image_generation.get("api_prompt_payload")
+            if is_api_prompt_v2 and isinstance(image_generation, dict)
+            else {}
+        )
+        v2_payload = v2_payload if isinstance(v2_payload, dict) else {}
+        v2_ir = v2_payload.get("drawable_prompt_ir")
+        v2_ir = v2_ir if isinstance(v2_ir, dict) else {}
+        v2_dependencies = v2_ir.get("dependencies")
+        v2_dependencies = v2_dependencies if isinstance(v2_dependencies, dict) else {}
         is_reference_entry = _is_reference_output(entry.output)
         narration_text = entry.narration or (((audio or {}).get("narration") or {}).get("text") or "")
         local_story = _scene_context_lookup(story_scene_map, entry.scene_id)
@@ -1254,6 +1466,17 @@ def review_entries(
 
         declared_character_ids = set(image_generation.get("character_ids") or []) if isinstance(image_generation, dict) else set()
         declared_object_ids = set(image_generation.get("object_ids") or []) if isinstance(image_generation, dict) else set()
+        if is_api_prompt_v2:
+            declared_character_ids.update(
+                str(value).strip()
+                for value in _v2_dependency_values(v2_dependencies.get("character_ids"))
+                if str(value).strip()
+            )
+            declared_object_ids.update(
+                str(value).strip()
+                for value in _v2_dependency_values(v2_dependencies.get("object_ids"))
+                if str(value).strip()
+            )
         contract = entry.contract if isinstance(entry.contract, dict) and entry.contract else {}
         if not contract and isinstance(image_generation, dict) and isinstance(image_generation.get("contract"), dict):
             contract = dict(image_generation.get("contract") or {})
@@ -1261,11 +1484,10 @@ def review_entries(
 
         findings: list[Finding] = []
         drawable_prompt = prompt_drawable_content(entry.prompt)
-        is_api_prompt_v1 = entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION
 
         if not is_reference_entry and cut_contract:
             cut_must_show = _nested_contract_list(cut_contract, "must_show", "viewer_contract.must_show")
-            if is_api_prompt_v1:
+            if is_versioned_api_prompt:
                 cut_must_show = [term for term in cut_must_show if not API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
             cut_must_avoid = _nested_contract_list(cut_contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
             first_frame_brief = _nested_contract_string(cut_contract, "first_frame_brief", "first_frame_contract.first_frame_brief")
@@ -1321,7 +1543,7 @@ def review_entries(
                 )
             )
 
-        if not contract:
+        if not contract and not is_api_prompt_v2:
             findings.append(
                 Finding(
                     code="image_contract_missing",
@@ -1330,7 +1552,7 @@ def review_entries(
             )
         else:
             must_include = _contract_string_list(contract, "must_include")
-            if is_api_prompt_v1:
+            if is_versioned_api_prompt:
                 must_include = [term for term in must_include if not API_PROMPT_ABSTRACT_TERM_RE.search(str(term))]
             must_avoid = _contract_string_list(contract, "must_avoid")
             target_focus = str(contract.get("target_focus") or "").strip().lower()
@@ -1368,6 +1590,13 @@ def review_entries(
                     object_present=bool(declared_object_ids),
                 )
             )
+        elif is_api_prompt_v2:
+            findings.extend(
+                api_prompt_v2_structural_contract_issues(
+                    entry.prompt,
+                    image_generation=image_generation if isinstance(image_generation, dict) else {},
+                )
+            )
         else:
             missing_blocks = find_missing_required_blocks(entry.prompt)
             for block in missing_blocks:
@@ -1378,7 +1607,7 @@ def review_entries(
                     )
                 )
             findings.extend(prompt_structural_contract_issues(entry.prompt))
-        craft_detail_issues = prompt_craft_detail_issues(entry.prompt)
+        craft_detail_issues = [] if is_api_prompt_v2 else prompt_craft_detail_issues(entry.prompt)
         for issue in craft_detail_issues:
             findings.append(Finding(code="image_prompt_prompt_craft_weak", message=issue))
         nonvisual_metadata_issues = find_prompt_nonvisual_metadata_issues(entry.prompt)
@@ -1412,6 +1641,20 @@ def review_entries(
             code = "non_japanese_prompt_term" if "rideable" in issue else "prompt_not_self_contained"
             findings.append(Finding(code=code, message=issue))
 
+        # v2's DrawablePromptIR is the cut-local dependency contract. Scene-wide
+        # alias inference belongs to the legacy reviewer and would incorrectly
+        # pull future characters/objects into every cut.
+        if is_api_prompt_v2:
+            character_alias_hits = {
+                asset_id: {asset_id} for asset_id in declared_character_ids
+            }
+            object_alias_hits = {
+                asset_id: {asset_id} for asset_id in declared_object_ids
+            }
+            prompt_character_hits = dict(character_alias_hits)
+            prompt_object_hits = dict(object_alias_hits)
+            narration_terms = set()
+
         if prompt_character_hits and not declared_character_ids:
             findings.append(
                 Finding(
@@ -1423,10 +1666,12 @@ def review_entries(
                 )
             )
 
-        important_source_terms = set(narration_terms)
-        for matched in list(character_alias_hits.values()) + list(object_alias_hits.values()):
-            important_source_terms.update(matched)
-        important_source_terms = compact_terms(important_source_terms)
+        important_source_terms: set[str] = set()
+        if not is_api_prompt_v2:
+            important_source_terms.update(narration_terms)
+            for matched in list(character_alias_hits.values()) + list(object_alias_hits.values()):
+                important_source_terms.update(matched)
+            important_source_terms = compact_terms(important_source_terms)
         for term in sorted(term for term in important_source_terms if not term_is_covered(term, prompt_terms)):
             findings.append(
                 Finding(
@@ -1512,8 +1757,10 @@ def review_entries(
         }
         source_relation_hits = sorted(term for term in relation_terms if term in local_source_text)
         prompt_relation_hits = sorted(term for term in relation_terms if term in entry.prompt)
-        blocking_missing = bool(source_relation_hits and not prompt_relation_hits)
-        if source_relation_hits and not prompt_relation_hits:
+        blocking_missing = bool(
+            not is_api_prompt_v2 and source_relation_hits and not prompt_relation_hits
+        )
+        if blocking_missing:
             findings.append(
                 Finding(
                     code="blocking_drift",
@@ -1554,6 +1801,7 @@ def review_entries(
             blocking_missing=blocking_missing,
             first_frame_readiness=first_frame_readiness,
             findings=findings,
+            is_api_prompt_v2=is_api_prompt_v2,
         )
         if rubric_scores["story_alignment"] < IMAGE_REVIEW_RUBRIC_THRESHOLDS["story_alignment"]:
             findings.append(
@@ -1674,7 +1922,7 @@ def render_prompt_collection(entries: list[PromptEntry]) -> str:
             lines.extend(f"  - `{message}`" for message in entry.agent_review_reason_messages)
         else:
             lines.append("  - ``")
-        fence = "api_prompt" if entry.prompt_policy_version == IMAGE_API_PROMPT_POLICY_VERSION else "text"
+        fence = "api_prompt" if entry.prompt_policy_version in IMAGE_API_PROMPT_POLICY_VERSIONS else "text"
         lines.extend(["", f"```{fence}", entry.prompt.rstrip(), "```", ""])
     return "\n".join(lines)
 
@@ -1762,13 +2010,15 @@ def render_report(
     hard_findings = sum(1 for outcome in results for finding in outcome.findings if is_hard_finding(finding))
     soft_findings = sum(1 for outcome in results for finding in outcome.findings if is_soft_finding(finding))
     finding_count = sum(len(outcome.findings) for outcome in results)
-    status = "FAIL" if unresolved_entries else ("WARN" if finding_count else "PASS")
+    empty_review_scope = total == 0
+    status = "FAIL" if empty_review_scope or unresolved_entries else ("WARN" if finding_count else "PASS")
     lines = [
         "# Image Prompt Story Review",
         "",
         f"- manifest: `{manifest_path}`",
         f"- status: `{status}`",
         f"- reviewed_entries: `{total}`",
+        f"- empty_review_scope: `{'true' if empty_review_scope else 'false'}`",
         f"- entries_with_findings: `{warned}`",
         f"- findings: `{finding_count}`",
         f"- hard_findings: `{hard_findings}`",
@@ -1894,7 +2144,18 @@ def apply_review_metadata_to_manifest(*, manifest_path: Path, manifest: dict[str
 
 def append_evaluator_state(*, run_dir: Path, outcomes: list[ReviewOutcome], unresolved_entries: int) -> None:
     state_path = run_dir / "state.txt"
-    if not state_path.exists() or not outcomes:
+    if not state_path.exists():
+        return
+    if not outcomes:
+        append_state_snapshot(
+            state_path,
+            {
+                "eval.image_prompt.score": "0.0000",
+                "eval.image_prompt.findings": "1",
+                "eval.image_prompt.unresolved_entries": "1",
+                "eval.image_prompt.empty_review_scope": "true",
+            },
+        )
         return
     rubric_keys = tuple(IMAGE_REVIEW_RUBRIC_WEIGHTS.keys())
     averages = {
@@ -2030,6 +2291,8 @@ def main() -> int:
     append_evaluator_state(run_dir=run_dir, outcomes=hydrated_results, unresolved_entries=unresolved_entries)
     print(out_path)
     findings = sum(len(outcome.findings) for outcome in hydrated_results)
+    if not hydrated_results:
+        return 1
     if args.fail_on_findings and findings and unresolved_entries:
         return 1
     return 0

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
+import re
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -80,6 +82,7 @@ def render_scope_json(
     scope_path: Path,
     prompt_path: Path,
     report_path: Path,
+    shard_plan: dict[str, object] | None = None,
 ) -> str:
     diagnostics = entry_diagnostics(entries)
     payload = {
@@ -98,7 +101,179 @@ def render_scope_json(
         },
         "generated_at": now_iso(),
     }
+    if shard_plan:
+        payload.update(
+            {
+                "review_scope": shard_plan.get("review_scope", payload["review_scope"]),
+                "shards": shard_plan.get("shards", []),
+                "coverage": shard_plan.get("coverage", {}),
+            }
+        )
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _entry_id(entry: dict[str, object], index: int) -> str:
+    return str(entry.get("id") or entry.get("selector") or f"entry_{index:03d}").strip()
+
+
+def _image_prompt_scene_token(entry: dict[str, object], entry_id: str) -> str:
+    raw_scene_id = str(entry.get("scene_id") or "").strip()
+    for candidate in (raw_scene_id, entry_id):
+        match = re.search(r"scene[_:\s-]*(\d+)", candidate, re.I)
+        if match:
+            return str(int(match.group(1)))
+    if raw_scene_id:
+        label = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_scene_id).strip("._-").lower()
+        if label:
+            return label
+    return ""
+
+
+def _scene_token_sort_key(token: str) -> tuple[int, object, str]:
+    if token.isdigit():
+        return (0, int(token), token)
+    return (1, token, token)
+
+
+def image_prompt_scene_shard_plan(entries: list[dict[str, object]]) -> dict[str, object]:
+    """Return a deterministic per-scene plan with exact selector coverage.
+
+    Every image-prompt entry, including the scene-composite gate, must belong to
+    exactly one scene shard. Invalid plans raise instead of silently producing a
+    partial semantic review.
+    """
+
+    if not entries:
+        raise ValueError("image_prompt semantic review has zero entries")
+    entry_ids = [_entry_id(entry, index) for index, entry in enumerate(entries, start=1)]
+    duplicates = sorted(entry_id for entry_id, count in Counter(entry_ids).items() if count > 1)
+    if duplicates:
+        raise ValueError(f"image_prompt semantic review has duplicate entry ids: {', '.join(duplicates)}")
+
+    grouped: dict[str, list[str]] = {}
+    for entry, entry_id in zip(entries, entry_ids):
+        scene_token = _image_prompt_scene_token(entry, entry_id)
+        if not scene_token:
+            raise ValueError(f"cannot assign entry to image_prompt scene shard: {entry_id}")
+        grouped.setdefault(scene_token, []).append(entry_id)
+
+    shards = [
+        {
+            "shard_id": f"scene_{scene_token}",
+            "scene_id": scene_token,
+            "entry_count": len(grouped[scene_token]),
+            "entry_ids": list(grouped[scene_token]),
+        }
+        for scene_token in sorted(grouped, key=_scene_token_sort_key)
+    ]
+    assigned_entry_ids = [entry_id for shard in shards for entry_id in shard["entry_ids"]]
+    return {
+        "review_scope": "per_scene_shards",
+        "shards": shards,
+        "coverage": {
+            "status": "valid",
+            "expected_entry_count": len(entry_ids),
+            "assigned_entry_count": len(assigned_entry_ids),
+            "expected_entry_ids": entry_ids,
+            "assigned_entry_ids": assigned_entry_ids,
+            "missing_entry_ids": [],
+            "duplicate_entry_ids": [],
+        },
+    }
+
+
+def _invalid_image_prompt_scene_shard_plan(entries: list[dict[str, object]], error: ValueError) -> dict[str, object]:
+    entry_ids = [_entry_id(entry, index) for index, entry in enumerate(entries, start=1)]
+    duplicates = sorted(entry_id for entry_id, count in Counter(entry_ids).items() if count > 1)
+    return {
+        "review_scope": "per_scene_shards",
+        "shards": [],
+        "coverage": {
+            "status": "invalid",
+            "expected_entry_count": len(entry_ids),
+            "assigned_entry_count": 0,
+            "expected_entry_ids": entry_ids,
+            "assigned_entry_ids": [],
+            "missing_entry_ids": entry_ids,
+            "duplicate_entry_ids": duplicates,
+            "errors": [str(error)],
+        },
+    }
+
+
+def materialize_image_prompt_scene_shards(
+    *,
+    run_dir: Path,
+    entries: list[dict[str, object]],
+    canonical_scope_path: Path,
+    canonical_report_path: Path,
+) -> dict[str, object]:
+    """Write stable scene-local review packs and return their scope manifest."""
+
+    plan = image_prompt_scene_shard_plan(entries)
+    entries_by_id = {
+        _entry_id(entry, index): entry
+        for index, entry in enumerate(entries, start=1)
+    }
+    shard_root = run_dir / "logs" / "review" / "semantic" / "image_prompt_shards" / "pack"
+    for index, shard in enumerate(plan["shards"], start=1):
+        shard_id = str(shard["shard_id"])
+        entry_ids = [str(item) for item in shard["entry_ids"]]
+        shard_entries = [entries_by_id[entry_id] for entry_id in entry_ids]
+        base = shard_root / f"{index:03d}_{shard_id}"
+        collection_path = base.with_suffix(".collection.md")
+        scope_path = base.with_suffix(".scope.json")
+        prompt_path = base.with_suffix(".prompt.md")
+        report_path = base.with_suffix(".report.md")
+        write_text(collection_path, render_collection("image_prompt", shard_entries))
+        shard_scope = {
+            "stage": "image_prompt",
+            "run_dir": str(run_dir.resolve()),
+            "entry_count": len(entry_ids),
+            "entry_ids": entry_ids,
+            "review_scope": "single_scene_image_prompt_shard",
+            "shard_id": shard_id,
+            "scene_id": str(shard["scene_id"]),
+            "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
+            "canonical_report": str(canonical_report_path.relative_to(run_dir)),
+            "source_artifacts": _source_artifacts(run_dir, "image_prompt"),
+            "artifacts": {
+                "collection": str(collection_path.relative_to(run_dir)),
+                "scope": str(scope_path.relative_to(run_dir)),
+                "prompt": str(prompt_path.relative_to(run_dir)),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            "generated_at": now_iso(),
+        }
+        write_text(scope_path, json.dumps(shard_scope, ensure_ascii=False, indent=2) + "\n")
+        shard_prompt = render_prompt(
+            stage="image_prompt",
+            run_dir=run_dir,
+            collection_path=collection_path,
+            scope_path=scope_path,
+            report_path=report_path,
+        )
+        write_text(
+            prompt_path,
+            shard_prompt.rstrip()
+            + "\n\n"
+            + f"Review only image_prompt scene shard `{shard_id}`.\n"
+            + "Expected reviewed_entries exactly once: "
+            + json.dumps(entry_ids, ensure_ascii=False)
+            + "\n",
+        )
+        write_text(
+            report_path,
+            render_report_template(
+                stage="image_prompt",
+                run_dir=run_dir,
+                scope_path=scope_path,
+                collection_path=collection_path,
+            )
+            + "\n",
+        )
+        shard["artifacts"] = shard_scope["artifacts"]
+    return plan
 
 
 def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
@@ -281,6 +456,20 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
     scope_path = run_dir / paths["scope"]
     prompt_path = run_dir / paths["prompt"]
     report_path = run_dir / paths["report"]
+    shard_plan: dict[str, object] | None = None
+
+    if stage == "image_prompt":
+        try:
+            shard_plan = materialize_image_prompt_scene_shards(
+                run_dir=run_dir,
+                entries=entries,
+                canonical_scope_path=scope_path,
+                canonical_report_path=report_path,
+            )
+        except ValueError as exc:
+            # Keep a canonical, inspectable fail-closed scope so the server can
+            # report the coverage defect without starting an unscoped review.
+            shard_plan = _invalid_image_prompt_scene_shard_plan(entries, exc)
 
     write_text(collection_path, render_collection(stage, entries))
     write_text(
@@ -293,6 +482,7 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
             scope_path=scope_path,
             prompt_path=prompt_path,
             report_path=report_path,
+            shard_plan=shard_plan,
         ),
     )
     prompt = render_prompt(stage=stage, run_dir=run_dir, collection_path=collection_path, scope_path=scope_path, report_path=report_path)

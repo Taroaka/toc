@@ -1,13 +1,13 @@
 # 動画マニフェスト: テンプレート（改善版）
 
 `docs/video-generation.md` の出力スキーマに準拠した作業テンプレートです。
-改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `scene_event` → `scene_cut_coverage_plan` → `cut_contract.source_event_contract` → `event_context_for_cut` → `image_generation.prompt` / `narration` / `video_generation.motion_prompt` のつながりを明示します。
+改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `scene_event` → `scene_cut_coverage_plan` → `cut_contract.source_event_contract` → `first_frame_visual_plan` → `drawable_prompt_ir` → `api_prompt_payload.prompt` / `narration` / `video_generation.motion_prompt` のつながりを明示します。
 このテンプレートは skeleton 作成にも使うため、image/video authoring prompt には TODO を含むことがある。ただし `audio.narration.text` / `audio.narration.tts_text` には TODO を入れず、未記入は空文字 + `authoring_status` で表す。`manifest_phase: production` へ昇格する時点では TODO / TBD / pending を残さない。
 
 - 出力先: `output/videos/<topic>_<timestamp>_manifest.md`
   - 1物語1フォルダ運用の場合: `output/<topic>_<timestamp>/video_manifest.md`
 - 目的: 生成素材・選定・合成の管理
-- 原則: p400 では完成 image prompt を書かず、p600 で 6 block prompt を作る
+- 原則: p400 では完成 image prompt を書かず、p600 で `image_api_prompt_v2` の条件付き prompt を compile する。固定6/11ブロックは要求しない
 
 ```yaml
 manifest_phase: "skeleton"
@@ -32,6 +32,21 @@ promotion_requirements:
   all_image_prompts_approved: true
   all_narration_text_finalized_or_silent: true
   all_video_motion_prompts_complete: true
+
+image_request_materialization:
+  prompt_policy_version: "image_api_prompt_v2"
+  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  review_projection: "image_generation_requests.md"
+  review_prompt_fence: "api_prompt"
+  execution_snapshot: "image_generation_request_snapshot.json"
+  snapshot_schema_version: "toc.image_generation_request_snapshot.v1"
+  provider_prompt_path: "snapshot.items[].prompt"
+  provider_prompt_source: "scenes[].cuts[].image_generation.api_prompt_payload.prompt"
+  immutable_after_materialization: true
+  reject_markdown_or_reference_drift: true
+  unique_destination_owner_per_snapshot: true
+  reject_cross_revision_output: true
+  legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
 
 subagent_trace:
   - subagent_id: "image-prompt-judgment-001"
@@ -96,7 +111,15 @@ assets:
   #     spectacle_details:
   #       - "封印が呼吸するように発光する"
 
-  location_bible: []
+  location_bible:
+    - location_id: "village_at_dawn"
+      reference_images: []
+      reference_variants: []
+      fixed_prompts:
+        - "夜明けの木造家屋、湿った土の道、低い朝霧"
+      review_aliases: ["夜明けの村"]
+      continuity_notes:
+        - "土の道の方向と木造家屋の配置を維持する"
   # - location_id: "sea_temple"
   #   reference_images:
   #     - "assets/locations/sea_temple.png"
@@ -512,10 +535,28 @@ scenes:
               new_asset_needed: false
               reuse_allowed: false
             p600_image:
+              authoring_boundary: "cut設計では完成 prompt を書かず、描画可能な first-frame 要件だけを渡す"
+              source_projection: "first_frame_visual_plan_v1"
+              compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
+              prompt_policy_version: "image_api_prompt_v2"
+              compiler_version: "conditional_drawable_prompt_compiler_v1"
+              drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
+              always_required_groups: ["style", "current_moment", "primary_subject", "composition", "constraints"]
+              conditional_groups:
+                references: "resolved references が1件以上ある場合だけ"
+                characters: "asset_dependency.character_ids_required が1件以上ある場合だけ"
+                objects: "asset_dependency.object_ids_required が1件以上ある場合だけ"
+                location: "asset_dependency.location_ids_required が1件以上ある場合だけ"
+                light_material: "明示された非定型の描画値がある場合だけ"
+                current_state_delta: "sequential progression の明示された描画値がある場合だけ"
               prompt_requirements: []
               reference_requirements: []
               first_frame_must_include: []
               first_frame_must_avoid: []
+              provider_prompt_path: "image_generation.api_prompt_payload.prompt"
+              review_projection: "image_generation_requests.md#api_prompt"
+              execution_snapshot: "image_generation_request_snapshot.json"
+              legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
             p700_narration:
               narration_requirements: []
               role: "setup|fact|emotion|contrast|aftertaste|silent"
@@ -562,15 +603,16 @@ scenes:
             - "reviewer が完了判断できる条件"
 
         image_generation:
-          # p600 image provider は codex_builtin_image 固定。
-          # prompt 本文には `最初の1フレーム` / `1フレーム目` / `first frame` と書かない。
+          # p600 image provider は codex_builtin_image 固定。provider へ渡す本文は api_prompt_payload.prompt だけ。
+          # first_frame_visual_plan / drawable_prompt_ir / ID / path / hash / motion_brief は prompt 本文へ出さない。
           tool: "codex_builtin_image"
           character_ids: ["protagonist"]  # 人物が映らない場合は []
           character_variant_ids: []
           object_ids: []
           object_variant_ids: []
-          location_ids: []
+          location_ids: ["village_at_dawn"]
           location_variant_ids: []
+          references: []
           applied_request_ids: []
           prompt_authoring_context:
             image_role: "video_first_frame_candidate"
@@ -601,30 +643,76 @@ scenes:
             status: "pending|approved|changes_requested"
             notes: ""
             change_requests: []
-          prompt: |
-            [全体 / 不変条件]
-            実写映画調、自然な映画照明、実物セット感。画面内テキストなし、字幕なし、ウォーターマークなし、ロゴなし。
+          # IDs / references / first_frame_visual_plan が変わったら、IR/payload/hash/snapshot を一括再生成する。
+          first_frame_visual_plan:
+            schema_version: "first_frame_visual_plan_v1"
+            editable: false
+            temporal_boundary:
+              first_visible_moment: "夜明けの村で主人公が湿った土の道の先を見つめている"
+              event_fact_visible_in_still: "主人公はまだ歩き出していない"
+              not_yet_happened_in_still: ["主人公が村を出る"]
+            subject_binding:
+              primary_subject:
+                name: "道の先を見つめる主人公"
+            spatial_composition:
+              foreground: "霧に濡れた土の道"
+              midground: "立ち止まる主人公"
+              background: "木造家屋と遠い山の輪郭"
+            prompt_rendering_policy:
+              render_only_drawable_information: true
+              do_not_render_design_meta: true
+              do_not_render_future_motion_as_action: true
+          api_prompt_payload:
+            policy_version: "image_api_prompt_v2"
+            compiler_version: "conditional_drawable_prompt_compiler_v1"
+            prompt: |-
+              [全体 / 不変条件]
+              実写映画調、自然な映画照明、実物セットとして見える質感。
 
-            [登場人物]
-            主人公は character_bible の参照画像と同じ人物。黒髪の短髪、和装の実写的な布地、体格と年齢感を維持する。
+              [シーン]
+              画面には、主人公はまだ歩き出していない。
+              観客が最初に読む主被写体は、道の先を見つめる主人公。
 
-            [小道具 / 舞台装置]
-            この場面で主役級の小道具はない。場所アンカーとして、夜明けの村の木造家屋、湿った土の道、低い朝霧を保つ。
+              [登場人物]
+              人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。
 
-            [シーン]
-            舞台: 夜明けの静かな田舎の村。
-            主役: 中景に立つ主人公。まだ歩き出しておらず、村の奥へ向かう視線だけが先に伸びている。
-            前景: 霧に濡れた土の道と小さな草。画面下に奥へ続く導線を作る。
-            中景: 主人公の姿勢と視線。これから物語が始まる直前の静けさ。
-            背景: 木造家屋の影、薄い朝霧、遠くの山の輪郭。
-            光: 青灰色の朝光が右奥から差し、人物の輪郭に弱いリムライトを作る。
-            構図: 縦型9:16、道を中央の導線にし、人物は中景のやや下に置く。
+              [場所と構図]
+              場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。
+              道の先を見つめる主人公が最初に読める構図。
 
-            [連続性]
-            この画像だけで、主人公がまだ日常の村にいること、次に村の奥へ進むこと、夜明けの時間帯が読める。
-
-            [禁止]
-            画面内テキスト、字幕、ウォーターマーク、ロゴ、アニメ調、漫画調、イラスト調、人物や手の崩れ、余計な人物、reveal早出し。
+              [禁止]
+              画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。
+              まだ描かないものは、主人公が村を出る。
+            negative_prompt: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト"
+            reference_instructions: ""
+            reference_images: []
+            sha256: "<sha256-of-exact-prompt>"
+            source_digest: "<sha256-of-first-frame-compilation-source>"
+            drawable_prompt_ir:
+              schema_version: "drawable_prompt_ir_v1"
+              dependencies:
+                character_ids: ["protagonist"]
+                object_ids: []
+                location_ids: ["village_at_dawn"]
+                references: []
+                required_groups: ["style", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
+              included_fragments:
+                - group: "style"
+                  text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+                - group: "current_moment"
+                  text: "画面には、主人公はまだ歩き出していない。"
+                - group: "primary_subject"
+                  text: "観客が最初に読む主被写体は、道の先を見つめる主人公。"
+                - group: "characters"
+                  text: "人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。"
+                - group: "location"
+                  text: "場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。"
+                - group: "composition"
+                  text: "道の先を見つめる主人公が最初に読める構図。"
+                - group: "constraints"
+                  text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。\nまだ描かないものは、主人公が村を出る。"
+              omitted_groups: ["references", "objects", "light_material", "current_state_delta"]
+          prompt: ""  # image_api_prompt_v1 legacy read-only projection。production v2 の送信には使わない
           output: "assets/scenes/scene1_cut1_base.png"
           iterations: 4
           selected: null
@@ -652,8 +740,9 @@ scenes:
               tool: "codex_builtin_image"
               character_ids: ["protagonist"]
               object_ids: []
-              location_ids: []
-              prompt: "same as primary image prompt"
+              location_ids: ["village_at_dawn"]
+              api_prompt_payload_ref: "scenes[0].cuts[0].image_generation.api_prompt_payload"
+              prompt: ""  # image_api_prompt_v1 legacy read-only projection
               output: "assets/scenes/scene1_cut1_base.png"
 
         video_generation:
