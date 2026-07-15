@@ -4,7 +4,14 @@ script_metadata:
   source_story: "output/<topic>_<timestamp>/story.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
-  target_duration: 60
+  target_duration: 300
+  target_duration_seconds: 300
+  duration_plan:
+    target_seconds: 300
+    minimum_scene_count: 8
+    minimum_cut_count: 25
+    minimum_narration_seconds: 210
+    minimum_effective_seconds: 240
   aspect_ratio: "9:16"
   affect_design_reference: "docs/affect-design.md"
   narration_source_of_truth: "script.md"
@@ -17,6 +24,51 @@ script_metadata:
     prompt_contract_version: "v3_tagged_context_v1"
     default_stability_profile: "creative"
     text_policy: "hiragana_plus_audio_tags"
+
+audio_story_plan:
+  schema_version: "audio_story_plan_v1"
+  authoring_provenance: "audio_story_director|derived_legacy_cut_projection"
+  authoring_status: "draft|authored|approved|changes_requested"
+  audience_promise: ""
+  narrator_bible:
+    relationship_to_story: "witness|companion|historian|limited_observer|omniscient"
+    knowledge_boundary: []
+    emotional_permission: []
+    forbidden_attitudes: []
+  open_loops:
+    - loop_id: ""
+      viewer_question: ""
+      why_it_matters: ""
+      opened_at: ""
+      payoff_at: ""
+      payoff_type: "answer|reframe|partial|intentional_unresolved"
+  scene_arcs:
+    - scene_id: ""
+      attention_state: "orient|build|hot|recovery|release"
+      audience_state_before: ""
+      audience_state_after: ""
+      semantic_load: "low|medium|high"
+      incoming_causal_question: ""
+      outgoing_causal_pressure: ""
+  silence_budget:
+    purpose: "視覚報酬、反応、緊張、余韻のために、言葉で埋めない区間を先に確保する"
+    protected_moments: []
+  continuous_full_draft: ""
+
+narration_spans:
+  - span_id: "ns_001"
+    source_cut_ids: []
+    story_job: "first_question|causal_bridge|payoff|reaction|aftertaste"
+    opened_loop_ids: []
+    closed_loop_ids: []
+    text: ""
+    tts_text: ""
+    audio_visual_relation: "orientation_overlap|causal_alignment|complement|counterpoint|voice_silence"
+    prosody:
+      pace: "ease|steady|press|hold|release"
+      pause_function: "parse|anticipate|absorb|reaction|handoff|none"
+    # 同一groupのvoiced cutはcanonical順のprevious_text/next_textをproviderへ渡す。1 cut = 1 group。
+    tts_generation_group_id: ""
 
 subagent_trace:
   - subagent_id: "scene-draft-001"
@@ -133,7 +185,7 @@ scene_set_review:
 scene_detail_review:
   status: "pending|approved|changes_requested|skipped"
   criteria:
-    target_total_video_duration_minutes: "5-10"
+    target_total_video_duration_minutes: "5-20"
     cut_duration_assumption_seconds: "4-15"
     required_checks:
       - "全体 scene 数と scene 重要度から、この scene に必要な尺を見積もる"
@@ -233,7 +285,7 @@ production_readiness_review:
         responsibility: "script の骨格、因果、scene/cut 接続、破綻を評価する"
         may_edit_downstream_design_artifacts: false
       - role: "duration_auditor"
-        responsibility: "cut 数と台本から 5-10 分動画の尺を予測し、不足を特定する"
+        responsibility: "選択された 5-20 分の目標尺に対し、scene/cut/narration の設計量と実効尺の不足を特定する"
         may_edit_downstream_design_artifacts: false
       - role: "quality_auditor"
         responsibility: "尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する"
@@ -756,6 +808,16 @@ scenes:
           status: "optional_draft|approved_by_human|superseded_by_p700"
         narration: "legacy_optional_draft"
         tts_text: "legacy_optional_draft"
+        narration_authoring:
+          schema_version: "narration_authoring_v1"
+          status: "missing|draft|human_locked|reviewed|silent"
+          semantic_revision: 0
+          semantic_hash: ""
+          tts_revision: 0
+          tts_request_hash: ""
+          source: "agent|frontend"
+          updated_at: ""
+          updated_by: ""
         elevenlabs_prompt:
           spoken_context: "string"
           voice_tags: ["excited", "laughs harder"]

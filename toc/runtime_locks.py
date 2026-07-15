@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 import fcntl
 import os
 from pathlib import Path
 import re
 import time
-from typing import AsyncIterator, TextIO
+from typing import AsyncIterator, Iterator, TextIO
 
 
 class FileLockUnavailable(RuntimeError):
@@ -56,6 +56,22 @@ def _acquire_file_lock(path: Path, *, wait: bool, timeout_seconds: float | None)
         if not wait or (deadline is not None and time.monotonic() >= deadline):
             raise FileLockUnavailable(f"file lock is already held: {path}")
         time.sleep(0.05)
+
+
+@contextmanager
+def sync_file_lock(
+    path: Path,
+    *,
+    wait: bool = True,
+    timeout_seconds: float | None = None,
+) -> Iterator[Path]:
+    """Hold the same advisory lock used by async server artifact writers."""
+
+    held = _acquire_file_lock(path, wait=wait, timeout_seconds=timeout_seconds)
+    try:
+        yield held.path
+    finally:
+        held.release()
 
 
 def _acquire_file_slot(

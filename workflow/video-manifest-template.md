@@ -26,6 +26,53 @@ video_metadata:
   aspect_ratio: "9:16"
   resolution: "1080x1920"
 
+# p700 script.mdからの一方向projection。manifest上で独立authoringしない。
+audio_story_plan:
+  schema_version: "audio_story_plan_v1"
+  authoring_provenance: ""
+  authoring_status: "draft"
+  audience_promise: ""
+  narrator_bible:
+    relationship_to_story: ""
+    knowledge_boundary: []
+    emotional_permission: []
+    forbidden_attitudes: []
+  open_loops: []
+  scene_arcs: []
+  silence_budget:
+    purpose: ""
+    protected_moments: []
+  continuous_full_draft: ""
+narration_spans: []
+
+# p720/p750のrun-level hash binding。値はreview/approval runtimeが更新する。
+narration_workflow:
+  schema_version: "narration_run_workflow_v1"
+  arc_review:
+    status: "pending"
+    narration_text_set_hash: ""
+    findings: []
+    report: ""
+    reviewed_at: ""
+  # p720の5 independent app-server criticsがruntimeで更新する。authoring時にpassedを手入力しない。
+  semantic_critic_review:
+    schema_version: "narration_semantic_critic_aggregate_v1"
+    status: "pending"
+    narration_text_set_hash: ""
+    semantic_review_input_hash: ""
+    reviewed_at: ""
+    critics: []
+    findings: []
+    report: ""
+    json: ""
+  final_audio_review:
+    status: "pending"
+    approved_audio_set_hash: ""
+    approved_timeline_hash: ""
+    approved_at: ""
+    approved_by: ""
+    note: ""
+
 promotion_requirements:
   no_todo_or_tbd: true
   all_cut_contracts_complete: true
@@ -300,7 +347,7 @@ scenes:
 
     # カット設計ルール:
     # - 1カット = 1意図。
-    # - 1カット = 1ナレーション、または明示された silent cut。
+    # - cutは映像編集単位。narration spanは複数cutをまたいでよく、または明示された silent cut。
     # - cut 数は固定テンプレートではなく scene_cut_coverage_plan で scene obligation から逆算する。
     # - low/medium/high/critical の重要度 floor と target_duration_seconds / 8 の duration floor を下回らない。
     # - 同じ story fact の繰り返しなら cut 追加ではなく既存 cut の prompt/contract を厚くする。
@@ -768,7 +815,7 @@ scenes:
 
         audio:
           narration:
-            authoring_status: "missing|draft|approved|silent"
+            authoring_status: "missing|draft|human_locked|reviewed|silent"
             missing_reason: "p700_narration_not_written_yet"
             contract:
               schema_version: "narration_contract_v2"
@@ -814,6 +861,8 @@ scenes:
                 - "映像で読めることを説明しすぎない"
             text: ""
             tts_text: ""
+            span_refs: []  # script.md narration_spans[]からの派生anchor
+            # frontend保存時にrevision/source_binding/generation/candidates/audio_reviewをhash付きでmaterializeする。
             tool: "elevenlabs|silent"
             silence_contract:
               intentional: false

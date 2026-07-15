@@ -37,12 +37,17 @@ ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
 ### 4. Manifest
 
 - renderable scene / cut の存在
-- `1 cut = 1 narration`
+- `audio_story_plan` / 全編通し原稿 / narration span と cut anchor の整合。1 span は複数cutをまたいでよい
 - narration text field の存在
 - `audio.narration.text` / `audio.narration.tts_text` に `TODO` / `TBD` / 制作メモが残っていないこと
-- `audio.narration.authoring_status` が `missing|draft|approved|silent` のいずれかであること
+- `audio.narration.authoring_status` が `missing|draft|human_locked|reviewed|silent` のいずれかであること
+- revision/hash と audio candidate が一致し、生成成功と人間承認が分離されていること
 - `audio.narration.contract.schema_version: narration_contract_v2` と story role / visual distance / TTS readiness の最低限の記録
-- p720 で pronunciation candidates と scene-level narration arc が確認されていること。runner が専用 artifact を materialize しない場合は、aggregator report または human handoff に同等の確認を残す
+- p720 deterministic reviewでpronunciation candidates、cut-local review、full-run arcを確認し、
+  `narration_workflow.arc_review`がcurrent `narration_text_set_hash`へ束縛されていること
+- p720 independent semantic reviewでretention/hook、narrator persona、causal/information rhythm、
+  audio-visual distance、payoff/endingの5 verdictが揃い、`narration_workflow.semantic_critic_review`がcurrent
+  `narration_text_set_hash`とcurrent exact `semantic_review_input_hash`の両方でpassedであること
 - cut duration 上限
 - `character_ids` / `object_ids` の明示
 - immersive の invariant（experience / no on-screen text）

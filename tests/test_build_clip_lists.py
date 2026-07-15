@@ -12,6 +12,63 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "build-clip-lists.py"
 
 
 class TestBuildClipLists(unittest.TestCase):
+    def test_shared_active_inventory_excludes_status_and_reference_forms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 0
+    image_generation:
+      output: assets/characters/hero.png
+    video_generation:
+      output: assets/videos/reference_scene.mp4
+    audio:
+      narration:
+        output: assets/audio/reference_scene.mp3
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        status: deleted
+        video_generation:
+          output: assets/videos/deleted.mp4
+        audio:
+          narration:
+            output: assets/audio/deleted.mp3
+      - cut_id: 2
+        scene_kind: location_reference
+        video_generation:
+          output: assets/videos/reference_cut.mp4
+        audio:
+          narration:
+            output: assets/audio/reference_cut.mp3
+      - cut_id: 3
+        video_generation:
+          output: assets/videos/active.mp4
+        audio:
+          narration:
+            output: assets/audio/active.mp3
+```
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--manifest", str(manifest_path)],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            clips = (tmp_path / "video_clips.txt").read_text(encoding="utf-8")
+            narrations = (tmp_path / "video_narration_list.txt").read_text(encoding="utf-8")
+
+            self.assertIn("active.mp4", clips)
+            self.assertIn("active.mp3", narrations)
+            self.assertNotIn("reference_scene", clips + narrations)
+            self.assertNotIn("reference_cut", clips + narrations)
+            self.assertNotIn("deleted", clips + narrations)
+
     def test_deleted_cuts_are_skipped_from_concat_lists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -240,6 +297,98 @@ scenes:
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("cuts assigned to multiple render_units", result.stderr + result.stdout)
+
+    def test_render_units_reject_reversed_canonical_cut_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        audio:
+          narration:
+            output: "assets/audio/scene03_cut01_narration.mp3"
+      - cut_id: 2
+        audio:
+          narration:
+            output: "assets/audio/scene03_cut02_narration.mp3"
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [2]
+        video_generation:
+          output: "assets/videos/scene03_cut02.mp4"
+      - unit_id: 2
+        source_cut_ids: [1]
+        video_generation:
+          output: "assets/videos/scene03_cut01.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must follow canonical active cut order", result.stderr + result.stdout)
+
+    def test_render_units_use_shared_reference_inventory_predicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        audio:
+          narration:
+            output: "assets/audio/scene03_cut01_narration.mp3"
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1]
+        image_generation:
+          output: "assets/characters/reference-unit.png"
+        video_generation:
+          output: "assets/videos/reference-unit.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("deleted/reference render_units are not supported", result.stderr + result.stdout)
 
 
 if __name__ == "__main__":

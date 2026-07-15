@@ -109,7 +109,7 @@ def _validate_cut_scene_file(
         out_cut["cut_id"] = int(cut_id)
         out_cut["image_generation"] = ig
 
-        # Ensure audio narration exists by default (1 cut = 1 narration).
+        # Ensure an audio anchor exists by default; p700 may map one narration span across multiple cuts.
         # Users can intentionally skip TTS at generation time via --skip-audio.
         audio = out_cut.get("audio")
         if not isinstance(audio, dict):

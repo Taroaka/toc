@@ -23,6 +23,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
 | Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible inside the owning p-bucket supervisor |
+| p720 narration review | Deterministic arc/cut validation followed by five independent hash-bound app-server semantic critics | Separate reproducible contract failures from whole-story listening judgments |
 | Codex app-server runtime | All server/CLI app-server callers use the shared runtime contract and transport preflight | Prevent DNS/WebSocket/HTTP fallback failures from being mistaken for artifact or semantic QA failures |
 
 ## Component diagram
@@ -67,6 +68,8 @@ graph TD
     - each round launches 5 independent critic agents against the same artifact/readset
     - 1 aggregator agent merges critic findings into the round gate result
     - maximum 5 rounds; unresolved findings after round 5 require human review or explicit override
+    - p720は実行契約を二層化する。`run-p720-narration-l3.py`の互換`critic_*.md`はdeterministic findingの分類であり、
+      独立agent判定ではない。その後の`run-p720-narration-semantic.py`だけが、凍結済み全編snapshotを別threadの5 criticへ渡す
 
 ## Storage strategy
 
@@ -97,6 +100,15 @@ graph TD
 - Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
 - Semantic QA / producer repair app-server turns use a no-progress watchdog, not a fixed total work deadline. Codex app-server streams turn notifications while agent work is active, so semantic orchestration treats turn notifications, semantic report writes, producer report writes, and source artifact changes as progress. It keeps waiting while progress is observable, and records `review.semantic.<stage>.watchdog.status=no_progress_timeout` only when progress stops for the configured interval.
 - Transport/runtime setup failure is a runtime block, not a semantic review result. A missing semantic report caused by app-server transport failure records `review.semantic.<stage>.transport.status=failed` and must not invoke the producer repair loop. If transport fails during producer repair before a completed producer report exists, the repair loop records `blocked_transport` instead of semantic failure. If the producer has already written `status: done`, the orchestrator accepts the report and immediately runs the next semantic review.
+- p720 narration semantic review uses five isolated app-server threads over one immutable `narration_text_set_hash` and exact
+  `semantic_review_input_hash`, with roles `retention_hook`,
+  `narrator_voice_persona`, `causal_information_rhythm`, `audio_visual_distance`, and `payoff_ending`. Each response is strict JSON.
+  The second hash also covers critic-visible visual beats, contracts, prompts, and timing. Threads use isolated cwd, scrubbed sensitive
+  environment, tool-disabled config, developer-instruction/data separation, and structured output; any tool-like transcript event fails closed.
+  Disabled runtime, execution or parse failure, incomplete/duplicate critic set, artifact mismatch, missing/hash-mismatched verdict,
+  superseded review id, and a manifest hash race are fail-closed conditions; none is converted to a pass.
+  `execution_failed`は作品内容へのsemantic判定ではなく運用上のblocking verdictであり、再実行前提の
+  `semantic_critic_review.status=changes_requested`としてgateだけを閉じる。
 
 ## Task granularity (MVP)
 
@@ -136,8 +148,14 @@ graph TD
   - `review.policy.image=required|optional`
   - `review.policy.narration=required|optional`
 - stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。
-- audio runtime は TTS 実行後の実尺を正本にし、`cinematic_story` は既定で 300 秒以上を target とする。
-  - target 未満なら scene / narration stretch review prompt を生成して停止し、人レビューへは進めない。
+- create API の `target_duration_seconds` は省略時 `300`、許容範囲は整数 `300..1200` とする。run 内では `T` と表し、frontend、backend、runner、state、research、story、script、manifest で同じ値を引き継ぐ。
+  - planning lower bounds は scene=`ceil(T/40)`、cut=`ceil(T/12)`、narration=`ceil(T*0.70)` 秒とする。これらは同一内容の複製ノルマではなく、長尺設計の不足を検出する budget である。
+  - research と story は、それぞれ実 Codex app-server semantic review/repair を通し、全 criterion の artifact-local evidence を持つ passed report がある場合だけ次工程へ進む。story review 後は scene 数、scene target 合計、narration target 合計を再検証してから cut を作る。
+- `p740` の audio runtime は、TTS 実行後に ffprobe 等で測った spoken audio と、完全な `silence_contract` を持つ intentional silence の明示尺を同一 audio timeline 上で合計する。
+  - video timeline は scene に `render_units[]` があれば render unit 合計を正本とし、その source cut の video duration は足さない。render unit がなければ cut video duration を使う。
+  - audio timeline と video timeline は並列 layer であり加算しない。pre-render effective duration は完全な両 timeline の短い方とし、`0.8*T` 以上なら合格する。上限は設けない。
+  - 未達または測定不完全なら scene / narration stretch review prompt を生成して停止し、video generation へは進めない。
+- final render は完成 media の ffprobe 実測を `review.final.duration_fit.*` に残し、同じ `0.8*T` lower-bound-only rule を通った場合だけ final QA へ進む。
 - production order は asset/image-first を採用する。
   - `script` で scene / narration draft を確定したあと、`video_manifest.md` はまず `manifest_phase: skeleton` で materialize する。
   - その後に `asset -> scene implementation / image -> narration -> video -> render -> qa` の順で進める。
@@ -257,10 +275,12 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
   - `p110`: grounding
   - `p120`: authoring
   - `p130`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `research.md` の構造、物語材料、矛盾、下流 readiness を semantic review し、pass しなければ story/cut 作成へ進まない。外部典拠・権利・版の検証はこの契約の対象外。
 - `p200`: story
   - `p210`: grounding
   - `p220`: authoring
   - `p230`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
+  - `story.md` の因果、人物、対立、scene 化 readiness を semantic review し、pass しなければ cut を materialize しない。
 - `p300`: visual planning
   - `p310`: visual value authoring (`visual_value.md`)
   - `p320`: visual planning evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
@@ -290,12 +310,19 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
   - `p660`: image generation
   - `p670`: image QA / fix loop
   - `p680`: image human review handoff
+    - `p680` から `p900` までを一操作で自動継続する UI / endpoint はこの変更の対象外。後続 p700/p800/p900 は既存の個別 gate を維持する。
 - `p700`: narration / audio runtime
   - `p710`: narration grounding
-  - `p720`: narration text evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-    - design-target critic split: story_role / visual_distance / tts_delivery / arc_and_pacing / spoken_japanese. Until the runner is v2-aware, these viewpoints may be covered inside generic critic / aggregator artifacts.
+  - `p720`: two-layer full-run narration text gate
+    - deterministic: cut-local contract/TTS checks plus run-level plan/span/canonical-order/open-loop validation; result is
+      `narration_workflow.arc_review`
+    - semantic: independent retention/hook, narrator persona, causal/information rhythm, audio-visual distance, payoff/ending critics;
+      result is `narration_workflow.semantic_critic_review`
+    - both results must be `passed` and bound to the current `narration_text_set_hash`; semantic review must also match the exact
+      current `semantic_review_input_hash`; frontend
+      `POST /api/image-gen/narration-review/run` executes them in that order
   - `p730`: TTS request / generation
-  - `p740`: duration fit gate
+  - `p740`: duration fit gate; a cut/render unit over the 60-second provider clip limit must be split
   - `p750`: audio QA / human review handoff
 - `p800`: video
   - `p810`: video grounding
@@ -329,7 +356,7 @@ slot ごとの標準分担:
 | `p400` script | `script.md` と skeleton manifest の統合、p400 review loops、slot 更新 | scene draft / narration draft / structure-duration-quality council |
 | `p500` asset | asset plan 採用、request 発行、asset generation、canonical asset 更新 | asset brief / coverage review / continuity review / image generation workers |
 | `p600` scene implementation | production manifest 統合、scene requests、scene image generation、image handoff | scene/cut prompt rewrite / image prompt judgment / image QA |
-| `p700` narration | p710-p750 の bucket single writer。TTS 実行判断、duration gate、manifest 反映、audio handoff | story-role / visual-distance / TTS-delivery / arc-and-pacing / spoken-Japanese narration reviewers, duration stretch review, TTS workers |
+| `p700` narration | p710-p750 の bucket single writer。deterministic/semantic p720、TTS 実行判断、duration gate、manifest 反映、audio handoff | retention/hook / narrator persona / causal-information rhythm / audio-visual distance / payoff-ending semantic critics, duration stretch review, TTS workers |
 | `p800` video | 採用判定、manifest 更新、除外理由の記録、video handoff | clip generation fan-out / clip review |
 | `p900` render / QA | final report 生成、完了判定、run closeout | QA reviewer / runtime summary review |
 
@@ -339,6 +366,8 @@ Authoring-after review loop の標準分担:
 - aggregator: 1 agent per round。5 critic reports を統合し、`passed|changes_requested` と unresolved findings を返す
 - L2 supervisor: aggregator report を根拠に担当 bucket の canonical artifact を更新し、次 round 実行または gate close を決める
 - max rounds: 5。round 5 後の unresolved finding は human review / explicit override に回す
+- p720ではdeterministic report projectionと5つの独立semantic criticを区別する。p750はcurrent arc passだけでなく、
+  current semantic passも要求し、app-server無効・malformed verdict・hash raceをoverrideなしのblocking状態として扱う
 
 禁止事項:
 

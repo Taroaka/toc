@@ -113,7 +113,9 @@ stage.story.audit.report=logs/grounding/story.audit.json
 stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
 stage.story.playbooks.report=logs/grounding/story.playbooks.json
 stage.story.playbooks.selected_count=0
-review.story.status=pending|approved|changes_requested
+review.story.status=pending|reviewing|approved|changes_requested
+review.research.duration_contract.status=passed|failed
+review.story.duration_contract.status=passed|failed
 review.story.subagent.prompt=logs/review/story.subagent_prompt.md
 review.story.subagent.prompt.generated_at=ISO8601
 eval.story.loop.status=pending|running|passed|changes_requested|failed
@@ -365,6 +367,11 @@ Authoring の直後に置かれる review slot は **最大 1 round の evaluato
   - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
   - 修正後、同じ review slot の次 round を実行する
 
+`p720` の現行実装は、この共通 review-loop の artifact naming と、音声作品固有の意味評価を二層に分ける。
+`scripts/run-p720-narration-l3.py` が出す `critic_*.md` / `aggregated_review.md` は、決定論的 finding を5観点へ
+投影した互換 artifact であり、5回の独立 LLM 判定ではない。独立した意味評価はその後に
+`scripts/run-p720-narration-semantic.py` が別 app-server thread で実行する5 criticを正本とする。
+
 停止条件:
 
 - aggregator が `passed` を返したら loop を終了し、対応 stage を次 slot へ進める
@@ -514,6 +521,24 @@ stage target resolution:
   - audio: `AAC`, `44100Hz`, `stereo`
   - 理由: `mono -> stereo` など channel layout が途中で変わると、concat 境界以降でジャミング音・ノイズ化が発生するため
 
+#### Duration-aware story run contract
+
+- create API の request field は `target_duration_seconds`。省略時は `300`、整数 `300..1200` のみを受け付ける。以下、この値を `T` とする。
+- request、`runtime.target_video_seconds`、`research.md.metadata.target_duration_seconds`、`story.md.story_metadata.target_duration_seconds`、`script.md.script_metadata.target_duration_seconds`、`video_manifest.md.video_metadata.target_duration_seconds` は同じ `T` を保持し、後段が独自の固定 300 秒へ戻してはならない。
+- research/story の semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。review transport failure、criterion 欠落、根拠欠落、failed criterion は pass とみなさない。
+- semantic repair 後は artifact を再読し、research の `metadata.target_duration_seconds` / `duration_plan` と story の `story_metadata.target_duration_seconds` / scene / narration floors を request target に再照合する。不一致は `review.*.duration_contract.status=failed` として story または cut materialization 前に停止する。
+- planning budget の lower bounds は次で固定する。
+  - scene count: `ceil(T / 40)`
+  - cut count: `ceil(T / 12)`
+  - narration seconds: `ceil(T * 0.70)`
+  - effective runtime: `T * 0.80`
+- p740 audio timeline `A` は、各 spoken cut の実測 audio 秒と、`intentional: true` / `confirmed_by_human: true` / non-empty `kind` / non-empty `reason` を持つ silent cut の明示 `video_generation.duration_seconds` の合計である。単なる `tool: silent` は incomplete とする。
+- video timeline `V` は scene ごとに正本を一つ選ぶ。`render_units[]` があれば unit duration 合計、なければ非 deleted cut duration 合計とし、render unit と source cut を二重計上しない。
+- `A` と `V` は並列 layer であり足さない。pre-render effective runtime は `min(A, V)`。全対象の測定が complete かつ `min(A, V) >= 0.8*T` の場合だけ p740 を pass する。上限は設けず、`1.5*T` でも下限を満たせば pass する。
+- `video_metadata.duration_seconds` は sync 後の derived cache であり、p740 actual の自己申告値として信用しない。p740 は manifest と media を再測定する。
+- final video は完成 media 自体を ffprobe し、`review.final.duration_fit.*` に別 layer として記録する。p740 actual と final actual は加算も相互上書きもしない。
+- p680 image handoff から p900 final QA までの one-click 自動継続は、この contract の対象外である。
+
 Canonical p300 done 条件:
 
 - `visual_value.md` が存在する
@@ -540,7 +565,7 @@ p400 の内部 slot:
   - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
   - `p410b` の stop condition は、これ以上 scene を増やしても既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持てず、cut 設計を厚くした方が品質が上がると説明できる状態である
   - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
-  - 具体 reviewer は 5-10 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もり、提案 cut 数だけで足りるかを評価する
+  - 具体 reviewer は 5-20 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もり、提案 cut 数だけで足りるかを評価する
   - 1 cut はおおよそ 4-15 秒であるため、1 cut しかない scene は 4-15 秒程度にしかならないことを finding に明記する
   - 具体 reviewer は、その scene で見せるべき内容が cut に全て載っているかを確認する
   - 次 scene 接続 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断し、必要なら cut 追加または最終 cut 増厚を要求する
@@ -565,7 +590,7 @@ p400 の内部 slot:
 - `p435`: production readiness council
   - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
   - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
-  - Duration Auditor は cut 数と台本から 5-10 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する。`target_duration_seconds` と cut duration 合計の比較を p700 へ defer してはいけない
+  - Duration Auditor は cut 数と台本から 5-20 分動画の尺を予測し、1 cut = 4-15 秒前提で不足を特定する。`target_duration_seconds` と cut duration 合計の比較を p700 へ defer してはいけない
   - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
   - Orchestrator は各 auditor の意見を統合して Design Owner 向け patch brief を作る
   - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この process 内で downstream design artifacts を触れるのは Design Owner だけとする
@@ -578,7 +603,7 @@ Canonical p400 done 条件:
 
 - `script.md.scenes[]` が `story.md` の主要 scene を coverage している
 - `eval.p400_readiness.status=approved` である。これがない限り p500 asset stage は grounding で `missing_inputs` になり、開始しない
-- `video_manifest.md.video_metadata.target_duration_seconds` は 300-600 秒であり、skeleton または promoted production manifest 上の cut duration 合計が target の 90% 以上である
+- `video_manifest.md.video_metadata.target_duration_seconds` は 300-1200 秒であり、skeleton または promoted production manifest 上の計画尺が target の 80% 以上である。上限超過だけを理由に fail にしない
 - `script.md` と `video_manifest.md` の scene/cut selector が完全一致している
 - `scene_set_review.md` / `scene_detail_review.md` / `cut_blueprint_review.md` / `script_review.md` / `production_readiness_review.md` が required section と passed status を持つ
 - p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p410b aggregate は `Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate`、p410c aggregate は `Scene Detail Gate`、p420 aggregate は `Cut Blueprint Gate`、p435 は `Design Owner Patch Brief` を持つ。required gate の値が `TODO` / `TBD` / `pending` / `changes_requested` / `failed` / `missing` / `unclear` / `none` / `null` / `n/a` / `なし` / `不明` / `未定` / `不足` のままなら p400 readiness は落ちる
@@ -1103,7 +1128,8 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 - 構造、存在、schema、参照 path、count、必須 field は関数 verifier が判定する
 - subject / location / object / timeline / reveal order / cut function などの意味判定は contextless semantic review agent が判定する
 - verifier は semantic review agent の report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする
-- frontend create flow では、生成前設計 stage の semantic review agent report が `status: passed` になることを必須にする。p680 までの create では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない
+- frontend create flow では、生成前設計 stage の semantic review agent report が `status: passed` になることを必須にする。`research` と `story` は pre-cut gate であり、どちらかが未実行、transport failure、または非 passed なら scene/cut materialization を開始しない。p680 までの create ではさらに `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない
+- `research` / `story` semantic review は artifact 内の構造、時系列、人物、対立、矛盾、scene 化 readiness を判定する。この変更では外部典拠、原典版、翻訳、権利状態、URL の真正性を検証対象にしない
 - 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。実画像・動画・最終 render の良否は deterministic output validator と frontend human review / final QA が判定する
 - semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
 - semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
@@ -1112,6 +1138,8 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 
 Canonical semantic review stages:
 
+- `research`
+- `story`
 - `scene_set`
 - `scene_detail`
 - `cut_blueprint`
@@ -1313,16 +1341,172 @@ subagent review は `drawable_prompt_ir.dependencies.required_groups` をその 
 
 ---
 
-## 6. `audio.narration.review` contract
+## 6. p700 Audio Story / revision-aware narration contract
 
-音声生成前 gate の review 状態は `video_manifest.md` の各 renderable narration node に直接保持する。
+### 6.1 Authoring source of truth
+
+ナレーションの言語正本は `script.md` とする。p700 authoringはcut別文面から始めず、全編を次の順で設計する。
+
+```yaml
+audio_story_plan:
+  schema_version: audio_story_plan_v1
+  authoring_provenance: "audio_story_director|derived_legacy_cut_projection"
+  authoring_status: "draft|authored|approved|changes_requested"
+  audience_promise: ""
+  narrator_bible:
+    relationship_to_story: "witness|companion|historian|limited_observer|omniscient"
+    knowledge_boundary: []
+    emotional_permission: []
+    forbidden_attitudes: []
+  open_loops:
+    - loop_id: "loop_01"
+      viewer_question: ""
+      why_it_matters: ""
+      opened_at: "scene1_cut1"
+      payoff_at: "scene8_cut2"
+      payoff_type: "answer|reframe|partial|intentional_unresolved"
+  scene_arcs:
+    - scene_id: "1"
+      attention_state: "orient|build|hot|recovery|release"
+      audience_state_before: ""
+      audience_state_after: ""
+      semantic_load: "low|medium|high"
+      incoming_causal_question: ""
+      outgoing_causal_pressure: ""
+  silence_budget:
+    purpose: ""
+    protected_moments: []
+  continuous_full_draft: "cut境界なしで通読できる全編spoken draft"
+
+narration_spans:
+  - span_id: "ns_001"
+    source_cut_ids: ["scene1_cut1"]
+    story_job: "first_question|causal_bridge|payoff|reaction|aftertaste"
+    opened_loop_ids: ["loop_01"]
+    closed_loop_ids: []
+    text: "公開用原稿"
+    tts_text: "provider用最終文字列"
+    audio_visual_relation: "orientation_overlap|causal_alignment|complement|counterpoint|voice_silence"
+    prosody:
+      pace: "ease|steady|press|hold|release"
+      pause_function: "parse|anticipate|absorb|reaction|handoff|none"
+    tts_generation_group_id: "voice_run_01"
+```
+
+- Audio Story Directorが全編reviewとcut projection照合を完了した正規稿だけ`authoring_provenance: audio_story_director` / `authoring_status: authored|approved`にする
+- cut原稿からのlegacy fallbackは`authoring_provenance: derived_legacy_cut_projection` / `authoring_status: changes_requested`とし、Audio Story Directorのreview完了までp720を通さない
+- 各voiced spanの`text` / `tts_text`は`source_cut_ids`順のnon-empty cut原稿を改行連結した値にし、`continuous_full_draft`はvoiced spanの`text`をspan順に改行連結した値にする
+- voiced cutは原則ちょうど1つのvoiced spanからanchorされ、未知selector、重複`span_id`、同一cut文面の完全重複を残さない
+- 各sceneは`scene_arcs[]`を持ち、最後のspanは`payoff|reaction|aftertaste`のいずれかを担う
+- `open_loops[].loop_id`は一意とし、span側の`opened_loop_ids` / `closed_loop_ids`は宣言済みIDだけを参照する。
+  `opened_at` / `payoff_at`は既知cutで、実際にopen/closeするspanのsource cutに属し、未解決を除きcanonical順でopenがpayoffより前に来る
+- `narration_spans[]`は文章・演技単位であり複数cutをまたいでよい。cut側には`audio.narration.span_refs[]`を派生同期する
+- `tts_generation_group_id`は連続したdelivery意図だけでなく、providerへ渡す前後文脈のruntime groupである。同一groupの
+  voiced cutをcanonical cut順に並べ、各cutの直前/直後の`tts_text`をElevenLabs `previous_text` / `next_text`へ渡す
+- provider outputとhuman approvalは引き続きcut-addressableに保つ。group全体を1fileに結合するfieldではない
+- 1つのvoiced cutを複数のgroupへ所属させない。`voice_silence` spanとsilent cutは前後文脈memberに数えない
+- 公開`text`とprovider用`tts_text`を分離し、`script.md`から`video_manifest.md`へ一方向同期する
+- frontendでcut文面を明示保存した場合は、そのcutをanchorするspanの公開/TTS文面と
+  `audio_story_plan.continuous_full_draft`もcanonical cut順から再構成し、full-run正本をcut projectionと乖離させない
+- p700 prepare/refresh/mergeは後段と同じactive inventoryを使い、deleted/reference/character-asset nodeを全編planとscratchへ入れない
+- dotted numericの`scene_id` / `cut_id`を整数化せず、`scene10_cut1.1`のようなcanonical selectorをmergeとarc reviewまで保持する
+- script/manifest/stateのCLI同期は同一transactionで、いずれかの書き込み失敗時は全成果物を開始前のbyte列へrollbackする
+
+### 6.2 p720 deterministic arc + semantic critic binding
+
+revision-aware runでは、p720 runnerがplan、spans、canonical cut順、各cutのauthoring status/tool/公開文面/TTS文面/span参照を
+一組として検査する。結果の正本はrun-level `narration_workflow.arc_review`であり、cut-local reviewの寄せ集めでは代替しない。
+この決定論的検査に加えて、同じ凍結済み全編snapshotを5つの独立したapp-server criticへ渡す。
+`p720`のpassには両方がcurrentであることが必要である。
+
+```yaml
+narration_workflow:
+  schema_version: narration_run_workflow_v1
+  arc_review:
+    status: "pending|passed|changes_requested"
+    narration_text_set_hash: "sha256:..."
+    findings: []
+    report: "narration_text_review.md"
+    reviewed_at: "ISO8601"
+  semantic_critic_review:
+    schema_version: "narration_semantic_critic_aggregate_v1"
+    status: "pending|passed|changes_requested"
+    narration_text_set_hash: "sha256:..."
+    semantic_review_input_hash: "sha256:..."
+    reviewed_at: "ISO8601"
+    critics: []
+    findings: []
+    report: "logs/eval/narration/semantic_critics/<stamp>_review.md"
+    json: "logs/eval/narration/semantic_critics/<stamp>_review.json"
+  final_audio_review:
+    status: "pending|approved|stale"
+    approved_audio_set_hash: ""
+    approved_timeline_hash: ""
+    approved_at: ""
+    approved_by: "frontend_human"
+    note: ""
+    listen_evidence:
+      mode: "sequential_full_run"
+      audio_set_hash: "sha256:..."
+      item_ids: ["scene1_cut1"]
+      timeline: []
+      completed_at: "ISO8601"
+    listen_evidence_hash: "sha256:..."
+```
+
+決定論的検査と意味検査の責務を混ぜない。
+
+- `scripts/run-p720-narration-l3.py`
+  - placeholder、TTS表記、句読点、contract必須field、局所的なvisual重複、canonical cut/span/open-loop整合を再現可能なruleで検査する
+  - cut-local `audio.narration.review` と run-level `narration_workflow.arc_review` を更新する
+  - `logs/eval/narration/round_01/critic_*.md` はdeterministic findingの観点別projectionであり、独立agent verdictではない
+- `scripts/run-p720-narration-semantic.py`
+  - `retention_hook`、`narrator_voice_persona`、`causal_information_rhythm`、`audio_visual_distance`、`payoff_ending`を、同じhash-bound full-run packに対する独立app-server threadで評価する
+  - 各criticはstrict JSONだけを返し、集約結果を`narration_workflow.semantic_critic_review`へ保存する
+  - report/jsonのlatest projectionは`logs/eval/narration/semantic_critics/latest.md|json`に置く
+
+`semantic_critic_review.critics[]`は5役それぞれの`schema_version`、`critic_id`、
+`narration_text_set_hash`、`semantic_review_input_hash`、`status: passed|changes_requested|execution_failed`、
+`summary`、`findings[]`を保持する。
+各findingは`code`、`severity: blocking|warning`、`message`、`evidence[]`、`suggestion`を持つ。
+aggregateの`findings[]`はこれを`critic_id` / `critic_label`付きで平坦化したUI用projectionであり、5件すべてが
+`passed`のときだけtop-level statusを`passed`にする。
+
+CLIは次の順で実行する。
+
+```bash
+python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings
+python scripts/run-p720-narration-semantic.py --run-dir output/<run> --fail-on-findings
+```
+
+- p750には`arc_review.status: passed`と`semantic_critic_review.status: passed`の両方が必要で、両方の
+  `narration_text_set_hash`がcurrent set hashと一致し、semantic側の`semantic_review_input_hash`も現在のexact
+  critic-visible packと一致しなければならない
+- plan、span、cut文面、TTS文面、tool、span参照の変更後は、以前の`passed`をcurrentとみなさずp720を再実行する
+- frontendのcandidate previewはp720/p730修正loop中にも行えるが、current arc bindingの代替にはならない
+- frontendは`POST /api/image-gen/narration-review/run`で決定論的runnerを先に実行し、その成功snapshotに対して5つの
+  semantic criticを実行する。arc/cut findingとsemantic findingを同じresponseで返すため、外部CLIだけを暗黙の完走条件にしない
+- app-server無効化、critic実行失敗、欠落またはmalformed JSON、critic/hash不一致はblocking findingへ変換してfail closedとする。
+  これは作品内容の不合格ではなく`execution_failed`という運用上のverdictで、再実行までaggregate gateを閉じる。
+  review中にmanifestのtext set hashが変わった場合は結果を書き戻さず`stale`/HTTP 409として、current snapshotで再実行する
+- semantic aggregateは5つの固定critic idをexactly once要求し、各response、flattened findings、JSON/Markdown artifactの
+  一致をp720保存時とp750 currentness確認時の両方で検証する。visual/prompt/contract/timingだけの変更でもinput hashをstaleにする
+- criticはisolated cwd、sensitive env scrub、tool無効config、structured output、instruction/data分離で実行し、
+  transcriptにtool/command/file eventがあれば有効な`passed` JSONがあっても`execution_failed`とする
+- p750前の通し試聴はapproved cut audio、offset、cut末の間、intentional silenceをcanonical順に最後まで再生する。
+  `listen_evidence.audio_set_hash`とtimelineが承認request/current manifestに一致しない場合はp750を拒否する
+
+### 6.3 `audio.narration.review` contract
+
+各cutのp720 review状態は`video_manifest.md`のrenderable narration nodeに保持する。legacy audio-only経路では
+音声生成前gate、revision-aware frontend経路ではcandidate preview後も含めたp750/video handoff gateとして使う。
 
 各 narration node は review の前提として `audio.narration.contract` を持てる。`text` / `tts_text` には `TODO` / `TBD` / `REPLACE_ME` / 制作メモを入れない。未記入は空文字と `authoring_status` で表す。
 
 ```yaml
 audio:
   narration:
-    authoring_status: "missing|draft|approved|silent"
+    authoring_status: "missing|draft|human_locked|reviewed|silent"
     missing_reason: "p700_narration_not_written_yet"
     text: ""
     tts_text: ""
@@ -1370,7 +1554,114 @@ audio:
 
 Required core fields for new p700 authoring are `schema_version`, `story_role.narrative_position`, `story_role.cut_function`, `story_role.voice_function`, `visual_distance.distance_policy`, `visual_distance.narration_should_add`, and `tts_readiness.pronunciation_targets`.
 
-Migration rule:
+Revision-aware frontend authoring adds the following metadata without changing the legacy string fields.
+
+```yaml
+audio:
+  narration:
+    text: "公開用原稿"
+    tts_text: "provider用最終文字列"
+    revision:
+      schema_version: narration_revision_v1
+      number: 1
+      text_revision: 1
+      tts_revision: 1
+      text_hash: "sha256:..."
+      tts_hash: "sha256:..."
+      source_hash: "sha256:..."
+      source: frontend|agent
+      updated_at: "ISO8601"
+    source_binding:
+      script_selector: "scene1_cut1"
+      contract_hash: "sha256:..."
+      visual_grounding_hash: "sha256:..."
+      semantic_revision: 1
+      semantic_hash: "sha256:..."
+      tts_revision: 1
+      tts_request_hash: "sha256:..."
+      synced_at: "ISO8601"
+    generation:
+      status: missing|generating|candidate|stale|failed|human_approved
+      candidate_id: ""
+      generated_from_tts_hash: "sha256:..."
+    candidates:
+      - candidate_id: "immutable id"
+        request_revision: 1
+        request_digest: "sha256:..."
+        generated_from_text_hash: "sha256:..."
+        generated_from_tts_hash: "sha256:..."
+        output: "assets/audio/.../candidates/<id>.mp3"
+        output_sha256: "sha256:..."
+        duration_seconds: 0
+        provider_request:
+          voice_id: ""
+          model_id: ""
+          voice_settings: {}
+          output_format: ""
+          language_code: "ja"
+          pronunciation_dictionary_locators: []
+          pronunciation_alias_source: ""
+          pronunciation_alias_sha256: "sha256:..."
+          effective_delivery_hash: "sha256:..."
+          tts_generation_group_id: "voice_run_01"
+          previous_text: "同一groupの直前cutのprovider用文字列"
+          next_text: "同一groupの直後cutのprovider用文字列"
+          tts_continuity_hash: "sha256:..."
+        status: generating|candidate|stale|failed|superseded|human_approved
+    audio_review:
+      status: pending|approved
+      approved_candidate_id: ""
+      approved_revision: 0
+      approved_text_hash: ""
+      approved_tts_hash: ""
+      approved_at: ""
+```
+
+- `output`はhuman-approved candidateだけを指す。candidate生成時には更新しない
+- `human_review_ok`はagent findingの例外許容専用で、audio approvalへ流用しない
+- text/tool/TTS変更後、以前のcandidate fileは削除せずstale化する
+- TTS完了時はcandidate id、request revision、current tts hashを再照合し、古い完了結果をcurrentへ昇格しない
+- 保存、無音確定、候補生成、候補承認は`expected_revision`必須のcompare-and-swapとする。候補生成/承認は
+  `expected_tts_hash`も要求し、古いfrontend stateからの更新を暗黙mergeしない
+- provider実行はlock外で行ってよいが、先にcandidateとeffective delivery snapshotをmanifestへ固定する。完了時に
+  revision/hashが変わっていればfileを`stale`として残し、current stateを更新しない
+- `tts_continuity_hash`はgroup id、`previous_text`、`next_text`を束ねる。隣接group memberのTTS文面変更でも
+  current contextが変わるため、影響する既存candidate/approvalをstale化して再生成する
+- candidate承認時とp750 readiness時に`output_sha256`と実fileを再照合する
+- `source_binding.contract_hash` / `visual_grounding_hash`がcurrent cut/image groundingと違う場合は、同じ文面でも
+  旧candidateを使わず、正本へ再保存・再reviewしてbindingを更新する
+
+### 6.4 p750 audio set / timeline approval
+
+p750 requestは一覧取得時のcurrent audio setと、視聴時に確定したtimelineをcompare-and-swapする。
+
+```yaml
+request:
+  expected_audio_set_hash: "sha256:..."
+  timeline:
+    - item_id: "scene1_cut1"
+      video_duration_seconds: 8
+      narration_offset_seconds: 0.5
+```
+
+- `expected_audio_set_hash`は全manifest cutをcanonical順に並べ、current source hash、candidate id、output path/content hash、
+  実測duration、tool、statusから計算する。一覧/各mutation responseの`audioSetHash`を承認requestへ渡す
+- timelineは全cutをちょうど1回ずつcanonical順に含む。欠落、重複、順序違いは拒否する
+- `video_duration_seconds`は仮の計画尺から短縮できるが、spoken cutでは
+  `ceil(approved audio duration + narration_offset_seconds)`以上にする
+- currentなdeterministic arc passとsemantic critic pass、全cutのcurrent individual approvalまたはhuman-confirmed silence、
+  p740 pass、audio set hash一致が揃った時だけ
+  `final_audio_review.status: approved`にする
+- 承認時のaudio set hashとtimeline hashの両方がcurrentの場合だけp750をcurrentとする。文面、TTS、delivery、候補、file、
+  cut順、duration、offsetの変更はp750をstaleにする
+- revision-aware renderは全cut・同順・同duration・同offsetを再要求し、spoken cutにはapproved `output`以外のpathを許可しない。
+  silent cutの無音fileはserverがapproved durationからmaterializeする
+- revision-aware CLIはcurrent p750なしでTTS/renderへ進まず、`runtime.stage=narration_frontend_handoff`として停止する。
+  manifestから直接audioを生成するCLI経路はlegacy narrationのみとする。current p750後は
+  `scripts/freeze-approved-render-inputs.py`がapproved offset、cut末の余白、intentional silenceを各cut音声へmaterializeしてから
+  concat listを作る。raw approved MP3をそのまま連結してp750 timelineを失ってはならない
+
+### 6.5 Migration rule
 
 - v2 fields are the design source of truth for new authoring.
 - Until all p720 / semantic / stage evaluators are v2-aware, legacy aliases are also required before p720:
@@ -1435,8 +1726,8 @@ Semantics:
   - p720 で見つけた固有名詞・人名・地名・専門語の読み替え候補
   - `unresolved` が残る場合は p730 前に `tts_text` のかな寄せ、`config/tts-pronunciation-aliases.tsv`、または official pronunciation dictionary locator のどれで処理するかを決める
 - `narration_arc_review`
-  - cut 単体では見つからない voice continuity / emotional curve / information flow / repetition control の軽量 review
-  - 初期運用では scene-level warning から始め、full-run blocking gate 化は運用が安定してから行う
+  - cut / scene 局所の voice continuity / emotional curve / information flow / repetition findingを保持する
+  - revision-aware runの全編blocking判定はrun-level `narration_workflow.arc_review`が正本であり、このnode fieldだけでpassにしない
 
 Canonical reason key:
 
@@ -1474,18 +1765,34 @@ Canonical reason key:
 - `narration_pacing_mismatch`
 - `narration_spoken_japanese_weak`
 
-p720 L3 critic assignment design target:
+p720 deterministic report projection:
 
-- critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
-- critic 2 `visual_distance`: visual captioning, image / motion distance, camera / prompt term leakage
-- critic 3 `tts_delivery`: `tts_text`, pause, sentence length, audio tag, pronunciation candidates
-- critic 4 `arc_and_pacing`: cut handoff, scene voice arc, duration density, ending aftertaste
-- critic 5 `spoken_japanese`: spoken naturalness, abstract AI wording, metaphor overload, monotonous endings
+- `TTS readiness and pronunciation payload`
+- `Narration contract and story role`
+- `Visual redundancy and leakage`
+- `Pacing and spoken timing`
+- `Spoken Japanese and thin wording`
 
-Current runner compatibility:
+これらはdeterministic findingを互換`critic_*.md`へ分類したものであり、独立semantic agentではない。
 
-- If `scripts/run-p720-narration-l3.py` still emits generic `critic_*.md`, the aggregator report must cover the five design-target viewpoints explicitly.
-- If deterministic review has not materialized `pronunciation_review` / `narration_arc_review`, they are design-target/manual review outputs, not required runtime fields.
+p720 independent semantic critics:
+
+- `retention_hook`: 冒頭の約束、注意の更新、open loopの進展、回復区間
+- `narrator_voice_persona`: narrator bible、知識境界、人格・文体・呼吸の連続性
+- `causal_information_rhythm`: 因果順、reveal順、聴覚で処理できる情報密度、scene handoff
+- `audio_visual_distance`: 映像の字幕化、音声先取り、映像に委ねる沈黙、追加価値
+- `payoff_ending`: audience promise/open loopの回収、reaction、aftertaste、意図的未解決の妥当性
+
+Current runner behavior:
+
+- `scripts/run-p720-narration-l3.py` はdeterministic findingを5つの互換critic reportとaggregatorへmaterializeする
+- `audio_story_plan` / `narration_spans`が存在するか、いずれかのnodeが`narration_revision_v1`ならfull-run arc validationを実行する
+- full-run resultは`narration_workflow.arc_review.status`、`narration_text_set_hash`、`findings`、`report`へ書き戻す。
+  missing/changes_requested/hash mismatchはrevision-aware p750のblocking conditionである
+- `scripts/run-p720-narration-semantic.py` は5 criticを別threadで実行し、strict JSON aggregateを
+  `narration_workflow.semantic_critic_review`と`logs/eval/narration/semantic_critics/`へ書き戻す
+- semantic aggregateのmissing/changes_requested/hash mismatchもrevision-aware p750のblocking conditionである
+- `pronunciation_review`の候補artifactは段階的導入を許容するが、unresolved pronunciation finding自体はp720で解消または明示overrideする
 
 Pronunciation candidate artifact design target:
 
@@ -1521,7 +1828,10 @@ audio:
 - `confirmed_by_human: true` は、人レビューで「この cut は無音でよい」と確定した印
 - 最終連結では、この cut の `video_generation.duration_seconds` 分の無音 mp3 をつなぐ
 - audio-only 生成後は `check-audio-duration-gate.py` を通し、`review.duration_fit.status` を更新する
-- `cinematic_story` の既定 target は 300 秒で、未達時は次を artifact 化する
+- `cinematic_story` の target は request の `target_duration_seconds`（省略時 300、範囲 300..1200）であり、p740 minimum はその 80%。上限は設けない
+- audio timeline は measured spoken audio と confirmed intentional silence のみから作る。video timeline は `render_units[]` があれば unit 側を使い、source cut duration と足さない。二つの timeline 自体も足さず、短い方を pre-render actual とする
+- `review.duration_fit.*` には target / minimum / actual / ratio / measurement completeness / spoken / silence / audio timeline / video timeline / missing / invalid の内訳を残す
+- 未達または測定不完全時は次を artifact 化する
   - `logs/review/duration_scene.subagent_prompt.md`
   - `logs/review/duration_narration.subagent_prompt.md`
 - 未達時は scene 設計 / narration 設計の見直しを先に行い、人レビューへは進めない
@@ -1530,7 +1840,7 @@ Lifecycle:
 
 1. subagent が narration text を review し、finding がある node を `agent_review_ok: false` にする
 2. subagent が `agent_review_reason_keys` / `agent_review_reason_messages` を残す
-3. fix を source manifest に反映する
+3. fix を言語正本`script.md`へ反映し、revision-aware syncでmanifestへ投影する
 4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
 5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
 
@@ -1541,14 +1851,25 @@ Lifecycle:
 - source: `script.md`
 - sink: `video_manifest.md`
 - sync target:
+  - top-level `audio_story_plan`
+  - top-level `narration_spans[]`
   - `audio.narration.text`
   - `audio.narration.tts_text`
+  - `audio.narration.span_refs[]`
+  - `audio.narration.revision` / `source_binding` / current review invalidation
 
 script 側の `tts_text` は `elevenlabs_prompt` を materialize した final string として扱う。
-この slice では manifest/runtime 側の contract は据え置きだが、script からの sync では
-次の優先順位で値を選ぶ。
+revision-aware syncは公開文面/TTS文面を別々に選び、manifestのrevision/source bindingを更新する。
+値の優先順位は次とする。
 
-sync 優先順位:
+sync 優先順位は公開文面とTTS payloadで分ける。TTS文字列を公開`text`へコピーしない。
+
+公開 `audio.narration.text`:
+
+1. `scenes[].cuts[].human_review.approved_narration`
+2. `scenes[].cuts[].narration`
+
+provider用 `audio.narration.tts_text`:
 
 1. `scenes[].cuts[].human_review.approved_tts_text`
 2. `scenes[].cuts[].tts_text`

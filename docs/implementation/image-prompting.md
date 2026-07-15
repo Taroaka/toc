@@ -964,6 +964,14 @@ scene の主役級 setpiece を object_bible と一致させる。材質、構�
 
 p600 は `cut_contract.first_frame_contract` を derived `first_frame_visual_plan` へ翻訳し、`drawable_prompt_ir_v1` を経由して条件付きの `image_api_prompt_v2` payload を作る stage である。既存の `scene_contract` と `image_generation.prompt` は互換 alias として扱えるが、cut 単位の送信正本は `api_prompt_payload.prompt` とする。
 
+### Frontend recompile contract
+
+frontend から `image_api_prompt_v2` の prompt を再生成するとき、`api_prompt_payload.prompt` を直接置換してはならない。ユーザー指示は binding / source grounding / reveal 境界を保持した visual plan patch へ変換し、`first_frame_visual_plan` を更新した上で `toc.image_prompt_compiler.compile_image_api_prompt_v2` を再実行する。
+
+更新単位は `video_manifest.md`、`image_generation_requests.md`、`image_generation_request_snapshot.json` の3成果物とする。manifestへ新しいplanとcompiled payloadを保存後、filterなしのrequest materializationを実行し、3成果物のいずれかの更新・検証に失敗した場合は全て変更前へ戻す。selected itemだけのmaterializationで未選択itemをrequest/snapshotから落としてはならない。
+
+frontend は再取得したrequestを表示正本とし、agentが返した中間patchや未compile文字列をprompt欄へ直接反映しない。asset requestの`image_api_prompt_v1`は既存の直接更新互換を維持する。
+
 入力優先順位:
 
 1. `cut_contract.first_frame_contract.first_frame_brief`

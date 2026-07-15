@@ -26,7 +26,24 @@
 #
 # Optional keys:
 #   runtime.stage=init|assets|render|done|shorts|...
+#   runtime.failure.stage=stage where the terminal runtime failure occurred
+#   runtime.failure.phase=semantic_review|semantic_producer_repair|media_generation|validation
+#   runtime.failure.error_kind=timeout|network|runtime_setup|unknown
+#   runtime.failure.last_progress_at=ISO8601|unknown
+#   image_generation.status=not_started|in_progress|completed|failed
+#   image_generation.started=true|false
+#   image_generation.generated_count=non-negative integer
+#   image_generation.blocked_by=semantic stage and phase identifier
+#   image_generation.block_reason=machine-readable blocking reason
+#   orchestration.p600.supervisor.status=pending|running|done|failed|invalidated
+#   orchestration.p600.supervisor.invalidated_by=machine-readable invalidation reason
 #   runtime.render.status=started|success|failed
+#   runtime.target_video_seconds=300  # request target; integer 300..1200, omitted request defaults to 300
+#   runtime.narration.phase=authoring|review|tts_preview|revising|audio_qa|awaiting_human_approval|done
+#   runtime.narration.approved_audio_set_hash=sha256:<hex>
+#   runtime.narration.approved_timeline_hash=sha256:<hex>
+#   artifact.narration_generation_request_snapshot=logs/providers/narration/generation_requests/<stamp>.json
+#   runtime.stage=narration_frontend_handoff  # revision-aware CLIがcurrent p750待ちで停止した状態
 #   slot.pXXX.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
 #   slot.pXXX.requirement=required|optional
 #   slot.pXXX.skip_reason=string
@@ -73,6 +90,17 @@
 #   stage.script.playbooks.report=logs/grounding/script.playbooks.json
 #   stage.script.playbooks.selected_count=0
 #   stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
+#     p720<->p730 frontend往復中は in_progress、p740合格後は awaiting_approval、明示p750全編承認後だけ done
+#   runtime.narration.preview_stage=string  # p750 done後のalternate previewはcanonical slot/phaseを戻さずここへ記録
+#   runtime.narration.preview_note=string
+#   slot.p720.status=pending|in_progress|done|blocked
+#     revision-aware doneにはvideo_manifest narration_workflow.arc_review.status=passedと
+#     narration_workflow.semantic_critic_review.status=passedが必要。両方のnarration_text_set_hashをcurrent setへ一致させ、
+#     semantic_review_input_hashもcurrent exact critic-visible packへ一致させる
+#   slot.p730.status=pending|in_progress|done|blocked  # candidate生成成功だけではdone/approvedを意味しない
+#   slot.p740.status=pending|in_progress|done|blocked
+#   slot.p750.status=pending|awaiting_approval|done|blocked
+#     doneにはcurrent audio set hash、approved timeline hash、同じset/timelineに束縛されたsequential_full_run listen evidenceが必要
 #   stage.narration.grounding.status=ready|missing_docs|missing_inputs
 #   stage.narration.grounding.report=logs/grounding/narration.json
 #   stage.narration.readset.report=logs/grounding/narration.readset.json
@@ -126,6 +154,14 @@
 #   review.semantic.image_prompt.shards.<scene>.blocked_entries=comma-separated selectors
 #   review.semantic.image_prompt.shards.<scene>.reason_keys=comma-separated reason keys
 #   review.semantic.image_prompt.shards.<scene>.transport.status=passed|retrying|recovered|failed
+#   review.semantic.<research|story>.status=pending|passed|failed
+#   review.semantic.<research|story>.collection=logs/review/semantic/<stage>.collection.md
+#   review.semantic.<research|story>.scope=logs/review/semantic/<stage>.scope.json
+#   review.semantic.<research|story>.prompt=logs/review/semantic/<stage>.prompt.md
+#   review.semantic.<research|story>.report=logs/review/semantic/<stage>.report.md
+#   review.semantic.<research|story>.entry_count=0
+#   review.semantic.<research|story>.error_count=0
+# passed foundation reports require exact entry coverage plus all fixed criteria with status and evidence
 #   stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
 #   stage.scene_implementation.playbooks.selected_count=0
 #   stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
@@ -157,12 +193,16 @@
 #   gate.image_prompt_review=required|optional|skipped  # legacy compatibility gate
 #   gate.image_review=required|optional|skipped
 #   gate.narration_review=required|optional|skipped
+#     gate はpolicyであり cleared などの進捗値を書かない
 #   gate.video_review=required|optional|skipped
 #   gate.hybridization_review=required|optional|skipped
+#   review.research.status=pending|reviewing|approved|changes_requested
+#   review.research.duration_contract.status=passed|failed  # semantic repair 後も request target / duration_plan を保持したか
 #   review.policy.story=required|optional
 #   review.policy.image=required|optional
 #   review.policy.narration=required|optional
-#   review.story.status=pending|approved|changes_requested
+#   review.story.status=pending|reviewing|approved|changes_requested
+#   review.story.duration_contract.status=passed|failed  # cut materialization 前の scene / narration duration floor
 #   review.story.subagent.prompt=logs/review/story.subagent_prompt.md
 #   review.story.subagent.prompt.generated_at=ISO8601
 #   artifact.video_manifest=output/<topic>_<timestamp>/video_manifest.md
@@ -215,17 +255,46 @@
 #   review.narration.last_change_request_id=string
 #   review.narration.pronunciation_candidates=logs/eval/narration/round_01/pronunciation_candidates.tsv  # design-target/manual artifact until runner materializes it
 #   review.narration.pronunciation_unresolved_count=0
-#   review.narration.arc.status=passed|warning|changes_requested|skipped
-#   review.narration.arc.report=logs/eval/narration/round_01/arc_review.md  # design-target/manual artifact until runner materializes it
+#   review.narration.deterministic.status=pending|passed|changes_requested
+#   review.narration.arc.status=passed|changes_requested  # optional state projection。revision-aware正本はvideo_manifest narration_workflow.arc_review
+#   review.narration.arc.report=narration_text_review.md
+#   review.narration.arc.narration_text_set_hash=sha256:<hex>  # manifest current hashとの一致がp750必須
+#   review.narration.semantic_critics.status=pending|in_progress|passed|changes_requested|stale
+#   review.narration.semantic_critics.text_set_hash=sha256:<hex>  # manifest current hashとの一致がp720/p750必須
+#   review.narration.semantic_critics.input_hash=sha256:<hex>  # visual/contract/prompt/timingを含むexact review pack
+#   review.narration.semantic_critics.review_run_id=<uuid>  # 後発reviewだけがcommitできるCAS identity
+#   artifact.narration_semantic_review=logs/eval/narration/semantic_critics/<stamp>_review.md
+#   artifact.narration_semantic_review_json=logs/eval/narration/semantic_critics/<stamp>_review.json
 #   review.duration_fit.status=passed|changes_requested|skipped
+#   review.duration_fit.target_seconds=300
 #   review.duration_fit.actual_seconds=0
-#   review.duration_fit.minimum_seconds=0
+#   review.duration_fit.minimum_seconds=240  # target * 0.8; lower-bound-only, no maximum
+#   review.duration_fit.ratio=0.0
+#   review.duration_fit.measurement_layer=manifest_runtime
+#   review.duration_fit.measurement_complete=true|false
+#   review.duration_fit.spoken_audio_seconds=0
+#   review.duration_fit.intentional_silence_seconds=0
+#   review.duration_fit.audio_timeline_seconds=0
+#   review.duration_fit.video_timeline_seconds=0
+#   review.duration_fit.video_timeline_source=cuts|render_units|mixed|none
+#   review.duration_fit.missing_items=[]  # JSON array
+#   review.duration_fit.invalid_items=[]  # JSON array
 #   review.duration_fit.note=string
 #   review.duration_fit.at=ISO8601
 #   review.duration_fit.scene_prompt=logs/review/duration_scene.subagent_prompt.md
 #   review.duration_fit.scene_prompt.generated_at=ISO8601
 #   review.duration_fit.narration_prompt=logs/review/duration_narration.subagent_prompt.md
 #   review.duration_fit.narration_prompt.generated_at=ISO8601
+#   # revision-aware p750 manifest binding:
+#   # narration_workflow.arc_review.status=passed
+#   # narration_workflow.arc_review.narration_text_set_hash=sha256:<hex>
+#   # narration_workflow.semantic_critic_review.status=passed
+#   # narration_workflow.semantic_critic_review.narration_text_set_hash=sha256:<hex>
+#   # narration_workflow.semantic_critic_review.semantic_review_input_hash=sha256:<hex>
+#   # narration_workflow.final_audio_review.status=pending|approved|stale
+#   # narration_workflow.final_audio_review.approved_audio_set_hash=sha256:<hex>
+#   # narration_workflow.final_audio_review.approved_timeline_hash=sha256:<hex>
+#   # deterministic/semantic review、audio set、timelineのいずれかがcurrentでなければslot.p750.statusをdoneにしない
 #   review.human_changes.status=pending|approved|changes_requested
 #   review.human_changes.note=string
 #   review.human_changes.change_request_count=0
@@ -274,6 +343,13 @@
 #   review.video.change_request_count=0
 #   review.video.open_change_request_count=0
 #   review.video.last_change_request_id=string
+#   review.final.duration_fit.status=passed|changes_requested
+#   review.final.duration_fit.target_seconds=300
+#   review.final.duration_fit.minimum_seconds=240  # target * 0.8; lower-bound-only, no maximum
+#   review.final.duration_fit.actual_seconds=0
+#   review.final.duration_fit.ratio=0.0
+#   review.final.duration_fit.measurement_layer=final_video
+#   review.final.duration_fit.at=ISO8601
 #   eval.research.score=0.0-1.0
 #   eval.research.status=approved|changes_requested
 #   eval.research.findings=0

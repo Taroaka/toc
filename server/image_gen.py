@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import fcntl
 import hashlib
 import json
 import os
@@ -36,6 +37,9 @@ REQUEST_SNAPSHOT_FILE_BY_KIND = {
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 IMAGE_API_PROMPT_POLICY_PREFIX = "image_api_prompt_v"
 COMPILED_IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
+FIRST_IMAGE_RETENTION_SCHEMA = "toc.first_image_retention.v1"
+FIRST_IMAGE_RETENTION_RESTORE_SCHEMA = "toc.first_image_retention_restore.v1"
+FIRST_IMAGE_RETENTION_RESTORE_MARKER = Path("logs/image_first_retention_restore.json")
 PROMPT_SETTING_TARGETS = {
     "character": {
         "label": "キャラクター",
@@ -152,17 +156,40 @@ def safe_run_dir(run_id: str, root: Path | None = None) -> Path:
 
 def list_runs(root: Path | None = None) -> list[dict[str, Any]]:
     base = output_root(root)
-    if not base.exists():
-        return []
     runs: list[dict[str, Any]] = []
-    for path in sorted((p for p in base.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True):
-        runs.append(
-            {
+    by_id: dict[str, dict[str, Any]] = {}
+    if base.exists():
+        for path in sorted((p for p in base.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True):
+            payload = {
                 "id": path.name,
                 "name": path.name,
                 "path": f"output/{path.name}",
                 "hasAssetRequests": (path / REQUEST_FILE_BY_KIND["asset"]).exists(),
                 "hasSceneRequests": (path / REQUEST_FILE_BY_KIND["scene"]).exists(),
+                "archiveOnly": False,
+                "restoredFromArchive": is_first_image_retention_restored_run(path),
+            }
+            runs.append(payload)
+            by_id[path.name] = payload
+
+    archived_by_run: dict[str, set[str]] = {}
+    for retention in list_first_image_retentions(root=root):
+        archived_by_run.setdefault(str(retention["runId"]), set()).add(str(retention["kind"]))
+    for run_id, kinds in sorted(archived_by_run.items()):
+        existing = by_id.get(run_id)
+        if existing is not None:
+            existing["hasAssetRequests"] = bool(existing["hasAssetRequests"] or "asset" in kinds)
+            existing["hasSceneRequests"] = bool(existing["hasSceneRequests"] or "scene" in kinds)
+            continue
+        runs.append(
+            {
+                "id": run_id,
+                "name": run_id,
+                "path": f"output/{run_id}",
+                "hasAssetRequests": "asset" in kinds,
+                "hasSceneRequests": "scene" in kinds,
+                "archiveOnly": True,
+                "restoredFromArchive": False,
             }
         )
     return runs
@@ -778,7 +805,15 @@ def list_reference_options(run_dir: Path) -> list[ReferenceOption]:
 
 def candidate_dir(run_dir: Path, item_id: str) -> Path:
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
-    return run_dir / "assets" / "test" / "image_gen_candidates" / safe_id
+    if safe_id in {".", ".."}:
+        raise ValueError("item_id cannot be a dot segment")
+    base = run_dir / "assets" / "test" / "image_gen_candidates"
+    directory = base / safe_id
+    resolved = directory.resolve()
+    resolved_base = base.resolve()
+    if resolved_base not in resolved.parents:
+        raise ValueError("item_id escapes image candidate root")
+    return directory
 
 
 def candidate_path(run_dir: Path, item_id: str, index: int) -> Path:
@@ -985,6 +1020,436 @@ def copy_saved_image(saved_path: Path, destination: Path) -> Path:
         os.replace(temporary_path, destination)
     finally:
         temporary_path.unlink(missing_ok=True)
+    return destination
+
+
+def copy_saved_image_to_new_candidate(
+    saved_path: Path,
+    *,
+    run_dir: Path,
+    item_id: str,
+    requested_index: int,
+) -> tuple[Path, int]:
+    """Import a candidate while treating every existing candidate as immutable."""
+    if requested_index < 1:
+        raise ValueError("requested_index must be positive")
+    directory = candidate_dir(run_dir, item_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / ".candidate_import.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        existing_indices = []
+        for path in directory.iterdir():
+            match = re.search(r"candidate_(\d+)", path.stem)
+            if path.is_file() and match:
+                existing_indices.append(int(match.group(1)))
+        destination = candidate_path(run_dir, item_id, requested_index)
+        actual_index = requested_index
+        if destination.exists() or requested_index in existing_indices:
+            actual_index = max([requested_index, *existing_indices]) + 1
+            destination = candidate_path(run_dir, item_id, actual_index)
+            while destination.exists():
+                actual_index += 1
+                destination = candidate_path(run_dir, item_id, actual_index)
+        copy_saved_image(saved_path, destination)
+        return destination, actual_index
+
+
+def first_image_retention_root(root: Path | None = None) -> Path:
+    configured = os.environ.get("TOC_IMAGE_FIRST_RETENTION_ROOT", "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = (root or repo_root()) / configured_path
+        return configured_path.resolve()
+    return ((root or repo_root()) / "server" / "data" / "image_first_retention").resolve()
+
+
+def _retention_component(value: str, *, fallback: str) -> str:
+    normalized = re.sub(r"[^\w.-]+", "_", str(value), flags=re.UNICODE).strip("_.-")
+    label = (normalized or fallback)[:80]
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
+    return f"{label}--{digest}"
+
+
+def first_image_retention_dir(
+    *,
+    root: Path | None,
+    run_id: str,
+    kind: str,
+    item_id: str,
+) -> Path:
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    if kind not in {"asset", "scene"}:
+        raise ValueError("invalid image request kind")
+    if not item_id.strip():
+        raise ValueError("item_id is required")
+    return (
+        first_image_retention_root(root)
+        / "runs"
+        / _retention_component(run_id, fallback="run")
+        / kind
+        / _retention_component(item_id, fallback="item")
+    )
+
+
+def _load_retention_metadata(directory: Path) -> dict[str, Any] | None:
+    path = directory / "receipt.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != FIRST_IMAGE_RETENTION_SCHEMA:
+        return None
+    image_name = str(payload.get("imageFile") or "")
+    directory_resolved = directory.resolve()
+    image_path = (directory / image_name).resolve()
+    if not image_name or image_path.parent != directory_resolved or not image_path.is_file():
+        return None
+    try:
+        validate_image_bytes(image_path)
+    except ValueError:
+        return None
+    expected_sha256 = str(payload.get("sha256") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        return None
+    if _sha256_file(image_path) != expected_sha256:
+        return None
+    return {**payload, "imagePath": str(image_path)}
+
+
+def _validated_retention_destination(
+    retention: dict[str, Any],
+    *,
+    root: Path | None,
+) -> Path:
+    run_id = str(retention.get("runId") or "")
+    kind = str(retention.get("kind") or "")
+    item_id = str(retention.get("itemId") or "")
+    storage_role = str(retention.get("storageRole") or "")
+    try:
+        candidate_index = int(retention.get("candidateIndex") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid retained candidate index") from exc
+    if candidate_index < 1:
+        raise ValueError("invalid retained candidate index")
+    if storage_role not in {"candidate", "canonical"}:
+        raise ValueError("invalid retained storage role")
+    run_dir = output_root(root) / run_id
+    destination_text = str(retention.get("destination") or "").strip()
+    if not destination_text:
+        raise ValueError("retained destination is required")
+    destination = resolve_run_relative(run_dir, destination_text)
+    if storage_role == "candidate":
+        expected = candidate_path(run_dir, item_id, candidate_index).resolve()
+        if destination != expected:
+            raise ValueError("retained candidate destination does not match its item and index")
+    else:
+        require_assets_output(run_dir, destination_text)
+    if kind not in {"asset", "scene"}:
+        raise ValueError("invalid retained kind")
+    return destination
+
+
+def _validated_retention_metadata(
+    directory: Path,
+    *,
+    root: Path | None,
+) -> dict[str, Any] | None:
+    payload = _load_retention_metadata(directory)
+    if payload is None:
+        return None
+    run_id = str(payload.get("runId") or "")
+    kind = str(payload.get("kind") or "")
+    item_id = str(payload.get("itemId") or "")
+    try:
+        expected_directory = first_image_retention_dir(
+            root=root,
+            run_id=run_id,
+            kind=kind,
+            item_id=item_id,
+        ).resolve()
+        if directory.resolve() != expected_directory:
+            return None
+        _validated_retention_destination(payload, root=root)
+    except (OSError, TypeError, ValueError):
+        return None
+    return payload
+
+
+def load_first_image_retention(
+    *,
+    root: Path | None,
+    run_id: str,
+    kind: str,
+    item_id: str,
+) -> dict[str, Any] | None:
+    directory = first_image_retention_dir(
+        root=root,
+        run_id=run_id,
+        kind=kind,
+        item_id=item_id,
+    )
+    return _validated_retention_metadata(directory, root=root)
+
+
+def list_first_image_retentions(
+    *,
+    root: Path | None = None,
+    run_id: str | None = None,
+    kind: str | None = None,
+    item_id: str | None = None,
+) -> list[dict[str, Any]]:
+    if run_id is not None and (not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}):
+        raise ValueError("invalid run_id")
+    if kind is not None and kind not in {"asset", "scene"}:
+        raise ValueError("invalid image request kind")
+    retention_runs = first_image_retention_root(root) / "runs"
+    if not retention_runs.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for receipt in retention_runs.glob("*/*/*/receipt.json"):
+        directory = receipt.parent
+        try:
+            resolved_directory = directory.resolve()
+            resolved_root = retention_runs.resolve()
+        except OSError:
+            continue
+        if resolved_root not in resolved_directory.parents:
+            continue
+        record = _validated_retention_metadata(directory, root=root)
+        if record is None:
+            continue
+        if run_id is not None and record.get("runId") != run_id:
+            continue
+        if kind is not None and record.get("kind") != kind:
+            continue
+        if item_id is not None and record.get("itemId") != item_id:
+            continue
+        records.append(record)
+    return sorted(
+        records,
+        key=lambda record: (
+            str(record.get("runId") or ""),
+            str(record.get("kind") or ""),
+            str(record.get("itemId") or ""),
+        ),
+    )
+
+
+def _first_image_retention_restore_marker(run_dir: Path) -> Path:
+    return run_dir / FIRST_IMAGE_RETENTION_RESTORE_MARKER
+
+
+def is_first_image_retention_restored_run(run_dir: Path) -> bool:
+    marker = _first_image_retention_restore_marker(run_dir)
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("schemaVersion") == FIRST_IMAGE_RETENTION_RESTORE_SCHEMA
+        and payload.get("runId") == run_dir.name
+    )
+
+
+def restore_first_image_retention_run(
+    run_id: str,
+    *,
+    root: Path | None = None,
+) -> Path | None:
+    records = list_first_image_retentions(root=root, run_id=run_id)
+    if not records:
+        return None
+    base = output_root(root)
+    base.mkdir(parents=True, exist_ok=True)
+    run_dir = base / run_id
+    resolved_run_dir = run_dir.resolve()
+    if base.resolve() not in resolved_run_dir.parents:
+        raise ValueError("run_id escapes output root")
+
+    lock_dir = first_image_retention_root(root) / "restore_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{_retention_component(run_id, fallback='run')}.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        created = False
+        try:
+            run_dir.mkdir(parents=False, exist_ok=False)
+            created = True
+        except FileExistsError:
+            if not run_dir.is_dir() or not is_first_image_retention_restored_run(run_dir):
+                return None
+
+        marker_path = _first_image_retention_restore_marker(run_dir)
+        if created:
+            _atomic_write_text(
+                marker_path,
+                json.dumps(
+                    {
+                        "schemaVersion": FIRST_IMAGE_RETENTION_RESTORE_SCHEMA,
+                        "runId": run_id,
+                        "restoredAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        "restoredItems": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+
+        restored_items: list[dict[str, Any]] = []
+        for record in records:
+            source = Path(str(record["imagePath"]))
+            candidate_index = int(record.get("candidateIndex") or 1)
+            if record.get("storageRole") == "candidate":
+                destination = _validated_retention_destination(record, root=root)
+            else:
+                canonical_preview = candidate_path(
+                    run_dir,
+                    str(record["itemId"]),
+                    candidate_index,
+                )
+                destination = (
+                    canonical_preview
+                    if source.suffix.lower() == ".png"
+                    else canonical_preview.with_suffix(source.suffix.lower())
+                )
+            if destination.exists():
+                try:
+                    validate_image_bytes(destination)
+                except (OSError, ValueError):
+                    continue
+                if _sha256_file(destination) != str(record["sha256"]):
+                    continue
+            else:
+                copy_saved_image(source, destination)
+            restored_items.append(
+                {
+                    "kind": record["kind"],
+                    "itemId": record["itemId"],
+                    "candidateIndex": candidate_index,
+                    "path": destination.resolve().relative_to(run_dir.resolve()).as_posix(),
+                    "sha256": record["sha256"],
+                }
+            )
+
+        if not restored_items:
+            if created:
+                shutil.rmtree(run_dir)
+            return None
+        _atomic_write_text(
+            marker_path,
+            json.dumps(
+                {
+                    "schemaVersion": FIRST_IMAGE_RETENTION_RESTORE_SCHEMA,
+                    "runId": run_id,
+                    "restoredAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "restoredItems": restored_items,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        return run_dir.resolve()
+
+
+def retain_first_image(
+    source: Path,
+    *,
+    root: Path | None,
+    run_id: str,
+    kind: str,
+    item_id: str,
+    candidate_index: int,
+    destination: str,
+    provenance: dict[str, Any] | None = None,
+    storage_role: str = "candidate",
+) -> dict[str, Any]:
+    """Keep the first valid raster for one run/kind/item without ever replacing it."""
+    if candidate_index < 1:
+        raise ValueError("candidate_index must be positive")
+    if storage_role not in {"candidate", "canonical"}:
+        raise ValueError("invalid first image storage role")
+    require_image_file(source)
+    validate_image_bytes(source)
+    directory = first_image_retention_dir(
+        root=root,
+        run_id=run_id,
+        kind=kind,
+        item_id=item_id,
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / ".retain.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        existing = _load_retention_metadata(directory)
+        if existing is not None:
+            return {**existing, "created": False}
+
+        suffix = source.suffix.lower()
+        image_path = directory / f"first{suffix}"
+        if image_path.exists():
+            validate_image_bytes(image_path)
+        else:
+            copy_saved_image(source, image_path)
+        retained_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        metadata: dict[str, Any] = {
+            "schemaVersion": FIRST_IMAGE_RETENTION_SCHEMA,
+            "runId": run_id,
+            "kind": kind,
+            "itemId": item_id,
+            "candidateIndex": candidate_index,
+            "destination": destination,
+            "storageRole": storage_role,
+            "retainedAt": retained_at,
+            "imageFile": image_path.name,
+            "sha256": _sha256_file(image_path),
+            "sizeBytes": image_path.stat().st_size,
+            "sourcePath": str(source),
+            "provenance": dict(provenance or {}),
+        }
+        _atomic_write_text(
+            directory / "receipt.json",
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        )
+        return {**metadata, "imagePath": str(image_path), "created": True}
+
+
+def rehydrate_retained_first_image(
+    run_dir: Path,
+    *,
+    root: Path | None,
+    kind: str,
+    item_id: str,
+) -> Path | None:
+    retention = load_first_image_retention(
+        root=root,
+        run_id=run_dir.name,
+        kind=kind,
+        item_id=item_id,
+    )
+    if retention is None or retention.get("storageRole") != "candidate":
+        return None
+    destination_text = str(retention.get("destination") or "").strip()
+    if not destination_text:
+        destination_text = candidate_path(
+            run_dir,
+            item_id,
+            int(retention.get("candidateIndex") or 1),
+        ).relative_to(run_dir).as_posix()
+    destination = resolve_run_relative(run_dir, destination_text)
+    expected_parent = candidate_dir(run_dir, item_id).resolve()
+    if destination.parent.resolve() != expected_parent:
+        raise ValueError("retained image destination is not an item candidate path")
+    if destination.exists():
+        validate_image_bytes(destination)
+        return destination
+    source = Path(str(retention["imagePath"]))
+    copy_saved_image(source, destination)
     return destination
 
 

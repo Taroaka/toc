@@ -917,6 +917,17 @@ body {
   border-radius: 5px;
 }
 
+.referencePending {
+  width: 46px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed rgba(255, 190, 74, 0.42);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: rgba(255, 190, 74, 0.06);
+}
+
 .videoCutCard {
   overflow: hidden;
   border-color: rgba(83, 221, 255, 0.14) !important;

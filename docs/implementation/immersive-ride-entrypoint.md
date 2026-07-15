@@ -88,7 +88,7 @@ run root:
     - 直前clip終盤のフレームを次clipの first frame に使う chaining（`--chain-first-frame-from-prev-video`）
 - 音声:
   - ElevenLabs（voice/model は運用で確定）
-  - **1カット=1ナレーション**（`audio.narration.output` は cut/clip ごとに分割）
+  - cutは映像単位、narration spanは文章・演技単位。互換上`audio.narration.output`をcutへanchorしてよいが、spanは複数cutをまたげる
   - `audio.narration.text` は物語原稿、`audio.narration.tts_text` は ElevenLabs に送るひらがな原稿として Narration Writer が確定する（`TODO:` 等のメタ情報は入れない）
   - 未記入は `text` / `tts_text` に placeholder を置かず、空文字 + `audio.narration.authoring_status: "missing"` で表す
   - `audio.narration.contract.schema_version: narration_contract_v2` で voice function / visual distance / pronunciation targets を管理する

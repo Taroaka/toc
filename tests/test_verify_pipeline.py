@@ -3,8 +3,10 @@ import importlib.util
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -2133,6 +2135,69 @@ scenes:
 
 
 class TestVerifyPipeline(unittest.TestCase):
+    def test_final_video_duration_uses_eighty_percent_lower_bound_without_layer_addition(self) -> None:
+        cases = ((239.7, False), (240.0, True), (450.0, True))
+
+        for actual_seconds, expected_passed in cases:
+            with self.subTest(actual_seconds=actual_seconds), tempfile.TemporaryDirectory(prefix="toc_verify_final_duration_") as td:
+                run_dir = Path(td)
+                (run_dir / "video.mp4").write_bytes(b"final-video")
+                (run_dir / "video_manifest.md").write_text(
+                    "```yaml\n"
+                    "video_metadata:\n"
+                    "  target_duration_seconds: 300\n"
+                    "  duration_seconds: 900\n"
+                    "scenes:\n"
+                    "  - scene_id: 1\n"
+                    "    render_units:\n"
+                    "      - unit_id: 1\n"
+                    "        video_generation: {duration_seconds: 900}\n"
+                    "    cuts:\n"
+                    "      - cut_id: 1\n"
+                    "        video_generation: {duration_seconds: 900}\n"
+                    "        audio:\n"
+                    "          narration: {duration_seconds: 900}\n"
+                    "```\n",
+                    encoding="utf-8",
+                )
+                checks: list[dict] = []
+
+                with patch.object(VERIFY_MODULE, "_probe_duration", return_value=actual_seconds):
+                    VERIFY_MODULE._video_checks(checks, video_path=run_dir / "video.mp4", state={}, run_dir=run_dir)
+
+                by_id = {check["id"]: check for check in checks}
+                self.assertTrue(by_id["video.file_exists"]["passed"])
+                self.assertTrue(by_id["video.duration"]["passed"])
+                self.assertTrue(by_id["video.target_duration"]["passed"])
+                self.assertEqual(by_id["video.duration_fit"]["passed"], expected_passed)
+
+    def test_final_video_duration_rejects_missing_and_invalid_targets(self) -> None:
+        cases = (
+            (None, 450.0),
+            ("invalid", 450.0),
+            (299, 450.0),
+            (1201, 1200.0),
+        )
+
+        for target_seconds, actual_seconds in cases:
+            with self.subTest(target_seconds=target_seconds, actual_seconds=actual_seconds), tempfile.TemporaryDirectory(prefix="toc_verify_final_duration_invalid_") as td:
+                run_dir = Path(td)
+                (run_dir / "video.mp4").write_bytes(b"final-video")
+                metadata = {} if target_seconds is None else {"target_duration_seconds": target_seconds}
+                (run_dir / "video_manifest.md").write_text(
+                    "```yaml\n" + yaml.safe_dump({"video_metadata": metadata}, sort_keys=False) + "```\n",
+                    encoding="utf-8",
+                )
+                checks: list[dict] = []
+
+                with patch.object(VERIFY_MODULE, "_probe_duration", return_value=actual_seconds):
+                    VERIFY_MODULE._video_checks(checks, video_path=run_dir / "video.mp4", state={}, run_dir=run_dir)
+
+                by_id = {check["id"]: check for check in checks}
+                self.assertTrue(by_id["video.file_exists"]["passed"])
+                self.assertFalse(by_id["video.target_duration"]["passed"])
+                self.assertFalse(by_id["video.duration_fit"]["passed"])
+
     def test_story_check_accepts_dense_story_without_author_score_hint(self) -> None:
         import tempfile
 

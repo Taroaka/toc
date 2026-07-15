@@ -43,6 +43,11 @@ from toc.image_request_snapshot import (  # noqa: E402
 from toc.semantic_review import check_image_prompt_judgment, check_semantic_review  # noqa: E402
 from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
 from toc.stage_evaluator import check_visual_value  # noqa: E402
+from toc.story_duration import (  # noqa: E402
+    MINIMUM_EFFECTIVE_RATIO,
+    audit_duration,
+    normalize_target_duration,
+)
 
 
 def has_todo(text: str) -> bool:
@@ -1865,6 +1870,53 @@ def _video_checks(checks: list[dict[str, Any]], *, video_path: Path, state: dict
     video_duration = _probe_duration(video_path)
     if video_duration is not None:
         add_check(checks, "video.duration", video_duration > 0.0, f"video duration is positive ({video_duration:.2f}s)", kind="rubric")
+
+    manifest_path = run_dir / "video_manifest.md"
+    if manifest_path.exists():
+        _manifest_text, manifest = load_structured_document(manifest_path)
+    else:
+        manifest = {}
+    raw_target_seconds = nested_get(manifest, ["video_metadata", "target_duration_seconds"])
+    try:
+        target_seconds = (
+            normalize_target_duration(raw_target_seconds)
+            if raw_target_seconds is not None
+            else None
+        )
+    except ValueError:
+        target_seconds = None
+    add_check(
+        checks,
+        "video.target_duration",
+        target_seconds is not None,
+        "final video verification requires a valid manifest target_duration_seconds (300-1200)",
+        kind="rubric",
+    )
+    if video_duration is not None:
+        try:
+            duration_audit = (
+                audit_duration(
+                    target_seconds=target_seconds,
+                    actual_seconds=video_duration,
+                    measurement_layer="final_media_ffprobe",
+                )
+                if target_seconds is not None
+                else None
+            )
+        except ValueError:
+            duration_audit = None
+        add_check(
+            checks,
+            "video.duration_fit",
+            duration_audit is not None and duration_audit.passed,
+            f"final media ffprobe duration reaches at least {MINIMUM_EFFECTIVE_RATIO:.0%} of manifest target without adding audio/render layers"
+            + (
+                f" ({duration_audit.actual_seconds:g}/{duration_audit.target_seconds}s)"
+                if duration_audit is not None
+                else " (manifest target is missing/invalid)"
+            ),
+            kind="rubric",
+        )
 
 
 def check_video_single(run_dir: Path, *, target_slot: str = "p930") -> tuple[dict[str, Any], dict[str, str]]:

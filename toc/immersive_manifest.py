@@ -110,7 +110,7 @@ def scene_reference_id(scene: Any) -> str | None:
 def scene_kind(scene: Any) -> str | None:
     if not isinstance(scene, dict):
         return None
-    return as_opt_str(scene.get("kind"))
+    return as_opt_str(scene.get("kind")) or as_opt_str(scene.get("scene_kind"))
 
 
 def is_character_reference_scene(scene: Any) -> bool:
@@ -124,6 +124,16 @@ def is_character_reference_scene(scene: Any) -> bool:
     output = as_opt_str(image_generation.get("output")) or ""
     normalized = output.replace("\\", "/")
     return normalized.startswith("assets/characters/") or "/assets/characters/" in normalized
+
+
+def is_non_renderable_manifest_node(node: Any) -> bool:
+    """Canonical active-inventory predicate shared by p700 through rendering."""
+
+    if not isinstance(node, dict):
+        return True
+    status = str(node.get("cut_status") or node.get("status") or "").strip().lower()
+    kind = str(node.get("kind") or node.get("scene_kind") or "").strip().lower()
+    return status == "deleted" or kind.endswith("_reference") or is_character_reference_scene(node)
 
 
 def parse_scene_selectors(scene_ids_csv: str | None) -> set[str] | None:
@@ -173,7 +183,7 @@ def story_scene_ids(raw_scenes: Iterable[Any]) -> list[int | str]:
     ids: list[int | str] = []
     seen: set[str] = set()
     for scene in raw_scenes:
-        if is_character_reference_scene(scene):
+        if is_non_renderable_manifest_node(scene):
             continue
         scene_id = scene_dotted_id(scene)
         if scene_id is None:

@@ -672,7 +672,7 @@ def _write_valid_immersive_p400_pair(
     run_dir: Path,
     *,
     target_duration: int = 300,
-    cut_duration: int = 15,
+    cut_duration: float = 15,
     scene_count: int = 10,
     manifest_phase: str = "production",
 ) -> None:
@@ -2142,7 +2142,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 "timestamp=2026-04-04T00:00:00+09:00\njob_id=JOB_2026-04-04_000015\ntopic=桃太郎\nstatus=MANIFEST\n---\n",
                 encoding="utf-8",
             )
-            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=6, scene_count=10)
+            _write_valid_immersive_p400_pair(run_dir, target_duration=300, cut_duration=5, scene_count=10)
             (run_dir / "production_readiness_review.md").write_text(
                 "status: passed\n\nStructure: ok\nDuration: p700 で後続確認する。\nQuality: ok\n",
                 encoding="utf-8",
@@ -2155,6 +2155,75 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
             self.assertIn("p400.duration_coverage", stage["reason_keys"])
             self.assertIn("p400.review_report_integrity", stage["reason_keys"])
+
+    def test_manifest_evaluator_uses_eighty_percent_lower_bound_for_five_to_twenty_minutes(self) -> None:
+        cases = (
+            (300, 239.7, 10, False),
+            (300, 240.0, 10, True),
+            (300, 450.0, 10, True),
+            (600, 480.0, 10, True),
+            (900, 720.0, 15, True),
+            (1200, 960.0, 20, True),
+        )
+
+        for target_seconds, actual_seconds, scene_count, expected_passed in cases:
+            with self.subTest(target_seconds=target_seconds, actual_seconds=actual_seconds):
+                with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_duration_contract_") as td:
+                    run_dir = Path(td) / "output" / f"momotaro_{target_seconds}_{actual_seconds}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    (run_dir / "state.txt").write_text(
+                        "timestamp=2026-07-11T00:00:00+09:00\n"
+                        "job_id=JOB_DURATION_CONTRACT\n"
+                        "topic=桃太郎\n"
+                        "status=MANIFEST\n"
+                        "---\n",
+                        encoding="utf-8",
+                    )
+                    cut_count = scene_count * 4
+                    _write_valid_immersive_p400_pair(
+                        run_dir,
+                        target_duration=target_seconds,
+                        cut_duration=actual_seconds / cut_count,
+                        scene_count=scene_count,
+                    )
+                    _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+                    stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+                if expected_passed:
+                    self.assertNotIn("p400.target_duration_range", stage["reason_keys"])
+                    self.assertNotIn("p400.duration_coverage", stage["reason_keys"])
+                    self.assertEqual(updates["eval.p400_readiness.status"], "approved")
+                else:
+                    self.assertIn("p400.duration_coverage", stage["reason_keys"])
+                    self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
+
+    def test_manifest_evaluator_rejects_duration_targets_outside_five_to_twenty_minutes(self) -> None:
+        for target_seconds in (299, 1201):
+            with self.subTest(target_seconds=target_seconds):
+                with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_duration_range_") as td:
+                    run_dir = Path(td) / "output" / f"momotaro_{target_seconds}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    (run_dir / "state.txt").write_text(
+                        "timestamp=2026-07-11T00:00:00+09:00\n"
+                        "job_id=JOB_DURATION_RANGE\n"
+                        "topic=桃太郎\n"
+                        "status=MANIFEST\n"
+                        "---\n",
+                        encoding="utf-8",
+                    )
+                    _write_valid_immersive_p400_pair(
+                        run_dir,
+                        target_duration=target_seconds,
+                        cut_duration=15,
+                        scene_count=10,
+                    )
+                    _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+                    stage, updates = STAGE_EVALUATOR.check_manifest_single(run_dir, "standard", "immersive")
+
+                self.assertIn("p400.target_duration_range", stage["reason_keys"])
+                self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
 
     def test_manifest_evaluator_gates_image_api_prompt_v1_payload(self) -> None:
         checks: list[dict] = []

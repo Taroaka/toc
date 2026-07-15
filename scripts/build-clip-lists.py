@@ -26,7 +26,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.run_index import write_run_index
-from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id
+from toc.immersive_manifest import (
+    is_non_renderable_manifest_node,
+    make_scene_cut_selector,
+    normalize_dotted_id,
+)
 
 
 def extract_yaml_block(text: str) -> str:
@@ -56,7 +60,7 @@ def _non_deleted_cut_lookup(raw_cuts: list[dict[str, object]]) -> dict[str, dict
         cut_id = normalize_dotted_id(raw_cut.get("cut_id"))
         if cut_id is None:
             continue
-        if _normalize_status(raw_cut.get("cut_status")) == "deleted":
+        if is_non_renderable_manifest_node(raw_cut):
             continue
         lookup[cut_id] = raw_cut
     return lookup
@@ -78,10 +82,13 @@ def _append_render_unit_outputs(
     ownership: dict[str, str] = {}
     missing: list[str] = []
     duplicate: list[str] = []
+    ordered_source_cut_ids: list[str] = []
 
     for raw_unit in render_units:
         if not isinstance(raw_unit, dict):
             raise SystemExit(f"scene{scene_id}: render_units[] must be mappings.")
+        if is_non_renderable_manifest_node(raw_unit):
+            raise SystemExit(f"scene{scene_id}: deleted/reference render_units are not supported.")
         unit_id = normalize_dotted_id(raw_unit.get("unit_id"))
         if unit_id is None:
             raise SystemExit(f"scene{scene_id}: render_units[].unit_id is required.")
@@ -100,6 +107,7 @@ def _append_render_unit_outputs(
                 raise SystemExit(f"{selector}: duplicate source_cut_id within render unit: {cut_id}")
             seen_within_unit.add(cut_id)
             source_cut_ids.append(cut_id)
+        ordered_source_cut_ids.extend(source_cut_ids)
 
         video_generation = raw_unit.get("video_generation")
         if not isinstance(video_generation, dict):
@@ -131,6 +139,12 @@ def _append_render_unit_outputs(
     missing_coverage = sorted(set(non_deleted_cut_lookup.keys()) - set(ownership.keys()))
     if missing_coverage:
         raise SystemExit(f"scene{scene_id}: non-deleted cuts missing from render_units: {missing_coverage}")
+    canonical_cut_ids = list(non_deleted_cut_lookup.keys())
+    if ordered_source_cut_ids != canonical_cut_ids:
+        raise SystemExit(
+            f"scene{scene_id}: render_units source_cut_ids must follow canonical active cut order: "
+            f"expected {canonical_cut_ids}, got {ordered_source_cut_ids}"
+        )
 
 
 def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, object]]]:
@@ -149,6 +163,8 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
     for raw_scene in data.get("scenes") or []:
         if not isinstance(raw_scene, dict):
             continue
+        if is_non_renderable_manifest_node(raw_scene):
+            continue
         scene_id = raw_scene.get("scene_id")
         raw_cuts = raw_scene.get("cuts")
         if isinstance(raw_cuts, list) and raw_cuts:
@@ -166,7 +182,7 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
                     continue
                 cut_id = raw_cut.get("cut_id")
                 selector = _selector(scene_id, cut_id)
-                cut_status = _normalize_status(raw_cut.get("cut_status"))
+                cut_status = _normalize_status(raw_cut.get("cut_status") or raw_cut.get("status"))
                 image_generation = raw_cut.get("image_generation") if isinstance(raw_cut.get("image_generation"), dict) else {}
                 video_generation = raw_cut.get("video_generation") if isinstance(raw_cut.get("video_generation"), dict) else {}
                 audio = raw_cut.get("audio") if isinstance(raw_cut.get("audio"), dict) else {}
@@ -179,7 +195,7 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
                 ):
                     if isinstance(maybe_output, str) and maybe_output.strip():
                         skipped_outputs.append(maybe_output.strip())
-                if cut_status == "deleted":
+                if is_non_renderable_manifest_node(raw_cut):
                     exclusions.append(
                         {
                             "selector": selector,
@@ -199,7 +215,7 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
             continue
 
         selector = _selector(scene_id)
-        scene_status = _normalize_status(raw_scene.get("cut_status"))
+        scene_status = _normalize_status(raw_scene.get("cut_status") or raw_scene.get("status"))
         image_generation = raw_scene.get("image_generation") if isinstance(raw_scene.get("image_generation"), dict) else {}
         video_generation = raw_scene.get("video_generation") if isinstance(raw_scene.get("video_generation"), dict) else {}
         audio = raw_scene.get("audio") if isinstance(raw_scene.get("audio"), dict) else {}

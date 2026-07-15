@@ -57,6 +57,7 @@ from toc.image_request_snapshot import (
 )
 from toc.immersive_manifest import (
     dotted_id_slug,
+    is_non_renderable_manifest_node,
     make_scene_cut_selector,
     normalize_dotted_id,
     parse_scene_selectors,
@@ -75,6 +76,7 @@ from toc.providers.gemini import GeminiClient, GeminiConfig
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
+from toc.narration_revision import REVISION_SCHEMA_VERSION
 from toc.run_index import write_run_index
 from toc.runtime_locks import async_file_lock, async_file_slot
 from toc.stage_evaluator import check_manifest_single
@@ -97,6 +99,30 @@ CODEX_BUILTIN_IMAGE_TOOL_ALIASES = {
     "openai_gpt_image_2",
     "openai_gpt-image-2",
 }
+
+
+def _manifest_has_revision_aware_narration(yaml_text: str) -> bool:
+    """Return whether audio must use the candidate/CAS frontend lifecycle."""
+
+    data = yaml.safe_load(yaml_text) if yaml is not None else None
+    if not isinstance(data, dict):
+        return False
+    for scene in data.get("scenes") or []:
+        if not isinstance(scene, dict) or is_non_renderable_manifest_node(scene):
+            continue
+        declared_cuts = scene.get("cuts")
+        nodes = declared_cuts if isinstance(declared_cuts, list) and declared_cuts else [scene]
+        for node in nodes:
+            if not isinstance(node, dict) or is_non_renderable_manifest_node(node):
+                continue
+            audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
+            narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+            revision = narration.get("revision") if isinstance(narration.get("revision"), dict) else {}
+            if str(revision.get("schema_version") or "") == REVISION_SCHEMA_VERSION:
+                return True
+    return False
+
+
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 SUPPORTED_IMAGE_API_PROMPT_POLICY_VERSIONS = {
     IMAGE_API_PROMPT_POLICY_VERSION,
@@ -1533,10 +1559,14 @@ def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneS
                 if node.manifest_cut_id is not None
             }
             ownership: dict[str, str] = {}
+            ordered_source_cut_ids: list[str] = []
             raw_render_units = raw_scene.get("render_units") or []
             for raw_unit in raw_render_units:
                 if not isinstance(raw_unit, dict):
                     issues.append(f"scene{scene_id}: render_units[] must be mappings.")
+                    continue
+                if is_non_renderable_manifest_node(raw_unit):
+                    issues.append(f"scene{scene_id}: deleted/reference render_units are not supported.")
                     continue
                 unit_id = normalize_dotted_id(raw_unit.get("unit_id"))
                 if unit_id is None:
@@ -1555,6 +1585,7 @@ def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneS
                         issues.append(f"{selector}: invalid source_cut_id: {raw_cut_id!r}")
                         continue
                     source_cut_ids.append(normalized_cut_id)
+                ordered_source_cut_ids.extend(source_cut_ids)
 
                 if not source_cut_ids:
                     continue
@@ -1608,6 +1639,12 @@ def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneS
             missing_cut_ids = sorted(set(non_deleted_by_cut_id.keys()) - set(ownership.keys()))
             if missing_cut_ids:
                 issues.append(f"scene{scene_id}: non-deleted cuts missing from render_units: {missing_cut_ids}")
+            canonical_cut_ids = list(non_deleted_by_cut_id.keys())
+            if not missing_cut_ids and ordered_source_cut_ids != canonical_cut_ids:
+                issues.append(
+                    f"scene{scene_id}: render_units source_cut_ids must follow canonical active cut order: "
+                    f"expected {canonical_cut_ids}, got {ordered_source_cut_ids}"
+                )
             continue
 
         for scene in scene_nodes:
@@ -6540,6 +6577,12 @@ def main() -> None:
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
 
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
+    if not args.skip_audio and _manifest_has_revision_aware_narration(yaml_text):
+        raise SystemExit(
+            "Revision-aware narration audio cannot be generated directly from the manifest.\n"
+            "  Use the frontend p730 candidate generation/playback/approval flow, then approve the full run at p750.\n"
+            "  Re-run this command with --skip-audio to generate only the remaining assets."
+        )
     aspect_ratio = (
         args.image_aspect_ratio
         or args.video_aspect_ratio
@@ -6592,6 +6635,16 @@ def main() -> None:
             "--fail-on-findings",
         ]
         subprocess.run(review_cmd, check=True)
+        semantic_review_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/run-p720-narration-semantic.py"),
+            "--run-dir",
+            str(base_dir),
+            "--manifest",
+            str(manifest_path),
+            "--fail-on-findings",
+        ]
+        subprocess.run(semantic_review_cmd, check=True)
     script_visual_beat_map: dict[str, str] = {}
     script_path = base_dir / "script.md"
     if script_path.exists():

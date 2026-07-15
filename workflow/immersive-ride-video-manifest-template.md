@@ -8,11 +8,67 @@ video_metadata:
   topic: "<topic>"
   source_story: "output/<topic>_<timestamp>/story.md"
   created_at: "<ISO8601>"
+  target_duration_seconds: 300  # frontend request の 300-1200 秒を保持する
+  minimum_duration_seconds: 240 # target * 0.8。下限のみで上限なし
+  minimum_scene_count: 8        # ceil(target / 40)
+  minimum_cut_count: 25         # ceil(target / 12)
+  minimum_narration_seconds: 210 # ceil(target * 0.70)
+  duration_plan:
+    target_seconds: 300
+    minimum_scene_count: 8
+    minimum_cut_count: 25
+    minimum_narration_seconds: 210
+    minimum_effective_seconds: 240
   duration_seconds: 0   # ナレーション生成後に埋める（任意）
   experience: "cinematic_story"
   aspect_ratio: "16:9"
   resolution: "1280x720"
   frame_rate: 24
+
+# script.mdで全編authoringし、p700 syncでこのmanifestへprojectionする。
+audio_story_plan:
+  schema_version: "audio_story_plan_v1"
+  authoring_provenance: ""
+  authoring_status: "draft"
+  audience_promise: ""
+  narrator_bible:
+    relationship_to_story: ""
+    knowledge_boundary: []
+    emotional_permission: []
+    forbidden_attitudes: []
+  open_loops: []
+  scene_arcs: []
+  silence_budget:
+    purpose: ""
+    protected_moments: []
+  continuous_full_draft: ""
+narration_spans: []
+narration_workflow:
+  schema_version: "narration_run_workflow_v1"
+  arc_review:
+    status: "pending"
+    narration_text_set_hash: ""
+    findings: []
+    report: ""
+    reviewed_at: ""
+  # p720の5 independent app-server criticsがruntimeで更新する。authoring時にpassedを手入力しない。
+  semantic_critic_review:
+    schema_version: "narration_semantic_critic_aggregate_v1"
+    status: "pending"
+    narration_text_set_hash: ""
+    semantic_review_input_hash: ""
+    reviewed_at: ""
+    critics: []
+    findings: []
+    report: ""
+    json: ""
+  final_audio_review:
+    status: "pending"
+    approved_audio_set_hash: ""
+    approved_timeline_hash: ""
+    approved_at: ""
+    approved_by: ""
+    note: ""
 
 assets:
   character_bible:
@@ -200,7 +256,7 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
-        authoring_status: "missing|draft|approved|silent"
+        authoring_status: "missing|draft|human_locked|reviewed|silent"
         missing_reason: "p700_narration_not_written_yet"
         contract:
           schema_version: "narration_contract_v2"
@@ -225,6 +281,8 @@ scenes:
         # review metadata は audio.narration.review に保持する。
         text: ""
         tts_text: ""
+        span_refs: []  # script.md narration_spans[]からの派生anchor
+        # frontend保存時にrevision/source_binding/generation/candidates/audio_reviewをhash付きでmaterializeする。
         tool: "elevenlabs"
         review:
           agent_review_ok: false
@@ -292,7 +350,7 @@ scenes:
       output: "assets/scenes/scene20_to_30.mp4"
     audio:
       narration:
-        authoring_status: "missing|draft|approved|silent"
+        authoring_status: "missing|draft|human_locked|reviewed|silent"
         missing_reason: "p700_narration_not_written_yet"
         contract:
           schema_version: "narration_contract_v2"
@@ -317,6 +375,8 @@ scenes:
         # review metadata は audio.narration.review に保持する。
         text: ""
         tts_text: ""
+        span_refs: []  # script.md narration_spans[]からの派生anchor
+        # frontend保存時にrevision/source_binding/generation/candidates/audio_reviewをhash付きでmaterializeする。
         tool: "elevenlabs"
         review:
           agent_review_ok: false

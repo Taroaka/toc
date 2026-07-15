@@ -42,7 +42,7 @@ p番号で止めたい場合（`p` なしの数字も可）:
   - ボート/真鍮バー/手元アンカーなどの “固定デバイス” は使わない
   - 物語キャラクター / 主役級アイテム（例: 玉手箱）をアンカーにして連続性を作る
   - 物語キャラクター（毎scene必ず登場）
-  - 音声は **1カット=1ナレーション** を基本にする（メイン=5–15秒、サブ=3–15秒）
+  - 音声は全編通し原稿を先に作り、narration spanを1つ以上のcutへanchorする。spanは複数cutをまたいでよい
 
 `cloud_island_walk`（default）:
 
@@ -102,9 +102,9 @@ $ARGUMENTS:
   - `p300` / `300` / `visual_value`: `visual_value.md` まで
   - `p400` / `400`: `script.md` まで
   - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
-  - `p500` / `500` / `narration`: narration / audio runtime gate まで
-  - `p600` / `600` / `asset`: reusable asset stage まで
-  - `p700` / `700` / `scene_implementation`: production manifest / image request stage まで
+  - `p500` / `500` / `asset`: reusable asset stage まで
+  - `p600` / `600` / `scene_implementation`: production manifest / image request・scene image stage まで
+  - `p700` / `700` / `narration`: 全編narration authoring / audio QA・human handoff まで
   - `p800` / `800` / `video_generation`: video request / clip generation stage まで
   - `p900` / `900` / `render` / `video`: final render / QA まで
 - `--experience cinematic_story|cloud_island_walk|ride_action_boat` (optional, default: `cloud_island_walk`)
@@ -140,9 +140,9 @@ $ARGUMENTS:
    - 出力: `script.md` と `video_manifest.md`
    - `--stage p400|400` の場合は `script.md` までで停止する
    - `--stage p450|450|script` の場合は skeleton `video_manifest.md` までで停止する
-7) `--stage p500|500|narration` 以降の場合は narration / audio runtime gate まで進め、p500 指定なら停止する
-8) `--stage p600|600|asset` 以降の場合は reusable asset stage まで進め、p600 指定なら停止する
-9) `--stage p700|700|scene_implementation` 以降の場合は production manifest / image request stage まで進め、p700 指定なら停止する
+7) `--stage p500|500|asset` 以降の場合は reusable asset stage まで進め、p500 指定なら停止する
+8) `--stage p600|600|scene_implementation` 以降の場合は production manifest / image request・scene image stage まで進め、p600 指定なら停止する
+9) `--stage p700|700|narration` 以降の場合は確定visualをgroundingし、全編audio story→通し原稿→span/cut projection→p720/p730/p740/p750 handoffまで進め、p700 指定なら停止する
 10) `--stage p800|800|video_generation` 以降の場合は video request / clip generation stage まで進め、p800 指定なら停止する
 11) `--stage video|p900|900|render` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
    - `scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>`

@@ -85,7 +85,7 @@ scene ごとに次を固定する。
 2. `scene_detail_review`
    - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する。
    - `dramatic_question` が scene 内で進むか、`value_shift` が画面で読めるか、`causal_turn` が次 scene を発生させるかを見る。
-   - 目標動画は最低でも 5-10 分程度を想定し、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる。
+   - frontend で選択された 5-20 分の目標尺を使い、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる。
    - 1 cut はおおよそ 4-15 秒であり、cut が 1 つしかない scene は 4-15 秒程度の尺しか持てないことを明示して評価する。
    - medium 以上の scene が 2 cut だけで済んでいる場合は、情報量・感情変化・次 scene への接続のどれかを失っていないかを blocking finding として扱う。
    - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する。
@@ -208,7 +208,7 @@ cut authoring は scene 単位で parallel agent に分担してよいが、`scr
 ### p435 Production Readiness Council
 
 p435 は p430 script review の後、p440 human changes / narration sync の前に走る。
-Structure Auditor は骨格と因果、Duration Auditor は 5-10 分動画としての尺、Quality Auditor は映像品質と追加 scene/cut の必要性を見る。
+Structure Auditor は骨格と因果、Duration Auditor は選択された 5-20 分動画としての尺、Quality Auditor は映像品質と追加 scene/cut の必要性を見る。
 Orchestrator は意見を統合するが、Orchestrator と auditor は設計書を編集しない。
 この process 内で後段に渡る design artifacts を触れるのは Design Owner だけで、他 agent は Design Owner 向け patch brief を返す。
 

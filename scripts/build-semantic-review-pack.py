@@ -9,7 +9,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from textwrap import dedent
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -18,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from toc.harness import append_state_snapshot, now_iso  # noqa: E402
 from toc.semantic_pack import collect_entries, load_manifest  # noqa: E402
 from toc.semantic_review import (  # noqa: E402
+    FOUNDATION_SEMANTIC_CRITERIA,
     IMAGE_PROMPT_JUDGMENT_COLLECTION,
     IMAGE_PROMPT_JUDGMENT_PROMPT,
     IMAGE_PROMPT_JUDGMENT_REPORT,
@@ -29,6 +29,8 @@ from toc.semantic_review import (  # noqa: E402
 
 
 STAGE_LABELS = {
+    "research": "research story foundation",
+    "story": "story skeleton and scene allocation",
     "scene_set": "scene set design",
     "scene_detail": "scene detail design",
     "cut_blueprint": "cut blueprint design",
@@ -310,6 +312,12 @@ def _truthy(value: object) -> bool:
 
 
 def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
+    foundation_sources = {
+        "research": ["research.md"],
+        "story": ["research.md", "story.md"],
+    }
+    if stage in foundation_sources:
+        return [rel for rel in foundation_sources[stage] if (run_dir / rel).exists()]
     common = ["story.md", "script.md", "video_manifest.md"]
     by_stage = {
         "asset_plan": ["asset_inventory.md", "asset_plan.md"],
@@ -330,40 +338,62 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
 
 
 def render_report_template(*, stage: str, run_dir: Path, scope_path: Path, collection_path: Path) -> str:
-    return dedent(
-        f"""
-        # Semantic Review Report: {stage}
-
-        - run_dir: `{run_dir.resolve()}`
-        - stage: `{stage}`
-        - scope: `{scope_path}`
-        - collection: `{collection_path}`
-        - status: `pending`
-
-        ## Reviewed Entries
-
-        - `...`
-
-        ## Blocked Entries
-
-        - `...`
-
-        ## Findings
-
-        - `...`
-
-        ## Reason Keys
-
-        - `...`
-
-        ## Notes
-
-        - `...`
-        """
-    ).strip()
+    lines = [
+        f"# Semantic Review Report: {stage}",
+        "",
+        f"- run_dir: `{run_dir.resolve()}`",
+        f"- stage: `{stage}`",
+        f"- scope: `{scope_path}`",
+        f"- collection: `{collection_path}`",
+        "- status: `pending`",
+        "",
+        "## Reviewed Entries",
+        "",
+        "- `...`",
+        "",
+        "## Blocked Entries",
+        "",
+        "- `...`",
+    ]
+    if stage in FOUNDATION_SEMANTIC_CRITERIA:
+        lines.extend(["", "## Criterion Results", "", "criteria_results_json: []"])
+    lines.extend(
+        [
+            "",
+            "## Findings",
+            "",
+            "- `...`",
+            "",
+            "## Reason Keys",
+            "",
+            "- `...`",
+            "",
+            "## Notes",
+            "",
+            "- `...`",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _stage_specific_review_instructions(stage: str) -> list[str]:
+    if stage == "research":
+        return [
+            "Treat `research.md` as the run-local provisional baseline; judge whether it is internally sufficient for story authoring.",
+            "Review canonical_story_dump, chronological_events, characters/motivations/relationships, conflicts/selection cues, and handoff_to_story together.",
+            "Fail when the baseline is too thin to recover a beginning, pressure, causal turns, and resolution; events contradict their declared order; principal characters have no usable role or motivation; or conflicts cannot guide a coherent story choice.",
+            "Do not browse or validate external URLs, editions, translations, rights, or factual fidelity. External source authenticity is outside this gate.",
+            "Use reason keys such as research_baseline_too_thin, research_timeline_incoherent, research_character_model_incomplete, or research_conflict_unresolved_for_story.",
+        ]
+    if stage == "story":
+        return [
+            "Treat approved `research.md` as immutable upstream baseline and review the complete story-to-scene allocation before any cut is authored.",
+            "Check timeline, characters and motivations, conflict escalation/resolution, important-event coverage, distinct scene responsibility, internal research_refs, and duration-aware scene allocation.",
+            "Fail if story order contradicts research, character state changes without cause, every scene repeats the same conflict or turn, important events are unassigned, internal refs do not resolve, or scenes are too generic/duplicative to split into cuts.",
+            "Do not impose a fixed scene count. Judge semantic coverage against target_duration_seconds and the story's own meaningful scene responsibilities.",
+            "Do not browse or validate external URLs, editions, translations, rights, or factual fidelity. External source authenticity is outside this gate.",
+            "Use reason keys such as story_baseline_mismatch, story_timeline_mismatch, story_character_continuity_mismatch, story_conflict_progression_weak, story_event_unassigned, story_scene_allocation_generic, story_scene_duplicate_responsibility, or internal_reference_unresolved.",
+        ]
     if stage != "cut_blueprint":
         return []
     return [
@@ -379,11 +409,36 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
     source_artifacts = _source_artifacts(run_dir, stage)
     source_lines = [f"- `{(run_dir / rel).resolve()}`" for rel in source_artifacts]
     stage_specific_instructions = _stage_specific_review_instructions(stage)
+    foundation_criteria_lines: list[str] = []
+    if stage in FOUNDATION_SEMANTIC_CRITERIA:
+        criterion_ids = list(FOUNDATION_SEMANTIC_CRITERIA[stage])
+        foundation_criteria_lines = [
+            "Evaluate every required foundation criterion below in this exact order:",
+            *[f"- `{criterion_id}`" for criterion_id in criterion_ids],
+            "For each criterion, record `criterion_id`, `status` (`passed` or `failed`), and non-empty artifact-local `evidence` naming the source artifact and field/scene that supports the result.",
+            "Write all criterion objects on one `criteria_results_json:` line as a valid JSON array, preserving the exact criterion order with no missing, duplicate, or extra IDs.",
+            "The overall status may be `passed` only when every criterion status is `passed`.",
+            "Example: criteria_results_json: "
+            + json.dumps(
+                [
+                    {
+                        "criterion_id": criterion_id,
+                        "status": "passed",
+                        "evidence": f"{stage}.md:<field or scene-specific evidence>",
+                    }
+                    for criterion_id in criterion_ids
+                ],
+                ensure_ascii=False,
+            ),
+        ]
     return "\n".join(
         [
             f"You are a contextless semantic review agent for ToC `{stage}` artifacts.",
             "",
             "You do semantic judgment only. Do not edit source artifacts and do not repair outputs.",
+            f"You MUST edit exactly one file: `{report_path}`. This report is not a source artifact; replacing its pending template is required.",
+            "Do not spawn or delegate to another agent. Read the listed artifacts and make the judgment yourself.",
+            "Do not return the verdict only in chat. The task is incomplete until the report file contains the final machine-readable verdict.",
             "Structural completeness is checked by deterministic functions elsewhere; your job is to catch meaning errors that structurally valid data can hide.",
             "",
             "Read these artifacts in order:",
@@ -398,13 +453,14 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "",
             "Judge whether each entry preserves the intended story/source meaning and is usable by the next downstream stage.",
             "Check subject identity, location, object/setpiece visibility, timeline, reveal order, continuity, narration alignment, and output-media suitability when those fields exist.",
-            "For planning stages (`scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
+            "For planning stages (`research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
             "Flag round-robin references, always-on story objects in unrelated entries, mismatched location/character/object references, missing semantic contracts, and outputs that do not support the contract.",
             "For entries whose review_scope is `scene_composite`, this is a gate, not advice: judge the scene as a whole across its split cuts.",
             "A scene_composite passes only when scene_cut_coverage_plan.scene_obligations and scene_event.event_sequence setup/pressure/turn/payoff beats are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
             "Do not require a fixed setup/turn/handoff order or a fixed cut count; judge whether the cuts were reverse-designed from the scene's actual visual obligations.",
             "If the scene meaning cannot be conveyed by the listed cuts, fail the gate and state whether it needs more cuts, stronger per-cut prompts, or a different scene split.",
             *stage_specific_instructions,
+            *foundation_criteria_lines,
             "",
             "Report format:",
             "status: passed|failed",
@@ -412,7 +468,15 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "blocked_entries: [...]",
             "findings: [...]",
             "failed_selectors: [...]",
-            "reason_keys: [semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
+            *(
+                [
+                    'criteria_results_json: [{"criterion_id": "...", "status": "passed|failed", '
+                    '"evidence": "research.md/story.md:<field or scene>"}, ...]'
+                ]
+                if stage in FOUNDATION_SEMANTIC_CRITERIA
+                else []
+            ),
+            "reason_keys: [research_baseline_too_thin|research_timeline_incoherent|research_character_model_incomplete|research_conflict_unresolved_for_story|story_baseline_mismatch|story_timeline_mismatch|story_character_continuity_mismatch|story_conflict_progression_weak|story_event_unassigned|story_scene_allocation_generic|story_scene_duplicate_responsibility|internal_reference_unresolved|semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
             "notes: [...]",
             "",
             f"Run dir: `{run_dir.resolve()}`",

@@ -1,17 +1,99 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from toc.harness import load_structured_document
+from toc.harness import load_structured_document, parse_state_file
+from toc.narration_revision import narration_text_hash
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "sync-narration-from-script.py"
+SPEC = importlib.util.spec_from_file_location("sync_narration_transaction", SCRIPT_PATH)
+assert SPEC and SPEC.loader
+SYNC_MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = SYNC_MODULE
+SPEC.loader.exec_module(SYNC_MODULE)
 
 
 class TestSyncNarrationFromScript(unittest.TestCase):
+    @staticmethod
+    def _run_sync(script_path: Path, manifest_path: Path) -> None:
+        subprocess.run(
+            [
+                "python",
+                str(REPO_ROOT / "scripts" / "sync-narration-from-script.py"),
+                "--script",
+                str(script_path),
+                "--manifest",
+                str(manifest_path),
+            ],
+            check=True,
+            cwd=REPO_ROOT,
+        )
+
+    def test_state_write_failure_rolls_back_all_authoring_artifacts_byte_exactly(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_narration_transaction_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+            state_path = run_dir / "state.txt"
+            script_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        narration: "新しい正本文です。"
+        tts_text: "あたらしい せいほんぶんです。"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        audio:
+          narration:
+            text: "古い文です。"
+            tts_text: "ふるい ぶんです。"
+```
+""",
+                encoding="utf-8",
+            )
+            state_path.write_bytes(b"original-state\n")
+            before = {
+                path: path.read_bytes()
+                for path in (script_path, manifest_path, state_path)
+            }
+
+            original_append = SYNC_MODULE.append_state_snapshot
+
+            def fail_after_partial_state_write(path: Path, values: dict[str, str]) -> None:
+                del values
+                path.write_bytes(b"partial-state-write")
+                raise RuntimeError("simulated state persistence failure")
+
+            SYNC_MODULE.append_state_snapshot = fail_after_partial_state_write
+            try:
+                with self.assertRaisesRegex(RuntimeError, "state persistence failure"):
+                    SYNC_MODULE.sync_narration(
+                        script_path=script_path,
+                        manifest_path=manifest_path,
+                    )
+            finally:
+                SYNC_MODULE.append_state_snapshot = original_append
+
+            for path, expected in before.items():
+                self.assertEqual(path.read_bytes(), expected, path.name)
+
     def test_sync_prefers_human_review_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_narration_") as td:
             run_dir = Path(td)
@@ -70,7 +152,7 @@ scenes:
 
             _, manifest = load_structured_document(manifest_path)
             narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
-            self.assertEqual(narration["text"], "しょうにんした だいほんです。")
+            self.assertEqual(narration["text"], "承認した台本です。")
             self.assertEqual(narration["tts_text"], "しょうにんした だいほんです。")
 
     def test_sync_falls_back_to_cut_tts_text(self) -> None:
@@ -131,7 +213,7 @@ scenes:
 
             _, manifest = load_structured_document(manifest_path)
             narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
-            self.assertEqual(narration["text"], "むらへ かえります。")
+            self.assertEqual(narration["text"], "村へ帰ります。")
             self.assertEqual(narration["tts_text"], "むらへ かえります。")
 
     def test_sync_materializes_tts_text_from_elevenlabs_prompt(self) -> None:
@@ -198,8 +280,258 @@ scenes:
             _, manifest = load_structured_document(manifest_path)
             narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
             expected = "かのじょは こえを ふるわせながら いいました。 [excited][laughs harder] やっと ここまで これました！"
-            self.assertEqual(narration["text"], expected)
+            self.assertEqual(narration["text"], "彼女は駆けだします。")
             self.assertEqual(narration["tts_text"], expected)
+
+    def test_sync_binds_contract_and_visual_hashes_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_grounding_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+            script_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        narration: "帰る理由を語ります。"
+        tts_text: "かえる りゆうを かたります。"
+        narration_authoring:
+          status: human_locked
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        cut_contract:
+          role: causal_bridge
+        image_generation:
+          output: assets/scenes/scene1_cut1.png
+          prompt: approved visual
+        audio:
+          narration:
+            tool: elevenlabs
+            text: ""
+            tts_text: ""
+```
+""",
+                encoding="utf-8",
+            )
+
+            self._run_sync(script_path, manifest_path)
+            first_text = manifest_path.read_text(encoding="utf-8")
+            _, manifest = load_structured_document(manifest_path)
+            narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+            binding = narration["source_binding"]
+            self._run_sync(script_path, manifest_path)
+            second_text = manifest_path.read_text(encoding="utf-8")
+
+            self.assertEqual(binding["script_selector"], "scene1_cut1")
+            self.assertTrue(binding["contract_hash"].startswith("sha256:"))
+            self.assertTrue(binding["visual_grounding_hash"].startswith("sha256:"))
+            self.assertEqual(first_text, second_text)
+
+    def test_sync_materializes_revision_and_grounding_for_silent_cut(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_silent_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+            script_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 2
+    cuts:
+      - cut_id: 3
+        narration: ""
+        tts_text: ""
+        narration_authoring:
+          status: silent
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 2
+    cuts:
+      - cut_id: 3
+        image_generation:
+          output: assets/scenes/scene2_cut3.png
+        audio:
+          narration:
+            tool: silent
+            text: ""
+            tts_text: ""
+            authoring_status: silent
+```
+""",
+                encoding="utf-8",
+            )
+
+            self._run_sync(script_path, manifest_path)
+            _, manifest = load_structured_document(manifest_path)
+            narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+
+            self.assertEqual(narration["revision"]["schema_version"], "narration_revision_v1")
+            self.assertEqual(narration["authoring_status"], "silent")
+            self.assertTrue(narration["source_binding"]["visual_grounding_hash"].startswith("sha256:"))
+
+    def test_sync_materializes_global_audio_story_and_cross_cut_span_refs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_audio_story_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+            script_path.write_text(
+                """```yaml
+audio_story_plan:
+  audience_promise: "帰れない理由を最後まで追う"
+narration_spans:
+  - span_id: ns_001
+    source_cut_ids: [scene01_cut01, scene1_cut2]
+    story_job: causal_bridge
+    audio_visual_relation: complement
+    tts_generation_group_id: scene1_flow
+    text: "一続きの語りです。"
+    tts_text: "ひとつづきの かたりです。"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        narration: "前半です。"
+        tts_text: "ぜんはんです。"
+      - cut_id: 2
+        narration: "後半です。"
+        tts_text: "こうはんです。"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation: {output: assets/scenes/scene1_cut1.png}
+      - cut_id: 2
+        image_generation: {output: assets/scenes/scene1_cut2.png}
+```
+""",
+                encoding="utf-8",
+            )
+
+            self._run_sync(script_path, manifest_path)
+            _, manifest = load_structured_document(manifest_path)
+            cuts = manifest["scenes"][0]["cuts"]
+
+            self.assertEqual(manifest["audio_story_plan"]["audience_promise"], "帰れない理由を最後まで追う")
+            self.assertEqual(manifest["narration_spans"][0]["span_id"], "ns_001")
+            self.assertEqual(cuts[0]["audio"]["narration"]["span_refs"][0]["span_id"], "ns_001")
+            self.assertEqual(cuts[1]["audio"]["narration"]["span_refs"][0]["span_id"], "ns_001")
+            self.assertEqual(
+                cuts[0]["audio"]["narration"]["span_refs"][0]["source_cut_ids"],
+                ["scene1_cut1", "scene1_cut2"],
+            )
+
+    def test_narration_change_requests_update_script_source_before_revision_projection(self) -> None:
+        cases = [
+            ("update_narration", "更新後の正本です。", "こうしんごの せいほんです。", "elevenlabs"),
+            ("clear_narration", "", "", "elevenlabs"),
+            ("set_silent_cut", "", "", "silent"),
+        ]
+        for action, expected_text, expected_tts, expected_tool in cases:
+            with self.subTest(action=action), tempfile.TemporaryDirectory(prefix=f"toc_sync_{action}_") as td:
+                run_dir = Path(td)
+                script_path = run_dir / "script.md"
+                manifest_path = run_dir / "video_manifest.md"
+                script_path.write_text(
+                    """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        narration: "元の正本です。"
+        tts_text: "もとの せいほんです。"
+```
+""",
+                    encoding="utf-8",
+                )
+                manifest_path.write_text(
+                    """```yaml
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation: {output: assets/scenes/scene1_cut1.png}
+        audio:
+          narration: {tool: elevenlabs, text: "", tts_text: "", output: ""}
+```
+""",
+                    encoding="utf-8",
+                )
+                self._run_sync(script_path, manifest_path)
+                (run_dir / "state.txt").write_text(
+                    "status=P750\nslot.p720.status=done\nslot.p750.status=done\n"
+                    "stage.narration.status=done\n---\n",
+                    encoding="utf-8",
+                )
+                payload_lines = (
+                    ["          text: \"更新後の正本です。\"", "          tts_text: \"こうしんごの せいほんです。\""]
+                    if action == "update_narration"
+                    else ["          reason: \"意図的な無音\""] if action == "set_silent_cut" else []
+                )
+                script_path.write_text(
+                    "\n".join(
+                        [
+                            "```yaml",
+                            "human_change_requests:",
+                            "  - request_id: req-narration",
+                            "    normalized_actions:",
+                            f"      - action: {action}",
+                            "        target:",
+                            "          scene_id: 1",
+                            "          cut_id: 1",
+                            "        payload:",
+                            *payload_lines,
+                            "scenes:",
+                            "  - scene_id: 1",
+                            "    cuts:",
+                            "      - cut_id: 1",
+                            "        narration: \"元の正本です。\"",
+                            "        tts_text: \"もとの せいほんです。\"",
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                self._run_sync(script_path, manifest_path)
+                _, script = load_structured_document(script_path)
+                _, manifest = load_structured_document(manifest_path)
+                script_cut = script["scenes"][0]["cuts"][0]
+                narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+
+                self.assertEqual(script_cut["narration"], expected_text)
+                self.assertEqual(script_cut["tts_text"], expected_tts)
+                self.assertEqual(narration["text"], expected_text)
+                self.assertEqual(narration["tts_text"], expected_tts)
+                self.assertEqual(narration["tool"], expected_tool)
+                self.assertEqual(
+                    narration["revision"]["text_hash"],
+                    narration_text_hash(expected_text, tool=expected_tool),
+                )
+                state = parse_state_file(run_dir / "state.txt")
+                self.assertEqual(state["status"], "P720")
+                self.assertEqual(state["slot.p720.status"], "in_progress")
+                self.assertEqual(state["slot.p750.status"], "pending")
+                self.assertEqual(state["stage.narration.status"], "in_progress")
 
     def test_sync_materializes_human_change_requests_and_still_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_human_changes_") as td:

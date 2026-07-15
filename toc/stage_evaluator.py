@@ -19,6 +19,13 @@ from toc.review_loop import (
     SCENE_DETAIL_GATE_MARKERS,
     SCENE_SET_GATE_MARKERS,
 )
+from toc.story_duration import (
+    MAX_TARGET_DURATION_SECONDS,
+    MINIMUM_EFFECTIVE_RATIO,
+    MIN_TARGET_DURATION_SECONDS,
+    audit_duration,
+    normalize_target_duration,
+)
 
 EVENT_TIME_POSITION_VALUES = {
     "before_trigger",
@@ -4179,18 +4186,38 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
             kind="rubric",
         )
         target_seconds, actual_seconds, cut_count = _manifest_duration_summary(data)
+        raw_target_seconds = nested_get(data, ["video_metadata", "target_duration_seconds"])
+        try:
+            normalized_target_seconds = (
+                normalize_target_duration(raw_target_seconds)
+                if raw_target_seconds is not None
+                else None
+            )
+        except ValueError:
+            normalized_target_seconds = None
+        duration_audit = (
+            audit_duration(
+                target_seconds=normalized_target_seconds,
+                actual_seconds=actual_seconds,
+                measurement_layer="planned_manifest",
+            )
+            if normalized_target_seconds is not None
+            else None
+        )
         add_check(
             checks,
             "p400.target_duration_range",
-            300 <= target_seconds <= 600,
-            f"p400 target duration is 5-10 minutes (got {target_seconds:.0f}s)",
+            normalized_target_seconds is not None,
+            f"p400 target duration is {MIN_TARGET_DURATION_SECONDS // 60}-{MAX_TARGET_DURATION_SECONDS // 60} minutes "
+            f"(got {target_seconds:.0f}s)",
             kind="rubric",
         )
         add_check(
             checks,
             "p400.duration_coverage",
-            bool(target_seconds) and actual_seconds >= target_seconds * 0.9,
-            f"p400 cut durations cover at least 90% of target ({actual_seconds:.0f}/{target_seconds:.0f}s across {cut_count} cuts)",
+            duration_audit is not None and duration_audit.passed,
+            f"p400 cut durations cover at least {MINIMUM_EFFECTIVE_RATIO:.0%} of target "
+            f"({actual_seconds:g}/{target_seconds:g}s across {cut_count} cuts)",
             kind="rubric",
         )
         script_selectors = _script_selectors_from_run(run_dir)

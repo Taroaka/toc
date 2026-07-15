@@ -14,13 +14,14 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -28,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import append_state_snapshot
+from toc.harness import append_state_snapshot, load_structured_document
 from toc.cut_context_packet import materialize_cut_context_packet
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.cut_design_logging import (
@@ -47,6 +48,8 @@ from toc.review_loop import (
 )
 from toc.review_loop_runner import materialize_review_loop_round
 from toc.run_index import write_run_index
+from toc.semantic_review import check_semantic_review
+from toc.story_duration import build_duration_plan, normalize_target_duration
 
 
 P650_SLOTS = (
@@ -80,8 +83,6 @@ P650_SLOTS = (
 P680_SLOTS = (*P650_SLOTS, "p660", "p670", "p680")
 AWAITING_ALLOWED = {"p130", "p230", "p320", "p330", "p430", "p540", "p570", "p630", "p640", "p680"}
 AUTHORING_REVIEW_STAGES = (
-    "research",
-    "story",
     "visual_value",
     "scene_set",
     "scene_detail",
@@ -295,14 +296,14 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
             "events": [
                 "継母と義姉たちが家の支配を握り、シンデレラは灰の台所で家事を押しつけられる。",
                 "王宮の舞踏会の知らせが届き、義姉たちは着飾る一方でシンデレラだけが参加を願う。",
-                "継母が仕事と衣装の欠如を理由にシンデレラを扉の内側へ閉じ込める。",
-                "月明かりの庭で助力者が現れ、かぼちゃの馬車、ドレス、ガラスの靴が整う。",
-                "シンデレラは馬車に乗り、家の門を越えて宮殿へ向かう。",
+                "継母が仕事と衣装の欠如を理由にシンデレラを舞踏会から排除して正面扉を閉ざす。家族が去った後、シンデレラは仕事を終えて裏口から月明かりの庭へ出る。",
+                "月明かりの庭で人物として現れた魔法の助力者が真夜中までの期限を告げ、かぼちゃの馬車、ドレス、ガラスの靴を整える。",
+                "シンデレラ自身が馬車に乗って出発すると選び、家の門を越えて宮殿へ向かう。",
                 "宮殿の階段を上がったシンデレラが、群衆と王子の視線を集めて舞踏会の中心へ入る。",
                 "王子と踊る間、誰も灰かぶりの彼女だと知らず、シンデレラは初めて公の場で認識される。",
                 "真夜中の鐘で魔法が解け始め、シンデレラは大階段を駆け下りて片方のガラスの靴を残す。",
-                "使者がガラスの靴の持ち主を探して家々を巡り、義姉たちは靴に足を合わせようとする。",
-                "隠されていたシンデレラの足にガラスの靴が合い、彼女の名と価値が公に認められる。",
+                "王子が残されたガラスの靴から持ち主の探索を命じ、王宮の使者が家々を巡る一方、義姉たちは靴に足を合わせようとする。",
+                "王宮の使者が継母と義姉の排除を退けてシンデレラにも試着させ、ガラスの靴の適合によって彼女の名と価値を公に確認する。",
             ],
         }
 
@@ -347,6 +348,80 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
     }
 
 
+def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds: int) -> dict[str, Any]:
+    """Expand canonical story beats into ordered runtime scenes for the target length."""
+
+    plan = build_duration_plan(target_duration_seconds)
+    canonical_titles = [str(value) for value in profile.get("scene_titles") or DEFAULT_SCENE_TITLES]
+    canonical_locations = [str(value) for value in profile.get("scene_locations") or profile.get("places") or canonical_titles]
+    if not canonical_titles:
+        raise ValueError("story profile must define at least one canonical scene")
+
+    runtime_count = max(len(canonical_titles), plan.minimum_scene_count)
+    canonical_count = len(canonical_titles)
+    canonical_scene_indices = [
+        min(canonical_count, ((runtime_index - 1) * canonical_count) // runtime_count + 1)
+        for runtime_index in range(1, runtime_count + 1)
+    ]
+    group_counts = {
+        canonical_index: canonical_scene_indices.count(canonical_index)
+        for canonical_index in range(1, canonical_count + 1)
+    }
+    group_positions: dict[int, int] = {}
+    runtime_titles: list[str] = []
+    runtime_locations: list[str] = []
+    runtime_segment_positions: list[int] = []
+    runtime_segment_counts: list[int] = []
+    runtime_segment_roles: list[str] = []
+    for canonical_index in canonical_scene_indices:
+        group_positions[canonical_index] = group_positions.get(canonical_index, 0) + 1
+        position = group_positions[canonical_index]
+        count = group_counts[canonical_index]
+        base_title = canonical_titles[canonical_index - 1]
+        if count == 1:
+            runtime_titles.append(base_title)
+        else:
+            if position == 1:
+                segment_role = "導入"
+            elif position == count:
+                segment_role = "余韻"
+            elif position * 2 <= count:
+                segment_role = "圧力"
+            else:
+                segment_role = "転換"
+            runtime_titles.append(f"{base_title}（{position}/{count}・{segment_role}）")
+        if count == 1:
+            segment_role = "全体"
+        runtime_segment_positions.append(position)
+        runtime_segment_counts.append(count)
+        runtime_segment_roles.append(segment_role)
+        location_index = min(canonical_index - 1, len(canonical_locations) - 1)
+        runtime_locations.append(canonical_locations[location_index])
+
+    base_scene_seconds, remainder = divmod(plan.target_seconds, runtime_count)
+    scene_target_durations = [
+        base_scene_seconds + (1 if index < remainder else 0)
+        for index in range(runtime_count)
+    ]
+
+    expanded = dict(profile)
+    expanded.update(
+        {
+            "scene_titles": runtime_titles,
+            "scene_locations": runtime_locations,
+            "canonical_scene_titles": canonical_titles,
+            "canonical_scene_indices": canonical_scene_indices,
+            "canonical_scene_count": canonical_count,
+            "scene_target_durations": scene_target_durations,
+            "scene_segment_positions": runtime_segment_positions,
+            "scene_segment_counts": runtime_segment_counts,
+            "scene_segment_roles": runtime_segment_roles,
+            "duration_plan": plan.to_dict(),
+        }
+    )
+    return expanded
+
+
 def _md_yaml(title: str, data: dict[str, Any]) -> str:
     return f"# {title}\n\n```yaml\n{yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)}```\n"
 
@@ -359,9 +434,256 @@ def _run_id_from_dir(run_dir: Path) -> str:
         raise SystemExit(f"--run-dir must be under output/: {run_dir}") from exc
 
 
+def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
+    """Carry the approved research foundation into story and cut builders."""
+
+    reviewed = dict(profile)
+    materials = research.get("story_materials") if isinstance(research.get("story_materials"), dict) else {}
+    raw_events = materials.get("chronological_events") if isinstance(materials.get("chronological_events"), list) else []
+    event_records = [item for item in raw_events if isinstance(item, dict) and str(item.get("event") or "").strip()]
+    if event_records:
+        reviewed["events"] = [str(item["event"]).strip() for item in event_records]
+        reviewed["research_event_ids_by_text"] = {
+            str(item["event"]).strip(): str(item.get("event_id") or f"E{index:02d}").strip()
+            for index, item in enumerate(event_records, start=1)
+        }
+        reviewed["research_event_ids"] = list(reviewed["research_event_ids_by_text"].values())
+    canonical_dump = str(materials.get("canonical_story_dump") or "").strip()
+    if canonical_dump:
+        reviewed["summary"] = canonical_dump
+    characters = materials.get("characters") if isinstance(materials.get("characters"), list) else []
+    protagonist = next(
+        (
+            item
+            for item in characters
+            if isinstance(item, dict)
+            and (
+                str(item.get("character_id") or "").strip() == "protagonist"
+                or "主人公" in str(item.get("role") or "")
+            )
+        ),
+        None,
+    )
+    if isinstance(protagonist, dict) and str(protagonist.get("name") or "").strip():
+        reviewed["protagonist_name"] = str(protagonist["name"]).strip()
+    passages = research.get("source_passages") if isinstance(research.get("source_passages"), list) else []
+    passage_records = [
+        item
+        for item in passages
+        if isinstance(item, dict)
+        and str(item.get("passage_id") or "").strip()
+        and str(item.get("passage") or "").strip()
+    ]
+    reviewed["research_passage_ids"] = [str(item["passage_id"]).strip() for item in passage_records]
+    reviewed["research_passage_ids_by_text"] = {
+        str(item["passage"]).strip(): str(item["passage_id"]).strip()
+        for item in passage_records
+    }
+    reviewed["reviewed_research"] = research
+    return reviewed
+
+
+def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any]) -> dict[str, Any]:
+    """Carry approved scene intent into cut construction without inventing a second story."""
+
+    reviewed = dict(profile)
+    script = story.get("script") if isinstance(story.get("script"), dict) else {}
+    scenes = [item for item in script.get("scenes", []) if isinstance(item, dict)]
+    reviewed["reviewed_story"] = story
+    reviewed["reviewed_story_scenes"] = scenes
+    if not scenes:
+        return reviewed
+
+    existing_titles = [str(item) for item in profile.get("scene_titles") or []]
+    reviewed["scene_titles"] = [
+        str(scene.get("title") or (existing_titles[index] if index < len(existing_titles) else f"scene {index + 1}")).strip()
+        for index, scene in enumerate(scenes)
+    ]
+
+    def resized(values: Any, fallback: Any) -> list[Any]:
+        source_values = list(values) if isinstance(values, list) else []
+        return [source_values[min(index, len(source_values) - 1)] if source_values else fallback for index in range(len(scenes))]
+
+    reviewed["scene_locations"] = resized(profile.get("scene_locations"), str((profile.get("places") or ["物語の場所"])[0]))
+    reviewed["canonical_scene_indices"] = [
+        int(scene.get("canonical_scene_index") or value)
+        for scene, value in zip(scenes, resized(profile.get("canonical_scene_indices"), 1))
+    ]
+    reviewed["scene_target_durations"] = [
+        int(scene.get("target_duration_seconds") or value)
+        for scene, value in zip(scenes, resized(profile.get("scene_target_durations"), 40))
+    ]
+    reviewed["scene_segment_positions"] = [
+        int((scene.get("segment") or {}).get("position") or value)
+        for scene, value in zip(scenes, resized(profile.get("scene_segment_positions"), 1))
+    ]
+    reviewed["scene_segment_counts"] = [
+        int((scene.get("segment") or {}).get("count") or value)
+        for scene, value in zip(scenes, resized(profile.get("scene_segment_counts"), 1))
+    ]
+    reviewed["scene_segment_roles"] = [
+        str((scene.get("segment") or {}).get("role") or value)
+        for scene, value in zip(scenes, resized(profile.get("scene_segment_roles"), "全体"))
+    ]
+    return reviewed
+
+
+def _positive_story_duration_seconds(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return seconds
+
+
+def _reviewed_research_duration_contract_errors(
+    research: dict[str, Any],
+    *,
+    target_duration_seconds: int,
+) -> list[str]:
+    """Ensure semantic repair preserved the requested planning contract."""
+
+    plan = build_duration_plan(target_duration_seconds)
+    metadata = research.get("metadata") if isinstance(research.get("metadata"), dict) else {}
+    errors: list[str] = []
+    raw_target = metadata.get("target_duration_seconds")
+    if raw_target is None:
+        reviewed_target = None
+    else:
+        try:
+            reviewed_target = normalize_target_duration(raw_target)
+        except ValueError:
+            reviewed_target = None
+    if reviewed_target != plan.target_seconds:
+        errors.append(
+            "metadata.target_duration_seconds must preserve the requested target "
+            f"({reviewed_target!r}!={plan.target_seconds})"
+        )
+
+    reviewed_plan = metadata.get("duration_plan") if isinstance(metadata.get("duration_plan"), dict) else {}
+    expected_plan = plan.to_dict()
+    for key, expected in expected_plan.items():
+        raw_value = reviewed_plan.get(key)
+        if raw_value is None or isinstance(raw_value, bool):
+            actual: float | None = None
+        else:
+            try:
+                actual = float(raw_value)
+            except (TypeError, ValueError):
+                actual = None
+        if actual is None or not math.isfinite(actual) or actual != float(expected):
+            errors.append(f"metadata.duration_plan.{key} must equal {expected} (got {raw_value!r})")
+    return errors
+
+
+def _validate_reviewed_research_duration_contract(
+    research: dict[str, Any],
+    *,
+    target_duration_seconds: int,
+) -> None:
+    errors = _reviewed_research_duration_contract_errors(
+        research,
+        target_duration_seconds=target_duration_seconds,
+    )
+    if errors:
+        raise RuntimeError(
+            "reviewed research duration contract failed before story authoring: " + "; ".join(errors)
+        )
+
+
+def _reviewed_story_duration_contract_errors(
+    story: dict[str, Any],
+    *,
+    target_duration_seconds: int,
+) -> list[str]:
+    """Return deterministic duration-floor defects before any cut is authored."""
+
+    plan = build_duration_plan(target_duration_seconds)
+    errors: list[str] = []
+    metadata = story.get("story_metadata") if isinstance(story.get("story_metadata"), dict) else {}
+    raw_reviewed_target = metadata.get("target_duration_seconds")
+    if raw_reviewed_target is None:
+        reviewed_target = None
+    else:
+        try:
+            reviewed_target = normalize_target_duration(raw_reviewed_target)
+        except ValueError:
+            reviewed_target = None
+    if reviewed_target != plan.target_seconds:
+        errors.append(
+            "story_metadata.target_duration_seconds must preserve the requested target "
+            f"({reviewed_target!r}!={plan.target_seconds})"
+        )
+
+    script = story.get("script") if isinstance(story.get("script"), dict) else {}
+    raw_scenes = script.get("scenes")
+    scenes = [scene for scene in raw_scenes if isinstance(scene, dict)] if isinstance(raw_scenes, list) else []
+    if len(scenes) < plan.minimum_scene_count:
+        errors.append(f"scene count below duration floor ({len(scenes)}<{plan.minimum_scene_count})")
+    if not isinstance(raw_scenes, list) or len(scenes) != len(raw_scenes):
+        errors.append("script.scenes must contain only scene objects")
+
+    scene_target_seconds: list[float] = []
+    narration_target_seconds: list[float] = []
+    for index, scene in enumerate(scenes, start=1):
+        scene_seconds = _positive_story_duration_seconds(scene.get("target_duration_seconds"))
+        if scene_seconds is None:
+            errors.append(f"scene[{index}].target_duration_seconds must be positive")
+        else:
+            scene_target_seconds.append(scene_seconds)
+        narration_seconds = _positive_story_duration_seconds(scene.get("narration_target_seconds"))
+        if narration_seconds is None:
+            errors.append(f"scene[{index}].narration_target_seconds must be positive")
+        else:
+            narration_target_seconds.append(narration_seconds)
+
+    if len(scene_target_seconds) == len(scenes) and sum(scene_target_seconds) < plan.target_seconds:
+        errors.append(
+            "scene target duration sum below requested target "
+            f"({sum(scene_target_seconds):g}<{plan.target_seconds})"
+        )
+    if len(narration_target_seconds) == len(scenes) and sum(narration_target_seconds) < plan.minimum_narration_seconds:
+        errors.append(
+            "narration target duration sum below duration floor "
+            f"({sum(narration_target_seconds):g}<{plan.minimum_narration_seconds})"
+        )
+    return errors
+
+
+def _validate_reviewed_story_duration_contract(
+    story: dict[str, Any],
+    *,
+    target_duration_seconds: int,
+) -> None:
+    errors = _reviewed_story_duration_contract_errors(
+        story,
+        target_duration_seconds=target_duration_seconds,
+    )
+    if errors:
+        raise RuntimeError(
+            "reviewed story duration contract failed before cut materialization: " + "; ".join(errors)
+        )
+
+
+def _run_foundation_semantic_review(run_dir: Path, stage: str) -> None:
+    """Use the real Codex app-server semantic review/repair loop for foundations."""
+
+    from server import image_gen_app
+
+    asyncio.run(image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage=stage))
+    result = check_semantic_review(run_dir, stage)
+    if not result.passed:
+        raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
+
+
 def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     places = profile.get("scene_locations") or profile["places"]
     specs: list[dict[str, Any]] = []
+    unique_places = list(dict.fromkeys(str(place) for place in places))
     cinderella_subjects = {
         "灰の台所": "灰の台所。薄暗い屋内、灰と布の質感、朝夕どちらにも寄りすぎない低い自然光、人物なし",
         "閉ざされた扉の前の暗い屋内": "閉ざされた扉の前の暗い屋内。重い扉、狭い廊下、遮られた光、人物なし",
@@ -372,7 +694,7 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
         "真夜中の大階段": "真夜中の大階段。夜、時計後の緊張、小道具を置ける空の段差と月光、人物なし、ガラスの靴なし、靴なし、物語アイテムなし",
         "靴合わせが行われる部屋": "靴合わせが行われる部屋。室内、日中でも落ち着いた光、人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
     }
-    for index, place in enumerate(places, start=1):
+    for index, place in enumerate(unique_places, start=1):
         subject = cinderella_subjects.get(str(place), f"{place}の場所参照。人物なし")
         specs.append(
             {
@@ -390,16 +712,47 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _location_spec_for_scene(profile: dict[str, Any], scene_index: int) -> dict[str, Any]:
     specs = _location_asset_specs(profile)
-    return specs[min(scene_index - 1, len(specs) - 1)]
+    scene_locations = [str(value) for value in profile.get("scene_locations") or []]
+    desired_name = scene_locations[min(scene_index - 1, len(scene_locations) - 1)] if scene_locations else ""
+    return next((spec for spec in specs if str(spec.get("name") or "") == desired_name), specs[-1])
+
+
+def _canonical_scene_index(profile: dict[str, Any], scene_index: int) -> int:
+    indices = profile.get("canonical_scene_indices")
+    if isinstance(indices, list) and 0 <= scene_index - 1 < len(indices):
+        return int(indices[scene_index - 1])
+    return scene_index
+
+
+def _phase_for_scene(profile: dict[str, Any], scene_index: int) -> str:
+    canonical_index = _canonical_scene_index(profile, scene_index)
+    return PHASES[min(max(canonical_index, 1), len(PHASES)) - 1]
+
+
+def _scene_segment(profile: dict[str, Any], scene_index: int) -> tuple[int, int, str]:
+    position_values = profile.get("scene_segment_positions")
+    count_values = profile.get("scene_segment_counts")
+    role_values = profile.get("scene_segment_roles")
+    offset = scene_index - 1
+    if isinstance(position_values, list) and isinstance(count_values, list) and isinstance(role_values, list):
+        if 0 <= offset < min(len(position_values), len(count_values), len(role_values)):
+            return int(position_values[offset]), int(count_values[offset]), str(role_values[offset])
+    return 1, 1, "全体"
 
 
 def _scene_uses_artifact(profile: dict[str, Any], scene_index: int) -> bool:
-    return scene_index in {int(value) for value in profile.get("artifact_scene_indices", [])}
+    canonical_index = _canonical_scene_index(profile, scene_index)
+    return canonical_index in {int(value) for value in profile.get("artifact_scene_indices", [])}
 
 
 def _artifact_first_scene_index(profile: dict[str, Any]) -> int:
-    indices = [int(value) for value in profile.get("artifact_scene_indices", [])]
-    return min(indices) if indices else len(profile["scene_titles"])
+    canonical_indices = {int(value) for value in profile.get("artifact_scene_indices", [])}
+    if not canonical_indices:
+        return len(profile["scene_titles"])
+    return next(
+        (index for index in range(1, len(profile["scene_titles"]) + 1) if _canonical_scene_index(profile, index) in canonical_indices),
+        len(profile["scene_titles"]),
+    )
 
 
 def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -440,14 +793,18 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
 
 def _protagonist_asset_for_cut(profile: dict[str, Any], scene_index: int, obligation_id: str) -> str:
     if _profile_is_cinderella(profile):
+        canonical_index = _canonical_scene_index(profile, scene_index)
         transformed_id = str(profile.get("protagonist_transformed_asset_id") or "")
         post_midnight_id = str(profile.get("protagonist_post_midnight_asset_id") or "")
         if post_midnight_id and (
-            scene_index == 8
-            or (scene_index == 7 and obligation_id in {"reaction_after_change"})
+            canonical_index == 8
+            or (canonical_index == 7 and obligation_id in {"reaction_after_change"})
         ):
             return post_midnight_id
-        if transformed_id and (scene_index >= 4 or (scene_index == 3 and obligation_id not in {"scene_pressure", "visible_value_shift"})):
+        if transformed_id and (
+            canonical_index >= 4
+            or (canonical_index == 3 and obligation_id not in {"scene_pressure", "visible_value_shift"})
+        ):
             return transformed_id
     return str(profile["protagonist_asset_id"])
 
@@ -476,6 +833,7 @@ def _supporting_object_asset_specs(profile: dict[str, Any]) -> list[dict[str, An
 
 
 def _supporting_character_ids_for_scene(profile: dict[str, Any], scene_index: int) -> list[str]:
+    canonical_index = _canonical_scene_index(profile, scene_index)
     protagonist_variant_ids = {
         str(profile.get("protagonist_transformed_asset_id") or ""),
         str(profile.get("protagonist_post_midnight_asset_id") or ""),
@@ -483,16 +841,17 @@ def _supporting_character_ids_for_scene(profile: dict[str, Any], scene_index: in
     return [
         str(spec["character_id"])
         for spec in _supporting_character_asset_specs(profile)
-        if scene_index in {int(value) for value in spec.get("scene_indices", [])}
+        if canonical_index in {int(value) for value in spec.get("scene_indices", [])}
         and str(spec["character_id"]) not in protagonist_variant_ids
     ]
 
 
 def _supporting_object_ids_for_scene(profile: dict[str, Any], scene_index: int) -> list[str]:
+    canonical_index = _canonical_scene_index(profile, scene_index)
     return [
         str(spec["object_id"])
         for spec in _supporting_object_asset_specs(profile)
-        if scene_index in {int(value) for value in spec.get("scene_indices", [])}
+        if canonical_index in {int(value) for value in spec.get("scene_indices", [])}
     ]
 
 
@@ -543,6 +902,7 @@ def _object_name_for_asset(profile: dict[str, Any], object_id: str) -> str:
 
 def _artifact_scene_role(profile: dict[str, Any], scene_index: int) -> str:
     if _profile_is_cinderella(profile):
+        canonical_index = _canonical_scene_index(profile, scene_index)
         return {
             3: "変身で初めて現れる贈り物として、衣装と足元の変化を証明する",
             4: "馬車に乗る足元の連続性として控えめに見える。主役は馬車の出発",
@@ -550,24 +910,25 @@ def _artifact_scene_role(profile: dict[str, Any], scene_index: int) -> str:
             6: "踊りの中で足元に光る連続性として控えめに見える。主役は他者の視線と認識",
             7: "脱げて階段に残り、次の靴合わせへ渡る証拠になる",
             8: "主人公の身元と価値を証明して物語を閉じる決定的な証",
-        }.get(scene_index, profile["artifact_role"])
+        }.get(canonical_index, profile["artifact_role"])
     return profile["artifact_role"]
 
 
 def _cut_uses_artifact(profile: dict[str, Any], scene_index: int, obligation_id: str, *, include_artifact: bool) -> bool:
     if not _profile_is_cinderella(profile):
         return include_artifact
-    if scene_index == 3:
+    canonical_index = _canonical_scene_index(profile, scene_index)
+    if canonical_index == 3:
         if not include_artifact:
             return False
         return obligation_id not in {"scene_pressure", "visible_value_shift"}
-    if scene_index == 4:
+    if canonical_index == 4:
         return obligation_id == "carriage_departure"
-    if scene_index == 5:
+    if canonical_index == 5:
         return obligation_id == "palace_entry_boundary"
-    if scene_index == 6:
+    if canonical_index == 6:
         return obligation_id == "public_recognition_dance"
-    if scene_index == 7:
+    if canonical_index == 7:
         if not include_artifact:
             return False
         return obligation_id in {
@@ -1812,7 +2173,27 @@ def _image_prompt_review_metadata_for_scaffold(
 
 
 def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
+    reviewed_events = _reviewed_story_source_events(profile, idx)
+    if reviewed_events:
+        return reviewed_events
     events = [str(event) for event in profile.get("events", []) if str(event).strip()]
+    if profile.get("story_key") == "cinderella":
+        event_ids = [str(value) for value in profile.get("research_event_ids") or []]
+        event_by_id = dict(zip(event_ids, events))
+        cinderella_scene_events = {
+            1: ["E01"],
+            2: ["E02", "E03"],
+            3: ["E04"],
+            4: ["E05"],
+            5: ["E06"],
+            6: ["E07"],
+            7: ["E08"],
+            8: ["E09", "E10"],
+        }
+        canonical_index = _canonical_scene_index(profile, idx)
+        allocated = [event_by_id[event_id] for event_id in cinderella_scene_events.get(canonical_index, []) if event_id in event_by_id]
+        if allocated:
+            return allocated
     scene_titles = [str(title) for title in profile.get("scene_titles") or []]
     scene_count = max(1, len(profile.get("scene_titles") or []))
     if not events:
@@ -1900,14 +2281,165 @@ def _runtime_scene_id(idx: int) -> int:
     return idx * 10
 
 
-def _scene_research_refs(idx: int, source_events: list[str]) -> list[str]:
+def _scene_research_refs(
+    idx: int,
+    source_events: list[str],
+    profile: dict[str, Any] | None = None,
+) -> list[str]:
     if not source_events:
+        event_ids = profile.get("research_event_ids") if isinstance(profile, dict) else None
+        if isinstance(event_ids, list) and event_ids:
+            event_id = str(event_ids[min(idx - 1, len(event_ids) - 1)])
+            return [f"research.story_materials.chronological_events[{event_id}]"]
         return [f"research.story_materials.chronological_events[E{idx:02d}]"]
     refs: list[str] = []
+    event_ids_by_text = profile.get("research_event_ids_by_text") if isinstance(profile, dict) else None
     for event in source_events:
-        refs.append(f"research.story_materials.chronological_events[{_stable_slug(event)}]")
-    refs.append(f"research.source_passages[P{idx}]")
+        event_id = event_ids_by_text.get(event) if isinstance(event_ids_by_text, dict) else None
+        refs.append(f"research.story_materials.chronological_events[{event_id or _stable_slug(event)}]")
+    passage_ids_by_text = profile.get("research_passage_ids_by_text") if isinstance(profile, dict) else None
+    passage_ids = profile.get("research_passage_ids") if isinstance(profile, dict) else None
+    if isinstance(passage_ids_by_text, dict):
+        for event in source_events:
+            passage_id = str(passage_ids_by_text.get(event) or "").strip()
+            if passage_id:
+                refs.append(f"research.source_passages[{passage_id}]")
+    elif isinstance(passage_ids, list) and passage_ids:
+        passage_id = str(passage_ids[min(idx - 1, len(passage_ids) - 1)])
+        refs.append(f"research.source_passages[{passage_id}]")
+    elif profile is None:
+        refs.append(f"research.source_passages[P{idx}]")
+
+    reviewed_research = profile.get("reviewed_research") if isinstance(profile, dict) else None
+    conflicts = reviewed_research.get("conflicts") if isinstance(reviewed_research, dict) else None
+    known_conflict_ids = {
+        str(item.get("conflict_id") or "").strip()
+        for item in conflicts or []
+        if isinstance(item, dict) and str(item.get("conflict_id") or "").strip()
+    }
+    if (
+        isinstance(profile, dict)
+        and _profile_is_cinderella(profile)
+        and _canonical_scene_index(profile, idx) in {3, 4, 7}
+        and "C1" in known_conflict_ids
+    ):
+        refs.append("research.conflicts[C1]")
     return list(dict.fromkeys(refs))
+
+
+def _reviewed_story_research_refs(profile: dict[str, Any], idx: int) -> list[str]:
+    scenes = profile.get("reviewed_story_scenes")
+    if not isinstance(scenes, list) or not 0 <= idx - 1 < len(scenes):
+        return []
+    scene = scenes[idx - 1]
+    if not isinstance(scene, dict) or not isinstance(scene.get("research_refs"), list):
+        return []
+    return list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in scene["research_refs"]
+            if str(value).strip()
+        )
+    )
+
+
+def _research_ref_entry_id(ref: str, section: str) -> str:
+    prefix = f"research.{section}["
+    return ref[len(prefix) : -1].strip() if ref.startswith(prefix) and ref.endswith("]") else ""
+
+
+def _reviewed_story_source_events(profile: dict[str, Any], idx: int) -> list[str]:
+    """Resolve the reviewed scene allocation against the reviewed research artifact."""
+
+    refs = _reviewed_story_research_refs(profile, idx)
+    research = profile.get("reviewed_research")
+    if not refs or not isinstance(research, dict):
+        return []
+    materials = research.get("story_materials") if isinstance(research.get("story_materials"), dict) else {}
+    raw_events = materials.get("chronological_events") if isinstance(materials.get("chronological_events"), list) else []
+    events_by_id = {
+        str(item.get("event_id") or "").strip(): str(item.get("event") or "").strip()
+        for item in raw_events
+        if isinstance(item, dict) and str(item.get("event_id") or "").strip() and str(item.get("event") or "").strip()
+    }
+    raw_passages = research.get("source_passages") if isinstance(research.get("source_passages"), list) else []
+    passages_by_id = {
+        str(item.get("passage_id") or "").strip(): str(item.get("passage") or "").strip()
+        for item in raw_passages
+        if isinstance(item, dict) and str(item.get("passage_id") or "").strip() and str(item.get("passage") or "").strip()
+    }
+    raw_conflicts = research.get("conflicts") if isinstance(research.get("conflicts"), list) else []
+
+    def conflict_source_text(item: dict[str, Any]) -> str:
+        selection = item.get("selection_notes") if isinstance(item.get("selection_notes"), dict) else {}
+        recommended_choice = str(selection.get("recommended_choice") or "").strip()
+        accounts = item.get("accounts") if isinstance(item.get("accounts"), list) else []
+        selected_claim = next(
+            (
+                str(account.get("claim") or "").strip()
+                for account in accounts
+                if isinstance(account, dict)
+                and str(account.get("account_id") or "").strip() == recommended_choice
+                and str(account.get("claim") or "").strip()
+            ),
+            "",
+        )
+        if not selected_claim:
+            selected_claim = next(
+                (
+                    str(account.get("claim") or "").strip()
+                    for account in accounts
+                    if isinstance(account, dict) and str(account.get("claim") or "").strip()
+                ),
+                "",
+            )
+        return " / ".join(
+            text
+            for text in (
+                str(item.get("topic") or "").strip(),
+                selected_claim,
+                str(item.get("impact_on_story") or "").strip(),
+            )
+            if text
+        )
+
+    conflicts_by_id: dict[str, str] = {}
+    for item in raw_conflicts:
+        if not isinstance(item, dict):
+            continue
+        conflict_id = str(item.get("conflict_id") or "").strip()
+        source_text = conflict_source_text(item)
+        if conflict_id and source_text:
+            conflicts_by_id[conflict_id] = source_text
+    event_values = [
+        events_by_id[entry_id]
+        for ref in refs
+        if (entry_id := _research_ref_entry_id(ref, "story_materials.chronological_events")) in events_by_id
+    ]
+    if event_values:
+        return list(dict.fromkeys(event_values))
+    passage_values = [
+        passages_by_id[entry_id]
+        for ref in refs
+        if (entry_id := _research_ref_entry_id(ref, "source_passages")) in passages_by_id
+    ]
+    if passage_values:
+        return list(dict.fromkeys(passage_values))
+    conflict_values = [
+        conflicts_by_id[entry_id]
+        for ref in refs
+        if (entry_id := _research_ref_entry_id(ref, "conflicts")) in conflicts_by_id
+    ]
+    return list(dict.fromkeys(conflict_values))
+
+
+def _downstream_scene_research_refs(
+    idx: int,
+    source_events: list[str],
+    profile: dict[str, Any],
+) -> list[str]:
+    reviewed_refs = _reviewed_story_research_refs(profile, idx)
+    return reviewed_refs or _scene_research_refs(idx, source_events, profile)
 
 
 def _next_scene_title(profile: dict[str, Any], idx: int) -> str:
@@ -1922,6 +2454,116 @@ def _previous_scene_title(profile: dict[str, Any], idx: int) -> str:
     if idx > 1 and idx - 2 < len(titles):
         return titles[idx - 2]
     return "開始前の状況"
+
+
+def _reviewed_story_scene(profile: dict[str, Any], idx: int) -> dict[str, Any]:
+    scenes = profile.get("reviewed_story_scenes")
+    if isinstance(scenes, list) and 0 <= idx - 1 < len(scenes) and isinstance(scenes[idx - 1], dict):
+        return scenes[idx - 1]
+    return {}
+
+
+def _apply_reviewed_story_scene_to_blueprint(
+    blueprint: dict[str, Any],
+    *,
+    profile: dict[str, Any],
+    idx: int,
+) -> dict[str, Any]:
+    """Overlay only reviewed story-owned meaning onto downstream cut inputs."""
+
+    reviewed_scene = _reviewed_story_scene(profile, idx)
+    if not reviewed_scene:
+        return blueprint
+    merged = dict(blueprint)
+    purpose = str(reviewed_scene.get("purpose") or "").strip()
+    conflict = str(reviewed_scene.get("conflict") or "").strip()
+    turn = str(reviewed_scene.get("turn") or "").strip()
+    visual_action = str(reviewed_scene.get("visualizable_action") or "").strip()
+    if purpose:
+        merged["story_purpose"] = purpose
+    if conflict:
+        merged["obstacle"] = conflict
+        merged["scene_spine"] = f"{merged.get('desire', '')} / {conflict} / {turn or merged.get('causal_turn', '')}"
+    if turn:
+        merged["causal_turn"] = turn
+        merged["no_return_point"] = turn
+        merged["payoff"] = f"{turn}の結果が{merged.get('handoff_anchor', '次のscene')}へ残る"
+    if visual_action:
+        merged["visible_evidence"] = list(dict.fromkeys([visual_action, *merged.get("visible_evidence", [])]))[:6]
+    merged["reviewed_story_scene_id"] = str(reviewed_scene.get("scene_id") or idx)
+    merged["research_refs"] = list(reviewed_scene.get("research_refs") or merged.get("research_refs") or [])
+    return merged
+
+
+_CINDERELLA_SEGMENT_BEATS: dict[int, tuple[str, ...]] = {
+    1: (
+        "灰の台所でシンデレラが一人だけ床と炉を掃除する",
+        "継母が新しい家事道具を置き、休む間もなく仕事を増やす",
+        "義姉たちが汚れた衣服を残し、名前ではなく灰かぶりと呼ぶ",
+        "継母と義姉が去り、灰の中にシンデレラだけが取り残される",
+    ),
+    2: (
+        "王宮の舞踏会の知らせを義姉たちが奪うように受け取る",
+        "シンデレラが自分も参加したいと継母へ願い出る",
+        "継母が山積みの仕事と破れた衣装を示して参加を拒む",
+        "正面扉が閉まり、仕事を終えたシンデレラが裏口から月明かりの庭へ出る",
+    ),
+    3: (
+        "月明かりの庭で願いを捨てないシンデレラの前に魔法の助力者が現れる",
+        "助力者が真夜中までという期限をシンデレラへ明確に告げる",
+        "かぼちゃが馬車へ変わり、ドレスとガラスの靴が実物として整う",
+        "シンデレラが馬車の扉へ歩き、自分で出発を選べる位置に立つ",
+    ),
+    4: (
+        "開いた馬車の扉の前でシンデレラが家と宮殿を見比べる",
+        "真夜中の期限を受け入れたシンデレラが馬車へ手を伸ばす",
+        "シンデレラ自身が馬車へ乗り込み、内側から扉を閉じる",
+        "動き出した馬車が家の門を越えることで出発を確定する",
+    ),
+    5: (
+        "宮殿へ到着したシンデレラが大階段の下で群衆を見上げる",
+        "礼装の客たちの視線を受けながら最初の一段へ足を置く",
+        "シンデレラが立ち止まらず階段を上り、公の空間へ入る",
+        "階段上へ着いたシンデレラを王子が認めて振り返る",
+    ),
+    6: (
+        "王子がシンデレラへ手を差し出し、踊りへの選択を委ねる",
+        "二人が踊り始め、群衆の視線がシンデレラへ集まる",
+        "王子が灰かぶりではない一人の人物として彼女を記憶する",
+        "時計の予兆に気づいたシンデレラの身体が大階段へ向く",
+    ),
+    7: (
+        "真夜中の鐘が鳴り、ドレスと馬車の魔法が解け始める",
+        "シンデレラが王子の前を離れ、大階段を駆け下りる",
+        "片方のガラスの靴が脱げ、シンデレラだけが宮殿を去る",
+        "王子が階段に残ったガラスの靴を見つけて手に取る",
+    ),
+    8: (
+        "王子がガラスの靴の持ち主の探索を命じ、その命を受けた王宮の使者が家へ入り義姉たちを試す",
+        "継母の排除を王宮の使者が退け、シンデレラにも試着の場を開く",
+        "シンデレラの足にガラスの靴が合い、使者と証人が適合を見る",
+        "王宮の使者がシンデレラの身元と価値を公に確認する",
+    ),
+}
+
+
+def _cinderella_segment_contract(
+    canonical_index: int,
+    position: int,
+    count: int,
+) -> dict[str, Any]:
+    beats = list(_CINDERELLA_SEGMENT_BEATS[canonical_index])
+    start = (position - 1) * len(beats) // count
+    end = position * len(beats) // count
+    selected = beats[start:end] or [beats[min(start, len(beats) - 1)]]
+    return {
+        "responsibility_id": f"cinderella_c{canonical_index:02d}_s{position:02d}",
+        "beat_ids": [f"C{canonical_index:02d}-B{beat_index + 1:02d}" for beat_index in range(start, end)],
+        "responsibility": " → ".join(selected),
+        "first_action": selected[0],
+        "last_action": selected[-1],
+        "next_action": beats[end] if end < len(beats) else "",
+    }
 
 
 def _scene_blueprint(
@@ -1944,38 +2586,41 @@ def _scene_blueprint(
     second_evidence = evidence_terms[1] if len(evidence_terms) > 1 else protagonist
     artifact_term = artifact if include_artifact else f"{artifact}をまだ隠す条件"
     if _profile_is_cinderella(profile):
+        canonical_index = _canonical_scene_index(profile, idx)
+        segment_position, segment_count, segment_role = _scene_segment(profile, idx)
         scene_specifics = {
             1: {
-                "question": "灰と家事に縛られたシンデレラは、舞踏会の知らせへ顔を上げられるか",
-                "desire": "王宮の舞踏会へ行き、自分も人として扱われたい",
+                "question": "灰と家事に縛られたシンデレラは、家の中で尊厳を失わずにいられるか",
+                "desire": "課された家事の中でも、自分の意思と尊厳を保ちたい",
                 "obstacle": "継母と義姉たちが家事と灰の台所へ彼女を押し戻す",
-                "stakes": "願いを口にする前に、灰かぶりとしての扱いだけが確定してしまう",
-                "turn": "舞踏会の知らせを見たシンデレラが、灰だらけの手を止めて参加したい願いを持つ",
-                "payoff": "台所の灰、知らせ、彼女の止まった手元が、閉ざされた扉の場面を始める",
-                "handoff": "舞踏会の知らせを握った手と、扉の向こうで義姉たちが着飾る音",
-                "pressure": ["灰の床", "舞踏会の知らせ", "継母たちの足音"],
+                "stakes": "家の序列が固定されれば、彼女は名前ではなく灰かぶりとして扱われ続ける",
+                "turn": "継母と義姉が家事道具を置き、シンデレラだけを灰の台所に残して家の序列を固定する",
+                "payoff": "台所の灰、積まれた仕事、遠ざかる足音が、次に届く外界の知らせとの落差を作る",
+                "handoff": "灰だらけの手元と、家の奥へ遠ざかる継母たちの足音",
+                "pressure": ["灰の床", "積み上がる家事道具", "継母と義姉たちの足音"],
             },
             2: {
                 "question": "閉ざされた扉の前でシンデレラは、継母の条件を越えられるか",
                 "desire": "舞踏会へ行く許しと着ていける衣装を得たい",
                 "obstacle": "継母が仕事と衣装の欠如を理由に参加を拒み、義姉たちが扉の外へ出る",
                 "stakes": "扉が閉まれば、彼女の願いは家の中で消える",
-                "turn": "破れた服と残された仕事の前で、シンデレラの願いが助力を呼ぶ状態になる",
-                "payoff": "閉ざされた扉と散らばる仕事が、月明かりの庭での助力を必要にする",
-                "handoff": "閉まる扉、破れた布、月明かりが差す庭への視線",
+                "turn": "家族が去った後に仕事を終えたシンデレラが、願いを捨てず裏口から月明かりの庭へ出る",
+                "payoff": "排除されても庭へ出た行動が、月明かりの下で魔法の助力者と出会う条件になる",
+                "handoff": "裏口を通って月明かりの庭に立つシンデレラと、背後で閉じた正面扉",
                 "pressure": ["閉ざされた扉", "破れた衣装", "山積みの仕事"],
             },
             3: {
                 "question": "月明かりの庭でシンデレラは、助力を受け取って別人の姿へ踏み出せるか",
                 "desire": "舞踏会へ行ける姿と移動手段を得たい",
-                "obstacle": "時間の制限と、魔法が一時的であるという条件",
+                "obstacle": "人物として現れた魔法の助力者が告げる、真夜中までという期限と一時的な魔法の条件",
                 "stakes": "助力を受け取れなければ、舞踏会の夜は家の外へ出ないまま終わる",
-                "turn": "かぼちゃの馬車、ドレス、ガラスの靴が整い、彼女が出発できる姿になる",
+                "turn": "魔法の助力者が真夜中までの期限を告げ、かぼちゃの馬車、ドレス、ガラスの靴を整えて、彼女が出発を選べる状態にする",
                 "payoff": "変身後の姿と馬車が、門前の出発へ直接つながる",
                 "handoff": "月明かりの庭に置かれた馬車の扉と、足元で光るガラスの靴",
                 "pressure": ["月明かり", "かぼちゃの馬車", "変化したドレス", "ガラスの靴"],
             },
             4: {
+                "purpose": "馬車が待つ門前で、助力を受けた後も主人公自身が出発を選び、家の境界を越えるE05のagency beatを成立させる",
                 "question": "門前でシンデレラは、家の境界を越えて宮殿へ向かえるか",
                 "desire": "馬車に乗って舞踏会へ出発したい",
                 "obstacle": "家に戻される恐れと、真夜中までという条件",
@@ -1998,7 +2643,7 @@ def _scene_blueprint(
             6: {
                 "question": "舞踏会の中心でシンデレラは、名乗らずに自分の価値を認識させられるか",
                 "desire": "王子と踊り、自分が一人の人物として見られたい",
-                "obstacle": "正体を明かせないことと、真夜中が近づく時間制限",
+                "obstacle": "正体を明かせないことと、魔法の助力者から告げられた真夜中が近づく時間制限",
                 "stakes": "誰にも認識されなければ、変身はただの幻で終わる",
                 "turn": "王子と踊るシンデレラに群衆の視線が集まり、灰かぶりではない存在として認識される",
                 "payoff": "広間の視線と王子の記憶が、真夜中の逃走で失われる証拠を必要にする",
@@ -2008,31 +2653,49 @@ def _scene_blueprint(
             7: {
                 "question": "真夜中の大階段でシンデレラは、魔法が解ける前に逃げ切れるか",
                 "desire": "正体が露見する前に宮殿を離れたい",
-                "obstacle": "真夜中の鐘、解け始める魔法、追いかける視線",
+                "obstacle": "魔法の助力者から告げられた真夜中の鐘、解け始める魔法、追いかける視線",
                 "stakes": "遅れれば、変身の秘密と身元がその場で崩れる",
-            "turn": "大階段を駆け下りる途中で片方のガラスの靴が脱げて階段に残り、宮殿に証拠として置き去りになる",
-                "payoff": "階段に残ったガラスの靴が、翌朝の探索を開始する",
-                "handoff": "大階段に残された片方のガラスの靴と、追ってくる足音",
+                "turn": "シンデレラが大階段を駆け下りて片方のガラスの靴を残し、王子がその物証を見つけて手に取る",
+                "payoff": "王子の手元に残ったガラスの靴が、次sceneで持ち主の探索を命じる根拠になる",
+                "handoff": "王子が手にした片方のガラスの靴と、次sceneで発せられる探索命令",
                 "pressure": ["真夜中の鐘", "大階段", "片方のガラスの靴"],
             },
             8: {
+                "purpose": "王子が靴から起動した探索を王宮の使者が実行し、継母と義姉の排除を退けた試着でシンデレラの身元を公に確認する",
                 "question": "靴合わせの部屋でシンデレラは、隠された名を公に取り戻せるか",
                 "desire": "ガラスの靴が自分のものだと証明されたい",
-                "obstacle": "継母と義姉たちの偽りの主張、隠された立場、周囲の疑い",
+                "obstacle": "継母と義姉たちがシンデレラを試着から排除しようとすること、隠された立場、周囲の疑い",
                 "stakes": "靴が合わなければ、舞踏会で得た認識は誰のものか分からないまま失われる",
-                "turn": "シンデレラの足にガラスの靴が合い、彼女が舞踏会の人物だと明らかになる",
-                "payoff": "靴、足、証人の視線が一致し、シンデレラの名と価値が公に戻る",
-                "handoff": "ガラスの靴を履いた足と、それを見届ける使者・義姉たちの視線",
-                "pressure": ["ガラスの靴", "使者", "義姉たちの失敗", "証人の視線"],
+                "turn": "王宮の使者が排除を退けてシンデレラにも試着させ、ガラスの靴の適合を証人の前で公に確認する",
+                "payoff": "靴、足、王宮の使者と証人の視線が一致し、シンデレラの名と価値が公に戻る",
+                "handoff": "ガラスの靴を履いた足と、それを見届ける王宮の使者・継母・義姉たちの視線",
+                "pressure": ["ガラスの靴", "王宮の使者", "継母と義姉たちの排除", "証人の視線"],
             },
         }
-        if idx in scene_specifics:
-            spec = scene_specifics[idx]
+        if canonical_index in scene_specifics:
+            spec = dict(scene_specifics[canonical_index])
+            segment_contract = _cinderella_segment_contract(canonical_index, segment_position, segment_count)
+            if segment_count > 1:
+                segment_note = f"{segment_role}区間 {segment_position}/{segment_count}"
+                base_turn = spec["turn"]
+                base_payoff = spec["payoff"]
+                spec["question"] = f"{segment_contract['responsibility']}を、{segment_note}の固有責務として完了できるか"
+                spec["turn"] = f"{segment_contract['last_action']}ことを画面上の状態差として確定する"
+                if segment_position == segment_count:
+                    spec["turn"] = f"{spec['turn']}。その結果、{base_turn}"
+                    spec["payoff"] = base_payoff
+                else:
+                    spec["payoff"] = f"{segment_contract['last_action']}結果が、次区間の「{segment_contract['next_action']}」を開始させる"
+                spec["handoff"] = f"{segment_contract['last_action']}後に残る人物・物・位置関係を次区間へ渡す"
+                spec["pressure"] = list(dict.fromkeys([segment_contract["first_action"], segment_contract["last_action"], *spec["pressure"]]))
             return {
                 "source_events": source_events,
-                "research_refs": _scene_research_refs(idx, source_events),
+                "research_refs": _downstream_scene_research_refs(idx, source_events, profile),
+                "semantic_scene_responsibility_id": segment_contract["responsibility_id"],
+                "segment_beat_ids": segment_contract["beat_ids"],
+                "segment_responsibility": segment_contract["responsibility"],
                 "dramatic_question": spec["question"],
-                "story_purpose": f"{title}で、シンデレラ原典の出来事「{source_summary}」を映像上の因果へ変換する",
+                "story_purpose": spec.get("purpose") or f"{title}で、シンデレラの出来事「{source_summary}」を映像上の因果へ変換する",
                 "scene_spine": f"{spec['desire']} / {spec['obstacle']} / {spec['turn']}",
                 "desire": spec["desire"],
                 "obstacle": spec["obstacle"],
@@ -2054,7 +2717,10 @@ def _scene_blueprint(
             }
     return {
         "source_events": source_events,
-        "research_refs": _scene_research_refs(idx, source_events),
+        "research_refs": _downstream_scene_research_refs(idx, source_events, profile),
+        "semantic_scene_responsibility_id": f"scene_{idx:02d}",
+        "segment_beat_ids": [f"scene_{idx:02d}_whole"],
+        "segment_responsibility": f"{title}で{source_summary}を人物・場所・証拠の因果として成立させる",
         "dramatic_question": f"{title}で{protagonist}は、{primary_evidence}を根拠に選択を変えられるか",
         "story_purpose": f"{title}で、source event「{source_summary}」を人物・場所・証拠の因果として成立させる",
         "scene_spine": f"{source_summary} / {location_name}の制約 / {artifact_term}",
@@ -2173,12 +2839,16 @@ def _scene_generation_for_scene(
     profile: dict[str, Any],
 ) -> dict[str, Any]:
     source_events = _scene_source_events(profile, idx)
-    blueprint = _scene_blueprint(
+    blueprint = _apply_reviewed_story_scene_to_blueprint(
+        _scene_blueprint(
+            profile=profile,
+            idx=idx,
+            title=title,
+            location_name=str(location_spec.get("name") or ""),
+            include_artifact=include_artifact,
+        ),
         profile=profile,
         idx=idx,
-        title=title,
-        location_name=str(location_spec.get("name") or ""),
-        include_artifact=include_artifact,
     )
     source_beat_ids = [f"source_scene{idx:02d}_beat{event_index:02d}" for event_index, _ in enumerate(source_events, start=1)]
     protagonist = str(profile.get("protagonist_name") or topic)
@@ -2736,12 +3406,16 @@ def _story_event_obligations_for_scene(
     source_events = _scene_source_events(profile, idx)
     if not source_events:
         return []
-    blueprint = _scene_blueprint(
+    blueprint = _apply_reviewed_story_scene_to_blueprint(
+        _scene_blueprint(
+            profile=profile,
+            idx=idx,
+            title=title,
+            location_name=location_name,
+            include_artifact=include_artifact,
+        ),
         profile=profile,
         idx=idx,
-        title=title,
-        location_name=location_name,
-        include_artifact=include_artifact,
     )
     event_text = " / ".join(source_events)
     visual_evidence = list(blueprint["visible_evidence"])
@@ -2769,6 +3443,7 @@ def _scene_intent_for_cut_design(
     include_artifact: bool,
 ) -> dict[str, Any]:
     is_terminal = idx == len(profile["scene_titles"])
+    canonical_index = _canonical_scene_index(profile, idx)
     artifact_has_been_revealed = idx >= _artifact_first_scene_index(profile)
     story_event_obligations = _story_event_obligations_for_scene(
         title=title,
@@ -2777,39 +3452,43 @@ def _scene_intent_for_cut_design(
         profile=profile,
         include_artifact=include_artifact,
     )
-    blueprint = _scene_blueprint(
+    blueprint = _apply_reviewed_story_scene_to_blueprint(
+        _scene_blueprint(
+            profile=profile,
+            idx=idx,
+            title=title,
+            location_name=str(location_spec["name"]),
+            include_artifact=include_artifact,
+        ),
         profile=profile,
         idx=idx,
-        title=title,
-        location_name=str(location_spec["name"]),
-        include_artifact=include_artifact,
     )
     visible_evidence = list(blueprint["visible_evidence"])
     if _profile_is_cinderella(profile):
-        if idx == 4:
+        if canonical_index == 4:
             visible_evidence.extend(["馬車", "乗車/出発", "門前から宮殿へ向かう導線"])
-        elif idx == 5:
+        elif canonical_index == 5:
             visible_evidence.extend(["宮殿階段の境界", "階段上の移動方向", "周囲の視線"])
-        elif idx == 6:
+        elif canonical_index == 6:
             visible_evidence.extend(["王子または踊り相手", "群衆の視線", "踊りが成立する瞬間"])
-        elif idx == 7:
+        elif canonical_index == 7:
             visible_evidence.extend(["真夜中の合図", "逃走する身体", "脱げて階段に残るガラスの靴"])
     audience_information = [f"{title}の場所と主人公の現在位置", "主人公が何に妨げられているか"]
-    if idx in {2, 5, 6}:
+    if canonical_index in {2, 5, 6}:
         audience_information.append("周囲の視線や場のルール")
-    if idx in {4, 7}:
+    if canonical_index in {4, 7}:
         audience_information.append("移動や時間制限によって状況が変わること")
     if _profile_is_cinderella(profile):
-        if idx == 4:
+        if canonical_index == 4:
             audience_information.extend(["馬車が待っていること", "主人公が宮殿へ出発すること"])
-        elif idx == 5:
+        elif canonical_index == 5:
             audience_information.extend(["宮殿に入る境界", "舞踏会へ接続する階段上の動き"])
-        elif idx == 6:
+        elif canonical_index == 6:
             audience_information.extend(["王子または踊り相手の存在", "群衆が主人公を認識していること"])
-        elif idx == 7:
+        elif canonical_index == 7:
             audience_information.extend(["真夜中の鐘または合図", "ガラスの靴が残ること"])
     withheld_information = [] if artifact_has_been_revealed else [profile["artifact_name"]]
-    if idx == 7:
+    if canonical_index == 7:
         withheld_information.append("時間制限の結果")
     reveal_constraints = [] if artifact_has_been_revealed else [f"{profile['artifact_name']}はこのsceneでは見せない"]
     if is_terminal:
@@ -2817,16 +3496,19 @@ def _scene_intent_for_cut_design(
     value_to = str(blueprint["value_to"])
     causal_turn = str(blueprint["causal_turn"])
     if _profile_is_cinderella(profile):
-        if idx == 4:
+        if canonical_index == 4:
             causal_turn = "馬車へ乗り込み、門前から宮殿へ出発することで物語が公的な場へ進む"
-        elif idx == 5:
+        elif canonical_index == 5:
             causal_turn = "宮殿階段を進み、公的な舞踏会の空間へ入ることで認識の試練へ進む"
-        elif idx == 6:
+        elif canonical_index == 6:
             causal_turn = "王子または踊り相手と群衆の視線の中で、主人公が場の中心として認識される"
-        elif idx == 7:
+        elif canonical_index == 7:
             causal_turn = "真夜中の合図で逃走し、脱げて階段に残ったガラスの靴が靴合わせへ因果を渡す"
     if is_terminal:
         causal_turn = str(blueprint["causal_turn"])
+    reviewed_turn = str(_reviewed_story_scene(profile, idx).get("turn") or "").strip()
+    if reviewed_turn:
+        causal_turn = reviewed_turn
     done_when = (
         f"{title}の問い、終結、物証の一致が、人物・場所・光・{profile['artifact_name']}の関係で説明なしに読める"
         if is_terminal
@@ -2983,12 +3665,17 @@ def _scene_event_for_cut_design(
     artifact = str(profile["artifact_name"])
     source_story_beat_id = f"story_scene{idx:02d}_primary"
     source_events = _scene_source_events(profile, idx)
-    blueprint = _scene_blueprint(
+    research_refs = _downstream_scene_research_refs(idx, source_events, profile)
+    blueprint = _apply_reviewed_story_scene_to_blueprint(
+        _scene_blueprint(
+            profile=profile,
+            idx=idx,
+            title=title,
+            location_name=location_name,
+            include_artifact=include_artifact,
+        ),
         profile=profile,
         idx=idx,
-        title=title,
-        location_name=location_name,
-        include_artifact=include_artifact,
     )
     source_summary = " / ".join(source_events) if source_events else str(profile.get("summary") or title)
     visible_evidence = scene_intent.get("value_shift", {}).get("visible_evidence", []) if isinstance(scene_intent.get("value_shift"), dict) else []
@@ -2996,7 +3683,7 @@ def _scene_event_for_cut_design(
     artifact_clause = f"と{artifact}" if include_artifact else ""
     source_fact_setup = source_events[0] if source_events else f"{title}で{protagonist}が{location_name}の制約に置かれる"
     source_fact_pressure = source_events[1] if len(source_events) > 1 else source_fact_setup
-    source_fact_turn = str(blueprint["causal_turn"])
+    source_fact_turn = str(scene_intent.get("causal_turn") or blueprint["causal_turn"])
     source_fact_payoff = str(blueprint["payoff"])
     beat_specs = [
         (
@@ -3069,6 +3756,7 @@ def _scene_event_for_cut_design(
                 },
                 "story_grounding": {
                     "source_story_beat_ids": [source_story_beat_id],
+                    "research_refs": research_refs,
                     "source_origin": _source_origin_for_profile(profile),
                     "source_confidence": "high" if source_events else "medium",
                     "source_text_or_summary": source_event_text,
@@ -3110,6 +3798,7 @@ def _scene_event_for_cut_design(
         "event_logline": f"{title}で「{blueprint['causal_turn']}」が起き、{blueprint['handoff_anchor']}が残る",
         "start_situation": blueprint["character_start"],
         "source_story_beat_ids": [source_story_beat_id],
+        "research_refs": research_refs,
         "story_specificity": _story_specificity_layers(
             profile=profile,
             location_name=location_name,
@@ -3683,6 +4372,102 @@ def _scene_cut_coverage_plan(
             return "payoff"
         return "pressure"
 
+    scene_targets = profile.get("scene_target_durations")
+    if isinstance(scene_targets, list) and 0 <= idx - 1 < len(scene_targets):
+        scene_target_seconds = max(1, int(scene_targets[idx - 1]))
+    else:
+        duration_plan = profile.get("duration_plan") if isinstance(profile.get("duration_plan"), dict) else {}
+        total_target_seconds = max(1, int(duration_plan.get("target_seconds") or 300))
+        scene_target_seconds = max(1, (total_target_seconds + len(profile.get("scene_titles") or [title]) - 1) // len(profile.get("scene_titles") or [title]))
+    duration_cut_floor = max(3, (scene_target_seconds + 7) // 8)
+
+    # Add only meaningfully distinct event-beat facets when duration requires
+    # more cuts than the story obligations already justify. Missing beat
+    # functions are filled first; additional cuts cycle through setup,
+    # pressure, turn, and payoff with a unique evidence lens.
+    function_order = ("setup", "pressure", "turn", "payoff")
+    function_counts = {
+        function: sum(
+            1
+            for obligation_index, obligation in enumerate(obligations, start=1)
+            if target_event_function(obligation, obligation_index) == function
+        )
+        for function in function_order
+    }
+    facet_labels = {
+        "setup": ("空間と開始状態", "人物の初期姿勢"),
+        "pressure": ("外部圧力", "圧力への身体反応"),
+        "turn": ("不可逆な行為", "行為が残す物証"),
+        "payoff": ("直後の結果", "次へ残る反応と痕跡"),
+    }
+    while len(obligations) < duration_cut_floor:
+        function = min(function_order, key=lambda item: (function_counts[item], function_order.index(item)))
+        beat = beat_for_function(function)
+        beat_id = str(beat.get("beat_id") or f"scene{idx:02d}_event_{function}").strip()
+        occurrence = function_counts[function] + 1
+        facet_options = facet_labels[function]
+        facet = facet_options[(occurrence - 1) % len(facet_options)]
+        concrete_event = beat.get("concrete_event") if isinstance(beat.get("concrete_event"), dict) else {}
+        visual_evidence_for_beat = [
+            str(item)
+            for item in beat.get("required_visual_evidence", [])
+            if str(item).strip()
+        ] if isinstance(beat.get("required_visual_evidence"), list) else []
+        if not visual_evidence_for_beat:
+            visual_evidence_for_beat = [
+                str(item)
+                for item in concrete_event.get("required_visual_evidence", [])
+                if str(item).strip()
+            ] if isinstance(concrete_event.get("required_visual_evidence"), list) else []
+        if not visual_evidence_for_beat:
+            visual_evidence_for_beat = [location_name, protagonist]
+        what_happens = str(beat.get("what_happens") or concrete_event.get("what_happens") or title)
+        visible_action = str(beat.get("visible_action") or concrete_event.get("visible_action") or what_happens)
+        visible_reaction = str(beat.get("visible_reaction") or concrete_event.get("visible_reaction") or "周囲の反応が変わる")
+        immediate_consequence = str(
+            beat.get("immediate_consequence")
+            or concrete_event.get("immediate_consequence")
+            or scene_intent.get("handoff_to_next_scene")
+            or scene_intent.get("terminal_resolution")
+            or "次の状態へ因果が残る"
+        )
+        must_show = list(dict.fromkeys(visual_evidence_for_beat[:3]))
+        required_roles = [
+            str(item)
+            for item in concrete_event.get("who", [])
+            if str(item).strip()
+        ] if isinstance(concrete_event.get("who"), list) else []
+        append_unique(
+            extra_obligation(
+                obligation_id=f"duration_{function}_{occurrence:02d}",
+                cut_function=f"{function}_detail",
+                source=f"scene_event.event_sequence[{beat_id}]",
+                target_beat=f"{title}: {function} beatの{facet}を独立して見せる — {what_happens}",
+                screen_question=f"{function}の{facet}から、観客は何が変わったと理解するのか",
+                dramatic_job=f"{beat_id}の{facet}を、他cutと異なる原因・反応・結果として可視化する",
+                visual_proof=f"{visible_action}。{visible_reaction}。視覚証拠: {'、'.join(must_show)}",
+                first_frame_brief=f"{', '.join(must_show)}が読め、{visible_action}の直前または直後を示す静止状態。",
+                must_show_extra=must_show,
+                done_when=f"{beat_id}の{facet}と{immediate_consequence}が、このcut固有の画面情報として読める",
+                foreground=must_show[0],
+                midground=protagonist,
+                background=location_name,
+                screen_direction=f"duration_{function}_{occurrence:02d}",
+                motion_brief=f"{visible_action}から{visible_reaction}へ小さく進み、{facet}を強める",
+                motion_end_state=immediate_consequence,
+                narration=f"{title}。{what_happens}",
+                audience_knowledge_delta=f"観客は{what_happens}の{facet}を具体的な事実として理解する",
+                causal_proof=immediate_consequence,
+                visual_evidence=must_show,
+                required_roles=required_roles,
+                static_first_frame_rule="動作の説明ではなく、原因・反応・結果のいずれかが一枚で読める静止状態にする",
+                anti_redundancy_key=f"{beat_id}:{facet}:{occurrence}",
+            )
+        )
+        function_counts[function] += 1
+
+    _normalize_cut_obligations_for_scene(obligations)
+
     def event_time_position_for_function(function: str) -> str:
         if function == "setup":
             return "before_trigger"
@@ -3760,7 +4545,7 @@ def _scene_cut_coverage_plan(
         return list(dict.fromkeys(selectors))
 
     minimum_by_importance = 3
-    minimum_by_duration = max(3, int((len(obligations) * 8 + 7) // 8))
+    minimum_by_duration = duration_cut_floor
     minimum_by_event_beats = len([beat for beat in event_sequence if beat.get("must_be_seen") is True]) or len(
         [beat for beat in event_sequence if str(beat.get("beat_function") or "") in required_functions]
     )
@@ -3823,6 +4608,8 @@ def _scene_cut_coverage_plan(
 
 
 def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) -> dict[str, Any]:
+    duration_plan = dict(profile.get("duration_plan") or build_duration_plan().to_dict())
+    is_cinderella = profile.get("story_key") == "cinderella" or profile.get("slug") == "cinderella"
     events = [
         "母の不在後、継母と義姉たちが入り、主人公は家の中で孤立する。",
         "主人公は台所と灰のそばで眠り、名前の代わりに灰かぶりとして扱われる。",
@@ -3835,31 +4622,100 @@ def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) 
         "使者が靴の持ち主を探し、家々を巡る。",
         "主人公の足に靴が合い、隠されていた身元が明らかになる。",
     ]
-    if profile["slug"] != "cinderella":
-        events = profile["events"]
+    if profile.get("events"):
+        events = [str(event) for event in profile["events"]]
     motif_sequence = "、".join(str(motif) for motif in profile["motifs"][:4])
-    deadline_trigger = "真夜中の鐘" if profile["slug"] == "cinderella" else "時間制限の合図"
-    helper_claim = "妖精の助力者として描く" if profile["slug"] == "cinderella" else "助力者、記憶、偶然、環境の変化のいずれかとして描く"
-    helper_theory = "通俗版では妖精。" if profile["slug"] == "cinderella" else "ユーザー指定のsourceから、助力の形を映像化に合わせて選ぶ。"
+    deadline_trigger = "真夜中の鐘" if is_cinderella else "時間制限の合図"
+    helper_claim = "妖精の助力者として描く" if is_cinderella else "助力者、記憶、偶然、環境の変化のいずれかとして描く"
+    helper_theory = "通俗版では妖精。" if is_cinderella else "ユーザー指定のsourceから、助力の形を映像化に合わせて選ぶ。"
+    characters = [
+        {"character_id": "protagonist", "name": profile["protagonist_name"], "role": "主人公", "motivations": ["尊厳と願いを失わずに進む"], "relationships": [{"target": "opposition", "relation": "前進を妨げられる"}]},
+        {"character_id": "opposition", "name": "主人公を妨げる力", "role": "抑圧者または障害", "motivations": ["現状維持"], "relationships": [{"target": "protagonist", "relation": "選択を狭める"}]},
+        {"character_id": "witness", "name": "真実を見届ける者", "role": "証人", "motivations": ["主人公の本質を探す"], "relationships": [{"target": "protagonist", "relation": "証を通じて探す"}]},
+    ]
+    symbols_and_themes = [
+        {"item_id": "SYM1", "item": profile["motifs"][0], "meaning": "抑圧と不可視化", "evidence_refs": ["P1"]},
+        {"item_id": "SYM2", "item": profile["artifact_name"], "meaning": "脆さと証明が同居する身元の鍵", "evidence_refs": ["P2"]},
+    ]
+    conflicts = [{"conflict_id": "C1", "topic": "助力者の表現", "accounts": [{"account_id": "A", "claim": helper_claim, "sources": ["S1"], "confidence": 0.8}], "impact_on_story": "映像では光、風、物の配置、人物の反応で示せる。", "selection_notes": {"recommended_choice": "A", "rationale": "映像上の因果を作りやすい。"}, "hybrid_proposal": {"proposed": False, "mix_elements": [], "risks": [], "mitigations": []}}]
+    open_questions = [{"question_id": "Q1", "question": "助力を人物として出すか、現象・記憶・道具として出すか。", "known_theories": [helper_theory], "investigation_status": "verified", "sources": ["S1"]}]
+    handoff_to_story: dict[str, Any] = {
+        "recommended_focus": [f"{profile['motifs'][0]}から光へ", f"証としての{profile['artifact_name']}"],
+        "must_preserve": ["抑圧", "越境", "時間制限", "証明"],
+        "avoid_overstating": ["史実性"],
+        "selection_questions_for_p200": ["主人公の能動性をどの場面で強めるか"],
+    }
+    event_character_ids: dict[int, list[str]] = {}
+    if is_cinderella:
+        characters = [
+            {"character_id": "protagonist", "name": "シンデレラ", "role": "主人公", "motivations": ["尊厳を保ち、自分の意思で舞踏会へ行く", "灰かぶりという扱いではなく自分自身として認められる"], "relationships": [{"target": "stepmother", "relation": "家事と閉じ込めによって参加を妨げられる"}, {"target": "helper", "relation": "期限付きの手段を受け取るが出発は自分で選ぶ"}, {"target": "prince", "relation": "舞踏会で踊り、残した靴を通じて探される"}, {"target": "royal_envoy", "relation": "試着によって身元を公に確認される"}]},
+            {"character_id": "stepmother", "name": "継母", "role": "家の支配者・主要な抑圧者", "motivations": ["家の序列を維持し、実の娘たちの機会を優先する"], "relationships": [{"target": "protagonist", "relation": "家事を課し、舞踏会と試着から排除する"}, {"target": "stepsisters", "relation": "舞踏会の機会を得させようとする"}]},
+            {"character_id": "stepsisters", "name": "義姉たち", "role": "共同抑圧者・競争者", "motivations": ["王宮で選ばれる機会を自分たちのものにする"], "relationships": [{"target": "protagonist", "relation": "家事を負わせ、靴の試着では先に名乗り出る"}, {"target": "stepmother", "relation": "排除と自己優先の方針を共有する"}]},
+            {"character_id": "helper", "name": "魔法の助力者", "role": "主人公の意思に応答する期限付きの援助者", "motivations": ["願いを捨てない主人公に自分で境界を越える機会を与える"], "relationships": [{"target": "protagonist", "relation": "真夜中までの手段を与えるが出発の選択は委ねる"}]},
+            {"character_id": "prince", "name": "王子", "role": "舞踏会で主人公を認識し、靴を手がかりに探索を起動する人物", "motivations": ["舞踏会で踊った相手の身元を確かめる"], "relationships": [{"target": "protagonist", "relation": "舞踏会で踊り、残された靴の持ち主を探す"}, {"target": "royal_envoy", "relation": "靴の持ち主を探す役目を託す"}]},
+            {"character_id": "royal_envoy", "name": "王宮の使者", "role": "靴の探索と公的な身元確認を実行する人物", "motivations": ["王子の命を遂行し、靴の真の持ち主を特定する"], "relationships": [{"target": "prince", "relation": "靴の持ち主を探す命を受ける"}, {"target": "protagonist", "relation": "試着の機会を与え、適合を公に確認する"}]},
+        ]
+        event_character_ids = {
+            1: ["protagonist", "stepmother", "stepsisters"],
+            2: ["protagonist", "stepmother", "stepsisters"],
+            3: ["protagonist", "stepmother"],
+            4: ["protagonist", "helper"],
+            5: ["protagonist", "helper"],
+            6: ["protagonist", "prince"],
+            7: ["protagonist", "prince"],
+            8: ["protagonist", "helper"],
+            9: ["protagonist", "stepmother", "stepsisters", "prince", "royal_envoy"],
+            10: ["protagonist", "stepmother", "stepsisters", "royal_envoy"],
+        }
+        symbols_and_themes[1]["evidence_refs"] = ["P4"]
+        conflicts = [{
+            "conflict_id": "C1",
+            "topic": "助力者の表現",
+            "accounts": [{"account_id": "A", "claim": "人物として現れる魔法の助力者が、主人公に真夜中までの期限と馬車・ドレス・ガラスの靴を与える", "sources": ["S1"], "confidence": 0.8}],
+            "impact_on_story": "E03後も願いを保つ主人公にE04の援助が応答し、E05の自発的な出発とE08の期限切れを経て、靴がE09-E10の探索と身元確認へつながる。",
+            "selection_notes": {"recommended_choice": "A", "selected_choice": "A", "resolution_status": "resolved", "rationale": "人物による期限付き魔法に固定し、記憶・偶然・環境変化との混成は行わない。"},
+            "hybrid_proposal": {"proposed": False, "mix_elements": [], "risks": [], "mitigations": []},
+        }]
+        open_questions = []
+        handoff_to_story.update(
+            {
+                "must_preserve": ["抑圧", "越境", "時間制限", "証明", "helper の期限付き援助と protagonist 自身の出発", "prince が探索を起動し royal_envoy が試着を実行する役割分担"],
+                "selection_questions_for_p200": ["E05で確定している主人公の出発の選択を、どのscene/beatで最も強く見せるか"],
+                "character_event_contract": [
+                    {"character_id": "protagonist", "event_ids": [f"E{i:02d}" for i in range(1, 11)], "causal_role": "排除されても願いを保ち、援助を受けた後は自分で出発し、最後に試着へ進む"},
+                    {"character_id": "stepmother", "event_ids": ["E01", "E02", "E03", "E09", "E10"], "causal_role": "家の序列を守るため主人公を舞踏会と試着から排除する"},
+                    {"character_id": "stepsisters", "event_ids": ["E01", "E02", "E09", "E10"], "causal_role": "排除に加わり、舞踏会と靴の候補者として主人公と対照を作る"},
+                    {"character_id": "helper", "event_ids": ["E04", "E05", "E08"], "causal_role": "期限付き魔法を与えるが、E05の出発は主人公に委ねる"},
+                    {"character_id": "prince", "event_ids": ["E06", "E07", "E09"], "causal_role": "主人公を舞踏会で認識し、残された靴から探索を起動する"},
+                    {"character_id": "royal_envoy", "event_ids": ["E09", "E10"], "causal_role": "王子の命で捜索と試着を実行し、身元を公に確認する"},
+                ],
+                "resolved_causal_chain": [
+                    {"from_event": "E03", "to_event": "E04", "cause": "家族が去った後に仕事を終えた主人公が裏口から月明かりの庭へ出て、願いを捨てない姿に helper が期限付き援助を与える"},
+                    {"from_event": "E04", "to_event": "E05", "cause": "helper は手段を用意するが、門を越えるのは protagonist 自身である"},
+                    {"from_event": "E04", "to_event": "E08", "cause": "真夜中の期限によって魔法が解け始め、protagonist は逃走する"},
+                    {"from_event": "E08", "to_event": "E09", "cause": "残された靴から prince が探索を起動し、royal_envoy が家々を巡る"},
+                    {"from_event": "E09", "to_event": "E10", "cause": "royal_envoy が試着させ、靴の適合が公的な身元確認になる"},
+                ],
+            }
+        )
     return {
         "topic": topic,
         "aliases": profile["aliases"],
         "story_materials": {
             "canonical_story_dump": f"{source}。{profile['summary']}",
             "chronological_events": [
-                {"event_id": f"E{i:02d}", "event": event, "sources": ["S1", "S2"], "confidence": 0.88}
+                {
+                    "event_id": f"E{i:02d}",
+                    "event": event,
+                    **({"involved_characters": event_character_ids[i]} if i in event_character_ids else {}),
+                    "sources": ["S1", "S2"],
+                    "confidence": 0.88,
+                }
                 for i, event in enumerate(events, start=1)
             ],
-            "characters": [
-                {"character_id": "protagonist", "name": profile["protagonist_name"], "role": "主人公", "motivations": ["尊厳と願いを失わずに進む"], "relationships": [{"target": "opposition", "relation": "前進を妨げられる"}]},
-                {"character_id": "opposition", "name": "主人公を妨げる力", "role": "抑圧者または障害", "motivations": ["現状維持"], "relationships": [{"target": "protagonist", "relation": "選択を狭める"}]},
-                {"character_id": "witness", "name": "真実を見届ける者", "role": "証人", "motivations": ["主人公の本質を探す"], "relationships": [{"target": "protagonist", "relation": "証を通じて探す"}]},
-            ],
+            "characters": characters,
             "setting": {"places": profile["places"], "time_or_era": "民話または伝承を実写映画として再構成した時間", "world_rules": [f"{profile['artifact_name']}は証として残る", "助力は主人公の選択を代行しない"]},
-            "symbols_and_themes": [
-                {"item_id": "SYM1", "item": profile["motifs"][0], "meaning": "抑圧と不可視化", "evidence_refs": ["P1"]},
-                {"item_id": "SYM2", "item": profile["artifact_name"], "meaning": "脆さと証明が同居する身元の鍵", "evidence_refs": ["P2"]},
-            ],
+            "symbols_and_themes": symbols_and_themes,
             "emotional_material": [{"emotion": "切迫", "trigger": deadline_trigger, "story_value": "逃走と証明を一気に動かす"}],
             "adaptation_options": [{"option_id": "A1", "proposal": f"実写映画のように{motif_sequence}の質感で感情を語る", "source_basis": ["S1"], "risks": ["説明台詞に寄せすぎない"]}],
         },
@@ -3873,39 +4729,124 @@ def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) 
             for i, passage in enumerate(events[:5], start=1)
         ],
         "variants": [{"variant_id": "V1", "name": f"{profile['artifact_name']}を証にする版", "differences": ["物語の証を映像上の主役級アイテムにする"], "impact_on_story": "主役級アイテムとして強い。", "sources": ["S1"]}],
-        "conflicts": [{"conflict_id": "C1", "topic": "助力者の表現", "accounts": [{"account_id": "A", "claim": helper_claim, "sources": ["S1"], "confidence": 0.8}], "impact_on_story": "映像では光、風、物の配置、人物の反応で示せる。", "selection_notes": {"recommended_choice": "A", "rationale": "映像上の因果を作りやすい。"}, "hybrid_proposal": {"proposed": False, "mix_elements": [], "risks": [], "mitigations": []}}],
+        "conflicts": conflicts,
         "facts": {"items": [{"fact_id": "F1", "claim": f"{profile['artifact_name']}が主人公の価値や身元を証明する。", "kind": "plot", "confidence": 0.86, "verification": "partially_verified", "sources": ["S1"], "notes": "物語筋として扱う。"}]},
         "engagement": {"hooks": [{"hook_id": "H1", "type": "emotional", "content": f"{profile['protagonist_name']}が、隠された状態から光の中で自分の名を取り戻す。", "curiosity_score": 0.92, "supporting_facts": ["F1"]}]},
-        "open_questions": [{"question_id": "Q1", "question": "助力を人物として出すか、現象・記憶・道具として出すか。", "known_theories": [helper_theory], "investigation_status": "verified", "sources": ["S1"]}],
-        "handoff_to_story": {"recommended_focus": [f"{profile['motifs'][0]}から光へ", f"証としての{profile['artifact_name']}"], "must_preserve": ["抑圧", "越境", "時間制限", "証明"], "avoid_overstating": ["史実性"], "selection_questions_for_p200": ["主人公の能動性をどの場面で強めるか"]},
-        "metadata": {"collected_at": now, "sources_used": ["S1", "S2", "S3"], "confidence_score": 0.86},
+        "open_questions": open_questions,
+        "handoff_to_story": handoff_to_story,
+        "metadata": {
+            "collected_at": now,
+            "sources_used": ["S1", "S2", "S3"],
+            "confidence_score": 0.86,
+            "target_duration_seconds": int(duration_plan["target_seconds"]),
+            "duration_plan": duration_plan,
+        },
         "evaluation_contract": {"target_questions": ["主要筋を映像化できるか"], "must_cover": ["canonical_story_dump", "chronological_events", "source_passages", "conflicts"], "must_resolve_conflicts": ["C1"], "done_when": ["p200 が追加調査なしで scene/beat 候補を作れる"]},
     }
+
+
+def _story_scene_character_ids(
+    profile: dict[str, Any],
+    idx: int,
+    source_events: list[str],
+) -> list[str]:
+    """Carry research character responsibility into each authored story scene."""
+
+    research = profile.get("reviewed_research")
+    materials = research.get("story_materials") if isinstance(research, dict) else None
+    raw_events = materials.get("chronological_events") if isinstance(materials, dict) else None
+    character_ids: list[str] = []
+    for event in raw_events or []:
+        if not isinstance(event, dict) or str(event.get("event") or "").strip() not in source_events:
+            continue
+        character_ids.extend(
+            str(value).strip()
+            for value in event.get("involved_characters") or []
+            if str(value).strip()
+        )
+    if _profile_is_cinderella(profile) and _canonical_scene_index(profile, idx) == 7:
+        character_ids.append("prince")
+    return list(dict.fromkeys(character_ids)) or ["protagonist"]
 
 
 def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -> dict[str, Any]:
     scenes = []
     motif_text = "・".join(profile["motifs"])
     run_variant = profile.get("run_variant", {})
+    duration_plan = dict(profile.get("duration_plan") or build_duration_plan().to_dict())
+    scene_targets = [int(value) for value in profile.get("scene_target_durations") or []]
+    scene_count = len(profile["scene_titles"])
+    narration_base, narration_remainder = divmod(int(duration_plan["minimum_narration_seconds"]), scene_count)
     for idx, title in enumerate(profile["scene_titles"], start=1):
+        location_spec = _location_spec_for_scene(profile, idx)
+        blueprint = _scene_blueprint(
+            profile=profile,
+            idx=idx,
+            title=title,
+            location_name=str(location_spec["name"]),
+            include_artifact=_scene_uses_artifact(profile, idx),
+        )
+        source_events = [str(value) for value in blueprint.get("source_events") or []]
+        canonical_index = _canonical_scene_index(profile, idx)
+        segment_position, segment_count, segment_role = _scene_segment(profile, idx)
+        visible_evidence = [str(value) for value in blueprint.get("visible_evidence") or [] if str(value).strip()]
+        visualizable_action = (
+            f"{str(location_spec['name'])}で、{'、'.join(visible_evidence)}を具体的に配置し、"
+            f"{blueprint['causal_turn']}。{blueprint['handoff_anchor']}を次のsceneへ残す"
+        )
+        narration = (
+            f"{blueprint['dramatic_question']} "
+            f"{blueprint['causal_turn']}。{blueprint['payoff']}"
+        )
+        research_refs = list(blueprint.get("research_refs") or [])
+        event_ids = [
+            _research_ref_entry_id(ref, "story_materials.chronological_events")
+            for ref in research_refs
+            if _research_ref_entry_id(ref, "story_materials.chronological_events")
+        ]
         scenes.append(
             {
                 "scene_id": idx,
-                "phase": PHASES[idx - 1],
-                "purpose": f"{title}で主人公の状況と選択を映画的に進める",
-                "conflict": "家の支配、身分の壁、時間制限のいずれかが主人公の前進を妨げる",
-                "turn": f"{title}の終わりに次の場所へ進む理由が生まれる",
-                "affect": {"label_hint": "awe" if idx in {3, 5, 6} else "strain", "audience_job": "bond"},
-                "visualizable_action": f"{title}を、{motif_text}の実写ディテールで見せる",
+                "title": title,
+                "canonical_scene_index": canonical_index,
+                "segment": {"position": segment_position, "count": segment_count, "role": segment_role},
+                "phase": _phase_for_scene(profile, idx),
+                "location": {"location_id": location_spec["asset_id"], "name": location_spec["name"]},
+                "target_duration_seconds": scene_targets[idx - 1] if idx - 1 < len(scene_targets) else 40,
+                "narration_target_seconds": narration_base + (1 if idx <= narration_remainder else 0),
+                "purpose": blueprint["story_purpose"],
+                "conflict": blueprint["obstacle"],
+                "turn": blueprint["causal_turn"],
+                "causal_handoff": blueprint["handoff_anchor"],
+                "semantic_scene_responsibility_id": blueprint["semantic_scene_responsibility_id"],
+                "segment_beat_ids": list(blueprint["segment_beat_ids"]),
+                "segment_responsibility": blueprint["segment_responsibility"],
+                "story_event_ids": event_ids,
+                "story_event_obligations": [
+                    *[f"{event_id}: {event}" for event_id, event in zip(event_ids, source_events)],
+                    f"turn: {blueprint['causal_turn']}",
+                    f"handoff: {blueprint['handoff_anchor']}",
+                ],
+                "character_ids": _story_scene_character_ids(profile, idx, source_events),
+                "affect": {"label_hint": "awe" if canonical_index in {3, 5, 6} else "strain", "audience_job": "bond"},
+                "visualizable_action": visualizable_action,
                 "grounding_note": "topic/source の筋を基にし、会話と構図は映像化のための創作補完。",
-                "narration": f"{title}で、隠された名前が光へ近づく。",
-                "visual": f"実写映画調の{title}。画面内テキストなし。",
-                "research_refs": ["research.story_materials.chronological_events[E01]", "research.source_passages[P1]"],
+                "narration": narration,
+                "visual": f"実写映画調の{title}。{visualizable_action}。画面内テキストなし。",
+                "research_refs": research_refs,
                 "creative_inventions": ["感情を光と質感で圧縮する"],
             }
         )
     return {
-        "story_metadata": {"topic": topic, "source_research": str(run_dir / "research.md"), "created_at": now, "pattern_used": "hero", "run_variant": run_variant},
+        "story_metadata": {
+            "topic": topic,
+            "source_research": str(run_dir / "research.md"),
+            "created_at": now,
+            "pattern_used": "hero",
+            "run_variant": run_variant,
+            "target_duration_seconds": int(duration_plan["target_seconds"]),
+            "duration_plan": duration_plan,
+        },
         "subagent_trace": [{"subagent_id": "story-candidate-audit-001", "role": "story_candidate", "input_artifact": str(run_dir / "research.md"), "output_artifact": str(run_dir / "logs/eval/story_candidate_a.md"), "accepted_by_main": True, "reason": "主要筋と映像化価値が一致するため採用。"}],
         "outcome_contract": {"goal": "research.md を映画的な story.md に変換する", "success_criteria": ["各 scene が目的、葛藤、転換、感情、視覚行動、research refs を持つ"], "source_vs_creative_boundary": {"source_backed": ["筋", "人物関係", "象徴"], "creative_allowed": ["構図", "光", "台詞", "カメラ"], "ask_before": ["矛盾版の混成"]}},
         "selection": {"candidates": [{"candidate_id": "A", "logline": f"{profile['protagonist_name']}が、失われた名や価値を{profile['artifact_name']}で証明する。", "fact_basis_refs": ["research.engagement.hooks[H1]"], "creative_inventions": [{"element": "光が記憶のように主人公を導く", "purpose": "visual_symbol", "does_not_contradict_refs": True}], "why_it_scores": ["映像の連続性が強い"], "requires_hybridization_approval": False, "conflicts_referenced": ["research.conflicts[C1]"]}, {"candidate_id": "B", "logline": "公的な場を社会の仮面として見せる。", "fact_basis_refs": ["research.story_materials.chronological_events[E06]"], "creative_inventions": [], "why_it_scores": ["テーマ性が明快"], "requires_hybridization_approval": False, "conflicts_referenced": []}], "chosen_candidate_id": "A", "rationale": "象徴を視覚的に追いやすく、p500/p600 の参照資産化に向く。"},
@@ -3926,6 +4867,8 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
     scene_event_inputs: list[dict[str, Any]] = []
     scene_event_outputs: list[dict[str, Any]] = []
     scene_generation_prompts: list[dict[str, Any]] = []
+    duration_plan = dict(profile.get("duration_plan") or build_duration_plan().to_dict())
+    scene_targets = [int(value) for value in profile.get("scene_target_durations") or []]
     _write_cut_design_context(
         run_dir,
         now=now,
@@ -4188,7 +5131,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "scene_event": scene_event,
             "done_when": scene_intent["done_when"],
         }
-        scene_target_seconds = len(cut_plans) * 8
+        scene_target_seconds = scene_targets[idx - 1] if idx - 1 < len(scene_targets) else len(cut_plans) * 8
         scene_duration_seconds = len(cut_plans) * 12
         total_duration_seconds += scene_duration_seconds
         cuts: list[dict[str, Any]] = []
@@ -4796,9 +5739,9 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 previous_cut=manifest_cuts[cut_index - 1] if cut_index > 0 else None,
                 next_cut=manifest_cuts[cut_index + 1] if cut_index + 1 < len(manifest_cuts) else None,
             )
-        script_scenes.append({"scene_id": scene_id, "phase": PHASES[idx - 1], "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _scene_research_refs(idx, _scene_source_events(profile, idx)), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
+        script_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "phase": _phase_for_scene(profile, idx), "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "passed", "reason": "scene is concrete and production ready"}, "coverage_review": coverage_review, "cuts": cuts})
         scene_composite_review = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
-        manifest_scenes.append({"scene_id": scene_id, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _scene_research_refs(idx, _scene_source_events(profile, idx)), "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
+        manifest_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
         scene_event_outputs.append(
             {
                 "scene_id": scene_id,
@@ -4837,7 +5780,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
         )
     canonical_event_coverage_matrix = _canonical_event_coverage_matrix(profile)
     scene_generation_policy = _scene_generation_policy(profile)
-    script = {"schema_version": "scene_event_v1", "script_metadata": {"topic": topic, "target_duration": 300, "created_at": now, "run_variant": run_variant}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "scene_set_review": {"status": "approved", "summary": f"8 scenes / {len(selectors)} cutsで主要筋を展開する。"}, "scene_detail_review": {"status": "approved", "summary": "各sceneは独立した問いと視覚行動を持つ。"}, "cut_blueprint_review": {"status": "approved", "summary": "scene設計から逆算したcoverage planに基づき、必要cut数を可変で設計する。"}, "script_review": {"status": "approved", "summary": "台本は後続画像生成に渡せる。"}, "production_readiness_review": {"status": "approved", "summary": "target duration is covered now."}, "evaluation_contract": {"target_arc": "opening,development,ordeal,transformation,ending", "must_cover": [profile["protagonist_name"], profile["artifact_name"], "時間制限", profile["motifs"][0]], "must_avoid": ["未承認の結末改変", "原典筋にない身元証明の差し替え"], "reveal_constraints": []}, "human_change_requests": [], "scenes": script_scenes}
+    script = {"schema_version": "scene_event_v1", "script_metadata": {"topic": topic, "target_duration": int(duration_plan["target_seconds"]), "target_duration_seconds": int(duration_plan["target_seconds"]), "minimum_narration_seconds": int(duration_plan["minimum_narration_seconds"]), "duration_plan": duration_plan, "created_at": now, "run_variant": run_variant}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "scene_set_review": {"status": "approved", "summary": f"{len(script_scenes)} scenes / {len(selectors)} cutsで主要筋を展開する。"}, "scene_detail_review": {"status": "approved", "summary": "各sceneは独立した問いと視覚行動を持つ。"}, "cut_blueprint_review": {"status": "approved", "summary": "scene設計から逆算したcoverage planに基づき、必要cut数を可変で設計する。"}, "script_review": {"status": "approved", "summary": "台本は後続画像生成に渡せる。"}, "production_readiness_review": {"status": "approved", "summary": f"target {int(duration_plan['target_seconds'])} seconds; minimum effective duration {int(duration_plan['minimum_effective_seconds'])} seconds."}, "evaluation_contract": {"target_arc": "opening,development,ordeal,transformation,ending", "must_cover": [profile["protagonist_name"], profile["artifact_name"], "時間制限", profile["motifs"][0]], "must_avoid": ["未承認の結末改変", "原典筋にない身元証明の差し替え"], "reveal_constraints": []}, "human_change_requests": [], "scenes": script_scenes}
     character_bible = [
         {
             "character_id": protagonist_asset,
@@ -4879,7 +5822,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "cinematic": {"role": spec["story_purpose"], "visual_takeaways": [spec["name"]], "visual_subject": spec["visual_subject"]},
             }
         )
-    manifest = {"schema_version": "scene_event_v1", "manifest_phase": "production", "video_metadata": {"topic": topic, "source_story": str(run_dir / "story.md"), "created_at": now, "run_variant": run_variant, "experience": "cinematic_story", "aspect_ratio": "16:9", "resolution": "1280x720", "frame_rate": 24, "target_duration_seconds": 300, "duration_seconds": total_duration_seconds}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "assets": {"character_bible": character_bible, "object_bible": object_bible, "location_bible": [{"location_id": spec["asset_id"], "reference_images": [spec["output"]], "fixed_prompts": [str((spec.get("visual_spec") or {}).get("subject") or f"{spec['name']}、実写映画の場所参照、同じ光と質感を維持")], "cinematic": {"role": spec["story_purpose"], "visual_subject": str((spec.get("visual_spec") or {}).get("subject") or "")}} for spec in _location_asset_specs(profile)], "style_guide": {"visual_style": "実写、シネマティック、プラクティカルエフェクト。画面内テキストなし。", "forbidden": ["アニメ調", "漫画調", "イラスト調", "画面内テキスト", "字幕", "ウォーターマーク", "ロゴ"], "reference_images": []}}, "human_change_requests": [], "scenes": manifest_scenes}
+    manifest = {"schema_version": "scene_event_v1", "manifest_phase": "production", "video_metadata": {"topic": topic, "source_story": str(run_dir / "story.md"), "created_at": now, "run_variant": run_variant, "experience": "cinematic_story", "aspect_ratio": "16:9", "resolution": "1280x720", "frame_rate": 24, "target_duration_seconds": int(duration_plan["target_seconds"]), "minimum_duration_seconds": int(duration_plan["minimum_effective_seconds"]), "minimum_scene_count": int(duration_plan["minimum_scene_count"]), "minimum_cut_count": int(duration_plan["minimum_cut_count"]), "minimum_narration_seconds": int(duration_plan["minimum_narration_seconds"]), "duration_plan": duration_plan, "duration_seconds": total_duration_seconds}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "assets": {"character_bible": character_bible, "object_bible": object_bible, "location_bible": [{"location_id": spec["asset_id"], "reference_images": [spec["output"]], "fixed_prompts": [str((spec.get("visual_spec") or {}).get("subject") or f"{spec['name']}、実写映画の場所参照、同じ光と質感を維持")], "cinematic": {"role": spec["story_purpose"], "visual_subject": str((spec.get("visual_spec") or {}).get("subject") or "")}} for spec in _location_asset_specs(profile)], "style_guide": {"visual_style": "実写、シネマティック、プラクティカルエフェクト。画面内テキストなし。", "forbidden": ["アニメ調", "漫画調", "イラスト調", "画面内テキスト", "字幕", "ウォーターマーク", "ロゴ"], "reference_images": []}}, "human_change_requests": [], "scenes": manifest_scenes}
     _write_scene_design_json(
         run_dir,
         "scene_event_input.json",
@@ -5208,7 +6151,13 @@ def _write_review_artifacts(run_dir: Path) -> None:
     append_state_snapshot(run_dir / "state.txt", state_updates)
 
 
-def _write_orchestration(run_dir: Path, stop_target: str, now: str) -> dict[str, str]:
+def _write_orchestration(
+    run_dir: Path,
+    stop_target: str,
+    now: str,
+    *,
+    foundation_reviews_passed: bool = False,
+) -> dict[str, str]:
     buckets = ("p100", "p200", "p300", "p400", "p500", "p600")
     bucket_slots = {
         "p100": ("p110", "p120", "p130"),
@@ -5239,7 +6188,12 @@ def _write_orchestration(run_dir: Path, stop_target: str, now: str) -> dict[str,
         state_updates[f"{key}.status"] = "done"
         state_updates[f"{key}.finished_at"] = now
         status_key = f"slot.{bucket_slots[bucket][-1]}.status"
-        expected_status = "done" if bucket == "p500" and stop_target == "p680" else ("awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done")
+        if foundation_reviews_passed and bucket in {"p100", "p200"}:
+            expected_status = "done"
+        elif bucket == "p500" and stop_target == "p680":
+            expected_status = "done"
+        else:
+            expected_status = "awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done"
         result = {
             "bucket": bucket,
             "status": "done",
@@ -5350,17 +6304,172 @@ def _build_asset_artifacts_from_manifest(
     return inventory, plan
 
 
-def materialize_run(topic: str, source: str, run_dir: Path, stop_target: str) -> None:
-    profile = _story_profile(topic, source, variant_seed=run_dir.name)
+def _review_foundation_stage(
+    *,
+    run_dir: Path,
+    stage: str,
+    review_runner: Callable[[Path, str], None] | None,
+) -> None:
+    if review_runner is None:
+        return
+    slot = "p130" if stage == "research" else "p230"
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "runtime.stage": f"{stage}_semantic_review",
+            f"review.{stage}.status": "reviewing",
+            f"slot.{slot}.status": "in_progress",
+            f"slot.{slot}.note": f"{stage} semantic review/repair in progress",
+        },
+    )
+    try:
+        review_runner(run_dir, stage)
+        result = check_semantic_review(run_dir, stage)
+        if not result.passed:
+            raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
+    except Exception as exc:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "timestamp": _now_iso(),
+                "runtime.stage": "foundation_semantic_review_failed",
+                "runtime.foundation_semantic_review.failed_stage": stage,
+                f"review.{stage}.status": "changes_requested",
+                f"slot.{slot}.status": "failed",
+                f"slot.{slot}.note": f"{stage} semantic review/repair failed; downstream generation blocked",
+                "last_error": str(exc)[:2000],
+            },
+        )
+        raise
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "runtime.stage": f"{stage}_semantic_review_passed",
+            f"review.{stage}.status": "approved",
+            f"slot.{slot}.status": "done",
+            f"slot.{slot}.note": f"{stage} semantic review/repair passed",
+        },
+    )
+
+
+def materialize_run(
+    topic: str,
+    source: str,
+    run_dir: Path,
+    stop_target: str,
+    target_duration_seconds: int = 300,
+    foundation_review_runner: Callable[[Path, str], None] | None = None,
+) -> None:
+    profile = _duration_aware_profile(
+        _story_profile(topic, source, variant_seed=run_dir.name),
+        target_duration_seconds=target_duration_seconds,
+    )
+    duration_plan = dict(profile["duration_plan"])
     run_dir.mkdir(parents=True, exist_ok=True)
     for rel in ("assets/characters", "assets/objects", "assets/locations", "assets/scenes", "assets/audio", "logs/grounding"):
         (run_dir / rel).mkdir(parents=True, exist_ok=True)
     now = _now_iso()
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": now,
+            "topic": topic,
+            "runtime.stage": "research_authoring",
+            "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
+            "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
+            "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
+            "runtime.duration_plan.minimum_cut_count": str(duration_plan["minimum_cut_count"]),
+            "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
+            "runtime.foundation_semantic_review": "required" if foundation_review_runner else "not_run_direct_materialization",
+            "review.policy.story": "required",
+            "gate.research_review": "required",
+            "gate.story_review": "required",
+            "review.research.status": "pending",
+            "review.story.status": "pending",
+            "slot.p130.status": "pending",
+            "slot.p230.status": "pending",
+            "slot.p420.status": "pending",
+        },
+    )
     (run_dir / "research.md").write_text(_md_yaml(f"リサーチ（{profile['topic_label']}）", _build_research(topic, source, now, profile)), encoding="utf-8")
+    _review_foundation_stage(
+        run_dir=run_dir,
+        stage="research",
+        review_runner=foundation_review_runner,
+    )
+    _research_text, reviewed_research = load_structured_document(run_dir / "research.md")
+    if not reviewed_research:
+        raise RuntimeError("reviewed research.md is not a structured document")
+    try:
+        _validate_reviewed_research_duration_contract(
+            reviewed_research,
+            target_duration_seconds=target_duration_seconds,
+        )
+    except RuntimeError as exc:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "timestamp": _now_iso(),
+                "runtime.stage": "reviewed_research_duration_contract_failed",
+                "review.research.status": "changes_requested",
+                "review.research.duration_contract.status": "failed",
+                "slot.p130.status": "failed",
+                "slot.p130.note": "reviewed research changed the requested duration plan; story/cut materialization blocked",
+                "last_error": str(exc)[:2000],
+            },
+        )
+        raise
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "review.research.duration_contract.status": "passed",
+        },
+    )
+    profile = _profile_from_reviewed_research(profile, reviewed_research)
     (run_dir / "story.md").write_text(_md_yaml(f"物語設計（{profile['topic_label']}）", _build_story(topic, run_dir, now, profile)), encoding="utf-8")
+    _review_foundation_stage(
+        run_dir=run_dir,
+        stage="story",
+        review_runner=foundation_review_runner,
+    )
+    _story_text, reviewed_story = load_structured_document(run_dir / "story.md")
+    if not reviewed_story:
+        raise RuntimeError("reviewed story.md is not a structured document")
+    try:
+        _validate_reviewed_story_duration_contract(
+            reviewed_story,
+            target_duration_seconds=target_duration_seconds,
+        )
+    except RuntimeError as exc:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "timestamp": _now_iso(),
+                "runtime.stage": "reviewed_story_duration_contract_failed",
+                "review.story.status": "changes_requested",
+                "review.story.duration_contract.status": "failed",
+                "slot.p230.status": "failed",
+                "slot.p230.note": "reviewed story violates duration floors; cut materialization blocked",
+                "last_error": str(exc)[:2000],
+            },
+        )
+        raise
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "review.story.duration_contract.status": "passed",
+        },
+    )
+    if foundation_review_runner is not None:
+        profile = _profile_from_reviewed_story(profile, reviewed_story)
     protagonist_asset = profile["protagonist_asset_id"]
     artifact_asset = profile["artifact_asset_id"]
     visual = {
+        "duration_plan": duration_plan,
         "global_visual_identity": {"format": "実写シネマティック", "palette": ["深い生活影", "月白", "金色", "象徴物の反射"], "no_onscreen_text": "画面内テキスト、字幕、ロゴ、ウォーターマークなし"},
         "scene_visual_values": [{"scene_selector": idx, "value": f"{title}の感情を、{'・'.join(profile['motifs'])}の触感で伝える", "anchor": title} for idx, title in enumerate(profile["scene_titles"], start=1)],
         "asset_bible_candidates": {"characters": [protagonist_asset, *[str(spec["character_id"]) for spec in _supporting_character_asset_specs(profile)]], "objects": [artifact_asset, *[str(spec["object_id"]) for spec in _supporting_object_asset_specs(profile)]], "locations": [spec["asset_id"] for spec in _location_asset_specs(profile)], "setpieces": [profile["artifact_name"], *[str(spec["name"]) for spec in _supporting_object_asset_specs(profile)]], "reusable_stills": ["時間制限を示す象徴的な光"]},
@@ -5390,11 +6499,25 @@ def materialize_run(topic: str, source: str, run_dir: Path, stop_target: str) ->
     _write_asset_request_files(run_dir, asset_plan, profile)
     _write_review_artifacts(run_dir)
     _materialize_standard_request_files(run_dir)
-    state_updates = _write_orchestration(run_dir, stop_target, now)
+    state_updates = _write_orchestration(
+        run_dir,
+        stop_target,
+        now,
+        foundation_reviews_passed=foundation_review_runner is not None,
+    )
     slots = P650_SLOTS if stop_target == "p680" else P650_SLOTS
     for slot in slots:
         state_updates[f"slot.{slot}.status"] = "awaiting_approval" if slot in AWAITING_ALLOWED else "done"
         state_updates[f"slot.{slot}.note"] = "frontend handoff" if slot in AWAITING_ALLOWED else "completed by frontend-review workflow"
+    if foundation_review_runner is not None:
+        state_updates.update(
+            {
+                "slot.p130.status": "done",
+                "slot.p130.note": "research semantic review/repair passed",
+                "slot.p230.status": "done",
+                "slot.p230.note": "story semantic review/repair passed",
+            }
+        )
     if stop_target == "p680":
         state_updates["slot.p660.status"] = "in_progress"
         state_updates["slot.p660.note"] = "scene images are still generating"
@@ -5408,22 +6531,29 @@ def materialize_run(topic: str, source: str, run_dir: Path, stop_target: str) ->
             "topic": topic,
             "runtime.run_variant.seed": str((profile.get("run_variant") or {}).get("seed") or ""),
             "runtime.run_variant.label": str((profile.get("run_variant") or {}).get("label") or ""),
+            "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
+            "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
+            "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
+            "runtime.duration_plan.minimum_cut_count": str(duration_plan["minimum_cut_count"]),
+            "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
             "status": "P650",
             "runtime.stage": "scene_images_generating" if stop_target == "p680" else "asset_and_scene_requests_ready",
             "runtime.stage_target": "p600",
             "runtime.stop_slot": stop_target,
             "runtime.scaffold.content_status": "authored",
             "runtime.review_policy": "frontend",
-            "review.policy.story": "optional",
+            "review.policy.story": "required",
             "review.policy.image": "required",
             "review.policy.narration": "optional",
-            "gate.story_review": "optional",
+            "gate.research_review": "required",
+            "gate.story_review": "required",
             "gate.narration_review": "optional",
             "immersive.experience": "cinematic_story",
-            "review.story.status": "approved",
+            "review.research.status": "approved" if foundation_review_runner is not None else "pending",
+            "review.story.status": "approved" if foundation_review_runner is not None else "pending",
             "review.script.status": "approved",
-            "stage.research.status": "awaiting_approval",
-            "stage.story.status": "awaiting_approval",
+            "stage.research.status": "reviewed" if foundation_review_runner is not None else "awaiting_approval",
+            "stage.story.status": "reviewed" if foundation_review_runner is not None else "awaiting_approval",
             "stage.visual_value.status": "awaiting_approval",
             "stage.script.status": "awaiting_approval",
             "stage.asset.status": "awaiting_approval",
@@ -5501,14 +6631,32 @@ def main() -> None:
     parser.add_argument("--source", default="")
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--stop-target", choices=["p650", "p680"], default="p680")
+    parser.add_argument(
+        "--target-duration-seconds",
+        type=int,
+        default=300,
+        help="Target video duration in seconds (300-1200).",
+    )
     parser.add_argument("--materialize-only", action="store_true", help="Write text artifacts only; do not generate images or validate media.")
     parser.add_argument("--skip-validation", action="store_true")
     args = parser.parse_args()
 
+    try:
+        target_duration_seconds = normalize_target_duration(args.target_duration_seconds)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     run_dir = Path(args.run_dir)
     source = args.source.strip() or args.topic
     materialize_stop_target = "p650" if args.materialize_only and args.stop_target == "p680" else args.stop_target
-    materialize_run(args.topic, source, run_dir, materialize_stop_target)
+    materialize_run(
+        args.topic,
+        source,
+        run_dir,
+        materialize_stop_target,
+        target_duration_seconds=target_duration_seconds,
+        foundation_review_runner=_run_foundation_semantic_review,
+    )
     prepare_grounding(run_dir)
     if not args.materialize_only:
         asyncio.run(generate_images(run_dir, args.stop_target))

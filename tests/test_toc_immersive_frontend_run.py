@@ -7,8 +7,11 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import yaml
+
+from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,707 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
+    @staticmethod
+    def _write_passing_foundation_review(run_dir: Path, stage: str) -> None:
+        review_dir = run_dir / "logs" / "review" / "semantic"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        entry_id = f"{stage}:foundation"
+        (review_dir / f"{stage}.collection.md").write_text(f"# Collection\n\n## {entry_id}\n", encoding="utf-8")
+        (review_dir / f"{stage}.scope.json").write_text(
+            json.dumps(
+                {
+                    "entry_count": 1,
+                    "entry_ids": [entry_id],
+                    "source_artifacts": ["research.md"] if stage == "research" else ["research.md", "story.md"],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (review_dir / f"{stage}.prompt.md").write_text("review prompt\n", encoding="utf-8")
+        criteria_results = [
+            {
+                "criterion_id": criterion_id,
+                "status": "passed",
+                "evidence": f"{stage}.md:{criterion_id}",
+            }
+            for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]
+        ]
+        (review_dir / f"{stage}.report.md").write_text(
+            "\n".join(
+                [
+                    "status: passed",
+                    f"reviewed_entries: [{entry_id}]",
+                    "blocked_entries: []",
+                    "failed_selectors: []",
+                    "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False),
+                    "findings: []",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    def test_research_semantic_failure_stops_before_story_and_cut_generation(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_foundation_research_fail_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
+
+            def fail_research(_run_dir: Path, stage: str) -> None:
+                self.assertEqual(stage, "research")
+                raise RuntimeError("research semantic review failed")
+
+            with patch.object(module, "_build_script_and_manifest", cut_builder):
+                with self.assertRaisesRegex(RuntimeError, "research semantic review failed"):
+                    module.materialize_run(
+                        "桃太郎",
+                        "桃太郎",
+                        run_dir,
+                        "p650",
+                        target_duration_seconds=900,
+                        foundation_review_runner=fail_research,
+                    )
+
+            self.assertTrue((run_dir / "research.md").exists())
+            self.assertFalse((run_dir / "story.md").exists())
+            self.assertFalse((run_dir / "script.md").exists())
+            self.assertFalse((run_dir / "video_manifest.md").exists())
+            self.assertFalse((run_dir / "logs" / "scene_design" / "scene_event_input.json").exists())
+            cut_builder.assert_not_called()
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.target_video_seconds"], "900")
+            self.assertEqual(state["runtime.duration_plan.minimum_scene_count"], "23")
+            self.assertEqual(state["runtime.duration_plan.minimum_cut_count"], "75")
+            self.assertEqual(state["runtime.duration_plan.minimum_narration_seconds"], "630")
+
+    def test_story_semantic_transport_failure_stops_before_cut_generation(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_foundation_story_transport_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
+            reviewed: list[str] = []
+
+            def review_foundation(target_run_dir: Path, stage: str) -> None:
+                reviewed.append(stage)
+                if stage == "story":
+                    raise RuntimeError("Codex app-server transport failed")
+                self._write_passing_foundation_review(target_run_dir, stage)
+
+            with patch.object(module, "_build_script_and_manifest", cut_builder):
+                with self.assertRaisesRegex(RuntimeError, "transport failed"):
+                    module.materialize_run(
+                        "桃太郎",
+                        "桃太郎",
+                        run_dir,
+                        "p650",
+                        foundation_review_runner=review_foundation,
+                    )
+
+            self.assertEqual(reviewed, ["research", "story"])
+            self.assertTrue((run_dir / "research.md").exists())
+            self.assertTrue((run_dir / "story.md").exists())
+            self.assertFalse((run_dir / "script.md").exists())
+            self.assertFalse((run_dir / "video_manifest.md").exists())
+            self.assertFalse((run_dir / "logs" / "scene_design" / "scene_event_input.json").exists())
+            cut_builder.assert_not_called()
+
+    def test_cli_main_always_enables_foundation_semantic_reviews(self) -> None:
+        module = load_frontend_run_module()
+        calls: list[dict[str, object]] = []
+
+        def fake_materialize(*args, **kwargs) -> None:
+            calls.append({"args": args, "kwargs": kwargs})
+
+        with (
+            patch.object(module, "materialize_run", fake_materialize),
+            patch.object(module, "prepare_grounding", Mock()),
+            patch.object(module, "write_run_index", Mock()),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-immersive-frontend-run.py",
+                    "--topic",
+                    "桃太郎",
+                    "--run-dir",
+                    "output/test_foundation_cli",
+                    "--materialize-only",
+                    "--skip-validation",
+                ],
+            ),
+        ):
+            module.main()
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["kwargs"]["foundation_review_runner"], module._run_foundation_semantic_review)
+
+    def test_orchestration_results_match_completed_foundation_review_slots(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory(prefix="frontend_orchestration_foundations_") as tmp:
+            run_dir = Path(tmp)
+            module._write_orchestration(
+                run_dir,
+                "p680",
+                "2099-01-01T00:00:00+09:00",
+                foundation_reviews_passed=True,
+            )
+            p100 = json.loads(
+                (run_dir / "logs" / "orchestration" / "p100.supervisor_result.json").read_text(encoding="utf-8")
+            )
+            p200 = json.loads(
+                (run_dir / "logs" / "orchestration" / "p200.supervisor_result.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(p100["state_keys"]["slot.p130.status"], "done")
+        self.assertEqual(p200["state_keys"]["slot.p230.status"], "done")
+
+    def test_reviewed_foundations_feed_story_and_cut_builders(self) -> None:
+        module = load_frontend_run_module()
+        base_profile = module._duration_aware_profile(
+            module._story_profile("桃太郎", "桃太郎", variant_seed="reviewed-foundation"),
+            target_duration_seconds=300,
+        )
+        reviewed_event = "審査で確定した出来事が、主人公を橋の向こうへ進ませる。"
+        reviewed_research = {
+            "story_materials": {
+                "canonical_story_dump": "審査済みの内部物語基準。",
+                "chronological_events": [{"event_id": "E99", "event": reviewed_event}],
+                "characters": [{"character_id": "protagonist", "name": "審査済み主人公", "role": "主人公"}],
+            },
+            "source_passages": [{"passage_id": "P99", "passage": reviewed_event}],
+        }
+
+        research_profile = module._profile_from_reviewed_research(base_profile, reviewed_research)
+        story = module._build_story("桃太郎", Path("output/reviewed-foundation"), "2026-07-11T00:00:00+09:00", research_profile)
+
+        self.assertEqual(research_profile["events"], [reviewed_event])
+        self.assertIn(reviewed_event, story["script"]["scenes"][0]["purpose"])
+        self.assertIn("research.story_materials.chronological_events[E99]", story["script"]["scenes"][0]["research_refs"])
+        self.assertIn("research.source_passages[P99]", story["script"]["scenes"][0]["research_refs"])
+
+        reviewed_turn = "審査で修正された不可逆な転換を画面上の事実にする。"
+        story["script"]["scenes"][0]["purpose"] = "審査で修正されたscene目的"
+        story["script"]["scenes"][0]["turn"] = reviewed_turn
+        cut_profile = module._profile_from_reviewed_story(research_profile, story)
+        location = module._location_spec_for_scene(cut_profile, 1)
+        scene_intent = module._scene_intent_for_cut_design(
+            title=cut_profile["scene_titles"][0],
+            idx=1,
+            location_spec=location,
+            profile=cut_profile,
+            include_artifact=False,
+        )
+        scene_event = module._scene_event_for_cut_design(
+            title=cut_profile["scene_titles"][0],
+            idx=1,
+            scene_intent=scene_intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=cut_profile,
+            include_artifact=False,
+        )
+
+        self.assertEqual(scene_intent["story_purpose"], "審査で修正されたscene目的")
+        self.assertEqual(scene_intent["causal_turn"], reviewed_turn)
+        turn_beat = next(item for item in scene_event["event_sequence"] if item["beat_function"] == "turn")
+        self.assertEqual(turn_beat["what_happens"], reviewed_turn)
+
+    def test_cinderella_research_is_causally_complete_and_yaml_round_trippable(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="research-sufficiency"),
+            target_duration_seconds=300,
+        )
+        research = module._build_research(
+            "シンデレラ",
+            "シンデレラ",
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+
+        character_ids = {
+            item["character_id"]
+            for item in research["story_materials"]["characters"]
+        }
+        self.assertTrue(
+            {"protagonist", "stepmother", "stepsisters", "helper", "prince", "royal_envoy"}.issubset(character_ids)
+        )
+        conflict = research["conflicts"][0]
+        self.assertEqual(conflict["selection_notes"]["selected_choice"], "A")
+        self.assertEqual(conflict["selection_notes"]["resolution_status"], "resolved")
+        self.assertEqual(research["open_questions"], [])
+        events_by_id = {
+            item["event_id"]: item["event"]
+            for item in research["story_materials"]["chronological_events"]
+        }
+        self.assertIn("助力者", events_by_id["E04"])
+        self.assertIn("門を越えて", events_by_id["E05"])
+        shoe_symbol = next(
+            item
+            for item in research["story_materials"]["symbols_and_themes"]
+            if item["item_id"] == "SYM2"
+        )
+        self.assertEqual(shoe_symbol["evidence_refs"], ["P4"])
+        passages_by_id = {item["passage_id"]: item["passage"] for item in research["source_passages"]}
+        self.assertIn("ガラスの靴", passages_by_id["P4"])
+        self.assertGreaterEqual(len(research["handoff_to_story"]["character_event_contract"]), 6)
+        self.assertGreaterEqual(len(research["handoff_to_story"]["resolved_causal_chain"]), 5)
+
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="research_roundtrip_", dir=output_root) as tmp:
+            path = Path(tmp) / "research.md"
+            path.write_text(module._md_yaml("Research", research), encoding="utf-8")
+            _text, reloaded = module.load_structured_document(path)
+
+        self.assertEqual(reloaded["metadata"]["target_duration_seconds"], 300)
+        self.assertEqual(reloaded["conflicts"][0]["selection_notes"]["resolution_status"], "resolved")
+
+    def test_cinderella_story_allocates_all_research_events_in_causal_order(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="story-allocation"),
+            target_duration_seconds=300,
+        )
+        research = module._build_research(
+            "シンデレラ",
+            "シンデレラ",
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        profile = module._profile_from_reviewed_research(profile, research)
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/story-allocation"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+
+        event_ids = [
+            ref.rsplit("[", 1)[1][:-1]
+            for scene in story["script"]["scenes"]
+            for ref in scene["research_refs"]
+            if ref.startswith("research.story_materials.chronological_events[")
+        ]
+
+        self.assertEqual(event_ids, [f"E{index:02d}" for index in range(1, 11)])
+
+    def test_cinderella_story_has_scene_specific_causal_and_visual_contracts(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="story-semantic-readiness"),
+            target_duration_seconds=300,
+        )
+        research = module._build_research(
+            "シンデレラ",
+            "シンデレラ",
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        profile = module._profile_from_reviewed_research(profile, research)
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/story-semantic-readiness"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        scenes = story["script"]["scenes"]
+
+        expected_passage_ids = [
+            ["P1"],
+            ["P2", "P3"],
+            ["P4"],
+            ["P5"],
+            [],
+            [],
+            [],
+            [],
+        ]
+        actual_passage_ids = [
+            [
+                ref.rsplit("[", 1)[1][:-1]
+                for ref in scene["research_refs"]
+                if ref.startswith("research.source_passages[")
+            ]
+            for scene in scenes
+        ]
+        self.assertEqual(actual_passage_ids, expected_passage_ids)
+
+        self.assertEqual(len({scene["purpose"] for scene in scenes}), 8)
+        self.assertEqual(len({scene["conflict"] for scene in scenes}), 8)
+        self.assertEqual(len({scene["turn"] for scene in scenes}), 8)
+        self.assertEqual(len({scene["visualizable_action"] for scene in scenes}), 8)
+        self.assertEqual(len({scene["narration"] for scene in scenes}), 8)
+        self.assertTrue(all(scene["character_ids"] for scene in scenes))
+        self.assertTrue(all(scene["story_event_obligations"] for scene in scenes))
+
+        self.assertIn("主人公自身", scenes[3]["purpose"])
+        self.assertIn("門", scenes[3]["visualizable_action"])
+        self.assertIn("裏口", scenes[1]["causal_handoff"])
+        self.assertIn("月明かりの庭", scenes[1]["causal_handoff"])
+        self.assertIn("王子", scenes[6]["turn"])
+        self.assertIn("探索", scenes[6]["causal_handoff"])
+        self.assertNotIn("探索を命じる", scenes[6]["segment_responsibility"])
+        self.assertIn("探索を命じ", scenes[7]["segment_responsibility"])
+        self.assertIn("王宮の使者", scenes[7]["visualizable_action"])
+        self.assertIn("試着", scenes[7]["visualizable_action"])
+        self.assertIn("公に", scenes[7]["turn"])
+
+    def test_twenty_minute_cinderella_scenes_have_distinct_segment_responsibilities(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="story-longform-readiness"),
+            target_duration_seconds=1200,
+        )
+        research = module._build_research(
+            "シンデレラ",
+            "シンデレラ",
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        profile = module._profile_from_reviewed_research(profile, research)
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/story-longform-readiness"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        scenes = story["script"]["scenes"]
+
+        self.assertEqual(len(scenes), 30)
+        self.assertEqual(len({scene["semantic_scene_responsibility_id"] for scene in scenes}), 30)
+        self.assertEqual(len({scene["segment_responsibility"] for scene in scenes}), 30)
+        self.assertTrue(all(scene["segment_beat_ids"] for scene in scenes))
+        self.assertFalse(any("不可逆な一歩" in scene["turn"] for scene in scenes))
+
+        for canonical_index in range(1, 9):
+            group = [scene for scene in scenes if scene["canonical_scene_index"] == canonical_index]
+            self.assertEqual(len({scene["segment_responsibility"] for scene in group}), len(group))
+            self.assertEqual(len({scene["turn"] for scene in group}), len(group))
+
+        departure_group = [scene for scene in scenes if scene["canonical_scene_index"] == 4]
+        self.assertIn("馬車の扉", departure_group[0]["segment_responsibility"])
+        self.assertIn("門を越える", departure_group[-1]["segment_responsibility"])
+        proof_group = [scene for scene in scenes if scene["canonical_scene_index"] == 8]
+        self.assertIn("王宮の使者", proof_group[0]["segment_responsibility"])
+        self.assertIn("公に確認", proof_group[-1]["segment_responsibility"])
+
+    def test_reviewed_story_research_refs_drive_downstream_source_grounding(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_reviewed_refs_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            profile = module._duration_aware_profile(
+                module._story_profile("シンデレラ", "シンデレラ", variant_seed="reviewed-refs"),
+                target_duration_seconds=300,
+            )
+            now = "2099-01-01T00:00:00+09:00"
+            research = module._build_research("シンデレラ", "シンデレラ", now, profile)
+            profile = module._profile_from_reviewed_research(profile, research)
+            story = module._build_story("シンデレラ", run_dir, now, profile)
+            reviewed_ref = "research.story_materials.chronological_events[E10]"
+            reviewed_event = research["story_materials"]["chronological_events"][-1]["event"]
+            story["script"]["scenes"][0]["title"] = "審査済みの中立タイトル"
+            story["script"]["scenes"][0]["research_refs"] = [reviewed_ref]
+            profile = module._profile_from_reviewed_story(profile, story)
+            (run_dir / "research.md").write_text(module._md_yaml("Research", research), encoding="utf-8")
+            (run_dir / "story.md").write_text(module._md_yaml("Story", story), encoding="utf-8")
+
+            script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                run_dir,
+                now,
+                profile,
+            )
+
+        for downstream_scene in (script["scenes"][0], manifest["scenes"][0]):
+            self.assertEqual(downstream_scene["research_refs"], [reviewed_ref])
+            scene_event = downstream_scene["scene_event"]
+            self.assertEqual(scene_event["research_refs"], [reviewed_ref])
+            self.assertTrue(
+                all(beat["story_grounding"]["research_refs"] == [reviewed_ref] for beat in scene_event["event_sequence"])
+            )
+            setup_grounding = scene_event["event_sequence"][0]["story_grounding"]
+            self.assertEqual(setup_grounding["research_refs"], [reviewed_ref])
+            self.assertEqual(setup_grounding["source_text_or_summary"], reviewed_event)
+
+            for cut in downstream_scene["cuts"]:
+                source_grounding = cut["cut_contract"]["source_event_contract"]["source_story_grounding"]
+                self.assertTrue(source_grounding)
+                self.assertTrue(
+                    all(item["research_refs"] == [reviewed_ref] for item in source_grounding)
+                )
+
+    def test_reviewed_story_conflict_ref_does_not_fall_back_to_heuristic_event(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="reviewed-conflict-ref"),
+            target_duration_seconds=300,
+        )
+        now = "2099-01-01T00:00:00+09:00"
+        research = module._build_research("シンデレラ", "シンデレラ", now, profile)
+        profile = module._profile_from_reviewed_research(profile, research)
+        story = module._build_story("シンデレラ", Path("output/reviewed-conflict-ref"), now, profile)
+        reviewed_ref = "research.conflicts[C1]"
+        conflict = research["conflicts"][0]
+        expected_source = " / ".join(
+            [
+                conflict["topic"],
+                conflict["accounts"][0]["claim"],
+                conflict["impact_on_story"],
+            ]
+        )
+        story["script"]["scenes"][0]["title"] = "審査済みの中立タイトル"
+        story["script"]["scenes"][0]["research_refs"] = [reviewed_ref]
+        profile = module._profile_from_reviewed_story(profile, story)
+
+        self.assertEqual(module._scene_source_events(profile, 1), [expected_source])
+
+        location = module._location_spec_for_scene(profile, 1)
+        scene_intent = module._scene_intent_for_cut_design(
+            title=profile["scene_titles"][0],
+            idx=1,
+            location_spec=location,
+            profile=profile,
+            include_artifact=False,
+        )
+        scene_event = module._scene_event_for_cut_design(
+            title=profile["scene_titles"][0],
+            idx=1,
+            scene_intent=scene_intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=profile,
+            include_artifact=False,
+        )
+
+        self.assertEqual(scene_event["research_refs"], [reviewed_ref])
+        self.assertEqual(
+            scene_event["event_sequence"][0]["story_grounding"]["source_text_or_summary"],
+            expected_source,
+        )
+
+    def test_reviewed_story_duration_shrink_stops_before_cut_materialization(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_reviewed_duration_shrink_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
+
+            def review_and_shrink_story(target_run_dir: Path, stage: str) -> None:
+                if stage == "story":
+                    _text, story = module.load_structured_document(target_run_dir / "story.md")
+                    story["script"]["scenes"] = story["script"]["scenes"][:1]
+                    (target_run_dir / "story.md").write_text(
+                        module._md_yaml("Story", story),
+                        encoding="utf-8",
+                    )
+                self._write_passing_foundation_review(target_run_dir, stage)
+
+            with patch.object(module, "_build_script_and_manifest", cut_builder):
+                with self.assertRaisesRegex(RuntimeError, "reviewed story duration contract failed before cut materialization"):
+                    module.materialize_run(
+                        "シンデレラ",
+                        "シンデレラ",
+                        run_dir,
+                        "p650",
+                        target_duration_seconds=1200,
+                        foundation_review_runner=review_and_shrink_story,
+                    )
+
+            cut_builder.assert_not_called()
+            self.assertFalse((run_dir / "script.md").exists())
+            self.assertFalse((run_dir / "video_manifest.md").exists())
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.stage"], "reviewed_story_duration_contract_failed")
+            self.assertEqual(state["slot.p230.status"], "failed")
+
+    def test_reviewed_research_duration_change_stops_before_story_and_cuts(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_reviewed_research_duration_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            story_builder = Mock(side_effect=AssertionError("story builder must not run"))
+            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
+
+            def review_and_change_research(target_run_dir: Path, stage: str) -> None:
+                self.assertEqual(stage, "research")
+                _text, research = module.load_structured_document(target_run_dir / "research.md")
+                research["metadata"]["target_duration_seconds"] = 300
+                research["metadata"]["duration_plan"]["target_seconds"] = 300
+                (target_run_dir / "research.md").write_text(
+                    module._md_yaml("Research", research),
+                    encoding="utf-8",
+                )
+                self._write_passing_foundation_review(target_run_dir, stage)
+
+            with (
+                patch.object(module, "_build_story", story_builder),
+                patch.object(module, "_build_script_and_manifest", cut_builder),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "reviewed research duration contract failed"):
+                    module.materialize_run(
+                        "シンデレラ",
+                        "シンデレラ",
+                        run_dir,
+                        "p650",
+                        target_duration_seconds=1200,
+                        foundation_review_runner=review_and_change_research,
+                    )
+
+            story_builder.assert_not_called()
+            cut_builder.assert_not_called()
+            self.assertFalse((run_dir / "story.md").exists())
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.stage"], "reviewed_research_duration_contract_failed")
+            self.assertEqual(state["slot.p130.status"], "failed")
+
+    def test_reviewed_research_duration_contract_requires_requested_plan(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="reviewed-research-target"),
+            target_duration_seconds=300,
+        )
+        research = module._build_research(
+            "シンデレラ",
+            "シンデレラ",
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        research["metadata"]["duration_plan"].pop("minimum_cut_count")
+
+        with self.assertRaisesRegex(RuntimeError, "metadata.duration_plan.minimum_cut_count"):
+            module._validate_reviewed_research_duration_contract(
+                research,
+                target_duration_seconds=300,
+            )
+
+    def test_reviewed_story_duration_contract_requires_explicit_requested_target(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="reviewed-target"),
+            target_duration_seconds=300,
+        )
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/reviewed-target"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        story["story_metadata"].pop("target_duration_seconds")
+
+        with self.assertRaisesRegex(RuntimeError, "story_metadata.target_duration_seconds"):
+            module._validate_reviewed_story_duration_contract(
+                story,
+                target_duration_seconds=300,
+            )
+
+    def test_duration_aware_profile_expands_canonical_beats_without_losing_order(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._story_profile("シンデレラ", "シンデレラ", variant_seed="duration-test")
+
+        five_minutes = module._duration_aware_profile(profile, target_duration_seconds=300)
+        twenty_minutes = module._duration_aware_profile(profile, target_duration_seconds=1200)
+
+        self.assertEqual(len(five_minutes["scene_titles"]), 8)
+        self.assertEqual(five_minutes["canonical_scene_indices"], list(range(1, 9)))
+        self.assertEqual(len(twenty_minutes["scene_titles"]), 30)
+        self.assertEqual(len(twenty_minutes["scene_locations"]), 30)
+        self.assertEqual(len(twenty_minutes["canonical_scene_indices"]), 30)
+        self.assertEqual(twenty_minutes["canonical_scene_indices"][0], 1)
+        self.assertEqual(twenty_minutes["canonical_scene_indices"][-1], 8)
+        self.assertEqual(sorted(twenty_minutes["canonical_scene_indices"]), twenty_minutes["canonical_scene_indices"])
+        self.assertEqual(twenty_minutes["duration_plan"]["target_seconds"], 1200)
+        self.assertEqual(twenty_minutes["duration_plan"]["minimum_scene_count"], 30)
+        self.assertEqual(twenty_minutes["duration_plan"]["minimum_cut_count"], 100)
+        self.assertEqual(twenty_minutes["duration_plan"]["minimum_narration_seconds"], 840)
+        self.assertEqual(sum(twenty_minutes["scene_target_durations"]), 1200)
+
+    def test_twenty_minute_builders_propagate_target_and_minimum_budgets(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="frontend_run_20m_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+            profile = module._duration_aware_profile(
+                module._story_profile("シンデレラ", "シンデレラ", variant_seed="duration-20m"),
+                target_duration_seconds=1200,
+            )
+            now = "2099-01-01T00:00:00+09:00"
+            research = module._build_research("シンデレラ", "シンデレラ", now, profile)
+            (run_dir / "research.md").write_text(module._md_yaml("Research", research), encoding="utf-8")
+            story = module._build_story("シンデレラ", run_dir, now, profile)
+            (run_dir / "story.md").write_text(module._md_yaml("Story", story), encoding="utf-8")
+            script, manifest, selectors = module._build_script_and_manifest("シンデレラ", run_dir, now, profile)
+
+        self.assertEqual(research["metadata"]["target_duration_seconds"], 1200)
+        self.assertEqual(research["metadata"]["duration_plan"]["minimum_scene_count"], 30)
+        self.assertEqual(story["story_metadata"]["target_duration_seconds"], 1200)
+        self.assertEqual(len(story["script"]["scenes"]), 30)
+        self.assertEqual(script["script_metadata"]["target_duration"], 1200)
+        self.assertEqual(script["script_metadata"]["minimum_narration_seconds"], 840)
+        self.assertGreaterEqual(len(script["scenes"]), 30)
+        self.assertGreaterEqual(len(selectors), 100)
+        self.assertEqual(manifest["video_metadata"]["target_duration_seconds"], 1200)
+        self.assertEqual(manifest["video_metadata"]["minimum_duration_seconds"], 960)
+        self.assertGreaterEqual(sum(scene["target_duration_seconds"] for scene in manifest["scenes"]), 1200)
+
+    def test_scene_cut_coverage_meets_duration_floor_with_distinct_obligations(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="duration-cut-floor"),
+            target_duration_seconds=300,
+        )
+        idx = 1
+        title = profile["scene_titles"][idx - 1]
+        location = module._location_spec_for_scene(profile, idx)
+        scene_intent = module._scene_intent_for_cut_design(
+            title=title,
+            idx=idx,
+            location_spec=location,
+            profile=profile,
+            include_artifact=False,
+        )
+        scene_event = module._scene_event_for_cut_design(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=profile,
+            include_artifact=False,
+        )
+
+        result = module._scene_cut_coverage_plan(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            scene_event=scene_event,
+            location_name=str(location["name"]),
+            profile=profile,
+            include_artifact=False,
+        )
+        cuts = result["cuts"]
+        coverage = result["coverage_plan"]
+        required_floor = (profile["scene_target_durations"][idx - 1] + 7) // 8
+
+        self.assertGreaterEqual(len(cuts), required_floor)
+        self.assertEqual(coverage["min_cut_count"]["by_duration"], required_floor)
+        self.assertGreaterEqual(coverage["min_cut_count"]["selected"], required_floor)
+        self.assertEqual(coverage["selected_cut_count"], len(cuts))
+        self.assertEqual(len(coverage["cut_assignments"]), len(cuts))
+        self.assertEqual(len({cut["obligation_id"] for cut in cuts}), len(cuts))
+        self.assertTrue(all(cut.get("primary_event_beat_id") for cut in cuts))
+
     def test_scaffold_prompt_compiler_omits_unbound_character_and_object_sections(self) -> None:
         module = load_frontend_run_module()
         first_frame_visual_plan = {
@@ -211,34 +915,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(state["slot.p420.status"], "failed")
 
     def test_materialize_only_reaches_frontend_p680_text_contract(self) -> None:
+        module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
         output_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="frontend_run_", dir=output_root) as tmp:
             run_dir = Path(tmp)
 
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/toc-immersive-frontend-run.py",
-                    "--topic",
-                    "シンデレラ",
-                    "--source",
-                    "シンデレラ",
-                    "--run-dir",
-                    str(run_dir),
-                    "--stop-target",
-                    "p680",
-                    "--materialize-only",
-                    "--skip-validation",
-                ],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"},
-                check=True,
-            )
-
-            self.assertIn("Stop target: p680", completed.stdout)
+            with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+                module.materialize_run("シンデレラ", "シンデレラ", run_dir, "p650")
+                module.write_run_index(run_dir)
             for name in (
                 "research.md",
                 "story.md",
@@ -273,8 +958,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
-            self.assertEqual(state["stage.asset.grounding.status"], "ready")
-            self.assertEqual(state["stage.scene_implementation.grounding.status"], "ready")
             self.assertEqual(state["slot.p650.status"], "done")
             self.assertNotIn("slot.p660.status", state)
             self.assertNotIn("slot.p680.status", state)
@@ -416,7 +1099,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 for scene in manifest_data["scenes"]
                 for cut in scene["cuts"]
             ]
-            self.assertEqual(len(manifest_cuts), 45)
+            duration_cut_floor = sum(
+                (int(scene["target_duration_seconds"]) + 7) // 8
+                for scene in manifest_data["scenes"]
+            )
+            self.assertGreaterEqual(len(manifest_cuts), duration_cut_floor)
+            for scene in manifest_data["scenes"]:
+                self.assertGreaterEqual(
+                    len(scene["cuts"]),
+                    (int(scene["target_duration_seconds"]) + 7) // 8,
+                )
             self.assertTrue(
                 all("prompt" not in cut["image_generation"] for cut in manifest_cuts)
             )
@@ -458,7 +1150,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("must_be_static_evidence_not_motion: true", manifest_text)
             self.assertIn("coverage_obligation_id:", manifest_text)
             self.assertIn("scene10_cut04", scene_request_text)
-            self.assertNotIn("scene10_cut05", scene_request_text)
+            self.assertIn("scene10_cut05", scene_request_text)
             self.assertIn("scene30_cut06", scene_request_text)
             self.assertIn("scene70_cut08", scene_request_text)
             self.assertIn("symbolic_proof", manifest_text)
@@ -575,30 +1267,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 self.assertFalse(any(marker in text for marker in forbidden), name)
 
     def test_materialize_only_uses_topic_profile_instead_of_cinderella_scaffold(self) -> None:
+        module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
         output_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="frontend_run_generic_", dir=output_root) as tmp:
             run_dir = Path(tmp)
 
-            subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/toc-immersive-frontend-run.py",
-                    "--topic",
-                    "桃太郎",
-                    "--source",
-                    "桃から生まれた主人公が仲間と鬼のいる島へ向かう民話。",
-                    "--run-dir",
-                    str(run_dir),
-                    "--stop-target",
-                    "p680",
-                    "--materialize-only",
-                    "--skip-validation",
-                ],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
+            module.materialize_run(
+                "桃太郎",
+                "桃から生まれた主人公が仲間と鬼のいる島へ向かう民話。",
+                run_dir,
+                "p650",
             )
 
             request_text = "\n".join(

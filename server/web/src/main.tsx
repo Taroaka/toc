@@ -42,14 +42,18 @@ import ImageIcon from '@mui/icons-material/Image';
 import KeyboardArrowLeftIcon from '@mui/icons-material/KeyboardArrowLeft';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import MovieCreationIcon from '@mui/icons-material/MovieCreation';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import SendIcon from '@mui/icons-material/Send';
 import SaveIcon from '@mui/icons-material/Save';
 import SaveAltIcon from '@mui/icons-material/SaveAlt';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SettingsIcon from '@mui/icons-material/Settings';
+import StopIcon from '@mui/icons-material/Stop';
 import { GlassDock, GlassPanel, GlassStatusRim, GlassSurface } from './components';
 import './styles.css';
+
+const MAX_CUT_VIDEO_DURATION_SECONDS = 60;
 
 type RunFolder = {
   id: string;
@@ -80,6 +84,7 @@ type ImageRequestItem = {
 type ReferenceOption = {
   path: string;
   label: string;
+  available?: boolean;
 };
 
 type Candidate = {
@@ -97,6 +102,8 @@ type EditableItem = ImageRequestItem & {
   candidates: Candidate[];
   selectedCandidatePath: string | null;
   generating: boolean;
+  generationJobStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'blocked';
+  generationGroupIndex?: number | null;
   promptGenerating?: boolean;
   videoCandidates: Candidate[];
   videoGenerating: boolean;
@@ -116,6 +123,22 @@ type EditableItem = ImageRequestItem & {
   narrationTool: string;
   narrationStatus: string;
   narrationReviewStatus: string;
+  narrationAuthoringStatus: string;
+  narrationRevision: number;
+  narrationTextHash: string;
+  narrationTtsHash: string;
+  narrationGenerationStatus: string;
+  narrationCandidateId: string | null;
+  narrationCandidateOutput: string | null;
+  narrationCandidateStatus: string;
+  narrationCandidateExists: boolean;
+  narrationCandidateDurationSec: number | null;
+  narrationGeneratedFromTtsHash: string;
+  narrationAudioReviewStatus: string;
+  narrationAudioHumanApproved: boolean;
+  narrationDirty: boolean;
+  narrationSaving: boolean;
+  narrationApproving: boolean;
   narrationSilentOk: boolean;
   narrationDurationSec: number | null;
   narrationExists: boolean;
@@ -145,10 +168,16 @@ type PromptSettingResponse = {
 type RegeneratedPrompt = {
   itemId: string;
   prompt: string;
+  promptPolicyVersion?: string;
+  operation: 'direct_update' | 'recompiled';
+  requestRevision?: string;
+  sourceDigest?: string;
+  compilerVersion?: string;
 };
 
 type RegeneratePromptsResponse = {
   status: string;
+  operation: 'direct_update' | 'recompiled';
   prompts: RegeneratedPrompt[];
   updated: string[];
   missing: string[];
@@ -216,6 +245,19 @@ type NarrationManifestItem = {
   narrationTool: string;
   narrationStatus: string;
   narrationReviewStatus: string;
+  narrationAuthoringStatus: string;
+  narrationRevision: number;
+  narrationTextHash: string;
+  narrationTtsHash: string;
+  narrationGenerationStatus: string;
+  narrationCandidateId: string | null;
+  narrationCandidateOutput: string | null;
+  narrationCandidateStatus: string;
+  narrationCandidateExists: boolean;
+  narrationCandidateDurationSeconds: number | null;
+  narrationGeneratedFromTtsHash: string;
+  narrationAudioReviewStatus: string;
+  narrationAudioHumanApproved: boolean;
   narrationSilentOk: boolean;
   narrationExists: boolean;
   narrationDurationSeconds: number | null;
@@ -230,6 +272,9 @@ type NarrationGenerateResponse = {
     status: string;
     path: string | null;
     durationSeconds: number | null;
+    candidateId?: string;
+    generatedFromTtsHash?: string;
+    requestRevision?: number;
     error?: string;
   };
   progress?: RunProgress;
@@ -240,12 +285,19 @@ type NarrationDraftCreateResponse = {
   updated: string[];
   skipped: string[];
   reportPath: string;
+  authoringWorkspace?: {
+    status: string;
+    audioStoryPath?: string;
+    authoringPromptPath?: string;
+    warning?: string;
+  };
   progress?: RunProgress;
 };
 
 type NarrationSilentOkResponse = {
   status: string;
   itemId: string;
+  audioSetHash: string;
   progress?: RunProgress;
 };
 
@@ -303,6 +355,7 @@ type CreateRunJob = {
   status: 'running' | 'completed' | 'failed' | 'paused';
   title: string;
   createMode?: CreateRunMode;
+  targetDurationSeconds?: number;
   stopTargetNumber?: number;
   currentProcess?: string;
   currentProcessNumber?: number;
@@ -320,10 +373,26 @@ type CandidatesResponse = {
   minDurationSeconds?: number | null;
 };
 
-type BulkGenerateResponse = {
+type BulkGenerationJobResult = {
+  itemId: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'blocked';
+  groupIndex: number;
+  candidates: Candidate[];
+  error?: string;
+};
+
+type BulkGenerationJob = {
+  jobId: string;
   runId: string;
   kind: 'asset' | 'scene';
-  results: CandidatesResponse[];
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
+  totalCount: number;
+  completedCount: number;
+  failedCount: number;
+  currentGroup: number | null;
+  groupCount: number;
+  results: BulkGenerationJobResult[];
+  error?: string | null;
 };
 
 type EnlargedImage = {
@@ -368,6 +437,88 @@ function fileUrl(runId: string, path: string): string {
   return `/api/image-gen/file?run_id=${encodeURIComponent(runId)}&path=${encodeURIComponent(path)}`;
 }
 
+type NarrationRevisionSummary = {
+  number: number;
+  text_hash: string;
+  tts_hash: string;
+};
+
+type NarrationWorkflowItem = {
+  itemId: string;
+  authoringStatus: string;
+  status: string;
+  text: string;
+  ttsText: string;
+  tool: string;
+  output: string | null;
+  revision: NarrationRevisionSummary;
+  generation: { status?: string; candidate_id?: string; generated_from_tts_hash?: string };
+  audioReview: { status?: string };
+  candidate?: {
+    candidate_id?: string;
+    output?: string;
+    status?: string;
+    duration_seconds?: number | null;
+    generated_from_tts_hash?: string;
+  } | null;
+  approvedCandidate?: {
+    candidate_id?: string;
+    output?: string;
+    status?: string;
+    duration_seconds?: number | null;
+    generated_from_tts_hash?: string;
+  } | null;
+};
+
+type NarrationTextSaveResponse = {
+  status: string;
+  item: NarrationWorkflowItem;
+  audioSetHash: string;
+  progress?: RunProgress;
+};
+
+type NarrationAudioApproveResponse = {
+  status: string;
+  item: NarrationWorkflowItem;
+  durationUpdated: string[];
+  audioSetHash: string;
+  progress?: RunProgress;
+};
+
+type NarrationRunApproveResponse = {
+  status: string;
+  approvedAudioSetHash: string;
+  approvedTimelineHash: string;
+  progress?: RunProgress;
+};
+
+type NarrationTimelinePayload = {
+  item_id: string;
+  video_duration_seconds: number;
+  narration_offset_seconds: number;
+};
+
+type NarrationListenEvidence = {
+  mode: 'sequential_full_run';
+  audio_set_hash: string;
+  item_ids: string[];
+  timeline: NarrationTimelinePayload[];
+  completed_at: string;
+};
+
+type NarrationReviewRunResponse = {
+  status: string;
+  findings: string[];
+  arcFindings: string[];
+  cutFindings: Array<{ itemId: string; reasonKeys: string[]; messages: string[] }>;
+  semanticFindings: Array<{ critic_id?: string; critic_label?: string; severity?: string; message?: string }>;
+  narrationTextSetHash: string;
+  report: string;
+  arcReport: string;
+  semanticReport: string;
+  progress?: RunProgress;
+};
+
 function videoFileUrl(runId: string, path: string): string {
   return `/api/image-gen/video-file?run_id=${encodeURIComponent(runId)}&path=${encodeURIComponent(path)}`;
 }
@@ -410,10 +561,73 @@ function sceneLabelFromKey(sceneKey: string | null): string {
   return sceneKey.replace(/^scene/, 'scene ');
 }
 
+function imageRequestScopeKey(runId: string, kind: ViewKind): string {
+  return `${runId}\u0000${kind}`;
+}
+
+function mergeCandidateSnapshots(previous: Candidate[], incoming: Candidate[]): Candidate[] {
+  const mergedByIndex = new Map<number, Candidate>();
+  const incomingPathIndexes = new Map<string, number>();
+
+  incoming.forEach((candidate) => {
+    if (candidate.path) {
+      const duplicateIndex = incomingPathIndexes.get(candidate.path);
+      if (duplicateIndex !== undefined && duplicateIndex !== candidate.index) {
+        mergedByIndex.delete(duplicateIndex);
+      }
+      incomingPathIndexes.set(candidate.path, candidate.index);
+    }
+    mergedByIndex.set(candidate.index, candidate);
+  });
+
+  previous.forEach((candidate) => {
+    if (!candidate.path) return;
+    const samePath = Array.from(mergedByIndex.values()).find((current) => current.path === candidate.path);
+    if (samePath) return;
+    const current = mergedByIndex.get(candidate.index);
+    if (!current?.path) {
+      mergedByIndex.set(candidate.index, candidate);
+    }
+  });
+
+  return Array.from(mergedByIndex.values()).sort((left, right) => left.index - right.index);
+}
+
+function selectedCandidateAfterMerge(
+  candidates: Candidate[],
+  currentSelection: string | null,
+  incomingSelection: string | null = null,
+): string | null {
+  const availablePaths = new Set(candidates.map((candidate) => candidate.path).filter(Boolean));
+  if (currentSelection && availablePaths.has(currentSelection)) return currentSelection;
+  if (incomingSelection && availablePaths.has(incomingSelection)) return incomingSelection;
+  return candidates.find((candidate) => candidate.path)?.path ?? null;
+}
+
+function mergedCandidateState(
+  item: Pick<EditableItem, 'candidates' | 'selectedCandidatePath'>,
+  incoming: Candidate[],
+  incomingSelection: string | null = null,
+): Pick<EditableItem, 'candidates' | 'selectedCandidatePath'> {
+  const candidates = mergeCandidateSnapshots(item.candidates, incoming);
+  return {
+    candidates,
+    selectedCandidatePath: selectedCandidateAfterMerge(
+      candidates,
+      item.selectedCandidatePath,
+      incomingSelection,
+    ),
+  };
+}
+
 function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], narrationById?: Map<string, NarrationManifestItem>): EditableItem[] {
   const byPath = new Map(refs.map((ref) => [ref.path, ref]));
   return items.map((item) => {
-    const selectedReferences = item.references.map((ref) => byPath.get(ref)).filter(Boolean) as ReferenceOption[];
+    const selectedReferences = item.references.map((ref) => byPath.get(ref) ?? {
+      path: ref,
+      label: ref.split('/').pop()?.replace(/\.[^.]+$/, '') || ref,
+      available: false,
+    });
     const narration = narrationById?.get(item.id);
     const sceneKey = inferSceneKey(item.id, narration?.sceneId);
     const narrationMinDuration = Math.max(1, Math.ceil(narration?.narrationDurationSeconds || 0));
@@ -445,6 +659,22 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       narrationTool: narration?.narrationTool || 'elevenlabs',
       narrationStatus: narration?.narrationStatus || '',
       narrationReviewStatus: narration?.narrationReviewStatus || '',
+      narrationAuthoringStatus: narration?.narrationAuthoringStatus || 'missing',
+      narrationRevision: narration?.narrationRevision || 0,
+      narrationTextHash: narration?.narrationTextHash || '',
+      narrationTtsHash: narration?.narrationTtsHash || '',
+      narrationGenerationStatus: narration?.narrationGenerationStatus || 'missing',
+      narrationCandidateId: narration?.narrationCandidateId || null,
+      narrationCandidateOutput: narration?.narrationCandidateOutput || null,
+      narrationCandidateStatus: narration?.narrationCandidateStatus || '',
+      narrationCandidateExists: Boolean(narration?.narrationCandidateExists),
+      narrationCandidateDurationSec: narration?.narrationCandidateDurationSeconds ?? null,
+      narrationGeneratedFromTtsHash: narration?.narrationGeneratedFromTtsHash || '',
+      narrationAudioReviewStatus: narration?.narrationAudioReviewStatus || 'pending',
+      narrationAudioHumanApproved: Boolean(narration?.narrationAudioHumanApproved),
+      narrationDirty: false,
+      narrationSaving: false,
+      narrationApproving: false,
       narrationSilentOk: Boolean(narration?.narrationSilentOk),
       narrationDurationSec: narration?.narrationDurationSeconds ?? null,
       narrationExists: Boolean(narration?.narrationExists),
@@ -463,26 +693,54 @@ function mergeLoadedItemsWithInflight(prev: EditableItem[], next: EditableItem[]
   const merged = next.map((item) => {
     const previous = previousById.get(item.id);
     if (!previous) return item;
-    if (!previous.generating && !previous.promptGenerating && !previous.videoGenerating && !previous.narrationGenerating) return item;
+    const candidateState = mergedCandidateState(previous, item.candidates, item.selectedCandidatePath);
+    const preserveNarration = previous.narrationDirty || previous.narrationSaving || previous.narrationApproving || previous.narrationGenerating;
+    if (!previous.generating && !previous.promptGenerating && !previous.videoGenerating && !preserveNarration) {
+      return { ...item, ...candidateState };
+    }
     return {
       ...item,
       generating: previous.generating,
+      generationJobStatus: previous.generationJobStatus ?? item.generationJobStatus,
+      generationGroupIndex: previous.generationGroupIndex ?? item.generationGroupIndex,
       promptGenerating: previous.promptGenerating,
-      candidates: previous.generating ? previous.candidates : item.candidates,
-      selectedCandidatePath: previous.selectedCandidatePath ?? item.selectedCandidatePath,
+      ...candidateState,
       videoGenerating: previous.videoGenerating,
       videoCandidates: previous.videoGenerating ? previous.videoCandidates : item.videoCandidates,
       renderVideoPath: previous.renderVideoPath ?? item.renderVideoPath,
       renderVideoExists: previous.renderVideoExists || item.renderVideoExists,
       narrationGenerating: previous.narrationGenerating,
-      narrationExists: previous.narrationExists || item.narrationExists,
-      narrationOutput: previous.narrationOutput ?? item.narrationOutput,
-      renderNarrationPath: previous.renderNarrationPath ?? item.renderNarrationPath,
+      narrationSaving: previous.narrationSaving,
+      narrationApproving: previous.narrationApproving,
+      narrationDirty: previous.narrationDirty,
+      narrationText: preserveNarration ? previous.narrationText : item.narrationText,
+      narrationTtsText: preserveNarration ? previous.narrationTtsText : item.narrationTtsText,
+      narrationTool: preserveNarration ? previous.narrationTool : item.narrationTool,
+      narrationStatus: preserveNarration ? previous.narrationStatus : item.narrationStatus,
+      narrationReviewStatus: preserveNarration ? previous.narrationReviewStatus : item.narrationReviewStatus,
+      narrationAuthoringStatus: preserveNarration ? previous.narrationAuthoringStatus : item.narrationAuthoringStatus,
+      narrationRevision: preserveNarration ? previous.narrationRevision : item.narrationRevision,
+      narrationTextHash: preserveNarration ? previous.narrationTextHash : item.narrationTextHash,
+      narrationTtsHash: preserveNarration ? previous.narrationTtsHash : item.narrationTtsHash,
+      narrationGenerationStatus: preserveNarration ? previous.narrationGenerationStatus : item.narrationGenerationStatus,
+      narrationCandidateId: preserveNarration ? previous.narrationCandidateId : item.narrationCandidateId,
+      narrationCandidateOutput: preserveNarration ? previous.narrationCandidateOutput : item.narrationCandidateOutput,
+      narrationCandidateStatus: preserveNarration ? previous.narrationCandidateStatus : item.narrationCandidateStatus,
+      narrationCandidateExists: preserveNarration ? previous.narrationCandidateExists : item.narrationCandidateExists,
+      narrationCandidateDurationSec: preserveNarration ? previous.narrationCandidateDurationSec : item.narrationCandidateDurationSec,
+      narrationGeneratedFromTtsHash: preserveNarration ? previous.narrationGeneratedFromTtsHash : item.narrationGeneratedFromTtsHash,
+      narrationAudioReviewStatus: preserveNarration ? previous.narrationAudioReviewStatus : item.narrationAudioReviewStatus,
+      narrationAudioHumanApproved: preserveNarration ? previous.narrationAudioHumanApproved : item.narrationAudioHumanApproved,
+      narrationSilentOk: preserveNarration ? previous.narrationSilentOk : item.narrationSilentOk,
+      narrationDurationSec: preserveNarration ? previous.narrationDurationSec : item.narrationDurationSec,
+      narrationExists: preserveNarration ? previous.narrationExists : item.narrationExists,
+      narrationOutput: preserveNarration ? previous.narrationOutput : item.narrationOutput,
+      renderNarrationPath: preserveNarration ? previous.renderNarrationPath : item.renderNarrationPath,
     };
   });
   const nextIds = new Set(next.map((item) => item.id));
   const carryOver = prev.filter(
-    (item) => !nextIds.has(item.id) && (item.generating || item.promptGenerating || item.videoGenerating || item.narrationGenerating),
+    (item) => !nextIds.has(item.id) && (item.generating || item.promptGenerating || item.videoGenerating || item.narrationGenerating || item.narrationDirty || item.narrationSaving || item.narrationApproving),
   );
   return carryOver.length ? [...merged, ...carryOver] : merged;
 }
@@ -938,6 +1196,22 @@ function existingAssetItems(refs: ReferenceOption[]): EditableItem[] {
         narrationTool: 'elevenlabs',
         narrationStatus: '',
         narrationReviewStatus: '',
+        narrationAuthoringStatus: 'missing',
+        narrationRevision: 0,
+        narrationTextHash: '',
+        narrationTtsHash: '',
+        narrationGenerationStatus: 'missing',
+        narrationCandidateId: null,
+        narrationCandidateOutput: null,
+        narrationCandidateStatus: '',
+        narrationCandidateExists: false,
+        narrationCandidateDurationSec: null,
+        narrationGeneratedFromTtsHash: '',
+        narrationAudioReviewStatus: 'pending',
+        narrationAudioHumanApproved: false,
+        narrationDirty: false,
+        narrationSaving: false,
+        narrationApproving: false,
         narrationSilentOk: false,
         narrationDurationSec: null,
         narrationExists: false,
@@ -981,9 +1255,58 @@ function itemNarrationDraftReady(item: EditableItem): boolean {
   return Boolean(item.narrationText.trim() || item.narrationTtsText.trim() || item.narrationStatus || item.narrationReviewStatus);
 }
 
+function itemNarrationTextLocked(item: EditableItem): boolean {
+  return ['human_locked', 'reviewed'].includes(item.narrationAuthoringStatus);
+}
+
 function itemNarrationAudioReady(item: EditableItem): boolean {
+  if (item.narrationRevision > 0) {
+    return (
+      item.narrationAudioHumanApproved
+      && item.narrationAudioReviewStatus === 'approved'
+      && item.narrationGeneratedFromTtsHash === item.narrationTtsHash
+      && ((item.narrationExists && item.narrationStatus === 'audio_ready') || (item.narrationTool === 'silent' && item.narrationSilentOk))
+    );
+  }
   const statusReady = ['audio_ready', 'approved'].includes(item.narrationStatus.trim().toLowerCase()) || item.narrationReviewStatus.trim().toLowerCase() === 'approved';
   return (item.narrationExists && statusReady) || (item.narrationTool === 'silent' && item.narrationSilentOk);
+}
+
+function narrationWorkflowPatch(item: NarrationWorkflowItem): Partial<EditableItem> {
+  const candidate = item.candidate || null;
+  const approvedCandidate = item.approvedCandidate || null;
+  const approved = item.audioReview?.status === 'approved' && (
+    item.tool === 'silent'
+      ? item.generation?.status === 'human_approved'
+      : Boolean(item.output) && approvedCandidate?.status === 'human_approved'
+  );
+  const approvedTtsHash = approvedCandidate?.generated_from_tts_hash || item.generation?.generated_from_tts_hash || '';
+  return {
+    narrationText: item.text,
+    narrationTtsText: item.ttsText,
+    narrationTool: item.tool,
+    narrationOutput: item.output,
+    narrationStatus: item.status,
+    narrationAuthoringStatus: item.authoringStatus,
+    narrationRevision: item.revision?.number || 0,
+    narrationTextHash: item.revision?.text_hash || '',
+    narrationTtsHash: item.revision?.tts_hash || '',
+    narrationGenerationStatus: item.generation?.status || 'missing',
+    narrationCandidateId: candidate?.candidate_id || null,
+    narrationCandidateOutput: candidate?.output || null,
+    narrationCandidateStatus: candidate?.status || '',
+    narrationCandidateExists: Boolean(candidate?.output),
+    narrationCandidateDurationSec: candidate?.duration_seconds ?? null,
+    narrationGeneratedFromTtsHash: approved ? approvedTtsHash : candidate?.generated_from_tts_hash || '',
+    narrationAudioReviewStatus: item.audioReview?.status || 'pending',
+    narrationAudioHumanApproved: approved,
+    narrationExists: approved && Boolean(item.output),
+    narrationDurationSec: approved ? approvedCandidate?.duration_seconds ?? null : null,
+    renderNarrationPath: approved ? item.output : null,
+    narrationDirty: false,
+    narrationSaving: false,
+    narrationApproving: false,
+  };
 }
 
 function labelFromPath(path: string): string {
@@ -1100,9 +1423,12 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
           label="秒数"
           type="number"
           value={item.videoDurationSec}
-          inputProps={{ min: narrationMinDuration, max: 60 }}
+          inputProps={{ min: narrationMinDuration, max: MAX_CUT_VIDEO_DURATION_SECONDS }}
           onChange={(event) => {
-            const next = Math.max(narrationMinDuration, Math.min(60, Number(event.target.value) || narrationMinDuration));
+            const next = Math.max(
+              narrationMinDuration,
+              Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Number(event.target.value) || narrationMinDuration),
+            );
             onPatchItem(item.id, { videoDurationSec: next });
           }}
         />
@@ -1317,7 +1643,13 @@ const PromptCard = React.memo(function PromptCard({
           });
         return (
           <Box key={ref.path} className="referenceThumb">
-            <img src={fileUrl(runId, ref.path)} alt={ref.label} loading="lazy" decoding="async" />
+            {ref.available === false ? (
+              <Box className="referencePending" aria-label={`${ref.label}は先行グループで生成待ち`}>
+                <Typography variant="caption">生成待ち</Typography>
+              </Box>
+            ) : (
+              <img src={fileUrl(runId, ref.path)} alt={ref.label} loading="lazy" decoding="async" />
+            )}
             <Typography variant="caption" noWrap>{ref.label}</Typography>
             <IconButton size="small" aria-label={`${ref.label}を参照から外す`} onClick={removeReference}>
               ×
@@ -1402,7 +1734,18 @@ const PromptCard = React.memo(function PromptCard({
           <Box className="comparisonWall">
             <Box className="comparisonHeader">
               <Typography fontWeight={900}>候補比較</Typography>
-              <Chip size="small" label={item.promptGenerating ? 'プロンプト作成中' : item.generating ? '生成中' : item.candidates.length ? '確認待ち' : '未生成'} />
+              <Chip
+                size="small"
+                label={item.promptGenerating
+                  ? 'プロンプト作成中'
+                  : item.generating && item.generationJobStatus === 'queued'
+                    ? `Group ${item.generationGroupIndex || '-'} / 順番待ち`
+                    : item.generating
+                      ? `Group ${item.generationGroupIndex || '-'} / 生成中`
+                      : item.candidates.length
+                        ? '確認待ち'
+                        : '未生成'}
+              />
             </Box>
             {primarySceneImage && (
               <Box className="scenePrimaryPreview">
@@ -1591,7 +1934,9 @@ type NarrationCutCardProps = {
   runId: string;
   narrationBusy: boolean;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
+  onSaveNarrationText: (item: EditableItem, lock: boolean) => void;
   onGenerateNarration: (item: EditableItem) => void;
+  onApproveNarration: (item: EditableItem) => void;
   onConfirmSilentOk: (item: EditableItem) => void;
 };
 
@@ -1600,7 +1945,9 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
   runId,
   narrationBusy,
   onPatchItem,
+  onSaveNarrationText,
   onGenerateNarration,
+  onApproveNarration,
   onConfirmSilentOk,
 }: NarrationCutCardProps) {
   const handleAudioPlay = useCallback((event: React.SyntheticEvent<HTMLAudioElement>) => {
@@ -1609,8 +1956,29 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
     });
   }, []);
   const handleGenerate = useCallback(() => onGenerateNarration(item), [item, onGenerateNarration]);
+  const handleSaveDraft = useCallback(() => onSaveNarrationText(item, false), [item, onSaveNarrationText]);
+  const handleToggleLock = useCallback(
+    () => onSaveNarrationText(item, !itemNarrationTextLocked(item)),
+    [item, onSaveNarrationText],
+  );
+  const handleApprove = useCallback(() => onApproveNarration(item), [item, onApproveNarration]);
   const handleSilentOk = useCallback(() => onConfirmSilentOk(item), [item, onConfirmSilentOk]);
   const audioReady = itemNarrationAudioReady(item);
+  const textLocked = itemNarrationTextLocked(item);
+  const candidatePreviewReady = Boolean(
+    item.narrationCandidateStatus === 'candidate'
+    && item.narrationCandidateExists
+    && item.narrationCandidateOutput,
+  );
+  const previewOutput = candidatePreviewReady ? item.narrationCandidateOutput : item.narrationOutput;
+  const previewExists = candidatePreviewReady || (item.narrationExists && Boolean(item.narrationOutput));
+  const candidateCurrent = Boolean(
+    item.narrationCandidateId
+    && item.narrationCandidateStatus === 'candidate'
+    && item.narrationCandidateExists
+    && item.narrationCandidateOutput
+    && item.narrationGeneratedFromTtsHash === item.narrationTtsHash,
+  );
   return (
     <Card className="narrationCutCard" variant="outlined">
       <CardContent className="narrationCutCardContent">
@@ -1624,7 +1992,7 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
           <Chip
             size="small"
             color={audioReady ? 'success' : 'default'}
-            label={item.narrationSilentOk ? '無音OK' : item.narrationDurationSec ? `${item.narrationDurationSec.toFixed(1)}s` : item.narrationExists ? '生成済み' : '未生成'}
+            label={item.narrationSilentOk ? '無音OK' : audioReady ? '承認済み' : item.narrationCandidateStatus === 'stale' ? '古い候補' : candidateCurrent ? '候補・未承認' : '未生成'}
           />
         </Stack>
 
@@ -1634,14 +2002,16 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
             multiline
             minRows={5}
             value={item.narrationText}
-            onChange={(event) => onPatchItem(item.id, { narrationText: event.target.value })}
+            disabled={textLocked}
+            onChange={(event) => onPatchItem(item.id, { narrationText: event.target.value, narrationDirty: true, narrationAudioHumanApproved: false })}
           />
           <TextField
             label="TTS文面"
             multiline
             minRows={3}
             value={item.narrationTtsText}
-            onChange={(event) => onPatchItem(item.id, { narrationTtsText: event.target.value })}
+            disabled={textLocked}
+            onChange={(event) => onPatchItem(item.id, { narrationTtsText: event.target.value, narrationDirty: true, narrationAudioHumanApproved: false })}
           />
           <Box className="narrationSettingsGrid">
             <FormControl size="small">
@@ -1649,7 +2019,8 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
               <Select
                 label="tool"
                 value={item.narrationTool}
-                onChange={(event) => onPatchItem(item.id, { narrationTool: event.target.value })}
+                disabled={textLocked}
+                onChange={(event) => onPatchItem(item.id, { narrationTool: event.target.value, narrationDirty: true, narrationAudioHumanApproved: false })}
               >
                 <MenuItem value="elevenlabs">ElevenLabs</MenuItem>
                 <MenuItem value="silent">Silent</MenuItem>
@@ -1660,23 +2031,35 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
               size="small"
               label="出力"
               value={item.narrationOutput || ''}
-              onChange={(event) => onPatchItem(item.id, { narrationOutput: event.target.value || null })}
+              disabled
+              helperText="承認済み音声のみ。候補はrevision別pathへ保存されます。"
             />
           </Box>
           <Box className="audioReviewBox">
-            {item.narrationExists && item.narrationOutput ? (
-              <audio src={audioFileUrl(runId, item.narrationOutput)} controls preload="metadata" onPlay={handleAudioPlay} />
+            {previewExists && previewOutput ? (
+              <audio src={audioFileUrl(runId, previewOutput)} controls preload="metadata" onPlay={handleAudioPlay} />
             ) : (
               <Typography variant="caption" color="text.secondary">音声ファイル未生成</Typography>
             )}
+            <Button variant="outlined" onClick={handleSaveDraft} disabled={narrationBusy || item.narrationSaving || textLocked || !item.narrationDirty}>
+              下書き保存
+            </Button>
+            <Button variant={textLocked ? 'outlined' : 'contained'} onClick={handleToggleLock} disabled={narrationBusy || item.narrationSaving || (!textLocked && !item.narrationText.trim() && !item.narrationTtsText.trim())}>
+              {textLocked ? '確定解除' : '文面を確定'}
+            </Button>
             <Button
-              variant="contained"
+              variant="outlined"
               startIcon={<RecordVoiceOverIcon />}
               onClick={handleGenerate}
               disabled={narrationBusy || item.narrationGenerating || (item.narrationTool !== 'silent' && !item.narrationText.trim() && !item.narrationTtsText.trim())}
             >
-              このcutの音声生成
+              音声候補を生成
             </Button>
+            {item.narrationTool !== 'silent' && (
+              <Button color="success" variant="contained" onClick={handleApprove} disabled={narrationBusy || item.narrationApproving || !textLocked || !candidateCurrent}>
+                この候補を承認
+              </Button>
+            )}
             {item.narrationTool === 'silent' && (
               <Button
                 variant={item.narrationSilentOk ? 'contained' : 'outlined'}
@@ -1710,6 +2093,8 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
   const narrationDuration = item.narrationDurationSec || 0;
   const minVideoDuration = Math.max(1, Math.ceil(narrationDuration + item.renderNarrationOffsetSec));
   const isShort = item.renderVideoDurationSec < minVideoDuration;
+  const narrationExceedsVideoDurationLimit = minVideoDuration > MAX_CUT_VIDEO_DURATION_SECONDS;
+  const configuredVideoExceedsDurationLimit = item.renderVideoDurationSec > MAX_CUT_VIDEO_DURATION_SECONDS;
   return (
     <Card className="renderCutCard" variant="outlined">
       <CardContent className="renderCutCardContent">
@@ -1748,9 +2133,13 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
               label="動画秒数"
               type="number"
               value={item.renderVideoDurationSec}
-              inputProps={{ min: minVideoDuration, max: 600 }}
+              inputProps={{ min: Math.min(minVideoDuration, MAX_CUT_VIDEO_DURATION_SECONDS), max: MAX_CUT_VIDEO_DURATION_SECONDS }}
               onChange={(event) => {
-                const next = Math.max(minVideoDuration, Math.min(600, Number(event.target.value) || minVideoDuration));
+                const boundedMinimum = Math.min(minVideoDuration, MAX_CUT_VIDEO_DURATION_SECONDS);
+                const next = Math.max(
+                  boundedMinimum,
+                  Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Number(event.target.value) || boundedMinimum),
+                );
                 onPatchItem(item.id, { renderVideoDurationSec: next, videoDurationSec: next });
               }}
             />
@@ -1759,14 +2148,14 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
               label="話し出し秒"
               type="number"
               value={item.renderNarrationOffsetSec}
-              inputProps={{ min: 0, max: 120, step: 0.1 }}
+              inputProps={{ min: 0, max: MAX_CUT_VIDEO_DURATION_SECONDS, step: 0.1 }}
               onChange={(event) => {
-                const next = Math.max(0, Math.min(120, Number(event.target.value) || 0));
+                const next = Math.max(0, Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Number(event.target.value) || 0));
                 const nextMin = Math.max(1, Math.ceil(narrationDuration + next));
                 onPatchItem(item.id, {
                   renderNarrationOffsetSec: next,
-                  renderVideoDurationSec: Math.max(item.renderVideoDurationSec, nextMin),
-                  videoDurationSec: Math.max(item.videoDurationSec, nextMin),
+                  renderVideoDurationSec: Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Math.max(item.renderVideoDurationSec, nextMin)),
+                  videoDurationSec: Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Math.max(item.videoDurationSec, nextMin)),
                 });
               }}
             />
@@ -1783,7 +2172,13 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
               onChange={(event) => onPatchItem(item.id, { renderNarrationPath: event.target.value || null })}
             />
           </Box>
-          {isShort && <Chip size="small" color="warning" label={`最低 ${minVideoDuration}s`} />}
+          {narrationExceedsVideoDurationLimit ? (
+            <Chip size="small" color="error" label={`音声+offset ${minVideoDuration}s。60秒以内のcutへ分割してください`} />
+          ) : configuredVideoExceedsDurationLimit ? (
+            <Chip size="small" color="error" label="動画秒数を60秒以内にしてください" />
+          ) : isShort ? (
+            <Chip size="small" color="warning" label={`最低 ${minVideoDuration}s`} />
+          ) : null}
         </Box>
       </CardContent>
     </Card>
@@ -1816,6 +2211,7 @@ function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
+  const [bulkJobId, setBulkJobId] = useState<string | null>(null);
   const [bulkGenerating, setBulkGenerating] = useState(false);
   const [bulkTotal, setBulkTotal] = useState(0);
   const [bulkCompletedCount, setBulkCompletedCount] = useState(0);
@@ -1829,6 +2225,14 @@ function App() {
   const [narrationBulkTotal, setNarrationBulkTotal] = useState(0);
   const [narrationBulkCompletedCount, setNarrationBulkCompletedCount] = useState(0);
   const [narrationBulkFailedCount, setNarrationBulkFailedCount] = useState(0);
+  const [narrationAudioSetHash, setNarrationAudioSetHash] = useState('');
+  const [narrationMutationPendingCount, setNarrationMutationPendingCount] = useState(0);
+  const [narrationReviewBusy, setNarrationReviewBusy] = useState(false);
+  const [narrationReviewFindings, setNarrationReviewFindings] = useState<string[]>([]);
+  const [narrationReviewReport, setNarrationReviewReport] = useState('');
+  const [fullNarrationListening, setFullNarrationListening] = useState(false);
+  const [fullNarrationListeningItem, setFullNarrationListeningItem] = useState('');
+  const [fullNarrationListenEvidence, setFullNarrationListenEvidence] = useState<NarrationListenEvidence | null>(null);
   const [renderBusy, setRenderBusy] = useState(false);
   const [renderStatus, setRenderStatus] = useState<string | null>(null);
   const [insertBusy, setInsertBusy] = useState(false);
@@ -1840,6 +2244,7 @@ function App() {
   const [createRunTitle, setCreateRunTitle] = useState('');
   const [createRunSource, setCreateRunSource] = useState('');
   const [createRunMode, setCreateRunMode] = useState<CreateRunMode>('normal');
+  const [createRunTargetDurationSeconds, setCreateRunTargetDurationSeconds] = useState('300');
   const [createRunBusy, setCreateRunBusy] = useState(false);
   const [createRunStatus, setCreateRunStatus] = useState<string | null>(null);
   const [createRunError, setCreateRunError] = useState<string | null>(null);
@@ -1876,8 +2281,18 @@ function App() {
   const [addAssetError, setAddAssetError] = useState<string | null>(null);
   const chatToggleButtonRef = useRef<HTMLButtonElement | null>(null);
   const chatInputRef = useRef<HTMLInputElement | null>(null);
+  const runIdRef = useRef(runId);
+  const requestKindRef = useRef<ViewKind>('asset');
+  const itemsScopeRef = useRef('');
+  const loadRunRequestsEpochRef = useRef(0);
+  const narrationMutationEpochRef = useRef(0);
+  const narrationMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const fullNarrationPlaybackTokenRef = useRef(0);
+  const cancelCurrentFullNarrationAudioRef = useRef<(() => void) | null>(null);
   const selectedRun = useMemo(() => runs.find((run) => run.id === runId), [runId, runs]);
   const requestKind = workspaceMode === 'image' ? viewKind : 'scene';
+  runIdRef.current = runId;
+  requestKindRef.current = requestKind;
   const visibleItems = useMemo(() => {
     if (workspaceMode !== 'image') return items.filter(isSceneCutItem);
     if (viewKind === 'scene') return items.filter(isSceneCutItem);
@@ -1936,11 +2351,50 @@ function App() {
   const videoDisplayItems = workspaceMode === 'video' ? activeVideoScene?.items ?? [] : visibleItems;
   const displayedItemCount = workspaceMode === 'image' ? imageDisplayItems.length : workspaceMode === 'video' ? videoDisplayItems.length : visibleItems.length;
   const sceneCutItems = useMemo(() => items.filter(isSceneCutItem), [items]);
+  const narrationApprovalTimeline = useMemo<NarrationTimelinePayload[]>(() => sceneCutItems.map((item) => ({
+    item_id: item.id,
+    video_duration_seconds: Math.max(
+      item.renderVideoDurationSec,
+      Math.ceil((item.narrationDurationSec || 0) + item.renderNarrationOffsetSec),
+      1,
+    ),
+    narration_offset_seconds: item.renderNarrationOffsetSec,
+  })), [sceneCutItems]);
+  const narrationApprovalTimelineSignature = useMemo(
+    () => JSON.stringify(narrationApprovalTimeline),
+    [narrationApprovalTimeline],
+  );
+  const narrationDurationLimitViolation = useMemo(
+    () => narrationApprovalTimeline.find((item) => item.video_duration_seconds > MAX_CUT_VIDEO_DURATION_SECONDS) || null,
+    [narrationApprovalTimeline],
+  );
   const narrationDraftReadyCount = useMemo(() => sceneCutItems.filter(itemNarrationDraftReady).length, [sceneCutItems]);
   const narrationAudioReadyCount = useMemo(() => sceneCutItems.filter(itemNarrationAudioReady).length, [sceneCutItems]);
   const hasNarrationDrafts = sceneCutItems.length > 0 && narrationDraftReadyCount > 0;
-  const allNarrationDraftsReady = sceneCutItems.length > 0 && narrationDraftReadyCount === sceneCutItems.length;
   const allNarrationAudioReady = sceneCutItems.length > 0 && narrationAudioReadyCount === sceneCutItems.length;
+  const allNarrationTextReady = sceneCutItems.length > 0 && sceneCutItems.every((item) => (
+    !item.narrationDirty
+    && (
+      item.narrationAuthoringStatus === 'silent'
+      || (itemNarrationTextLocked(item) && Boolean(item.narrationText.trim() || item.narrationTtsText.trim()))
+    )
+  ));
+  const narrationTextReviewPassed = Boolean(runProgress?.slots.some((slot) => slot.code === 'p720' && slot.state === 'done'));
+  const narrationRunApproved = Boolean(runProgress?.slots.some((slot) => slot.code === 'p750' && slot.state === 'done'));
+  const fullNarrationListenIsCurrent = Boolean(
+    fullNarrationListenEvidence
+    && fullNarrationListenEvidence.audio_set_hash === narrationAudioSetHash
+    && JSON.stringify(fullNarrationListenEvidence.timeline) === narrationApprovalTimelineSignature
+    && JSON.stringify(fullNarrationListenEvidence.item_ids) === JSON.stringify(sceneCutItems.map((item) => item.id)),
+  );
+  const narrationReadyForVideo = allNarrationAudioReady && narrationRunApproved;
+  const cancelFullNarrationPlayback = useCallback(() => {
+    fullNarrationPlaybackTokenRef.current += 1;
+    cancelCurrentFullNarrationAudioRef.current?.();
+    cancelCurrentFullNarrationAudioRef.current = null;
+    setFullNarrationListening(false);
+    setFullNarrationListeningItem('');
+  }, []);
   const canGoPrevImageCut = activeImageCutIndex > 0;
   const canGoNextImageCut = activeImageCutIndex >= 0 && activeImageCutIndex < imageSceneItems.length - 1;
   const moveImageCut = useCallback((delta: -1 | 1) => {
@@ -1952,7 +2406,13 @@ function App() {
     setActiveItemId(nextItem.id);
   }, [activeImageCutIndex, imageSceneItems]);
   const imageGenerationActive = bulkGenerating || regenerateBusy || addAssetBusy || items.some((item) => item.generating || item.promptGenerating);
-  const narrationGenerationActive = narrationBusy || narrationDraftBusy || items.some((item) => item.narrationGenerating);
+  const narrationMutationActive = narrationMutationPendingCount > 0;
+  const narrationGenerationActive = narrationBusy
+    || narrationDraftBusy
+    || narrationReviewBusy
+    || narrationMutationActive
+    || fullNarrationListening
+    || items.some((item) => item.narrationGenerating || item.narrationSaving || item.narrationApproving);
   const videoGenerationActive = videoPromptBusy || items.some((item) => item.videoGenerating);
   const generationInFlight = imageGenerationActive || narrationGenerationActive || videoGenerationActive || renderBusy;
   const backgroundGenerationLabel = useMemo(() => {
@@ -1992,6 +2452,26 @@ function App() {
     });
   }, []);
 
+  const runNarrationMutation = useCallback(<T,>(targetRunId: string, operation: () => Promise<T>): Promise<T> => {
+    setNarrationMutationPendingCount((count) => count + 1);
+    const queued = narrationMutationQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (runIdRef.current !== targetRunId) {
+          throw new Error('selected run changed before narration mutation started');
+        }
+        narrationMutationEpochRef.current += 1;
+        return operation();
+      });
+    narrationMutationQueueRef.current = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued.finally(() => {
+      setNarrationMutationPendingCount((count) => Math.max(0, count - 1));
+    });
+  }, []);
+
   const loadRuns = useCallback(async (preferredRunId?: string) => {
     const data = await jsonFetch<{ runs: RunFolder[] }>('/api/image-gen/runs');
     setRuns(data.runs);
@@ -2000,35 +2480,54 @@ function App() {
   }, []);
 
   const loadRunRequests = useCallback(async (targetRunId: string, targetKind: ViewKind) => {
+    const targetScopeKey = imageRequestScopeKey(targetRunId, targetKind);
+    const requestEpoch = loadRunRequestsEpochRef.current + 1;
+    loadRunRequestsEpochRef.current = requestEpoch;
+    const narrationMutationEpoch = narrationMutationEpochRef.current;
+    const requestIsCurrent = () => (
+      loadRunRequestsEpochRef.current === requestEpoch
+      && narrationMutationEpochRef.current === narrationMutationEpoch
+      && runIdRef.current === targetRunId
+      && requestKindRef.current === targetKind
+    );
     setBusy(true);
     try {
       const data = await jsonFetch<{ items: ImageRequestItem[]; references: ReferenceOption[]; progress: RunProgress }>(
         `/api/image-gen/requests?run_id=${encodeURIComponent(targetRunId)}&kind=${targetKind}`,
       );
       let narrationById: Map<string, NarrationManifestItem> | undefined;
+      let audioSetHash = '';
       let progress = data.progress;
       if (targetKind === 'scene') {
         try {
-          const narrationData = await jsonFetch<{ items: NarrationManifestItem[]; progress: RunProgress }>(
+          const narrationData = await jsonFetch<{ items: NarrationManifestItem[]; audioSetHash: string; progress: RunProgress }>(
             `/api/image-gen/narration-items?run_id=${encodeURIComponent(targetRunId)}`,
           );
           narrationById = new Map(narrationData.items.map((item) => [item.itemId, item]));
+          audioSetHash = narrationData.audioSetHash || '';
           progress = narrationData.progress || progress;
         } catch (error) {
           console.error(error);
         }
       }
+      if (!requestIsCurrent()) return;
       const loadedItems = toEditableItems(data.items, data.references, narrationById);
+      const sameScope = itemsScopeRef.current === targetScopeKey;
+      itemsScopeRef.current = targetScopeKey;
       setReferences(data.references);
-      setItems((prev) => mergeLoadedItemsWithInflight(prev, loadedItems));
+      setItems((prev) => sameScope ? mergeLoadedItemsWithInflight(prev, loadedItems) : loadedItems);
       setRunProgress(progress);
+      if (targetKind === 'scene') setNarrationAudioSetHash(audioSetHash);
     } catch (error) {
       console.error(error);
+      if (!requestIsCurrent()) return;
+      itemsScopeRef.current = targetScopeKey;
       setItems([]);
       setReferences([]);
       setRunProgress(null);
+      if (targetKind === 'scene') setNarrationAudioSetHash('');
     } finally {
-      setBusy(false);
+      if (requestIsCurrent()) setBusy(false);
     }
   }, []);
 
@@ -2036,6 +2535,25 @@ function App() {
     loadRuns()
       .catch((error) => console.error(error));
   }, [loadRuns]);
+
+  useEffect(() => {
+    const nextScopeKey = imageRequestScopeKey(runId, requestKind);
+    if (itemsScopeRef.current === nextScopeKey) return;
+    itemsScopeRef.current = nextScopeKey;
+    setItems([]);
+    setReferences([]);
+  }, [requestKind, runId]);
+
+  useEffect(() => {
+    setNarrationAudioSetHash('');
+    setNarrationReviewFindings([]);
+    setNarrationReviewReport('');
+  }, [runId]);
+
+  useEffect(() => {
+    cancelFullNarrationPlayback();
+    setFullNarrationListenEvidence(null);
+  }, [cancelFullNarrationPlayback, narrationApprovalTimelineSignature, narrationAudioSetHash, runId]);
 
   useEffect(() => {
     if (!runId) return;
@@ -2055,10 +2573,21 @@ function App() {
   useEffect(() => {
     if (!runId || !generationInFlight) return;
     let cancelled = false;
+    let pollRequestEpoch = 0;
     const pollProgress = async () => {
+      const requestEpoch = pollRequestEpoch + 1;
+      pollRequestEpoch = requestEpoch;
+      const narrationMutationEpoch = narrationMutationEpochRef.current;
       try {
         const data = await jsonFetch<ProgressResponse>(`/api/image-gen/progress?run_id=${encodeURIComponent(runId)}`);
-        if (!cancelled) setRunProgress(data.progress);
+        if (
+          !cancelled
+          && requestEpoch === pollRequestEpoch
+          && narrationMutationEpoch === narrationMutationEpochRef.current
+          && runIdRef.current === runId
+        ) {
+          setRunProgress(data.progress);
+        }
       } catch (error) {
         console.error(error);
       }
@@ -2139,6 +2668,43 @@ function App() {
     setItems((prev) => prev.map((item) => (item.id === itemId ? { ...item, ...patch } : item)));
   }, []);
 
+  const applyBulkGenerationJob = useCallback((
+    job: BulkGenerationJob,
+    options: { preserveLoadedCandidates?: boolean } = {},
+  ) => {
+    if (runIdRef.current !== job.runId || requestKindRef.current !== job.kind) return;
+    const active = job.status === 'queued' || job.status === 'running';
+    setBulkGenerating(active);
+    setBulkTotal(job.totalCount);
+    setBulkCompletedCount(job.completedCount);
+    setBulkFailedCount(job.failedCount);
+    const resultById = new Map(job.results.map((result) => [result.itemId, result]));
+    setItems((prev) => prev.map((item) => {
+      const result = resultById.get(item.id);
+      if (!result) return item;
+      if (options.preserveLoadedCandidates) {
+        const candidateState = mergedCandidateState(item, result.candidates || []);
+        return {
+          ...item,
+          ...candidateState,
+          generating: false,
+          generationJobStatus: result.status,
+          generationGroupIndex: result.groupIndex,
+        };
+      }
+      const incomingCandidates = result.candidates?.length
+        ? result.candidates
+        : [{ index: 1, status: result.status, path: null, error: result.error }];
+      return {
+        ...item,
+        generating: result.status === 'queued' || result.status === 'running',
+        generationJobStatus: result.status,
+        generationGroupIndex: result.groupIndex,
+        ...mergedCandidateState(item, incomingCandidates),
+      };
+    }));
+  }, []);
+
   const closeChat = useCallback(() => {
     setChatOpen(false);
     window.setTimeout(() => chatToggleButtonRef.current?.focus(), 0);
@@ -2151,9 +2717,9 @@ function App() {
   const fetchCandidates = useCallback(
     (itemId: string) =>
       jsonFetch<CandidatesResponse>(
-        `/api/image-gen/candidates?run_id=${encodeURIComponent(runId)}&item_id=${encodeURIComponent(itemId)}`,
+        `/api/image-gen/candidates?run_id=${encodeURIComponent(runId)}&item_id=${encodeURIComponent(itemId)}&kind=${viewKind}`,
       ),
-    [runId],
+    [runId, viewKind],
   );
 
   const waitForRecoveredCandidates = useCallback(
@@ -2207,26 +2773,54 @@ function App() {
 
   const generateItem = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    const generationRunId = runId;
+    const generationKind = viewKind;
+    const generationScopeKey = imageRequestScopeKey(generationRunId, generationKind);
+    const generationIsCurrent = () => (
+      runIdRef.current === generationRunId
+      && requestKindRef.current === generationKind
+      && itemsScopeRef.current === generationScopeKey
+    );
     ensureItemsInState([item]);
     setActiveItemId(item.id);
     setInsertStatus('idle');
-    patchItem(item.id, { generating: true, candidates: [] });
+    setItems((prev) => prev.map((current) => (
+      current.id === item.id
+        ? { ...current, ...mergedCandidateState(current, []), generating: true }
+        : current
+    )));
     try {
       const data = await generateWithRecovery(item);
-      patchItem(item.id, {
-        candidates: data.candidates,
-        selectedCandidatePath: data.candidates.find((candidate) => candidate.path)?.path ?? null,
-      });
+      if (!generationIsCurrent()) return;
+      setItems((prev) => prev.map((current) => (
+        current.id === item.id
+          ? { ...current, ...mergedCandidateState(current, data.candidates) }
+          : current
+      )));
     } catch (error) {
       console.error(error);
-      patchItem(item.id, { candidates: [{ index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) }] });
+      if (!generationIsCurrent()) return;
+      const failedCandidate: Candidate = { index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) };
+      setItems((prev) => prev.map((current) => (
+        current.id === item.id
+          ? { ...current, ...mergedCandidateState(current, [failedCandidate]) }
+          : current
+      )));
     } finally {
-      patchItem(item.id, { generating: false });
+      if (generationIsCurrent()) patchItem(item.id, { generating: false });
     }
-  }, [ensureItemsInState, generateWithRecovery, patchItem, runId]);
+  }, [ensureItemsInState, generateWithRecovery, patchItem, runId, viewKind]);
 
   const generateItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId) return;
+    const generationRunId = runId;
+    const generationKind = viewKind;
+    const generationScopeKey = imageRequestScopeKey(generationRunId, generationKind);
+    const generationIsCurrent = () => (
+      runIdRef.current === generationRunId
+      && requestKindRef.current === generationKind
+      && itemsScopeRef.current === generationScopeKey
+    );
     ensureItemsInState(targetItems);
     const targetIds = new Set(targetItems.map((item) => item.id));
     setBulkGenerating(true);
@@ -2235,7 +2829,11 @@ function App() {
     setBulkFailedCount(0);
     setInsertStatus('idle');
     setActiveItemId(targetItems[0]?.id ?? null);
-    setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, generating: true, candidates: [] } : item)));
+    setItems((prev) => prev.map((item) => (
+      targetIds.has(item.id)
+        ? { ...item, ...mergedCandidateState(item, []), generating: true }
+        : item
+    )));
 
     try {
       const requestItems = targetItems.map((item) => ({
@@ -2248,65 +2846,105 @@ function App() {
         references: item.selectedReferences.map((ref) => ref.path),
         candidate_count: candidateCount,
       }));
-      const maxCandidatesPerBulkRequest = 100;
-      const maxItemsPerBulkRequest = Math.max(1, Math.floor(maxCandidatesPerBulkRequest / Math.max(candidateCount, 1)));
-      const allResults: CandidatesResponse[] = [];
-      for (let start = 0; start < requestItems.length; start += maxItemsPerBulkRequest) {
-        const batchItems = requestItems.slice(start, start + maxItemsPerBulkRequest);
-        const batchCandidateTotal = batchItems.reduce((sum, item) => sum + item.candidate_count, 0);
-        const data = await jsonFetch<BulkGenerateResponse>('/api/image-gen/generate-bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            run_id: runId,
-            kind: viewKind,
-            items: batchItems,
-            concurrency: Math.min(Math.max(batchCandidateTotal, 1), 100),
-          }),
-        });
-        allResults.push(...data.results);
-      }
-      const resultsById = new Map(allResults.map((result) => [result.itemId, result]));
-      let completed = 0;
-      let failed = 0;
-      setItems((prev) =>
-        prev.map((prevItem) => {
-          if (!targetIds.has(prevItem.id)) return prevItem;
-          const result = resultsById.get(prevItem.id);
-          const candidates = result?.candidates?.length
-            ? result.candidates
-            : [{ index: 1, status: 'failed', path: null, error: result?.error ?? 'generation failed' }];
-          if (candidates.some((candidate) => candidate.path)) completed += 1;
-          else failed += 1;
-          return {
-            ...prevItem,
-            generating: false,
-            candidates,
-            selectedCandidatePath: candidates.find((candidate) => candidate.path)?.path ?? null,
-          };
+      const job = await jsonFetch<BulkGenerationJob>('/api/image-gen/generate-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          run_id: runId,
+          kind: viewKind,
+          items: requestItems,
+          background: true,
         }),
-      );
-      setBulkCompletedCount(completed);
-      setBulkFailedCount(failed);
+      });
+      applyBulkGenerationJob(job);
+      if (job.status === 'queued' || job.status === 'running') {
+        setBulkJobId(job.jobId);
+      }
     } catch (error) {
       const message = candidateErrorMessage(error);
+      if (!generationIsCurrent()) return;
+      setBulkGenerating(false);
       setBulkCompletedCount(0);
       setBulkFailedCount(targetIds.size);
       setItems((prev) =>
         prev.map((prevItem) =>
           targetIds.has(prevItem.id)
-            ? {
-                ...prevItem,
-                generating: false,
-                candidates: [{ index: 1, status: 'failed', path: null, error: message }],
-              }
+              ? {
+                  ...prevItem,
+                  generating: false,
+                  ...mergedCandidateState(prevItem, [{ index: 1, status: 'failed', path: null, error: message }]),
+                }
             : prevItem,
         ),
       );
-    } finally {
-      setBulkGenerating(false);
     }
-  }, [candidateCount, ensureItemsInState, runId, viewKind]);
+  }, [applyBulkGenerationJob, candidateCount, ensureItemsInState, runId, viewKind]);
+
+  useEffect(() => {
+    if (!bulkJobId) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    const poll = async () => {
+      try {
+        const job = await jsonFetch<BulkGenerationJob>(
+          `/api/image-gen/generate-bulk/${encodeURIComponent(bulkJobId)}`,
+        );
+        if (cancelled || runIdRef.current !== job.runId) return;
+        if (job.status === 'queued' || job.status === 'running') {
+          applyBulkGenerationJob(job);
+          timer = window.setTimeout(() => void poll(), 2000);
+          return;
+        }
+        setBulkJobId(null);
+        await loadRunRequests(job.runId, job.kind);
+        if (cancelled || runIdRef.current !== job.runId) return;
+        applyBulkGenerationJob(job);
+      } catch (error) {
+        if (cancelled) return;
+        console.error(error);
+        timer = window.setTimeout(() => void poll(), 3000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [applyBulkGenerationJob, bulkJobId, loadRunRequests]);
+
+  useEffect(() => {
+    setBulkJobId(null);
+    setBulkGenerating(false);
+    setBulkTotal(0);
+    setBulkCompletedCount(0);
+    setBulkFailedCount(0);
+    if (!runId) return;
+    const controller = new AbortController();
+    const reconnect = async () => {
+      try {
+        const response = await fetch(
+          `/api/image-gen/runs/${encodeURIComponent(runId)}/generate-bulk/active?kind=${viewKind}`,
+          { signal: controller.signal },
+        );
+        if (response.status === 404) return;
+        if (!response.ok) throw new Error((await response.text()) || response.statusText);
+        const job = await response.json() as BulkGenerationJob;
+        if (controller.signal.aborted || runIdRef.current !== job.runId) return;
+        if (job.status === 'queued' || job.status === 'running') {
+          applyBulkGenerationJob(job);
+          setBulkJobId(job.jobId);
+          return;
+        }
+        await loadRunRequests(job.runId, job.kind);
+        if (controller.signal.aborted || runIdRef.current !== job.runId) return;
+        applyBulkGenerationJob(job, { preserveLoadedCandidates: true });
+      } catch (error) {
+        if (!controller.signal.aborted) console.error(error);
+      }
+    };
+    void reconnect();
+    return () => controller.abort();
+  }, [applyBulkGenerationJob, loadRunRequests, runId, viewKind]);
 
   const generateBulk = async () => {
     await generateItems([...imageBulkItems]);
@@ -2414,7 +3052,12 @@ function App() {
     setAssetFilter(nextView.assetFilter);
     setActiveItemId(targetItems[0]?.id ?? null);
     setRegenerateBusy(true);
-    setRegenerateStatus(`${settingsTargetLabel(settingsTarget)}のプロンプトを生成中`);
+    const hasCompiledV2 = targetItems.some((item) => item.promptPolicyVersion === 'image_api_prompt_v2');
+    setRegenerateStatus(
+      hasCompiledV2
+        ? `${settingsTargetLabel(settingsTarget)}の設計を更新して再コンパイル中`
+        : `${settingsTargetLabel(settingsTarget)}のプロンプトを生成中`,
+    );
     setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, generating: true } : item)));
     try {
       const data = await jsonFetch<RegeneratePromptsResponse>('/api/image-gen/regenerate-prompts', {
@@ -2427,23 +3070,29 @@ function App() {
           item_ids: currentTargetVisible ? targetItems.map((item) => item.id) : [],
         }),
       });
-      const byId = new Map(data.prompts.map((item) => [item.itemId, item.prompt]));
+      const updatedIds = new Set(data.updated);
       const requestKind = nextView.viewKind;
       const requestData = await jsonFetch<{ items: ImageRequestItem[]; references: ReferenceOption[] }>(
         `/api/image-gen/requests?run_id=${encodeURIComponent(runId)}&kind=${requestKind}`,
       );
+      if (runIdRef.current !== runId || requestKindRef.current !== requestKind) return;
       setReferences(requestData.references);
       const loadedItems = toEditableItems(requestData.items, requestData.references);
+      const targetScopeKey = imageRequestScopeKey(runId, requestKind);
+      const sameScope = itemsScopeRef.current === targetScopeKey;
+      itemsScopeRef.current = targetScopeKey;
       const nextGenerated = loadedItems
-        .filter((item) => byId.has(item.id))
-        .map((item) => {
-          const prompt = byId.get(item.id) ?? item.draftPrompt;
-          return { ...item, prompt, draftPrompt: prompt, candidates: [], selectedCandidatePath: null, generating: false };
-        });
-      const generatedById = new Map(nextGenerated.map((item) => [item.id, item]));
-      setItems(loadedItems.map((item) => generatedById.get(item.id) ?? item));
+        .filter((item) => updatedIds.has(item.id))
+        .map((item) => ({ ...item, generating: false }));
+      setItems((prev) => (sameScope ? mergeLoadedItemsWithInflight(prev, loadedItems) : loadedItems).map((item) => (
+        updatedIds.has(item.id) ? { ...item, generating: false } : item
+      )));
       setRegeneratedItems(nextGenerated);
-      setRegenerateStatus(`${data.updated.length}件のプロンプトを更新しました`);
+      setRegenerateStatus(
+        data.operation === 'recompiled'
+          ? `${data.updated.length}件の設計を更新して再コンパイルしました`
+          : `${data.updated.length}件のプロンプトを更新しました`,
+      );
       setSettingDraft('');
       setConfirmImageGenerateOpen(nextGenerated.length > 0);
     } catch (error) {
@@ -2539,9 +3188,9 @@ function App() {
 
   const openVideoPromptConfirm = useCallback(async () => {
     if (!runId) return;
-    if (!allNarrationAudioReady) {
+    if (!narrationReadyForVideo) {
       applyWorkspaceMode('video');
-      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+      setVideoPromptStatus('動画生成には全cut音声の個別承認と全編音声承認が必要です');
       return;
     }
     setVideoPromptStatus(null);
@@ -2551,7 +3200,7 @@ function App() {
       await loadRunRequests(runId, 'scene');
     }
     setConfirmVideoPromptOpen(true);
-  }, [allNarrationAudioReady, applyWorkspaceMode, items, loadRunRequests, runId, viewKind]);
+  }, [applyWorkspaceMode, items, loadRunRequests, narrationReadyForVideo, runId, viewKind]);
 
   const buildVideoGenerateItem = useCallback((item: EditableItem, count = videoCandidateCount): VideoGenerateItemPayload => ({
     item_id: item.id,
@@ -2578,8 +3227,8 @@ function App() {
 
   const generateVideoForCut = useCallback(async (item: EditableItem) => {
     if (!runId) return;
-    if (!allNarrationAudioReady) {
-      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+    if (!narrationReadyForVideo) {
+      setVideoPromptStatus('動画生成には全編音声承認が必要です');
       return;
     }
     ensureItemsInState([item]);
@@ -2614,12 +3263,12 @@ function App() {
       patchItem(item.id, { videoGenerating: false });
       setVideoPromptBusy(false);
     }
-  }, [allNarrationAudioReady, ensureItemsInState, generateVideoRequest, patchItem, runId, saveCurrentReview]);
+  }, [ensureItemsInState, generateVideoRequest, narrationReadyForVideo, patchItem, runId, saveCurrentReview]);
 
   const generateVideoItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId || !targetItems.length) return;
-    if (!allNarrationAudioReady) {
-      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+    if (!narrationReadyForVideo) {
+      setVideoPromptStatus('動画生成には全編音声承認が必要です');
       return;
     }
     ensureItemsInState(targetItems);
@@ -2687,11 +3336,11 @@ function App() {
     } finally {
       setVideoPromptBusy(false);
     }
-  }, [allNarrationAudioReady, ensureItemsInState, generateVideoRequest, runId, saveCurrentReview]);
+  }, [ensureItemsInState, generateVideoRequest, narrationReadyForVideo, runId, saveCurrentReview]);
 
   const generateAllVideos = useCallback(async () => {
-    if (!allNarrationAudioReady) {
-      setVideoPromptStatus('動画生成には全cutの音声ファイルまたは無音OKが必要です');
+    if (!narrationReadyForVideo) {
+      setVideoPromptStatus('動画生成には全編音声承認が必要です');
       setConfirmVideoPromptOpen(false);
       return;
     }
@@ -2699,60 +3348,102 @@ function App() {
     if (!sceneItems.length) return;
     setConfirmVideoPromptOpen(false);
     await generateVideoItems(sceneItems);
-  }, [allNarrationAudioReady, generateVideoItems, items]);
+  }, [generateVideoItems, items, narrationReadyForVideo]);
 
   const createNarrationDrafts = useCallback(async (replace = false) => {
     if (!runId) return;
+    const targetRunId = runId;
     setConfirmNarrationReplaceOpen(false);
     setNarrationDraftBusy(true);
     setNarrationStatus(replace ? 'ナレーション文面を再作成中' : 'ナレーション文面を作成中');
     try {
-      const data = await jsonFetch<NarrationDraftCreateResponse>('/api/image-gen/narration-drafts/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          run_id: runId,
-          note: 'frontend narration draft creation',
-          replace,
-        }),
+      const data = await runNarrationMutation(targetRunId, async () => {
+        try {
+          return await jsonFetch<NarrationDraftCreateResponse>('/api/image-gen/narration-drafts/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              note: 'frontend narration draft creation',
+              replace,
+            }),
+          });
+        } finally {
+          await loadRunRequests(targetRunId, 'scene');
+        }
       });
-      if (data.progress) setRunProgress(data.progress);
-      await loadRunRequests(runId, 'scene');
-      setNarrationStatus(`ナレーション文面 ${data.updated.length} cut 作成`);
+      const workspaceNote = data.authoringWorkspace?.status === 'ready'
+        ? '。全編音声設計ワークスペースも準備しました'
+        : data.authoringWorkspace?.warning ? `。音声設計準備: ${data.authoringWorkspace.warning}` : '';
+      setNarrationStatus(`ナレーション文面 ${data.updated.length} cut 作成${workspaceNote}`);
     } catch (error) {
       console.error(error);
       setNarrationStatus(replace ? 'ナレーション文面の再作成に失敗' : 'ナレーション文面の作成に失敗');
     } finally {
       setNarrationDraftBusy(false);
     }
-  }, [loadRunRequests, runId]);
+  }, [loadRunRequests, runId, runNarrationMutation]);
+
+  const saveNarrationText = useCallback(async (item: EditableItem, lock: boolean): Promise<NarrationWorkflowItem | null> => {
+    if (!runId) return null;
+    const targetRunId = runId;
+    patchItem(item.id, { narrationSaving: true });
+    setNarrationStatus(`${item.id} ${lock ? '文面を確定中' : '下書きを保存中'}`);
+    try {
+      const data = await runNarrationMutation(targetRunId, async () => {
+        try {
+          const response = await jsonFetch<NarrationTextSaveResponse>('/api/image-gen/narration-text/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              item_id: item.id,
+              text: item.narrationText,
+              tts_text: item.narrationTtsText || item.narrationText,
+              tool: item.narrationTool,
+              authoring_status: lock ? 'human_locked' : 'draft',
+              expected_revision: item.narrationRevision,
+            }),
+          });
+          patchItem(item.id, narrationWorkflowPatch(response.item));
+          return response;
+        } finally {
+          patchItem(item.id, { narrationSaving: false });
+          await loadRunRequests(targetRunId, 'scene');
+        }
+      });
+      setNarrationStatus(`${item.id} ${lock ? '文面を確定しました' : '下書きを保存しました'}`);
+      return data.item;
+    } catch (error) {
+      console.error(error);
+      patchItem(item.id, { narrationSaving: false });
+      setNarrationStatus(`${item.id} 保存に失敗しました。別タブ更新時は再読込してください`);
+      return null;
+    }
+  }, [loadRunRequests, patchItem, runId, runNarrationMutation]);
 
   const confirmSilentOk = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    const targetRunId = runId;
     patchItem(item.id, { narrationGenerating: true });
     setNarrationStatus(`${item.id} 無音OKを保存中`);
     try {
-      const data = await jsonFetch<NarrationSilentOkResponse>('/api/image-gen/narration-silent-ok', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          run_id: runId,
-          item_id: item.id,
-          reason: 'frontend confirmed intentional silence',
-        }),
-      });
-      if (data.progress) setRunProgress(data.progress);
-      patchItem(item.id, {
-        narrationGenerating: false,
-        narrationTool: 'silent',
-        narrationText: '',
-        narrationTtsText: '',
-        narrationOutput: null,
-        narrationExists: false,
-        narrationStatus: 'audio_ready',
-        narrationReviewStatus: 'approved',
-        narrationSilentOk: true,
-        renderNarrationPath: null,
+      await runNarrationMutation(targetRunId, async () => {
+        try {
+          await jsonFetch<NarrationSilentOkResponse>('/api/image-gen/narration-silent-ok', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              item_id: item.id,
+              reason: 'frontend confirmed intentional silence',
+              expected_revision: item.narrationRevision,
+            }),
+          });
+        } finally {
+          patchItem(item.id, { narrationGenerating: false });
+          await loadRunRequests(targetRunId, 'scene');
+        }
       });
       setNarrationStatus(`${item.id} 無音OK`);
     } catch (error) {
@@ -2760,15 +3451,13 @@ function App() {
       patchItem(item.id, { narrationGenerating: false });
       setNarrationStatus(`${item.id} 無音OKの保存に失敗`);
     }
-  }, [patchItem, runId]);
+  }, [loadRunRequests, patchItem, runId, runNarrationMutation]);
 
   const narrationPayload = useCallback((item: EditableItem) => ({
     item_id: item.id,
-    text: item.narrationText,
-    tts_text: item.narrationTtsText || item.narrationText,
-    output: item.narrationOutput,
     tool: item.narrationTool,
-    duration_seconds: Math.max(1, item.renderVideoDurationSec || item.videoDurationSec || 1),
+    expected_revision: item.narrationRevision,
+    expected_tts_hash: item.narrationTtsHash,
   }), []);
 
   const applyNarrationResult = useCallback((result: NarrationGenerateResponse['item']) => {
@@ -2778,15 +3467,19 @@ function App() {
           ? {
               ...item,
               narrationGenerating: false,
-              narrationExists: result.status === 'completed' || item.narrationExists,
-              narrationOutput: result.path || item.narrationOutput,
-              renderNarrationPath: result.path || item.renderNarrationPath,
-              narrationStatus: result.status === 'completed' ? 'audio_ready' : item.narrationStatus,
-              narrationReviewStatus: result.status === 'completed' ? 'approved' : item.narrationReviewStatus,
-              narrationSilentOk: item.narrationTool === 'silent' && result.status === 'completed' ? true : item.narrationSilentOk,
-              narrationDurationSec: result.durationSeconds ?? item.narrationDurationSec,
-              videoDurationSec: Math.max(item.videoDurationSec, Math.ceil(result.durationSeconds || 0), 1),
-              renderVideoDurationSec: Math.max(item.renderVideoDurationSec, Math.ceil(result.durationSeconds || 0), 1),
+              narrationStatus: item.narrationAudioHumanApproved ? item.narrationStatus : result.status,
+              narrationGenerationStatus: result.status,
+              narrationCandidateId: result.candidateId || item.narrationCandidateId,
+              narrationCandidateOutput: result.path || item.narrationCandidateOutput,
+              narrationCandidateStatus: result.status,
+              narrationCandidateExists: Boolean(result.path) && result.status !== 'failed',
+              narrationCandidateDurationSec: result.durationSeconds ?? item.narrationCandidateDurationSec,
+              narrationGeneratedFromTtsHash: result.generatedFromTtsHash || item.narrationGeneratedFromTtsHash,
+              narrationAudioReviewStatus: item.narrationAudioReviewStatus,
+              narrationAudioHumanApproved: item.narrationAudioHumanApproved,
+              narrationExists: item.narrationExists,
+              narrationOutput: item.narrationOutput,
+              renderNarrationPath: item.renderNarrationPath,
             }
           : item,
       ),
@@ -2795,6 +3488,13 @@ function App() {
 
   const generateNarrationForCut = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    const targetRunId = runId;
+    let generationItem = item;
+    if (item.narrationDirty || item.narrationRevision === 0) {
+      const saved = await saveNarrationText(item, itemNarrationTextLocked(item));
+      if (!saved) return;
+      generationItem = { ...item, ...narrationWorkflowPatch(saved) } as EditableItem;
+    }
     ensureItemsInState([item]);
     setActiveItemId(item.id);
     setNarrationBusy(true);
@@ -2803,19 +3503,25 @@ function App() {
     setNarrationBulkCompletedCount(0);
     setNarrationBulkFailedCount(0);
     patchItem(item.id, { narrationGenerating: true });
-    await saveCurrentReview();
     try {
-      const data = await jsonFetch<NarrationGenerateResponse>('/api/image-gen/narration-generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: runId, ...narrationPayload(item) }),
+      const data = await runNarrationMutation(targetRunId, async () => {
+        try {
+          const response = await jsonFetch<NarrationGenerateResponse>('/api/image-gen/narration-generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: targetRunId, ...narrationPayload(generationItem) }),
+          });
+          applyNarrationResult(response.item);
+          return response;
+        } finally {
+          patchItem(item.id, { narrationGenerating: false });
+          await loadRunRequests(targetRunId, 'scene');
+        }
       });
-      if (data.progress) setRunProgress(data.progress);
-      applyNarrationResult(data.item);
-      const ok = data.item.status === 'completed';
+      const ok = data.item.status === 'candidate';
       setNarrationBulkCompletedCount(ok ? 1 : 0);
       setNarrationBulkFailedCount(ok ? 0 : 1);
-      setNarrationStatus(ok ? `${item.id} 音声生成完了` : `${item.id} 音声生成失敗`);
+      setNarrationStatus(ok ? `${item.id} 音声候補を生成しました。試聴後に承認してください` : `${item.id} 音声候補は古いrevisionです`);
     } catch (error) {
       console.error(error);
       patchItem(item.id, { narrationGenerating: false });
@@ -2824,17 +3530,60 @@ function App() {
     } finally {
       setNarrationBusy(false);
     }
-  }, [applyNarrationResult, ensureItemsInState, narrationPayload, patchItem, runId, saveCurrentReview]);
+  }, [applyNarrationResult, ensureItemsInState, loadRunRequests, narrationPayload, patchItem, runId, runNarrationMutation, saveNarrationText]);
+
+  const approveNarrationCandidate = useCallback(async (item: EditableItem) => {
+    if (!runId || !item.narrationCandidateId) return;
+    const targetRunId = runId;
+    patchItem(item.id, { narrationApproving: true });
+    setNarrationStatus(`${item.id} 音声候補を承認中`);
+    try {
+      await runNarrationMutation(targetRunId, async () => {
+        try {
+          const data = await jsonFetch<NarrationAudioApproveResponse>('/api/image-gen/narration-audio/approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              item_id: item.id,
+              candidate_id: item.narrationCandidateId,
+              expected_revision: item.narrationRevision,
+              expected_tts_hash: item.narrationTtsHash,
+              note: 'frontend listened to and approved this narration candidate',
+            }),
+          });
+          const duration = data.item.approvedCandidate?.duration_seconds || data.item.candidate?.duration_seconds || 0;
+          patchItem(item.id, {
+            ...narrationWorkflowPatch(data.item),
+            videoDurationSec: Math.max(item.videoDurationSec, Math.ceil(duration), 1),
+            renderVideoDurationSec: Math.max(item.renderVideoDurationSec, Math.ceil(duration), 1),
+          });
+        } finally {
+          patchItem(item.id, { narrationApproving: false });
+          await loadRunRequests(targetRunId, 'scene');
+        }
+      });
+      setNarrationStatus(`${item.id} 音声を承認しました`);
+    } catch (error) {
+      console.error(error);
+      patchItem(item.id, { narrationApproving: false });
+      setNarrationStatus(`${item.id} 音声承認に失敗しました。revisionを確認してください`);
+    }
+  }, [loadRunRequests, patchItem, runId, runNarrationMutation]);
 
   const generateAllNarration = useCallback(async () => {
     if (!runId) return;
-    if (!allNarrationDraftsReady) {
-      setNarrationStatus(`音声生成には全cutの文面が必要です ${narrationDraftReadyCount}/${sceneCutItems.length}`);
-      return;
-    }
-    const sceneItems = items.filter((item) => isSceneCutItem(item) && !itemNarrationAudioReady(item));
+    const targetRunId = runId;
+    const sceneItems = items.filter(
+      (item) => isSceneCutItem(item)
+        && item.narrationTool !== 'silent'
+        && itemNarrationTextLocked(item)
+        && !item.narrationDirty
+        && item.narrationRevision > 0
+        && !itemNarrationAudioReady(item),
+    );
     if (!sceneItems.length && items.some(isSceneCutItem)) {
-      setNarrationStatus('全cutの音声または無音OKが揃っています');
+      setNarrationStatus('生成対象がありません。先に各cutの文面を確定してください');
       return;
     }
     if (!sceneItems.length) return;
@@ -2846,28 +3595,34 @@ function App() {
     setNarrationBulkCompletedCount(0);
     setNarrationBulkFailedCount(0);
     setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, narrationGenerating: true } : item)));
-    await saveCurrentReview();
     try {
-      const data = await jsonFetch<BulkNarrationGenerateResponse>('/api/image-gen/narration-generate-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          run_id: runId,
-          items: sceneItems.map((item) => narrationPayload(item)),
-          concurrency: 2,
-        }),
+      const data = await runNarrationMutation(targetRunId, async () => {
+        try {
+          const response = await jsonFetch<BulkNarrationGenerateResponse>('/api/image-gen/narration-generate-bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              items: sceneItems.map((item) => narrationPayload(item)),
+              concurrency: 2,
+            }),
+          });
+          response.results.forEach(applyNarrationResult);
+          return response;
+        } finally {
+          setItems((prev) => prev.map((current) => (targetIds.has(current.id) ? { ...current, narrationGenerating: false } : current)));
+          await loadRunRequests(targetRunId, 'scene');
+        }
       });
-      if (data.progress) setRunProgress(data.progress);
       let completed = 0;
       let failed = 0;
       data.results.forEach((result) => {
-        if (result.status === 'completed') completed += 1;
+        if (result.status === 'candidate') completed += 1;
         else failed += 1;
-        applyNarrationResult(result);
       });
       setNarrationBulkCompletedCount(completed);
       setNarrationBulkFailedCount(failed);
-      setNarrationStatus(`音声生成完了 ${completed}/${sceneItems.length}`);
+      setNarrationStatus(`音声候補生成完了 ${completed}/${sceneItems.length}。試聴後に個別承認してください`);
     } catch (error) {
       console.error(error);
       setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, narrationGenerating: false } : item)));
@@ -2876,7 +3631,256 @@ function App() {
     } finally {
       setNarrationBusy(false);
     }
-  }, [allNarrationDraftsReady, applyNarrationResult, ensureItemsInState, items, narrationDraftReadyCount, narrationPayload, runId, saveCurrentReview, sceneCutItems.length]);
+  }, [applyNarrationResult, ensureItemsInState, items, loadRunRequests, narrationPayload, runId, runNarrationMutation]);
+
+  const runNarrationTextReview = useCallback(async () => {
+    if (!runId || !allNarrationTextReady) {
+      setNarrationStatus('全cutの文面を確定してからp720全編レビューを実行してください');
+      return;
+    }
+    const targetRunId = runId;
+    setNarrationReviewBusy(true);
+    setNarrationStatus('p720 全編テキストレビュー中');
+    try {
+      const data = await runNarrationMutation(targetRunId, async () => {
+        try {
+          const response = await jsonFetch<NarrationReviewRunResponse>('/api/image-gen/narration-review/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: targetRunId }),
+          });
+          setNarrationReviewFindings(response.findings || []);
+          setNarrationReviewReport(response.report || '');
+          return response;
+        } finally {
+          await loadRunRequests(targetRunId, 'scene');
+        }
+      });
+      if (data.status === 'passed') {
+        setNarrationStatus('p720 全編テキストレビュー合格');
+      } else {
+        const firstFinding = data.findings[0] ? `: ${data.findings[0]}` : '';
+        setNarrationStatus(`p720 要修正${firstFinding}`);
+      }
+    } catch (error) {
+      console.error(error);
+      setNarrationReviewFindings([]);
+      setNarrationStatus('p720 全編テキストレビューに失敗しました');
+    } finally {
+      setNarrationReviewBusy(false);
+    }
+  }, [allNarrationTextReady, loadRunRequests, runId, runNarrationMutation]);
+
+  const playFullNarration = useCallback(async () => {
+    if (!runId || !allNarrationAudioReady || !narrationAudioSetHash) {
+      setNarrationStatus('先に全cutのcurrent音声を個別承認してください');
+      return;
+    }
+    cancelFullNarrationPlayback();
+    const token = fullNarrationPlaybackTokenRef.current + 1;
+    fullNarrationPlaybackTokenRef.current = token;
+    const audioSetHash = narrationAudioSetHash;
+    const timeline = narrationApprovalTimeline.map((item) => ({ ...item }));
+    let cutStartSeconds = 0;
+    const schedule = sceneCutItems.map((item, index) => {
+      const timelineItem = timeline[index];
+      if (!timelineItem || timelineItem.item_id !== item.id) {
+        throw new Error(`${item.id}: narration timeline order mismatch`);
+      }
+      const scheduledItem = { item, timelineItem, cutStartSeconds };
+      cutStartSeconds += timelineItem.video_duration_seconds;
+      return scheduledItem;
+    });
+    const totalDurationSeconds = cutStartSeconds;
+    setFullNarrationListenEvidence(null);
+    setFullNarrationListening(true);
+    setFullNarrationListeningItem('準備中');
+    setNarrationStatus('全編音声を事前読込中');
+    document.querySelectorAll('audio').forEach((audio) => audio.pause());
+    const audioContext = new AudioContext();
+    const abortController = new AbortController();
+    const activeSources = new Set<AudioBufferSourceNode>();
+    let completionSource: ConstantSourceNode | null = null;
+    let resolveCompletion: ((completed: boolean) => void) | null = null;
+    let listeningItemTimer: number | null = null;
+    let cancelled = false;
+    const cancelThisPlayback = () => {
+      cancelled = true;
+      abortController.abort();
+      activeSources.forEach((source) => {
+        try {
+          source.stop();
+        } catch {
+          // A source may have already ended.
+        }
+      });
+      activeSources.clear();
+      if (completionSource) {
+        try {
+          completionSource.stop();
+        } catch {
+          // The completion marker may have already ended.
+        }
+      }
+      resolveCompletion?.(false);
+      resolveCompletion = null;
+      if (listeningItemTimer !== null) window.clearInterval(listeningItemTimer);
+      listeningItemTimer = null;
+      void audioContext.close().catch(() => undefined);
+    };
+    cancelCurrentFullNarrationAudioRef.current = cancelThisPlayback;
+
+    try {
+      await audioContext.resume();
+      const decodedAudio = await Promise.all(schedule.map(async ({ item, timelineItem }) => {
+        if (item.narrationTool === 'silent') return null;
+        if (!item.narrationOutput) throw new Error(`${item.id}: approved narration output is missing`);
+        const response = await fetch(audioFileUrl(runId, item.narrationOutput), { signal: abortController.signal });
+        if (!response.ok) throw new Error(`full narration audio fetch failed: ${response.status}`);
+        const buffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+        const availableDuration = timelineItem.video_duration_seconds - timelineItem.narration_offset_seconds;
+        if (buffer.duration > availableDuration + 0.05) {
+          throw new Error(`${item.id}: approved narration exceeds its timeline duration`);
+        }
+        return buffer;
+      }));
+      if (cancelled || fullNarrationPlaybackTokenRef.current !== token) return;
+
+      const scheduleStartTime = audioContext.currentTime + 0.1;
+      schedule.forEach(({ timelineItem, cutStartSeconds: itemStartSeconds }, index) => {
+        const buffer = decodedAudio[index];
+        if (!buffer) return;
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        source.onended = () => activeSources.delete(source);
+        activeSources.add(source);
+        source.start(scheduleStartTime + itemStartSeconds + timelineItem.narration_offset_seconds);
+      });
+
+      const completionGain = audioContext.createGain();
+      completionGain.gain.value = 0;
+      completionGain.connect(audioContext.destination);
+      completionSource = audioContext.createConstantSource();
+      completionSource.offset.value = 0;
+      completionSource.connect(completionGain);
+      const completion = new Promise<boolean>((resolve) => {
+        let settled = false;
+        resolveCompletion = (completed) => {
+          if (settled) return;
+          settled = true;
+          resolve(completed);
+        };
+        completionSource!.onended = () => {
+          resolveCompletion?.(!cancelled && fullNarrationPlaybackTokenRef.current === token);
+        };
+      });
+      completionSource.start(scheduleStartTime);
+      completionSource.stop(scheduleStartTime + totalDurationSeconds);
+
+      const updateListeningItem = () => {
+        const elapsedSeconds = Math.max(0, audioContext.currentTime - scheduleStartTime);
+        const current = schedule.find(({ timelineItem, cutStartSeconds: itemStartSeconds }) => (
+          elapsedSeconds < itemStartSeconds + timelineItem.video_duration_seconds
+        ));
+        setFullNarrationListeningItem(current?.item.id || schedule.at(-1)?.item.id || '');
+      };
+      updateListeningItem();
+      listeningItemTimer = window.setInterval(updateListeningItem, 100);
+      setNarrationStatus('全編音声を承認タイムラインどおりに再生中');
+
+      const completed = await completion;
+      resolveCompletion = null;
+      if (!completed || fullNarrationPlaybackTokenRef.current !== token) return;
+      setFullNarrationListenEvidence({
+        mode: 'sequential_full_run',
+        audio_set_hash: audioSetHash,
+        item_ids: schedule.map(({ item }) => item.id),
+        timeline,
+        completed_at: new Date().toISOString(),
+      });
+      setNarrationStatus('全編音声の通し試聴が完了しました');
+    } catch (error) {
+      console.error(error);
+      if (!cancelled && fullNarrationPlaybackTokenRef.current === token) {
+        setFullNarrationListenEvidence(null);
+        setNarrationStatus('全編音声の通し試聴に失敗しました');
+      }
+    } finally {
+      if (listeningItemTimer !== null) window.clearInterval(listeningItemTimer);
+      if (cancelCurrentFullNarrationAudioRef.current === cancelThisPlayback) {
+        cancelCurrentFullNarrationAudioRef.current = null;
+      }
+      if (audioContext.state !== 'closed') {
+        await audioContext.close().catch(() => undefined);
+      }
+      if (fullNarrationPlaybackTokenRef.current === token) {
+        setFullNarrationListening(false);
+        setFullNarrationListeningItem('');
+      }
+    }
+  }, [
+    allNarrationAudioReady,
+    cancelFullNarrationPlayback,
+    narrationApprovalTimeline,
+    narrationAudioSetHash,
+    runId,
+    sceneCutItems,
+  ]);
+
+  const approveFullNarration = useCallback(async () => {
+    if (!runId || !narrationAudioSetHash) return;
+    if (narrationDurationLimitViolation) {
+      setNarrationStatus(`${narrationDurationLimitViolation.item_id}: 60秒を超えています。短いcutへ分割してください`);
+      return;
+    }
+    if (!narrationTextReviewPassed) {
+      setNarrationStatus('先にp720全編テキストレビューを合格させてください');
+      return;
+    }
+    if (!fullNarrationListenIsCurrent || !fullNarrationListenEvidence) {
+      setNarrationStatus('currentな全編音声を最初から最後まで通し試聴してください');
+      return;
+    }
+    const targetRunId = runId;
+    setNarrationBusy(true);
+    setNarrationStatus('全編音声を承認中');
+    try {
+      await runNarrationMutation(targetRunId, async () => {
+        try {
+          await jsonFetch<NarrationRunApproveResponse>('/api/image-gen/narration-review/approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: targetRunId,
+              note: 'frontend reviewed and approved the complete narration track',
+              expected_audio_set_hash: narrationAudioSetHash,
+              timeline: narrationApprovalTimeline,
+              listen_evidence: fullNarrationListenEvidence,
+            }),
+          });
+        } finally {
+          await loadRunRequests(targetRunId, 'scene');
+        }
+      });
+      setNarrationStatus('全編音声を承認しました。動画生成へ進めます');
+    } catch (error) {
+      console.error(error);
+      setNarrationStatus('全編音声を承認できません。未承認cutまたは尺を確認してください');
+    } finally {
+      setNarrationBusy(false);
+    }
+  }, [
+    fullNarrationListenEvidence,
+    fullNarrationListenIsCurrent,
+    narrationApprovalTimeline,
+    narrationAudioSetHash,
+    narrationDurationLimitViolation,
+    narrationTextReviewPassed,
+    loadRunRequests,
+    runId,
+    runNarrationMutation,
+  ]);
 
   const buildRenderItems = useCallback((targetItems: EditableItem[]) => targetItems.map((item) => ({
     item_id: item.id,
@@ -2887,7 +3891,10 @@ function App() {
   })), []);
 
   const freezeRenderInputs = useCallback(async () => {
-    if (!runId || !visibleItems.length) return;
+    if (!runId || !visibleItems.length || !narrationReadyForVideo) {
+      setRenderStatus('入力確定にはcurrentな全編音声承認が必要です');
+      return;
+    }
     setRenderBusy(true);
     setRenderStatus('レンダー入力を確定中');
     await saveCurrentReview();
@@ -2909,10 +3916,13 @@ function App() {
     } finally {
       setRenderBusy(false);
     }
-  }, [buildRenderItems, runId, saveCurrentReview, visibleItems]);
+  }, [buildRenderItems, narrationReadyForVideo, runId, saveCurrentReview, visibleItems]);
 
   const finalRender = useCallback(async () => {
-    if (!runId || !visibleItems.length) return;
+    if (!runId || !visibleItems.length || !narrationReadyForVideo) {
+      setRenderStatus('最終レンダーにはcurrentな全編音声承認が必要です');
+      return;
+    }
     setRenderBusy(true);
     setRenderStatus('最終レンダー中');
     await saveCurrentReview();
@@ -2935,7 +3945,7 @@ function App() {
     } finally {
       setRenderBusy(false);
     }
-  }, [buildRenderItems, runId, saveCurrentReview, visibleItems]);
+  }, [buildRenderItems, narrationReadyForVideo, runId, saveCurrentReview, visibleItems]);
 
   const openAddCutDialog = useCallback(() => {
     const defaultAnchor = activeItem?.kind === 'scene' ? activeItem.id : visibleItems[visibleItems.length - 1]?.id || '';
@@ -3022,6 +4032,22 @@ function App() {
       narrationTool: 'elevenlabs',
       narrationStatus: '',
       narrationReviewStatus: '',
+      narrationAuthoringStatus: 'missing',
+      narrationRevision: 0,
+      narrationTextHash: '',
+      narrationTtsHash: '',
+      narrationGenerationStatus: 'missing',
+      narrationCandidateId: null,
+      narrationCandidateOutput: null,
+      narrationCandidateStatus: '',
+      narrationCandidateExists: false,
+      narrationCandidateDurationSec: null,
+      narrationGeneratedFromTtsHash: '',
+      narrationAudioReviewStatus: 'pending',
+      narrationAudioHumanApproved: false,
+      narrationDirty: false,
+      narrationSaving: false,
+      narrationApproving: false,
       narrationSilentOk: false,
       narrationDurationSec: null,
       narrationExists: false,
@@ -3072,6 +4098,8 @@ function App() {
   const createRun = async () => {
     const title = createRunTitle.trim();
     if (!title) return;
+    const targetDurationSeconds = Number(createRunTargetDurationSeconds);
+    if (!Number.isInteger(targetDurationSeconds) || targetDurationSeconds < 300 || targetDurationSeconds > 1200) return;
     const mode = createRunMode;
     const endpoint = mode === 'scene_storyboard' ? '/api/image-gen/runs/create/storyboard' : '/api/image-gen/runs/create';
     setCreateRunBusy(true);
@@ -3081,7 +4109,11 @@ function App() {
       const created = await jsonFetch<CreateRunJob>(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, source: createRunSource.trim() || null }),
+        body: JSON.stringify({
+          title,
+          source: createRunSource.trim() || null,
+          target_duration_seconds: targetDurationSeconds,
+        }),
       });
       const newRun: RunFolder = {
         id: created.runId,
@@ -3099,6 +4131,7 @@ function App() {
       setCreateRunTitle('');
       setCreateRunSource('');
       setCreateRunMode('normal');
+      setCreateRunTargetDurationSeconds('300');
       setCreateRunStatus(mode === 'scene_storyboard' ? 'ストーリーボード式ToCを作成中' : 'ToCを作成中');
 
       let latest = created;
@@ -3113,7 +4146,7 @@ function App() {
       }
       setCreateRunStatus(latest.status === 'paused' ? `${latest.currentProcess || 'p650'}で中断` : '作成完了');
       await loadRuns(created.runId);
-      await loadRunRequests(created.runId, viewKind);
+      await loadRunRequests(created.runId, workspaceMode === 'image' ? viewKind : 'scene');
     } catch (error) {
       console.error(error);
       setCreateRunError(error instanceof Error ? error.message : String(error));
@@ -3192,7 +4225,7 @@ function App() {
             <Stack direction="row" spacing={0.75} alignItems="center" className="topbarActions">
               <FormControl size="small" className="topbarRunSelect">
                 <InputLabel>出力先</InputLabel>
-                <Select value={runId} label="出力先" onChange={(event) => setRunId(event.target.value)} disabled={generationInFlight}>
+                <Select value={runId} label="出力先" onChange={(event) => setRunId(event.target.value)} disabled={busy || generationInFlight}>
                   {runs.map((run) => (
                     <MenuItem key={run.id} value={run.id}>
                       {run.name}
@@ -3294,22 +4327,55 @@ function App() {
                     <Typography fontWeight={800}>全cutナレーション</Typography>
                     <Chip color={allNarrationAudioReady ? 'success' : 'primary'} label={`${narrationAudioReadyCount}/${sceneCutItems.length}`} />
                   </Stack>
+                  {narrationDurationLimitViolation && (
+                    <Chip
+                      size="small"
+                      color="error"
+                      label={`${narrationDurationLimitViolation.item_id}: 60秒以内のcutへ分割してください`}
+                    />
+                  )}
                   <Stack direction="row" spacing={1}>
                     <Button
                       variant={hasNarrationDrafts ? 'outlined' : 'contained'}
                       startIcon={<RecordVoiceOverIcon />}
                       onClick={() => (hasNarrationDrafts ? setConfirmNarrationReplaceOpen(true) : createNarrationDrafts(false))}
-                      disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy}
+                      disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy || narrationMutationActive || fullNarrationListening}
                     >
-                      {hasNarrationDrafts ? '文面を再作成' : '文面を作成'}
+                      {hasNarrationDrafts ? '未確定文面を再作成' : '文面枠を作成'}
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      startIcon={<FactCheckIcon />}
+                      onClick={runNarrationTextReview}
+                      disabled={!allNarrationTextReady || narrationReviewBusy || narrationBusy || narrationDraftBusy || narrationMutationActive || fullNarrationListening}
+                    >
+                      {narrationTextReviewPassed ? 'p720再レビュー' : 'p720全編レビュー'}
                     </Button>
                     <Button
                       variant="contained"
                       startIcon={<RecordVoiceOverIcon />}
                       onClick={generateAllNarration}
-                      disabled={!visibleItems.length || !allNarrationDraftsReady || allNarrationAudioReady || narrationBusy || narrationDraftBusy}
+                      disabled={
+                        !visibleItems.length
+                        || !sceneCutItems.some((item) => itemNarrationTextLocked(item) && !item.narrationDirty && !itemNarrationAudioReady(item))
+                        || narrationBusy
+                        || narrationDraftBusy
+                        || narrationMutationActive
+                        || fullNarrationListening
+                      }
                     >
-                      全cut音声生成
+                      音声候補を生成
+                    </Button>
+                    <Button
+                      variant={fullNarrationListenIsCurrent ? 'outlined' : 'contained'}
+                      startIcon={fullNarrationListening ? <StopIcon /> : <PlayArrowIcon />}
+                      onClick={fullNarrationListening ? cancelFullNarrationPlayback : playFullNarration}
+                      disabled={!fullNarrationListening && (!allNarrationAudioReady || !narrationAudioSetHash || narrationBusy || narrationReviewBusy || narrationMutationActive)}
+                    >
+                      {fullNarrationListening ? `停止 ${fullNarrationListeningItem}` : fullNarrationListenIsCurrent ? '通し試聴済み' : '全編を通し試聴'}
+                    </Button>
+                    <Button color="success" variant="contained" onClick={approveFullNarration} disabled={!allNarrationAudioReady || !narrationAudioSetHash || !narrationTextReviewPassed || !fullNarrationListenIsCurrent || narrationRunApproved || narrationBusy || narrationReviewBusy || narrationMutationActive || fullNarrationListening}>
+                      {narrationRunApproved ? '全編承認済み' : '全編承認'}
                     </Button>
                   </Stack>
                 </>
@@ -3321,10 +4387,10 @@ function App() {
                     <Chip color="primary" label={`${visibleItems.length} cut`} />
                   </Stack>
                   <Stack direction="row" spacing={1}>
-                    <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || renderBusy}>
+                    <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
                       入力確定
                     </Button>
-                    <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || renderBusy}>
+                    <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
                       最終レンダー
                     </Button>
                   </Stack>
@@ -3334,7 +4400,7 @@ function App() {
                   <Typography variant="caption" className="stationLabel">動画生成本数</Typography>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
                     <Typography fontWeight={800}>同時生成本数</Typography>
-                    <Chip color={allNarrationAudioReady ? 'primary' : 'default'} label={allNarrationAudioReady ? `${displayedVideoCandidateCount}候補` : `音声 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />
+                    <Chip color={narrationReadyForVideo ? 'primary' : 'default'} label={narrationReadyForVideo ? `${displayedVideoCandidateCount}候補` : `音声承認 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />
                   </Stack>
                   <Slider
                     className="countSlider"
@@ -3361,7 +4427,7 @@ function App() {
                     variant="contained"
                     startIcon={<MovieCreationIcon />}
                     onClick={openVideoPromptConfirm}
-                    disabled={!visibleItems.length || !allNarrationAudioReady || videoPromptBusy}
+                    disabled={!visibleItems.length || !narrationReadyForVideo || videoPromptBusy}
                   >
                     全cut動画生成
                   </Button>
@@ -3541,13 +4607,30 @@ function App() {
                     <Typography fontWeight={900}>表示できるシーンcutがありません</Typography>
                   </GlassPanel>
                 )}
-                {workspaceMode === 'video' && !allNarrationAudioReady && (
+                {workspaceMode === 'video' && !narrationReadyForVideo && (
                   <GlassPanel variant="frosted" density="spacious" className="emptyGallery narrationGateCard">
                     <Typography fontWeight={900}>動画生成には音声レビューが必要です</Typography>
                     <Typography variant="body2" color="text.secondary">
-                      音声タブで全cutの音声ファイルを生成するか、無音cutを「無音OK」にしてください。
+                      音声タブで各cutの候補を承認し、最後に「全編音声を承認」してください。
                     </Typography>
                     <Chip color="primary" label={`音声 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />
+                  </GlassPanel>
+                )}
+                {workspaceMode === 'narration' && narrationReviewFindings.length > 0 && (
+                  <GlassPanel variant="frosted" density="spacious" className="emptyGallery narrationGateCard">
+                    <Typography fontWeight={900}>p720 全編レビューの修正点</Typography>
+                    <Stack spacing={0.75}>
+                      {narrationReviewFindings.slice(0, 20).map((finding, index) => (
+                        <Typography key={`${index}-${finding}`} variant="body2" color="error">
+                          {finding}
+                        </Typography>
+                      ))}
+                    </Stack>
+                    {narrationReviewReport && (
+                      <Typography variant="caption" color="text.secondary">
+                        詳細レポート: {narrationReviewReport}
+                      </Typography>
+                    )}
                   </GlassPanel>
                 )}
                 {workspaceMode === 'narration' && visibleItems.map((item) => (
@@ -3555,9 +4638,11 @@ function App() {
                     key={item.id}
                     item={item}
                     runId={runId}
-                    narrationBusy={narrationBusy || narrationDraftBusy}
+                    narrationBusy={narrationBusy || narrationDraftBusy || narrationReviewBusy || narrationMutationActive || fullNarrationListening}
                     onPatchItem={patchItem}
+                    onSaveNarrationText={saveNarrationText}
                     onGenerateNarration={generateNarrationForCut}
+                    onApproveNarration={approveNarrationCandidate}
                     onConfirmSilentOk={confirmSilentOk}
                   />
                 ))}
@@ -3568,7 +4653,7 @@ function App() {
                     runId={runId}
                     references={references}
                     videoGenerationBusy={videoPromptBusy}
-                    videoReady={allNarrationAudioReady}
+                    videoReady={narrationReadyForVideo}
                     videoCandidateCount={videoCandidateCount}
                     onPatchItem={patchItem}
                     onGenerateVideo={generateVideoForCut}
@@ -3601,12 +4686,15 @@ function App() {
               {workspaceMode === 'video' && videoPromptBusy && <Chip size="small" color="primary" label={`動画生成中 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal || visibleItems.length}`} />}
               {workspaceMode === 'video' && !videoPromptBusy && videoBulkTotal > 0 && <Chip size="small" label={`動画生成完了 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal}`} />}
               {workspaceMode === 'video' && videoBulkFailedCount > 0 && <Chip size="small" color="error" label={`動画失敗 ${videoBulkFailedCount}`} />}
-              {workspaceMode === 'video' && !allNarrationAudioReady && <Chip size="small" color="warning" label={`音声未完了 ${narrationAudioReadyCount}/${sceneCutItems.length}`} />}
+              {workspaceMode === 'video' && !narrationReadyForVideo && <Chip size="small" color="warning" label={`音声承認待ち ${narrationAudioReadyCount}/${sceneCutItems.length}`} />}
               {workspaceMode === 'narration' && narrationDraftBusy && <Chip size="small" color="primary" label="文面作成中" />}
               {workspaceMode === 'narration' && !narrationDraftBusy && hasNarrationDrafts && <Chip size="small" color="primary" label={`文面 ${narrationDraftReadyCount}/${sceneCutItems.length}`} />}
               {workspaceMode === 'narration' && narrationBusy && <Chip size="small" color="primary" label={`音声生成中 ${narrationBulkCompletedCount + narrationBulkFailedCount}/${narrationBulkTotal || visibleItems.length}`} />}
               {workspaceMode === 'narration' && !narrationBusy && narrationBulkTotal > 0 && <Chip size="small" label={`音声生成完了 ${narrationBulkCompletedCount + narrationBulkFailedCount}/${narrationBulkTotal}`} />}
               {workspaceMode === 'narration' && narrationBulkFailedCount > 0 && <Chip size="small" color="error" label={`音声失敗 ${narrationBulkFailedCount}`} />}
+              {workspaceMode === 'narration' && narrationReviewBusy && <Chip size="small" color="primary" label="p720全編レビュー中" />}
+              {workspaceMode === 'narration' && fullNarrationListening && <Chip size="small" color="primary" label={`通し試聴中 ${fullNarrationListeningItem}`} />}
+              {workspaceMode === 'narration' && fullNarrationListenIsCurrent && !fullNarrationListening && <Chip size="small" color="success" label="current全編試聴済み" />}
               {workspaceMode === 'render' && renderBusy && <Chip size="small" color="primary" label={renderStatus || 'レンダー処理中'} />}
               {backgroundGenerationLabel && <Chip size="small" color="secondary" label={backgroundGenerationLabel} />}
               {regenerateStatus && <Chip size="small" color={regenerateBusy ? 'primary' : 'default'} label={regenerateStatus} />}
@@ -3620,9 +4708,11 @@ function App() {
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1}>
-              <Button variant="outlined" startIcon={<SaveIcon />} onClick={saveCurrentReview} disabled={!visibleItems.length || reviewSaveBusy}>
-                一時保存
-              </Button>
+              {workspaceMode !== 'narration' && (
+                <Button variant="outlined" startIcon={<SaveIcon />} onClick={saveCurrentReview} disabled={!visibleItems.length || reviewSaveBusy}>
+                  一時保存
+                </Button>
+              )}
               {workspaceMode === 'image' ? (
                 <>
                   <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={generateBulk} disabled={!imageBulkItems.length || bulkGenerating}>
@@ -3641,26 +4731,59 @@ function App() {
                     variant={hasNarrationDrafts ? 'outlined' : 'contained'}
                     startIcon={<RecordVoiceOverIcon />}
                     onClick={() => (hasNarrationDrafts ? setConfirmNarrationReplaceOpen(true) : createNarrationDrafts(false))}
-                    disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy}
+                    disabled={!sceneCutItems.length || narrationDraftBusy || narrationBusy || narrationMutationActive || fullNarrationListening}
                   >
-                    {hasNarrationDrafts ? '文面を再作成' : '文面を作成'}
+                    {hasNarrationDrafts ? '未確定文面を再作成' : '文面枠を作成'}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    startIcon={<FactCheckIcon />}
+                    onClick={runNarrationTextReview}
+                    disabled={!allNarrationTextReady || narrationReviewBusy || narrationBusy || narrationDraftBusy || narrationMutationActive || fullNarrationListening}
+                  >
+                    {narrationTextReviewPassed ? 'p720再レビュー' : 'p720全編レビュー'}
                   </Button>
                   <Button
                     className="insertAction"
                     variant="contained"
                     startIcon={<RecordVoiceOverIcon />}
                     onClick={generateAllNarration}
-                    disabled={!visibleItems.length || !allNarrationDraftsReady || allNarrationAudioReady || narrationBusy || narrationDraftBusy}
+                    disabled={
+                      !visibleItems.length
+                      || !sceneCutItems.some((item) => itemNarrationTextLocked(item) && !item.narrationDirty && !itemNarrationAudioReady(item))
+                      || narrationBusy
+                      || narrationDraftBusy
+                      || narrationMutationActive
+                      || fullNarrationListening
+                    }
                   >
-                    全cut音声生成
+                    確定済み文面の音声候補を生成
+                  </Button>
+                  <Button
+                    variant={fullNarrationListenIsCurrent ? 'outlined' : 'contained'}
+                    startIcon={fullNarrationListening ? <StopIcon /> : <PlayArrowIcon />}
+                    onClick={fullNarrationListening ? cancelFullNarrationPlayback : playFullNarration}
+                    disabled={!fullNarrationListening && (!allNarrationAudioReady || !narrationAudioSetHash || narrationBusy || narrationReviewBusy || narrationMutationActive)}
+                  >
+                    {fullNarrationListening ? `停止 ${fullNarrationListeningItem}` : fullNarrationListenIsCurrent ? '通し試聴済み' : '全編を通し試聴'}
+                  </Button>
+                  <Button
+                    className="insertAction"
+                    color="success"
+                    variant="contained"
+                    startIcon={<FactCheckIcon />}
+                    onClick={approveFullNarration}
+                    disabled={!allNarrationAudioReady || !narrationAudioSetHash || !narrationTextReviewPassed || !fullNarrationListenIsCurrent || narrationRunApproved || narrationBusy || narrationDraftBusy || narrationReviewBusy || narrationMutationActive || fullNarrationListening}
+                  >
+                    {narrationRunApproved ? '全編音声承認済み' : '全編音声を承認'}
                   </Button>
                 </Stack>
               ) : workspaceMode === 'render' ? (
                 <>
-                  <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || renderBusy}>
+                  <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
                     入力確定
                   </Button>
-                  <Button className="insertAction" variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || renderBusy}>
+                  <Button className="insertAction" variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
                     最終レンダー
                   </Button>
                 </>
@@ -3670,7 +4793,7 @@ function App() {
                   variant="contained"
                   startIcon={<MovieCreationIcon />}
                   onClick={openVideoPromptConfirm}
-                  disabled={!visibleItems.length || !allNarrationAudioReady || videoPromptBusy}
+                  disabled={!visibleItems.length || !narrationReadyForVideo || videoPromptBusy}
                 >
                   全cut動画生成
                 </Button>
@@ -3745,6 +4868,36 @@ function App() {
                   <MenuItem value="scene_storyboard">1scene=1ストーリーボード式</MenuItem>
                 </Select>
               </FormControl>
+              <FormControl fullWidth size="small">
+                <InputLabel>動画尺プリセット</InputLabel>
+                <Select
+                  label="動画尺プリセット"
+                  value={['300', '600', '900', '1200'].includes(createRunTargetDurationSeconds) ? createRunTargetDurationSeconds : ''}
+                  disabled={createRunBusy}
+                  onChange={(event) => setCreateRunTargetDurationSeconds(String(event.target.value))}
+                >
+                  <MenuItem value="">カスタム</MenuItem>
+                  <MenuItem value="300">5分</MenuItem>
+                  <MenuItem value="600">10分</MenuItem>
+                  <MenuItem value="900">15分</MenuItem>
+                  <MenuItem value="1200">20分</MenuItem>
+                </Select>
+              </FormControl>
+              <TextField
+                label="目標動画尺（秒）"
+                type="number"
+                value={createRunTargetDurationSeconds}
+                disabled={createRunBusy}
+                onChange={(event) => setCreateRunTargetDurationSeconds(event.target.value)}
+                slotProps={{ htmlInput: { min: 300, max: 1200, step: 1 } }}
+                error={
+                  !Number.isInteger(Number(createRunTargetDurationSeconds))
+                  || Number(createRunTargetDurationSeconds) < 300
+                  || Number(createRunTargetDurationSeconds) > 1200
+                }
+                helperText="300〜1200秒。実効尺は目標の80%以上で合格します。"
+                fullWidth
+              />
               <TextField
                 label="中身"
                 value={createRunSource}
@@ -3773,7 +4926,13 @@ function App() {
               variant="contained"
               startIcon={<AddIcon />}
               onClick={createRun}
-              disabled={createRunBusy || !createRunTitle.trim()}
+              disabled={
+                createRunBusy
+                || !createRunTitle.trim()
+                || !Number.isInteger(Number(createRunTargetDurationSeconds))
+                || Number(createRunTargetDurationSeconds) < 300
+                || Number(createRunTargetDurationSeconds) > 1200
+              }
             >
               作成
             </Button>
@@ -3861,7 +5020,9 @@ function App() {
           <DialogContent dividers>
             <Typography>
               {currentSettingsTarget === settingsTarget
-                ? `${settingsTargetLabel(settingsTarget)}の表示中 ${visibleItems.filter((item) => item.executionLane !== 'existing_asset').length} 件を、新しい指示で再生成します。`
+                ? visibleItems.some((item) => item.executionLane !== 'existing_asset' && item.promptPolicyVersion === 'image_api_prompt_v2')
+                  ? `${settingsTargetLabel(settingsTarget)}の表示中 ${visibleItems.filter((item) => item.executionLane !== 'existing_asset').length} 件について、上流のfirst-frame設計を更新し、manifest・prompt・snapshotを再コンパイルします。`
+                  : `${settingsTargetLabel(settingsTarget)}の表示中 ${visibleItems.filter((item) => item.executionLane !== 'existing_asset').length} 件を、新しい指示で再生成します。`
                 : `${settingsTargetLabel(settingsTarget)}タブの対象を、新しい指示で再生成します。`}
             </Typography>
           </DialogContent>
@@ -3910,7 +5071,7 @@ function App() {
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setConfirmNarrationReplaceOpen(false)}>キャンセル</Button>
-            <Button variant="contained" color="warning" onClick={() => createNarrationDrafts(true)} disabled={narrationDraftBusy}>
+            <Button variant="contained" color="warning" onClick={() => createNarrationDrafts(true)} disabled={narrationDraftBusy || narrationMutationActive}>
               再作成
             </Button>
           </DialogActions>
@@ -3931,16 +5092,16 @@ function App() {
               <Typography variant="body2" color="text.secondary">
                 対象: {sceneCutItems.length} cut / 各cut {videoCandidateCount} 本を候補動画として並列生成します。
               </Typography>
-              {!allNarrationAudioReady && (
+              {!narrationReadyForVideo && (
                 <Typography variant="body2" color="error">
-                  動画生成には全cutの音声ファイルまたは無音OKが必要です。
+                  動画生成には各cutの音声承認と全編音声承認が必要です。
                 </Typography>
               )}
             </Stack>
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setConfirmVideoPromptOpen(false)}>キャンセル</Button>
-            <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={generateAllVideos} disabled={videoPromptBusy || !sceneCutItems.length || !allNarrationAudioReady}>
+            <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={generateAllVideos} disabled={videoPromptBusy || !sceneCutItems.length || !narrationReadyForVideo}>
               全cut動画生成
             </Button>
           </DialogActions>

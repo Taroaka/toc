@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from toc.harness import load_structured_document, parse_state_file
+from toc.narration_revision import ensure_narration_revision
+from toc.narration_semantic_review import (
+    RESPONSE_SCHEMA_VERSION,
+    SEMANTIC_CRITIC_PROFILES,
+    aggregate_narration_critic_results,
+    build_narration_semantic_review_pack,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +90,165 @@ def _write_run(run_dir: Path, *, narration_text: str, tts_text: str, human_revie
     )
 
 
+def _make_revision_aware(run_dir: Path, *, valid_audio_story: bool) -> None:
+    _, manifest = load_structured_document(run_dir / "video_manifest.md")
+    narration = manifest["scenes"][0]["cuts"][0]["audio"]["narration"]
+    narration["authoring_status"] = "human_locked"
+    ensure_narration_revision(narration)
+    if valid_audio_story:
+        manifest["audio_story_plan"] = {
+            "authoring_status": "authored",
+            "authoring_provenance": "audio_story_director",
+            "audience_promise": "主人公が迷いを越える瞬間まで見届ける",
+            "narrator_bible": {
+                "relationship_to_story": "companion",
+                "emotional_permission": ["迷いに寄り添う"],
+                "forbidden_attitudes": ["結末を先取りしない"],
+            },
+            "continuous_full_draft": narration["text"],
+            "open_loops": [],
+            "scene_arcs": [
+                {
+                    "scene_id": 10,
+                    "attention_state": "release",
+                    "audience_state_before": "迷いの理由を知らない",
+                    "audience_state_after": "迷いを理解する",
+                    "semantic_load": "medium",
+                }
+            ],
+        }
+        manifest["narration_spans"] = [
+            {
+                "span_id": "ns_001",
+                "source_cut_ids": ["scene10_cut1"],
+                "story_job": "aftertaste",
+                "text": narration["text"],
+                "tts_text": narration["tts_text"],
+                "audio_visual_relation": "complement",
+                "tts_generation_group_id": "scene10_flow",
+            }
+        ]
+    dumped = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True, width=1000)
+    (run_dir / "video_manifest.md").write_text(f"```yaml\n{dumped}```\n", encoding="utf-8")
+
+
+def _persist_semantic_pass(run_dir: Path) -> None:
+    _, manifest = load_structured_document(run_dir / "video_manifest.md")
+    pack = build_narration_semantic_review_pack(manifest)
+    text_hash = pack["narration_text_set_hash"]
+    input_hash = pack["semantic_review_input_hash"]
+    critics = [
+        {
+            "schema_version": RESPONSE_SCHEMA_VERSION,
+            "critic_id": profile.critic_id,
+            "narration_text_set_hash": text_hash,
+            "semantic_review_input_hash": input_hash,
+            "status": "passed",
+            "summary": "物語全体を通した評価です。",
+            "findings": [],
+        }
+        for profile in SEMANTIC_CRITIC_PROFILES
+    ]
+    aggregate = aggregate_narration_critic_results(
+        critics,
+        text_set_hash=text_hash,
+        semantic_review_input_hash=input_hash,
+        reviewed_at="2026-07-12T00:00:00Z",
+    )
+    review_dir = run_dir / "logs" / "eval" / "narration" / "semantic_critics"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    report = review_dir / "review.md"
+    artifact = review_dir / "review.json"
+    report.write_text(aggregate["report"], encoding="utf-8")
+    artifact.write_text(json.dumps(aggregate, ensure_ascii=False), encoding="utf-8")
+    manifest.setdefault("narration_workflow", {})["semantic_critic_review"] = {
+        key: aggregate[key]
+        for key in (
+            "schema_version",
+            "status",
+            "narration_text_set_hash",
+            "semantic_review_input_hash",
+            "reviewed_at",
+            "critics",
+            "findings",
+        )
+    }
+    manifest["narration_workflow"]["semantic_critic_review"].update(
+        {
+            "report": report.relative_to(run_dir).as_posix(),
+            "json": artifact.relative_to(run_dir).as_posix(),
+        }
+    )
+    dumped = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True, width=1000)
+    (run_dir / "video_manifest.md").write_text(f"```yaml\n{dumped}```\n", encoding="utf-8")
+
+
 class TestP720L3NarrationRunner(unittest.TestCase):
+    def test_revision_aware_runner_requires_and_hash_binds_full_run_arc_review(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_p720_arc_") as td:
+            run_dir = Path(td)
+            _write_run(
+                run_dir,
+                narration_text="主人公は迷いを抱えたまま、浜辺で足を止めます。",
+                tts_text="主人公は迷いを抱えたまま、浜辺で足を止めます。",
+            )
+            _make_revision_aware(run_dir, valid_audio_story=False)
+            blocked = subprocess.run(
+                [sys.executable, str(RUNNER), "--run-dir", str(run_dir), "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            _, blocked_manifest = load_structured_document(run_dir / "video_manifest.md")
+
+            self.assertEqual(blocked.returncode, 1)
+            self.assertEqual(blocked_manifest["narration_workflow"]["arc_review"]["status"], "changes_requested")
+            self.assertTrue(blocked_manifest["narration_workflow"]["arc_review"]["findings"])
+
+            _make_revision_aware(run_dir, valid_audio_story=True)
+            passed = subprocess.run(
+                [sys.executable, str(RUNNER), "--run-dir", str(run_dir), "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            _, passed_manifest = load_structured_document(run_dir / "video_manifest.md")
+            arc_review = passed_manifest["narration_workflow"]["arc_review"]
+            passed_state = parse_state_file(run_dir / "state.txt")
+
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertEqual(arc_review["status"], "passed")
+            self.assertTrue(arc_review["narration_text_set_hash"].startswith("sha256:"))
+            self.assertEqual(passed_state["slot.p720.status"], "in_progress")
+            self.assertEqual(passed_state["slot.p730.status"], "blocked")
+            self.assertEqual(passed_state["review.narration.status"], "pending")
+
+    def test_revision_aware_runner_accepts_only_complete_current_semantic_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_p720_semantic_current_") as td:
+            run_dir = Path(td)
+            _write_run(
+                run_dir,
+                narration_text="主人公は迷いを抱えたまま、浜辺で足を止めます。",
+                tts_text="主人公は迷いを抱えたまま、浜辺で足を止めます。",
+            )
+            _make_revision_aware(run_dir, valid_audio_story=True)
+            _persist_semantic_pass(run_dir)
+
+            result = subprocess.run(
+                [sys.executable, str(RUNNER), "--run-dir", str(run_dir), "--fail-on-findings"],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(state["slot.p720.status"], "done")
+            self.assertEqual(state["review.narration.status"], "approved")
+
     def test_runner_creates_l3_reports_and_blocks_failed_p720(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_p720_l3_") as td:
             run_dir = Path(td)

@@ -15,6 +15,18 @@ DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS = 3
 
 
 SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
+    "research": {
+        "slot": "p130",
+        "owner": "research foundation producer",
+        "artifacts": ["research.md"],
+        "focus": "internal story baseline, chronological event coherence, characters, conflicts, and story-stage sufficiency",
+    },
+    "story": {
+        "slot": "p230",
+        "owner": "story foundation producer",
+        "artifacts": ["story.md"],
+        "focus": "research-baseline preservation, timeline, character continuity, conflict progression, and event-to-scene allocation",
+    },
     "scene_set": {
         "slot": "p410",
         "owner": "scene design producer",
@@ -258,7 +270,20 @@ def write_semantic_repair_prompt(
     artifacts = [str(item) for item in target.get("artifacts", [])] if isinstance(target.get("artifacts"), list) else []
     error_text = "\n".join(f"- {error}" for error in errors) or "- semantic reviewer did not provide a specific error"
     stage_specific_repair = ""
-    if stage == "image_prompt":
+    if stage in {"research", "story"}:
+        editable_artifact = "research.md" if stage == "research" else "story.md"
+        locked_artifact = "" if stage == "research" else " `research.md` is approved upstream input and must not be edited during story repair."
+        stage_specific_repair = f"""
+## Foundation Repair Boundary
+
+- Edit only `{editable_artifact}`.{locked_artifact}
+- Repair internal story sufficiency and consistency only. Do not browse, fetch, or validate external URLs, editions, translations, rights, or factual fidelity.
+- Preserve the requested target duration and keep research/story responsibilities separate from cut, image, audio, or video authoring.
+- Preserve the existing Markdown fenced YAML structure. Quote any scalar containing `: ` so the YAML remains parseable.
+- After editing, use `toc.harness.load_structured_document` on `{run_dir / editable_artifact}` and do not finish while it returns an empty mapping.
+- Do not delegate this repair. You must make the targeted edit, validate the structured round trip, and write the producer repair report yourself.
+"""
+    elif stage == "image_prompt":
         stage_specific_repair = """
 ## Image Prompt Repair Boundary
 

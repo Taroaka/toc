@@ -14,6 +14,51 @@ video_metadata:
   resolution: "1280x720"
   frame_rate: 24
 
+# script.mdで全編authoringし、p700 syncでこのmanifestへprojectionする。
+audio_story_plan:
+  schema_version: "audio_story_plan_v1"
+  authoring_provenance: ""
+  authoring_status: "draft"
+  audience_promise: ""
+  narrator_bible:
+    relationship_to_story: ""
+    knowledge_boundary: []
+    emotional_permission: []
+    forbidden_attitudes: []
+  open_loops: []
+  scene_arcs: []
+  silence_budget:
+    purpose: ""
+    protected_moments: []
+  continuous_full_draft: ""
+narration_spans: []
+narration_workflow:
+  schema_version: "narration_run_workflow_v1"
+  arc_review:
+    status: "pending"
+    narration_text_set_hash: ""
+    findings: []
+    report: ""
+    reviewed_at: ""
+  # p720の5 independent app-server criticsがruntimeで更新する。authoring時にpassedを手入力しない。
+  semantic_critic_review:
+    schema_version: "narration_semantic_critic_aggregate_v1"
+    status: "pending"
+    narration_text_set_hash: ""
+    semantic_review_input_hash: ""
+    reviewed_at: ""
+    critics: []
+    findings: []
+    report: ""
+    json: ""
+  final_audio_review:
+    status: "pending"
+    approved_audio_set_hash: ""
+    approved_timeline_hash: ""
+    approved_at: ""
+    approved_by: ""
+    note: ""
+
 assets:
   character_bible: []
 
@@ -130,7 +175,7 @@ scenes:
       output: "assets/scenes/scene10_to_20.mp4"
     audio:
       narration:
-        authoring_status: "missing|draft|approved|silent"
+        authoring_status: "missing|draft|human_locked|reviewed|silent"
         missing_reason: "p700_narration_not_written_yet"
         contract:
           schema_version: "narration_contract_v2"
@@ -155,6 +200,8 @@ scenes:
         # review metadata は audio.narration.review に保持する。
         text: ""
         tts_text: ""
+        span_refs: []  # script.md narration_spans[]からの派生anchor
+        # frontend保存時にrevision/source_binding/generation/candidates/audio_reviewをhash付きでmaterializeする。
         tool: "elevenlabs"
         review:
           agent_review_ok: false

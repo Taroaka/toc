@@ -14,7 +14,7 @@ ToC（TikTok Story Creator）をトピックから実行するためのコマン
 - `state.txt`（追記型）が生成される
 - `logs/grounding/<stage>.json` に stage ごとの参照証跡が残る
 - 成果物（`research.md` / `story.md` / `visual_value.md` / `script.md` / `video_manifest.md` 等）の本文は **日本語**で記述する（ユーザーが直接修正する前提）
-- カット設計は **1カット=1ナレーション** を基本に、メイン(5–15秒) + 必要ならサブ(3–15秒)で進める（詳細は `docs/implementation/video-integration.md`）
+- cutは映像編集単位、narration spanは文章・演技単位として分け、spanは複数cutをまたいでよい（詳細は `docs/implementation/video-integration.md`）
 - 音声（ナレーション）は **デフォルト必須**。意図的に作らない場合だけ `scripts/generate-assets-from-manifest.py --skip-audio` を指定する
 
 ## 方針メモ（創造と選択）

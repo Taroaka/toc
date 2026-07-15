@@ -54,6 +54,9 @@ _CODEX_HOME_FALLBACK_RELATIVE_FILES = {
 }
 _DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.6-sol"
 _DEFAULT_CODEX_APP_SERVER_MIN_VERSION = "0.144.0"
+_DEFAULT_CODEX_APP_SERVER_JSONL_LIMIT_BYTES = 32 * 1024 * 1024
+_MIN_CODEX_APP_SERVER_JSONL_LIMIT_BYTES = 1024 * 1024
+_MAX_CODEX_APP_SERVER_JSONL_LIMIT_BYTES = 64 * 1024 * 1024
 _CODEX_CLI_VERSION_RE = re.compile(
     r"^\s*codex(?:-cli)?\s+(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*$",
     flags=re.IGNORECASE,
@@ -61,6 +64,22 @@ _CODEX_CLI_VERSION_RE = re.compile(
 _SEMVER_RE = re.compile(
     r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
 )
+_SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|"
+    r"PRIVATE_KEY|DATABASE_URL|DSN|COOKIE)(?:$|_)",
+    flags=re.IGNORECASE,
+)
+
+
+def _scrubbed_app_server_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove credentials and API-lane overrides from a ChatGPT-auth child."""
+
+    return {
+        key: value
+        for key, value in env.items()
+        if not _SENSITIVE_ENV_NAME_RE.search(key)
+        and not key.upper().startswith(("OPENAI_", "AZURE_OPENAI_"))
+    }
 
 
 @dataclass(frozen=True)
@@ -132,8 +151,50 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
         task.exception()
 
 
+def app_server_jsonl_limit_bytes() -> int:
+    raw = os.environ.get("TOC_CODEX_APP_SERVER_JSONL_LIMIT_BYTES", "").strip()
+    try:
+        configured = int(raw) if raw else _DEFAULT_CODEX_APP_SERVER_JSONL_LIMIT_BYTES
+    except ValueError:
+        configured = _DEFAULT_CODEX_APP_SERVER_JSONL_LIMIT_BYTES
+    return min(
+        _MAX_CODEX_APP_SERVER_JSONL_LIMIT_BYTES,
+        max(_MIN_CODEX_APP_SERVER_JSONL_LIMIT_BYTES, configured),
+    )
+
+
+def _compact_image_generation_payload(message: dict[str, Any]) -> dict[str, Any]:
+    """Drop the inline base64 image after JSON framing has succeeded.
+
+    The app-server also supplies ``savedPath``. ToC imports from that path, so
+    retaining several MiB of base64 in every transcript only increases memory
+    and debug-log size without improving provenance.
+    """
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "imageGeneration":
+                value.pop("result", None)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(message)
+    return message
+
+
 class CodexAppServerClient:
-    def __init__(self, *, cwd: Path, codex_bin: str = "codex") -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        codex_bin: str = "codex",
+        scrub_sensitive_env: bool = False,
+        require_chatgpt_account: bool = False,
+        require_chatgpt_pro: bool = False,
+    ) -> None:
         self.cwd = cwd
         self.codex_bin = os.environ.get("TOC_CODEX_BIN", "").strip() or codex_bin
         self.proc: asyncio.subprocess.Process | None = None
@@ -153,6 +214,14 @@ class CodexAppServerClient:
         self._codex_version = "unknown"
         self._minimum_codex_version = minimum_app_server_version()
         self._model = default_app_server_model()
+        self._scrub_sensitive_env = scrub_sensitive_env
+        self._require_chatgpt_account = require_chatgpt_account or require_chatgpt_pro
+        self._require_chatgpt_pro = require_chatgpt_pro
+        self._account_type: str | None = None
+        self._account_plan_type: str | None = None
+        self._jsonl_limit_bytes = app_server_jsonl_limit_bytes()
+        self._transport_error: CodexAppServerTransportError | None = None
+        self._stopping = False
 
     def _resolve_codex_home(self, env: dict[str, str] | None = None) -> Path:
         if self._codex_home is not None:
@@ -182,7 +251,37 @@ class CodexAppServerClient:
 
     def _subprocess_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        env["CODEX_HOME"] = str(self._resolve_codex_home(env))
+        if self._scrub_sensitive_env:
+            env = _scrubbed_app_server_env(env)
+        codex_home = self._resolve_codex_home(env)
+        env["CODEX_HOME"] = str(codex_home)
+        if not env.get("CODEX_CODE_MODE_HOST_PATH", "").strip():
+            codex_bin_path = shutil.which(self.codex_bin)
+            candidates: list[Path] = []
+            if codex_bin_path:
+                unresolved_bin = Path(codex_bin_path)
+                candidates.extend(
+                    [
+                        unresolved_bin.with_name("codex-code-mode-host"),
+                        unresolved_bin.resolve().with_name("codex-code-mode-host"),
+                    ]
+                )
+            candidates.extend(
+                [
+                    codex_home / "plugins" / ".plugin-appserver" / "codex-code-mode-host",
+                    Path("/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host"),
+                ]
+            )
+            discovered = next(
+                (
+                    candidate
+                    for candidate in dict.fromkeys(candidates)
+                    if candidate.is_file() and os.access(candidate, os.X_OK)
+                ),
+                None,
+            )
+            if discovered is not None:
+                env["CODEX_CODE_MODE_HOST_PATH"] = str(discovered)
         return env
 
     def runtime_contract(self) -> CodexAppServerRuntimeContract:
@@ -251,6 +350,8 @@ class CodexAppServerClient:
     async def start(self) -> None:
         if self.proc is not None:
             return
+        self._stopping = False
+        self._transport_error = None
         self.preflight_runtime()
         self.proc = await asyncio.create_subprocess_exec(
             self.codex_bin,
@@ -262,8 +363,10 @@ class CodexAppServerClient:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.cwd),
             env=self._subprocess_env(),
+            limit=self._jsonl_limit_bytes,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._reader_task.add_done_callback(_consume_task_exception)
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         await self.request(
             "initialize",
@@ -277,10 +380,29 @@ class CodexAppServerClient:
             },
         )
         await self.notify("initialized", {})
+        if self._require_chatgpt_account:
+            account_result = await self.request(
+                "account/read",
+                {"refreshToken": False},
+            )
+            account = account_result.get("account") if isinstance(account_result, dict) else None
+            account_type = str(account.get("type") or "").strip().lower() if isinstance(account, dict) else ""
+            plan_type = str(account.get("planType") or "").strip().lower() if isinstance(account, dict) else ""
+            self._account_type = account_type or None
+            self._account_plan_type = plan_type or None
+            if account_type != "chatgpt":
+                raise CodexAppServerError(
+                    "image generation requires ChatGPT account authentication; API-key authentication is disabled"
+                )
+            if self._require_chatgpt_pro and "pro" not in plan_type:
+                raise CodexAppServerError(
+                    f"image generation requires a ChatGPT Pro account; current plan is {plan_type or 'unknown'}"
+                )
 
     async def stop(self) -> None:
         if self.proc is None:
             return
+        self._stopping = True
         proc = self.proc
         self.proc = None
         if proc.returncode is None:
@@ -291,33 +413,115 @@ class CodexAppServerClient:
                 proc.kill()
                 await proc.wait()
         if self._reader_task:
-            self._reader_task.cancel()
+            reader_task = self._reader_task
             self._reader_task = None
+            if not reader_task.done():
+                reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, CodexAppServerError):
+                await reader_task
         if self._stderr_task:
-            self._stderr_task.cancel()
+            stderr_task = self._stderr_task
             self._stderr_task = None
+            if not stderr_task.done():
+                stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+
+    def _record_transport_error(self, error: CodexAppServerTransportError) -> None:
+        if self._transport_error is None:
+            self._transport_error = error
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(self._transport_error)
+        self._pending.clear()
 
     async def _read_loop(self) -> None:
         assert self.proc and self.proc.stdout
-        while True:
-            line = await self.proc.stdout.readline()
-            if not line:
-                break
-            try:
-                message = json.loads(line.decode("utf-8"))
-            except json.JSONDecodeError:
-                continue
-            if "id" in message:
-                future = self._pending.pop(int(message["id"]), None)
-                if future and not future.done():
-                    future.set_result(message)
-            else:
-                await self._notifications.put(message)
-        error = CodexAppServerError(self._format_process_error("Codex app-server closed stdout"))
-        for future in list(self._pending.values()):
-            if not future.done():
-                future.set_exception(error)
-        self._pending.clear()
+        frame_bytes = 0
+        try:
+            while True:
+                line = await self.proc.stdout.readline()
+                if not line:
+                    break
+                frame_bytes = len(line)
+                try:
+                    decoded = json.loads(line.decode("utf-8"))
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"Codex app-server emitted a non-UTF-8 JSONL frame ({frame_bytes} bytes)"
+                    ) from exc
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Codex app-server emitted an invalid JSONL frame ({frame_bytes} bytes)"
+                    ) from exc
+                if not isinstance(decoded, dict):
+                    raise ValueError(
+                        f"Codex app-server emitted a non-object JSONL frame ({frame_bytes} bytes)"
+                    )
+                message = _compact_image_generation_payload(decoded)
+                if "id" in message:
+                    future = self._pending.pop(int(message["id"]), None)
+                    if future and not future.done():
+                        future.set_result(message)
+                else:
+                    await self._notifications.put(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = CodexAppServerTransportError(
+                self._format_process_error(
+                    f"Codex app-server stdout reader failed: {type(exc).__name__}: {exc}"
+                ),
+                diagnostics={
+                    "jsonlReaderLimitBytes": self._jsonl_limit_bytes,
+                    "jsonlFrameBytes": frame_bytes,
+                },
+            )
+            self._record_transport_error(error)
+            return
+        if not self._stopping:
+            error = CodexAppServerTransportError(
+                self._format_process_error("Codex app-server closed stdout"),
+                diagnostics={"jsonlReaderLimitBytes": self._jsonl_limit_bytes},
+            )
+            self._record_transport_error(error)
+
+    async def _next_notification(self, *, timeout: float) -> dict[str, Any]:
+        if not self._notifications.empty():
+            return self._notifications.get_nowait()
+        if self._transport_error is not None:
+            raise self._transport_error
+
+        notification_task = asyncio.create_task(self._notifications.get())
+        reader_task = self._reader_task
+        waiters: set[asyncio.Task[Any]] = {notification_task}
+        if reader_task is not None:
+            waiters.add(reader_task)
+        done, _pending = await asyncio.wait(
+            waiters,
+            timeout=max(0.0, timeout),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if notification_task in done:
+            return notification_task.result()
+        if not self._notifications.empty():
+            notification_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await notification_task
+            return self._notifications.get_nowait()
+        notification_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await notification_task
+        if not done:
+            raise asyncio.TimeoutError
+        if self._transport_error is not None:
+            raise self._transport_error
+        error = CodexAppServerTransportError(
+            self._format_process_error("Codex app-server notification reader stopped"),
+            diagnostics={"jsonlReaderLimitBytes": self._jsonl_limit_bytes},
+        )
+        self._record_transport_error(error)
+        raise error
 
     async def _drain_stderr(self) -> None:
         assert self.proc and self.proc.stderr
@@ -343,6 +547,12 @@ class CodexAppServerClient:
             "codexHome": str(self._resolve_codex_home()),
             "generatedImagesRoot": str(self.generated_images_root()),
             "pendingRequestIds": sorted(self._pending.keys()),
+            "jsonlReaderLimitBytes": self._jsonl_limit_bytes,
+            "readerTaskDone": self._reader_task.done() if self._reader_task is not None else None,
+            "transportError": str(self._transport_error) if self._transport_error is not None else None,
+            "sensitiveEnvScrubbed": self._scrub_sensitive_env,
+            "accountType": self._account_type,
+            "accountPlanType": self._account_plan_type,
             "stderrTail": list(self._stderr_tail),
             "transportErrorKind": classify_codex_transport_error(self._stderr_summary()),
         }
@@ -360,6 +570,8 @@ class CodexAppServerClient:
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         await self.start() if self.proc is None else None
+        if self._transport_error is not None:
+            raise self._transport_error
         assert self.proc and self.proc.stdin
         request_id = self._next_id
         self._next_id += 1
@@ -393,6 +605,8 @@ class CodexAppServerClient:
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         await self.start() if self.proc is None else None
+        if self._transport_error is not None:
+            raise self._transport_error
         assert self.proc and self.proc.stdin
         payload = {"method": method, "params": params or {}}
         async with self._write_lock:
@@ -405,16 +619,27 @@ class CodexAppServerClient:
         model: str | None = None,
         cwd: Path | None = None,
         approval_policy: str = "on-request",
+        sandbox: str = "workspace-write",
+        developer_instructions: str | None = None,
+        config: dict[str, Any] | None = None,
     ) -> str:
+        if sandbox not in {"read-only", "workspace-write"}:
+            raise ValueError(f"unsupported app-server sandbox: {sandbox}")
         params: dict[str, Any] = {
             "cwd": str(cwd or self.cwd),
             "approvalPolicy": approval_policy,
-            "sandbox": "workspace-write",
+            "sandbox": sandbox,
         }
         effective_model = model or default_app_server_model()
         self._model = effective_model
         self._runtime_contract = None
         params["model"] = effective_model
+        if developer_instructions is not None:
+            if not developer_instructions.strip():
+                raise ValueError("developer_instructions must not be empty")
+            params["developerInstructions"] = developer_instructions
+        if config is not None:
+            params["config"] = json.loads(json.dumps(config))
         result = await self.request("thread/start", params)
         thread = result.get("thread") or {}
         thread_id = thread.get("id")
@@ -433,16 +658,22 @@ class CodexAppServerClient:
         timeout_seconds: int = 900,
         reset_timeout_on_notification: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        return_on_completed_image_generation: bool = False,
     ) -> list[dict[str, Any]]:
         input_items: list[dict[str, Any]] = [{"type": "text", "text": text}]
         for skill in skills or []:
             input_items.append({"type": "skill", "name": skill.parent.name, "path": str(skill)})
         for image in local_images or []:
             input_items.append({"type": "localImage", "path": str(image)})
-        result = await self.request(
-            "turn/start",
-            {"threadId": thread_id, "cwd": str(cwd or self.cwd), "input": input_items},
-        )
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "cwd": str(cwd or self.cwd),
+            "input": input_items,
+        }
+        if output_schema is not None:
+            params["outputSchema"] = json.loads(json.dumps(output_schema))
+        result = await self.request("turn/start", params)
         turn_id = str((result.get("turn") or {}).get("id") or "")
         transcript: list[dict[str, Any]] = []
         deadline = time.monotonic() + max(1, timeout_seconds)
@@ -451,17 +682,26 @@ class CodexAppServerClient:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                notification = await asyncio.wait_for(self._notifications.get(), timeout=remaining)
+                notification = await self._next_notification(timeout=remaining)
+            except CodexAppServerTransportError as exc:
+                recovered_transcript = [*transcript, *getattr(exc, "transcript", [])]
+                diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+                diagnostics.update({"threadId": thread_id, "turnId": turn_id})
+                raise CodexAppServerTransportError(
+                    str(exc),
+                    transcript=recovered_transcript,
+                    diagnostics=diagnostics,
+                ) from exc
             except asyncio.TimeoutError as exc:
                 raise CodexAppServerTransportError("turn timed out", transcript=transcript, diagnostics=self.diagnostics()) from exc
+            params = notification.get("params") or {}
+            if turn_id and params.get("turnId") not in {None, turn_id}:
+                continue
             transcript.append(notification)
             if progress_callback is not None:
                 progress_callback(notification)
             if reset_timeout_on_notification:
                 deadline = time.monotonic() + max(1, timeout_seconds)
-            params = notification.get("params") or {}
-            if turn_id and params.get("turnId") not in {None, turn_id}:
-                continue
             method = str(notification.get("method") or "").lower()
             if "approval" in method:
                 raise CodexAppServerError(
@@ -469,6 +709,20 @@ class CodexAppServerClient:
                     transcript=transcript,
                     diagnostics=self.diagnostics(),
                 )
+            if (
+                return_on_completed_image_generation
+                and turn_id
+                and params.get("turnId") == turn_id
+                and notification.get("method") == "item/completed"
+            ):
+                item = params.get("item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "imageGeneration"
+                    and str(item.get("status") or "").strip().lower() == "completed"
+                    and image_generation_saved_path(item)
+                ):
+                    return transcript
             if notification.get("method") == "turn/completed":
                 turn = params.get("turn") or {}
                 if (turn.get("status") or "").lower() == "failed":
@@ -520,6 +774,29 @@ class CodexAppServerClient:
             timeout_seconds=timeout_seconds,
         )
 
+    async def _read_thread_for_transport_recovery(self, thread_id: str) -> dict[str, Any]:
+        """Read a turn through a fresh transport when the stdout reader died."""
+
+        restarted = False
+        if self._transport_error is not None:
+            await self.stop()
+            await self.start()
+            restarted = True
+        try:
+            return await self.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": True},
+            )
+        except CodexAppServerTransportError:
+            if restarted:
+                raise
+            await self.stop()
+            await self.start()
+            return await self.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": True},
+            )
+
     async def generate_image(
         self,
         *,
@@ -535,8 +812,16 @@ class CodexAppServerClient:
         timeout_seconds: int = 900,
     ) -> ImageGenerationResult:
         thread_id = await self.start_thread(cwd=run_dir)
-        generated_root = self.generated_images_root()
-        cutoff_ns = fallback_cutoff_ns if fallback_cutoff_ns is not None else latest_generated_image_mtime_ns(generated_root)
+        request_bound_v2 = str(provenance_policy or "").strip().lower() == "request_bound_v2"
+        use_generated_images_fallback = allow_generated_images_fallback and not request_bound_v2
+        generated_root = self.generated_images_root() if use_generated_images_fallback else None
+        cutoff_ns = (
+            fallback_cutoff_ns
+            if fallback_cutoff_ns is not None
+            else latest_generated_image_mtime_ns(generated_root)
+            if generated_root is not None
+            else 0
+        )
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         reference_sha256s = [_sha256_file(path) for path in reference_images]
         reference_lines = "\n".join(f"- {p.name}: attached local image" for p in reference_images) or "- none"
@@ -564,12 +849,13 @@ Rules:
                 cwd=run_dir,
                 local_images=reference_images,
                 timeout_seconds=timeout_seconds,
+                return_on_completed_image_generation=True,
             )
         )
         turn_task.add_done_callback(_consume_task_exception)
         fallback_task: asyncio.Task[Path | None] | None = None
         tasks: set[asyncio.Task[Any]] = {turn_task}
-        if allow_generated_images_fallback:
+        if use_generated_images_fallback and generated_root is not None:
             fallback_task = asyncio.create_task(
                 wait_for_unclaimed_generated_image_after(
                     cutoff_ns,
@@ -603,7 +889,72 @@ Rules:
             fallback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await fallback_task
-        transcript = await turn_task
+        transport_error: CodexAppServerTransportError | None = None
+        try:
+            transcript = await turn_task
+        except CodexAppServerTransportError as exc:
+            transport_error = exc
+            transcript = list(exc.transcript)
+
+            def completed_saved_item_exists(events: list[dict[str, Any]]) -> bool:
+                return any(
+                    str(image_item.get("status") or "").strip().lower() == "completed"
+                    and bool(image_generation_saved_path(image_item))
+                    for event in events
+                    for image_item in find_image_generation_items(event)
+                )
+
+            if not completed_saved_item_exists(transcript):
+                recovered_turn_id = _extract_turn_id(transcript)
+                try:
+                    thread_result = await asyncio.wait_for(
+                        self._read_thread_for_transport_recovery(thread_id),
+                        timeout=max(1, min(30, timeout_seconds)),
+                    )
+                except Exception:
+                    thread_result = {}
+                thread = thread_result.get("thread") if isinstance(thread_result, dict) else None
+                turns = thread.get("turns") if isinstance(thread, dict) else None
+                recovered_turn: dict[str, Any] | None = None
+                if isinstance(turns, list):
+                    if recovered_turn_id:
+                        recovered_turn = next(
+                            (
+                                turn
+                                for turn in turns
+                                if isinstance(turn, dict)
+                                and str(turn.get("id") or "") == recovered_turn_id
+                            ),
+                            None,
+                        )
+                    else:
+                        recovered_turn = next(
+                            (
+                                turn
+                                for turn in reversed(turns)
+                                if isinstance(turn, dict)
+                                and any(
+                                    str(item.get("status") or "").strip().lower() == "completed"
+                                    and bool(image_generation_saved_path(item))
+                                    for item in (turn.get("items") or [])
+                                    if isinstance(item, dict) and item.get("type") == "imageGeneration"
+                                )
+                            ),
+                            None,
+                        )
+                if recovered_turn is not None:
+                    recovered_turn_id = str(recovered_turn.get("id") or recovered_turn_id or "")
+                    transcript.append(
+                        {
+                            "method": "turn/recovered",
+                            "params": {
+                                "turnId": recovered_turn_id,
+                                "turn": recovered_turn,
+                            },
+                        }
+                    )
+            if not completed_saved_item_exists(transcript):
+                raise transport_error
         turn_id = _extract_turn_id(transcript)
         image_items: list[dict[str, Any]] = []
         for message in transcript:
@@ -620,7 +971,7 @@ Rules:
                 json.dumps(image_item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
             distinct_image_items[identity] = image_item
-        if len(distinct_image_items) > 1 and not allow_generated_images_fallback:
+        if len(distinct_image_items) > 1 and not use_generated_images_fallback:
             raise CodexAppServerError(
                 "request-bound image generation requires exactly one distinct imageGeneration item",
                 diagnostics={
@@ -638,7 +989,11 @@ Rules:
         saved = image_generation_saved_path(latest)
         source = "app_server"
         if not saved:
-            fallback = await claim_latest_generated_image_after(cutoff_ns, root=generated_root) if allow_generated_images_fallback else None
+            fallback = (
+                await claim_latest_generated_image_after(cutoff_ns, root=generated_root)
+                if use_generated_images_fallback and generated_root is not None
+                else None
+            )
             if fallback:
                 saved = str(fallback)
                 source = "generated_images_fallback"
@@ -704,9 +1059,105 @@ Rules:
         response_text = "\n".join(messages).strip()
         return _extract_prompt_from_agent_text(response_text)
 
+    async def revise_first_frame_visual_plan(
+        self,
+        *,
+        item: dict[str, Any],
+        current_plan: dict[str, Any],
+        instruction: str,
+        setting_content: str,
+        run_dir: Path,
+    ) -> dict[str, Any]:
+        thread_id = await self.start_thread(cwd=run_dir)
+        patch_properties: dict[str, Any] = {
+            key: {"type": "string"}
+            for key in (
+                "event_fact_visible_in_still",
+                "primary_subject_name",
+                "costume_state",
+                "pose",
+                "gaze",
+                "foreground",
+                "midground",
+                "background",
+                "light_source",
+                "light_direction",
+                "story_specific_texture",
+            )
+        }
+        patch_properties["dominant_materials"] = {"type": "array", "items": {"type": "string"}}
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "visual_plan_patch": {
+                    "type": "object",
+                    "properties": patch_properties,
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["visual_plan_patch"],
+            "additionalProperties": False,
+        }
+        text = f"""Revise one ToC compiled-v2 first-frame visual plan.
 
-def create_codex_app_server_client(*, cwd: Path, codex_bin: str = "codex") -> CodexAppServerClient:
-    return CodexAppServerClient(cwd=cwd, codex_bin=codex_bin)
+Item metadata JSON:
+{json.dumps(item, ensure_ascii=False, indent=2)}
+
+Current first_frame_visual_plan JSON:
+{json.dumps(current_plan, ensure_ascii=False, indent=2)}
+
+Permanent instruction section:
+{setting_content}
+
+User override instruction:
+{instruction}
+
+Rules:
+- Return exactly the requested JSON schema.
+- Change only visible first-frame presentation fields represented by the schema.
+- Preserve story event, reveal timing, not-yet constraints, binding ids, references, and continuity.
+- Do not add or remove characters, objects, locations, or references.
+- Do not generate images and do not edit files.
+"""
+        transcript = await self.run_turn(
+            thread_id=thread_id,
+            text=text,
+            cwd=run_dir,
+            timeout_seconds=900,
+            output_schema=output_schema,
+        )
+        messages: list[str] = []
+        for event in transcript:
+            messages.extend(find_agent_message_texts(event))
+        response_text = "\n".join(messages).strip()
+        match = re.search(r"\{.*\}", response_text, flags=re.DOTALL)
+        if not match:
+            raise CodexAppServerError("compiled-v2 visual plan revision returned no JSON object")
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise CodexAppServerError("compiled-v2 visual plan revision returned invalid JSON") from exc
+        patch = payload.get("visual_plan_patch") if isinstance(payload, dict) else None
+        if not isinstance(patch, dict) or not patch:
+            raise CodexAppServerError("compiled-v2 visual plan revision returned an empty patch")
+        return patch
+
+
+def create_codex_app_server_client(
+    *,
+    cwd: Path,
+    codex_bin: str = "codex",
+    scrub_sensitive_env: bool = False,
+    require_chatgpt_account: bool = False,
+    require_chatgpt_pro: bool = False,
+) -> CodexAppServerClient:
+    return CodexAppServerClient(
+        cwd=cwd,
+        codex_bin=codex_bin,
+        scrub_sensitive_env=scrub_sensitive_env,
+        require_chatgpt_account=require_chatgpt_account,
+        require_chatgpt_pro=require_chatgpt_pro,
+    )
 
 
 def app_server_disabled() -> bool:

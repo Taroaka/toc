@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, load_structured_document
 from toc.immersive_manifest import normalize_dotted_id
+from toc.runtime_locks import sync_file_lock
 
 META_MARKER_RE = re.compile(r"\bTODO\b|\bTBD\b|未記入|要修正|メモ|仮文", re.I)
 URL_RE = re.compile(r"https?://|www\.", re.I)
@@ -1013,11 +1014,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-on-findings", action="store_true", help="Exit non-zero when unresolved review findings exist.")
     parser.add_argument("--set-human-review", action="append", default=[], help='Mark scene/cut as human-reviewed, e.g. "scene02_cut01" or "scene10".')
     parser.add_argument("--human-review-value", choices=["true", "false"], default="true", help="Value used with --set-human-review.")
+    parser.add_argument("--assume-run-lock-held", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def run_review(args: argparse.Namespace) -> int:
     manifest_path = Path(args.manifest)
     run_dir = manifest_path.parent
     out_path = Path(args.out) if args.out else run_dir / "narration_text_review.md"
@@ -1060,6 +1061,15 @@ def main() -> int:
     if args.fail_on_findings and findings and unresolved_entries:
         return 1
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    manifest_path = Path(args.manifest).resolve()
+    if args.assume_run_lock_held:
+        return run_review(args)
+    with sync_file_lock(manifest_path.parent / ".locks" / "run_artifacts.lock"):
+        return run_review(args)
 
 
 if __name__ == "__main__":

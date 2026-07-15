@@ -159,6 +159,8 @@ class ElevenLabsClient:
         language_code: str | None = None,
         pronunciation_dictionary_locators: Any = None,
         voice_settings: dict[str, Any] | None = None,
+        previous_text: str | None = None,
+        next_text: str | None = None,
         timeout_seconds: float = 180.0,
     ) -> bytes:
         v_id = voice_id or self.config.voice_id
@@ -187,6 +189,10 @@ class ElevenLabsClient:
             payload["pronunciation_dictionary_locators"] = list(locators)
         if voice_settings is not None:
             payload["voice_settings"] = voice_settings
+        if previous_text:
+            payload["previous_text"] = previous_text
+        if next_text:
+            payload["next_text"] = next_text
 
         return request_bytes(
             url=url,

@@ -98,6 +98,20 @@ class TestElevenLabsDefaults(unittest.TestCase):
             [{"pronunciation_dictionary_id": "dict_1", "version_id": "ver_1"}],
         )
 
+    def test_tts_sends_adjacent_text_for_chunk_prosody_continuity(self) -> None:
+        client = ElevenLabsClient(ElevenLabsConfig(api_key="test_key"))
+
+        with patch("toc.providers.elevenlabs.request_bytes", return_value=b"audio") as request_bytes:
+            client.tts(
+                text="いまの文です。",
+                previous_text="ひとつ前の文です。",
+                next_text="次の文です。",
+            )
+
+        payload = request_bytes.call_args.kwargs["json_payload"]
+        self.assertEqual(payload["previous_text"], "ひとつ前の文です。")
+        self.assertEqual(payload["next_text"], "次の文です。")
+
 
 if __name__ == "__main__":
     unittest.main()

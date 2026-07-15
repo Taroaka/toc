@@ -109,7 +109,7 @@
 推奨ルール:
 
 - 1カット = 1意図。
-- 1カット = 1ナレーション、または明示的な silent cut。
+- cutは映像編集単位。narration spanは複数cutをまたいでよく、または明示的な silent cut。
 - cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high は5カット以上、critical は7カット以上。
 - `target_duration_seconds / 8` を切り上げたカット数も下回らない。
 - メインカット（最低1つ）: 5–15秒。

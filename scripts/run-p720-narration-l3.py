@@ -10,11 +10,20 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    import yaml  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover
+    yaml = None
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, now_iso
+from toc.harness import load_structured_document
+from toc.narration_arc import narration_text_set_hash, validate_audio_story_contract
+from toc.narration_semantic_review import narration_semantic_review_is_current
+from toc.runtime_locks import sync_file_lock
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
     aggregated_review_relpath,
@@ -105,6 +114,51 @@ CRITIC_PROFILES: tuple[CriticProfile, ...] = (
         ),
     ),
 )
+
+
+def _replace_yaml_block(text: str, new_yaml: str) -> str:
+    match = re.search(r"```yaml\s*\n(.*?)\n```", text, flags=re.DOTALL)
+    if not match:
+        raise RuntimeError("video_manifest.md has no YAML block")
+    start, end = match.span(1)
+    return text[:start] + new_yaml.rstrip("\n") + text[end:]
+
+
+def _requires_full_run_arc_review(manifest: dict[str, object]) -> bool:
+    if manifest.get("audio_story_plan") or manifest.get("narration_spans"):
+        return True
+    for scene in manifest.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        nodes = scene.get("cuts") if isinstance(scene.get("cuts"), list) else [scene]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
+            narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+            revision = narration.get("revision") if isinstance(narration.get("revision"), dict) else {}
+            if revision.get("schema_version") == "narration_revision_v1":
+                return True
+    return False
+
+
+def _write_arc_review_to_manifest(
+    *, manifest_path: Path, manifest_text: str, manifest: dict[str, object], status: str, findings: list[str], report: Path, run_dir: Path
+) -> None:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to write narration arc review")
+    workflow = manifest.get("narration_workflow") if isinstance(manifest.get("narration_workflow"), dict) else {}
+    workflow["schema_version"] = "narration_run_workflow_v1"
+    workflow["arc_review"] = {
+        "status": status,
+        "narration_text_set_hash": narration_text_set_hash(manifest),
+        "findings": findings,
+        "report": _relative(run_dir, report),
+        "reviewed_at": now_iso(),
+    }
+    manifest["narration_workflow"] = workflow
+    dumped = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True, width=1000)
+    manifest_path.write_text(_replace_yaml_block(manifest_text, dumped), encoding="utf-8")
 
 
 def _relative(run_dir: Path, path: Path) -> str:
@@ -326,7 +380,7 @@ def _render_aggregate_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def run_p720_l3(
+def _run_p720_l3_unlocked(
     *,
     run_dir: Path,
     manifest_path: Path,
@@ -349,6 +403,7 @@ def run_p720_l3(
         str(script_path),
         "--out",
         str(deterministic_report),
+        "--assume-run-lock-held",
     ]
     result = subprocess.run(review_cmd, check=False, capture_output=True, text=True)
     if result.returncode != 0:
@@ -374,6 +429,11 @@ def run_p720_l3(
     blocking_findings = [finding for finding in findings if not finding.human_review_ok]
     accepted_findings = [finding for finding in findings if finding.human_review_ok]
     status = "changes_requested" if unresolved_entries else "passed"
+    manifest_text, manifest = load_structured_document(manifest_path)
+    requires_arc_review = _requires_full_run_arc_review(manifest)
+    arc_findings = validate_audio_story_contract(manifest) if requires_arc_review else []
+    if arc_findings:
+        status = "changes_requested"
 
     unmatched = list(blocking_findings)
     critic_reports: list[str] = []
@@ -416,11 +476,41 @@ def run_p720_l3(
         deterministic_report=deterministic_report,
         run_dir=run_dir,
     )
+    if requires_arc_review:
+        arc_lines = ["", "## Full-run Arc Review", "", f"- status: {'passed' if not arc_findings else 'changes_requested'}"]
+        if arc_findings:
+            arc_lines.extend(f"- {finding}" for finding in arc_findings)
+        else:
+            arc_lines.append("- []")
+        aggregate_report = aggregate_report.rstrip() + "\n" + "\n".join(arc_lines) + "\n"
     aggregate_path = run_dir / aggregated_review_relpath(STAGE, round_number)
     aggregate_path.write_text(aggregate_report, encoding="utf-8")
     final_path = run_dir / final_review_relpath(STAGE)
     final_path.write_text(aggregate_report, encoding="utf-8")
+    if requires_arc_review:
+        _write_arc_review_to_manifest(
+            manifest_path=manifest_path,
+            manifest_text=manifest_text,
+            manifest=manifest,
+            status="passed" if status == "passed" else "changes_requested",
+            findings=arc_findings,
+            report=final_path,
+            run_dir=run_dir,
+        )
 
+    workflow = manifest.get("narration_workflow") if isinstance(manifest.get("narration_workflow"), dict) else {}
+    semantic_review = (
+        workflow.get("semantic_critic_review")
+        if isinstance(workflow.get("semantic_critic_review"), dict)
+        else {}
+    )
+    semantic_current = narration_semantic_review_is_current(
+        manifest,
+        semantic_review,
+        run_dir=run_dir,
+    )
+    full_review_passed = status == "passed" and (not requires_arc_review or semantic_current)
+    p720_status = "done" if full_review_passed else ("in_progress" if status == "passed" else "blocked")
     updates = loop_state_updates(stage=STAGE, status=status, current_round=round_number)
     updates.update(
         {
@@ -429,15 +519,51 @@ def run_p720_l3(
                 aggregated_review_relpath(STAGE, round_number)
             ),
             f"eval.{STAGE}.loop.round_{round_number:02d}.deterministic_gate_report": _relative(run_dir, deterministic_report),
-            "slot.p720.status": "done" if status == "passed" else "blocked",
+            "slot.p720.status": p720_status,
+            "slot.p720.note": (
+                "deterministic review passed; waiting for five independent semantic critics"
+                if status == "passed" and requires_arc_review and not semantic_current
+                else "p720 deterministic and semantic reviews passed"
+                if full_review_passed
+                else "p720 deterministic review has unresolved findings"
+            ),
             "slot.p720.review_loop.status": status,
             "slot.p720.review_loop.current_round": str(round_number),
-            "review.narration.status": "approved" if status == "passed" else "changes_requested",
+            "review.narration.deterministic.status": status,
+            "review.narration.status": (
+                "approved" if full_review_passed else "pending" if status == "passed" else "changes_requested"
+            ),
             "review.narration.report": str(final_review_relpath(STAGE)),
         }
     )
+    if status == "passed" and requires_arc_review and not semantic_current:
+        updates.update(
+            {
+                "slot.p730.status": "blocked",
+                "slot.p730.note": "waiting for hash-bound p720 semantic critics",
+                "gate.narration_review": "required",
+            }
+        )
     append_state_snapshot(run_dir / "state.txt", updates)
     return status
+
+
+def run_p720_l3(
+    *,
+    run_dir: Path,
+    manifest_path: Path,
+    script_path: Path,
+    round_number: int,
+) -> str:
+    """Run p720 against one stable script/manifest revision."""
+
+    with sync_file_lock(run_dir.resolve() / ".locks" / "run_artifacts.lock"):
+        return _run_p720_l3_unlocked(
+            run_dir=run_dir,
+            manifest_path=manifest_path,
+            script_path=script_path,
+            round_number=round_number,
+        )
 
 
 def parse_args() -> argparse.Namespace:

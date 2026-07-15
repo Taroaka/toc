@@ -13,6 +13,8 @@ IMAGE_PROMPT_JUDGMENT_PROMPT = Path("logs/review/image_prompt.judgment_prompt.md
 IMAGE_PROMPT_JUDGMENT_REPORT = Path("logs/review/image_prompt.judgment.md")
 PASSING_JUDGMENT_STATUSES = {"passed"}
 SEMANTIC_REVIEW_STAGES = {
+    "research",
+    "story",
     "scene_set",
     "scene_detail",
     "cut_blueprint",
@@ -20,6 +22,23 @@ SEMANTIC_REVIEW_STAGES = {
     "image_prompt",
     "narration",
     "video_motion",
+}
+FOUNDATION_SEMANTIC_REVIEW_STAGES = {"research", "story"}
+FOUNDATION_SEMANTIC_CRITERIA = {
+    "research": (
+        "baseline",
+        "chronology",
+        "principal_characters",
+        "central_conflict_resolution",
+        "downstream_handoff",
+    ),
+    "story": (
+        "research_event_allocation",
+        "chronology_causality",
+        "character_continuity",
+        "conflict_resolution",
+        "duration_scene_readiness",
+    ),
 }
 
 
@@ -95,11 +114,118 @@ def _scope_entry_count(scope_path: Path, *, rel_scope: Path | None = None) -> tu
     return None, "semantic review scope is missing integer entry_count"
 
 
+def _scope_entry_ids(scope_path: Path) -> tuple[list[str], str | None]:
+    if not scope_path.exists():
+        return [], f"missing semantic review scope: {scope_path.as_posix()}"
+    try:
+        data = json.loads(scope_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [], f"invalid semantic review scope JSON: {exc}"
+    raw = data.get("entry_ids")
+    if not isinstance(raw, list):
+        return [], "semantic review scope is missing entry_ids"
+    entry_ids = [str(value).strip() for value in raw if str(value).strip()]
+    if len(entry_ids) != len(raw):
+        return entry_ids, "semantic review scope contains blank entry_ids"
+    if len(set(entry_ids)) != len(entry_ids):
+        return entry_ids, "semantic review scope contains duplicate entry_ids"
+    return entry_ids, None
+
+
+def _report_list_values(text: str, key: str) -> list[str]:
+    values: list[str] = []
+    collecting = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith(f"{key}:") or stripped.startswith(f"- {key}:"):
+            inline = stripped.split(":", 1)[1].strip()
+            if inline.startswith("[") and inline.endswith("]"):
+                body = inline[1:-1].strip()
+                return [
+                    value.strip().strip("`\"'")
+                    for value in body.split(",")
+                    if value.strip().strip("`\"'")
+                ]
+            if inline:
+                scalar = inline.strip("`\"'")
+                return [] if scalar in {"[]", "..."} else [scalar]
+            collecting = True
+            continue
+        if collecting:
+            if not stripped:
+                continue
+            if not stripped.startswith("-"):
+                break
+            value = stripped[1:].strip().strip("`\"'")
+            if value and value not in {"[]", "..."}:
+                values.append(value)
+    return values
+
+
+def _report_json_value(text: str, key: str) -> tuple[Any | None, str | None]:
+    match = re.search(rf"(?m)^-?\s*{re.escape(key)}\s*:\s*", text)
+    if not match:
+        return None, f"semantic review report is missing {key}"
+    remainder = text[match.end() :].lstrip()
+    try:
+        value, _end = json.JSONDecoder().raw_decode(remainder)
+    except json.JSONDecodeError as exc:
+        return None, f"semantic review report has invalid {key} JSON: {exc}"
+    return value, None
+
+
+def _foundation_criteria_errors(report_text: str, stage: str, overall_status: str) -> list[str]:
+    expected_ids = list(FOUNDATION_SEMANTIC_CRITERIA[stage])
+    raw_results, parse_error = _report_json_value(report_text, "criteria_results_json")
+    if parse_error:
+        return [parse_error]
+    if not isinstance(raw_results, list):
+        return ["semantic review criteria_results_json must be a JSON array"]
+
+    errors: list[str] = []
+    result_ids: list[str] = []
+    statuses: dict[str, str] = {}
+    for index, raw_result in enumerate(raw_results, start=1):
+        if not isinstance(raw_result, dict):
+            errors.append(f"semantic review criterion result {index} must be an object")
+            continue
+        criterion_id = str(raw_result.get("criterion_id") or "").strip()
+        result_ids.append(criterion_id)
+        status = str(raw_result.get("status") or "").strip().lower()
+        if status not in {"passed", "failed"}:
+            errors.append(
+                f"semantic review criterion {criterion_id or index} status must be passed or failed"
+            )
+        elif criterion_id:
+            statuses[criterion_id] = status
+        evidence = raw_result.get("evidence")
+        if isinstance(evidence, list):
+            evidence_values = [str(value).strip() for value in evidence if str(value).strip()]
+        else:
+            evidence_values = [str(evidence).strip()] if evidence is not None and str(evidence).strip() else []
+        if not evidence_values or any(value in {"...", "pending"} for value in evidence_values):
+            errors.append(
+                f"semantic review criterion {criterion_id or index} requires non-empty evidence"
+            )
+
+    if result_ids != expected_ids:
+        errors.append(
+            "semantic review criterion_ids must exactly match the required ordered criteria "
+            f"(expected={expected_ids}, got={result_ids})"
+        )
+    if overall_status in PASSING_JUDGMENT_STATUSES and any(
+        statuses.get(criterion_id) != "passed" for criterion_id in expected_ids
+    ):
+        errors.append("passed foundation semantic review requires every criterion status to be passed")
+    return errors
+
+
 def _check_review_artifacts(
     run_dir: Path,
     *,
     artifacts: dict[str, Path],
     require_entries: bool,
+    require_exact_entry_coverage: bool = False,
 ) -> SemanticReviewStatus:
     errors: list[str] = []
     for rel in artifacts.values():
@@ -121,6 +247,25 @@ def _check_review_artifacts(
             errors.append("semantic review report still contains template placeholder entries")
         if status not in PASSING_JUDGMENT_STATUSES:
             errors.append(f"semantic review status must be passed, got {status or '(missing)'}")
+        if require_exact_entry_coverage:
+            expected_entry_ids, entry_ids_error = _scope_entry_ids(run_dir / artifacts["scope"])
+            if entry_ids_error:
+                errors.append(entry_ids_error)
+            reviewed_entries = _report_list_values(report_text, "reviewed_entries")
+            if reviewed_entries != expected_entry_ids:
+                errors.append(
+                    "semantic review reviewed_entries coverage must exactly match scope entry_ids "
+                    f"(expected={expected_entry_ids}, got={reviewed_entries})"
+                )
+            blocked_entries = _report_list_values(report_text, "blocked_entries")
+            failed_selectors = _report_list_values(report_text, "failed_selectors")
+            if status in PASSING_JUDGMENT_STATUSES and blocked_entries:
+                errors.append("passed semantic review must have empty blocked_entries")
+            if status in PASSING_JUDGMENT_STATUSES and failed_selectors:
+                errors.append("passed semantic review must have empty failed_selectors")
+            stage = artifacts["report"].name.split(".", 1)[0]
+            if stage in FOUNDATION_SEMANTIC_REVIEW_STAGES:
+                errors.extend(_foundation_criteria_errors(report_text, stage, status))
 
     return SemanticReviewStatus(status=status, entry_count=entry_count, errors=tuple(errors))
 
@@ -130,6 +275,7 @@ def check_semantic_review(run_dir: Path, stage: str, *, require_entries: bool = 
         run_dir,
         artifacts=semantic_review_relpaths(stage),
         require_entries=require_entries,
+        require_exact_entry_coverage=stage in FOUNDATION_SEMANTIC_REVIEW_STAGES,
     )
 
 

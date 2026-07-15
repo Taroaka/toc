@@ -407,9 +407,9 @@ def render_scene_manifest_md(
     motion_prompt = "TODO: 最小限のカメラ動き。テロップが読める可読性を優先。"
 
     # Cut planning (DRAFT):
-    # - 1 cut = 1 narration
-    # - main cut (at least 1): 5–15 seconds (based on actual narration audio duration)
-    # - sub cuts (optional): 3–15 seconds (short 3–4s cuts are sub-only; not for single-cut narration)
+    # - cut is a visual edit unit; narration spans may cross multiple cuts
+    # - main spoken group: 5–15 seconds (based on actual narration audio duration)
+    # - sub cuts (optional): 3–15 seconds; short cuts may continue a span or stay intentionally silent
     # - If narration would exceed 15s, split into multiple cuts
     # - Even if <= 15s, decide whether to split after both scene + narration are drafted
 

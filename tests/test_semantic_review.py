@@ -4,7 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from toc.semantic_review import SEMANTIC_REVIEW_STAGES, check_image_prompt_judgment, check_semantic_review, parse_judgment_report_status, semantic_review_relpaths
+from toc.semantic_review import (
+    FOUNDATION_SEMANTIC_CRITERIA,
+    SEMANTIC_REVIEW_STAGES,
+    check_image_prompt_judgment,
+    check_semantic_review,
+    parse_judgment_report_status,
+    semantic_review_relpaths,
+)
 from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
     _semantic_collection_excerpt,
@@ -33,15 +40,54 @@ def write_review_pack(run_dir: Path, *, status: str = "passed", entry_count: int
     (review_dir / "image_prompt.judgment.md").write_text(report, encoding="utf-8")
 
 
-def write_generic_pack(run_dir: Path, stage: str, *, status: str = "passed", entry_count: int = 1) -> None:
+def write_generic_pack(
+    run_dir: Path,
+    stage: str,
+    *,
+    status: str = "passed",
+    entry_count: int = 1,
+    reviewed_entries: list[str] | None = None,
+    include_foundation_criteria: bool = True,
+) -> None:
     paths = semantic_review_relpaths(stage)
+    entry_ids = [f"{stage}:entry:{index + 1}" for index in range(entry_count)]
+    reviewed = entry_ids if reviewed_entries is None else reviewed_entries
     for key, rel in paths.items():
         path = run_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         if key == "scope":
-            path.write_text(json.dumps({"entry_count": entry_count}, ensure_ascii=False) + "\n", encoding="utf-8")
+            path.write_text(
+                json.dumps({"entry_count": entry_count, "entry_ids": entry_ids}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
         elif key == "report":
-            path.write_text(f"status: {status}\nreviewed_entries: [entry]\nblocked_entries: []\nfindings: []\n", encoding="utf-8")
+            criteria_results = [
+                {
+                    "criterion_id": criterion_id,
+                    "status": "passed",
+                    "evidence": f"{stage}.md:{criterion_id}",
+                }
+                for criterion_id in FOUNDATION_SEMANTIC_CRITERIA.get(stage, ())
+            ]
+            criteria_line = (
+                "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False)
+                if include_foundation_criteria and stage in FOUNDATION_SEMANTIC_CRITERIA
+                else ""
+            )
+            path.write_text(
+                "\n".join(
+                    [
+                        f"status: {status}",
+                        f"reviewed_entries: [{', '.join(reviewed)}]",
+                        "blocked_entries: []",
+                        "failed_selectors: []",
+                        criteria_line,
+                        "findings: []",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
         else:
             path.write_text(f"{stage} {key}\n", encoding="utf-8")
 
@@ -100,6 +146,89 @@ class TestSemanticReview(unittest.TestCase):
             self.assertTrue(result.passed)
             self.assertEqual(result.status, "passed")
 
+    def test_foundation_semantic_review_requires_exact_scope_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(
+                run_dir,
+                "research",
+                entry_count=2,
+                reviewed_entries=["research:entry:1"],
+            )
+
+            result = check_semantic_review(run_dir, "research")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("reviewed_entries coverage" in error for error in result.errors))
+
+    def test_foundation_semantic_review_passes_with_exact_scope_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "story", entry_count=2)
+
+            result = check_semantic_review(run_dir, "story")
+
+            self.assertTrue(result.passed, result.errors)
+
+    def test_foundation_semantic_review_rejects_pass_without_criterion_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(
+                run_dir,
+                "research",
+                include_foundation_criteria=False,
+            )
+
+            result = check_semantic_review(run_dir, "research")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("criteria_results_json" in error for error in result.errors))
+
+    def test_foundation_semantic_review_rejects_missing_or_empty_criterion_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "story")
+            report_path = run_dir / semantic_review_relpaths("story")["report"]
+            report = report_path.read_text(encoding="utf-8")
+            criteria = [
+                {
+                    "criterion_id": criterion_id,
+                    "status": "passed",
+                    "evidence": f"story.md:{criterion_id}",
+                }
+                for criterion_id in FOUNDATION_SEMANTIC_CRITERIA["story"][:-1]
+            ]
+            criteria[0]["evidence"] = ""
+            report_path.write_text(
+                report.replace(
+                    next(line for line in report.splitlines() if line.startswith("criteria_results_json:")),
+                    "criteria_results_json: " + json.dumps(criteria, ensure_ascii=False),
+                ),
+                encoding="utf-8",
+            )
+
+            result = check_semantic_review(run_dir, "story")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("criterion_ids" in error for error in result.errors))
+            self.assertTrue(any("non-empty evidence" in error for error in result.errors))
+
+    def test_foundation_semantic_review_rejects_pass_when_any_criterion_failed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "research")
+            report_path = run_dir / semantic_review_relpaths("research")["report"]
+            report = report_path.read_text(encoding="utf-8")
+            report_path.write_text(
+                report.replace('"status": "passed"', '"status": "failed"', 1),
+                encoding="utf-8",
+            )
+
+            result = check_semantic_review(run_dir, "research")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("every criterion status" in error for error in result.errors))
+
     def test_image_prompt_prefers_generic_pack_when_present(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)
@@ -123,6 +252,7 @@ class TestSemanticReview(unittest.TestCase):
 
     def test_all_semantic_stages_have_producer_repair_targets(self) -> None:
         self.assertEqual(SEMANTIC_REVIEW_STAGES, set(SEMANTIC_REVIEW_PRODUCER_TARGETS))
+        self.assertTrue({"research", "story"}.issubset(SEMANTIC_REVIEW_STAGES))
 
     def test_write_semantic_repair_prompt_materializes_prompt_and_report(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
@@ -142,6 +272,25 @@ class TestSemanticReview(unittest.TestCase):
             self.assertEqual(paths["report"], run_dir / relpaths["report"])
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
+
+    def test_foundation_repair_prompt_requires_structured_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            (run_dir / "research.md").write_text("# Research\n\n```yaml\ntopic: test\n```\n", encoding="utf-8")
+            write_generic_pack(run_dir, "research", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "research",
+                round_number=1,
+                max_attempts=2,
+                errors=("research foundation failed",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+            self.assertIn("fenced YAML", prompt)
+            self.assertIn("load_structured_document", prompt)
+            self.assertIn("Do not delegate", prompt)
 
     def test_semantic_repair_defaults_to_two_review_attempts(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):

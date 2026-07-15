@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from copy import deepcopy
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
@@ -21,7 +23,7 @@ from typing import Any, Callable, Iterable
 import yaml
 try:
     from fastapi import APIRouter, HTTPException, Query
-    from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 except ModuleNotFoundError:  # pragma: no cover - CLI-only environments may omit FastAPI.
     class HTTPException(Exception):
         def __init__(self, status_code: int, detail: Any = None) -> None:
@@ -55,6 +57,10 @@ except ModuleNotFoundError:  # pragma: no cover - CLI-only environments may omit
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
+    class JSONResponse(Response):  # noqa: D101
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
     class StreamingResponse(Response):  # noqa: D101
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
@@ -73,12 +79,45 @@ from .codex_app_server import (
 )
 from toc.env import load_env_files
 from toc.http import HttpError
-from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id, selector_aliases
-from toc.harness import append_state_snapshot, now_iso, parse_state_file
+from toc.image_prompt_compiler import compile_image_api_prompt_v2
+from toc.immersive_manifest import (
+    is_non_renderable_manifest_node,
+    make_scene_cut_selector,
+    normalize_dotted_id,
+    selector_aliases,
+)
+from toc.harness import append_state_snapshot, load_structured_document, now_iso, parse_state_file
 from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
-from toc.script_narration import materialize_elevenlabs_tts_text
+from toc.script_narration import materialize_elevenlabs_tts_text, resolve_script_cut_tts_text
+from toc.narration_revision import (
+    REVISION_SCHEMA_VERSION,
+    NarrationRevisionConflict,
+    apply_authoring_update,
+    approve_audio_candidate,
+    current_audio_is_human_approved,
+    ensure_narration_revision,
+    narration_text_hash,
+    narration_tts_hash,
+    prepare_audio_candidate,
+    record_audio_candidate_result,
+)
+from toc.narration_arc import narration_text_set_hash
+from toc.narration_review_gate import deterministic_narration_review_blockers
+from toc.narration_semantic_review import (
+    build_narration_semantic_review_pack,
+    narration_semantic_review_is_current,
+    run_narration_semantic_critics,
+    validate_narration_semantic_aggregate,
+)
+from toc.narration_continuity import (
+    invalidate_stale_tts_context_audio,
+    narration_span_refs,
+    reconcile_audio_story_text,
+    tts_continuity_contexts,
+)
+from toc.story_duration import audit_duration, measure_manifest_runtime, normalize_target_duration
 from toc.runtime_locks import (
     FileLockLease,
     FileLockUnavailable,
@@ -116,10 +155,12 @@ from .image_gen import (
     build_zip,
     candidate_path,
     copy_saved_image,
+    copy_saved_image_to_new_candidate,
     insert_candidate,
     item_to_api,
     list_reference_options,
     list_candidate_items,
+    list_first_image_retentions,
     list_runs,
     load_request_items,
     output_root,
@@ -130,9 +171,13 @@ from .image_gen import (
     require_candidate_path,
     read_prompt_setting,
     read_run_progress,
+    rehydrate_retained_first_image,
     repo_root,
+    restore_first_image_retention_run,
+    retain_first_image,
     resolve_run_relative,
     safe_run_dir,
+    is_first_image_retention_restored_run,
     target_matches_item,
     target_to_request_kind,
     update_request_prompts,
@@ -206,6 +251,10 @@ IMAGE_GENERATION_ITEM_MAX_ATTEMPTS = max(1, int(os.environ.get("TOC_IMAGE_GEN_IT
 IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS = max(
     1.0,
     float(os.environ.get("TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS", "900") or "900"),
+)
+IMAGE_GENERATION_QUEUE_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("TOC_IMAGE_GEN_QUEUE_TIMEOUT_SECONDS", "7200") or "7200"),
 )
 FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS = max(
     1.0,
@@ -290,7 +339,17 @@ class BulkGenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(asset|scene)$")
     items: list[GenerateRequest] = Field(min_length=1, max_length=100)
-    concurrency: int = Field(default=2, ge=1, le=100)
+    concurrency: int = Field(default=IMAGE_GENERATION_PARALLELISM, ge=1, le=100)
+    background: bool = False
+
+
+@dataclass(frozen=True)
+class _BulkGenerationPlanItem:
+    id: str
+    output: str
+    references: list[str]
+    dependency_references: list[str]
+    request: GenerateRequest
 
 
 class InsertItem(BaseModel):
@@ -332,12 +391,14 @@ class CreateRunRequest(BaseModel):
     source: str | None = Field(default=None, max_length=4000)
     generate_images: bool = True
     stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
+    target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
 
 
 class CreateStoryboardRunRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     source: str | None = Field(default=None, max_length=4000)
     stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
+    target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
 
 
 class ResumeRunRequest(BaseModel):
@@ -410,6 +471,7 @@ class NarrationSilentOkRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     item_id: str = Field(min_length=1, max_length=200)
     reason: str | None = Field(default=None, max_length=2000)
+    expected_revision: int = Field(ge=0)
 
 
 class VideoGenerateItem(BaseModel):
@@ -442,6 +504,22 @@ class NarrationGenerateItem(BaseModel):
     output: str | None = Field(default=None, max_length=500)
     tool: str = Field(default="elevenlabs", pattern="^(elevenlabs|silent|macos_say|say)$")
     duration_seconds: float | None = Field(default=None, ge=0.1, le=600)
+    expected_revision: int = Field(ge=0)
+    expected_tts_hash: str = Field(min_length=1, max_length=80)
+    voice_id: str | None = Field(default=None, max_length=200)
+    model_id: str | None = Field(default=None, max_length=200)
+    voice_settings: dict[str, Any] = Field(default_factory=dict)
+    output_format: str | None = Field(default=None, max_length=100)
+    language_code: str | None = Field(default=None, max_length=20)
+    pronunciation_dictionary_locators: list[dict[str, str]] = Field(default_factory=list, max_length=3)
+    pronunciation_alias_source: str | None = Field(default=None, max_length=200)
+    pronunciation_alias_sha256: str | None = Field(default=None, max_length=80)
+    pronunciation_alias_path: str | None = Field(default=None, max_length=500)
+    effective_delivery_hash: str | None = Field(default=None, max_length=80)
+    tts_generation_group_id: str | None = Field(default=None, max_length=200)
+    tts_continuity_hash: str | None = Field(default=None, max_length=80)
+    previous_text: str | None = Field(default=None, max_length=40000)
+    next_text: str | None = Field(default=None, max_length=40000)
 
 
 class NarrationGenerateRequest(NarrationGenerateItem):
@@ -452,6 +530,54 @@ class BulkNarrationGenerateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=200)
     items: list[NarrationGenerateItem] = Field(min_length=1, max_length=256)
     concurrency: int = Field(default=2, ge=1, le=8)
+
+
+class NarrationTextSaveRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    item_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(default="", max_length=40000)
+    tts_text: str = Field(default="", max_length=40000)
+    tool: str = Field(default="elevenlabs", pattern="^(elevenlabs|silent|macos_say|say)$")
+    authoring_status: str = Field(default="draft", pattern="^(draft|human_locked|silent)$")
+    expected_revision: int = Field(ge=0)
+
+
+class NarrationAudioApproveRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    item_id: str = Field(min_length=1, max_length=200)
+    candidate_id: str = Field(min_length=1, max_length=200)
+    expected_revision: int = Field(ge=0)
+    expected_tts_hash: str = Field(min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class NarrationTimelineItem(BaseModel):
+    item_id: str = Field(min_length=1, max_length=200)
+    video_duration_seconds: int = Field(
+        ge=1,
+        le=VIDEO_GENERATION_DURATION_MAX_SECONDS,
+    )
+    narration_offset_seconds: float = Field(default=0, ge=0, le=120)
+
+
+class NarrationListenEvidence(BaseModel):
+    mode: str = Field(pattern="^sequential_full_run$")
+    audio_set_hash: str = Field(min_length=1, max_length=80)
+    item_ids: list[str] = Field(min_length=1, max_length=512)
+    timeline: list[NarrationTimelineItem] = Field(min_length=1, max_length=512)
+    completed_at: str = Field(min_length=1, max_length=100)
+
+
+class NarrationRunApproveRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    note: str = Field(min_length=1, max_length=2000)
+    expected_audio_set_hash: str = Field(min_length=1, max_length=80)
+    timeline: list[NarrationTimelineItem] = Field(min_length=1, max_length=512)
+    listen_evidence: NarrationListenEvidence
+
+
+class NarrationReviewRunRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
 
 
 class RenderInputItem(BaseModel):
@@ -474,9 +600,12 @@ class FinalRenderRequest(RenderFreezeRequest):
 
 _chat_threads: dict[str, str] = {}
 _create_jobs: dict[str, dict[str, Any]] = {}
+_bulk_generation_jobs: dict[str, dict[str, Any]] = {}
+_bulk_generation_tasks: dict[str, asyncio.Task[None]] = {}
 _codex_client: CodexAppServerClient | None = None
 _client_lock = asyncio.Lock()
 _create_jobs_lock = asyncio.Lock()
+_bulk_generation_jobs_lock = asyncio.Lock()
 _generation_semaphore = asyncio.Semaphore(100)
 _video_generation_semaphore = asyncio.Semaphore(4)
 _narration_generation_semaphore = asyncio.Semaphore(4)
@@ -491,6 +620,9 @@ _run_execution_leases_guard = asyncio.Lock()
 MAX_ZIP_BYTES = 250 * 1024 * 1024
 MAX_CREATE_JOBS = 64
 MAX_RUNNING_CREATE_JOBS = 2
+BULK_GENERATION_JOB_SCHEMA = "toc.bulk_image_generation_job.v1"
+BULK_GENERATION_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+_BULK_GENERATION_SERVER_INSTANCE_ID = uuid.uuid4().hex
 
 
 def _image_generation_provenance_policy() -> str:
@@ -510,6 +642,12 @@ def _effective_image_generation_parallelism() -> int:
     return 1
 
 
+def _image_generation_outer_timeout_seconds() -> float:
+    execution_timeout = max(0.01, float(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS))
+    recovery_grace = max(0.1, min(60.0, execution_timeout * 0.1))
+    return execution_timeout + recovery_grace
+
+
 def _image_generation_global_lock_dir() -> Path:
     configured = os.environ.get("TOC_IMAGE_GEN_GLOBAL_LOCK_DIR", "").strip()
     if configured:
@@ -522,7 +660,7 @@ def _image_generation_global_lock_dir() -> Path:
 async def _global_image_generation_slot(provenance_policy: str):
     is_serial_fallback = provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_SERIAL_FALLBACK
     lock_dir = _image_generation_global_lock_dir()
-    timeout_seconds = max(1.0, float(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS))
+    timeout_seconds = max(1.0, float(IMAGE_GENERATION_QUEUE_TIMEOUT_SECONDS))
     if is_serial_fallback:
         async with _global_image_generation_mode_lock(
             lock_dir,
@@ -646,6 +784,12 @@ async def get_codex_client() -> CodexAppServerClient:
 
 async def shutdown_codex_client() -> None:
     global _codex_client
+    tasks = list(_bulk_generation_tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _bulk_generation_tasks.clear()
     if _codex_client:
         await _codex_client.stop()
         _codex_client = None
@@ -1038,7 +1182,7 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3)
 def _validate_p650_run_core(
     run_id: str,
     *,
-    require_semantic_reviews: bool,
+    require_downstream_semantic_reviews: bool,
     require_generated_asset_outputs: bool,
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
@@ -1092,8 +1236,12 @@ def _validate_p650_run_core(
     missing_scene_requests = sorted(required_scene_outputs - request_outputs)
     if missing_scene_requests:
         raise RuntimeError(f"ToC run did not reach p650: missing scene cut requests {', '.join(missing_scene_requests)}")
-    if require_semantic_reviews:
-        _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
+    _validate_semantic_reviews(run_dir, ("research", "story"))
+    if require_downstream_semantic_reviews:
+        _validate_semantic_reviews(
+            run_dir,
+            ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"),
+        )
     if require_generated_asset_outputs:
         missing_asset_outputs = [
             str(item.output)
@@ -1130,17 +1278,28 @@ def _validate_p650_run_core(
 
 
 def _validate_p650_run(run_id: str) -> None:
-    _validate_p650_run_core(run_id, require_semantic_reviews=True, require_generated_asset_outputs=True)
+    _validate_p650_run_core(
+        run_id,
+        require_downstream_semantic_reviews=True,
+        require_generated_asset_outputs=True,
+    )
 
 
 def _validate_materialized_p650_run(run_id: str) -> None:
-    _validate_p650_run_core(run_id, require_semantic_reviews=False, require_generated_asset_outputs=False)
+    _validate_p650_run_core(
+        run_id,
+        require_downstream_semantic_reviews=False,
+        require_generated_asset_outputs=False,
+    )
 
 
 def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
     _validate_p650_run(run_id)
     run_dir = safe_run_dir(run_id, ROOT)
-    _validate_semantic_reviews(run_dir, ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"))
+    _validate_semantic_reviews(
+        run_dir,
+        ("research", "story", "scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"),
+    )
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
     if strict_visual_quality:
@@ -1256,6 +1415,7 @@ async def _run_toc_immersive_frontend_cli_helper(
     source: str | None = None,
     run_id: str,
     stop_target: str = "p680",
+    target_duration_seconds: int = 300,
     materialize_only: bool = False,
 ) -> str:
     cmd = [
@@ -1267,6 +1427,8 @@ async def _run_toc_immersive_frontend_cli_helper(
         (source or "").strip() or topic,
         "--run-dir",
         f"output/{run_id}",
+        "--target-duration-seconds",
+        str(target_duration_seconds),
         "--stop-target",
         stop_target,
     ]
@@ -1729,18 +1891,85 @@ def _write_silence_audio(path: Path, duration_seconds: float) -> None:
     )
 
 
-def _generate_elevenlabs_audio(path: Path, text: str) -> None:
+def _effective_narration_delivery(narration: dict[str, Any]) -> dict[str, Any]:
+    from toc.providers.elevenlabs import (
+        DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+        DEFAULT_ELEVENLABS_VOICE_ID,
+        parse_pronunciation_dictionary_locators,
+    )
+
+    load_env_files(repo_root=ROOT)
+    alias_raw = str(
+        narration.get("pronunciation_alias_file")
+        or os.environ.get("TOC_TTS_PRONUNCIATION_ALIAS_FILE")
+        or ROOT / "config" / "tts-pronunciation-aliases.tsv"
+    ).strip()
+    alias_path = Path(alias_raw).expanduser()
+    if not alias_path.is_absolute():
+        alias_path = ROOT / alias_path
+    alias_sha256 = ""
+    if alias_path.is_file():
+        alias_sha256 = "sha256:" + hashlib.sha256(alias_path.read_bytes()).hexdigest()
+    try:
+        alias_source = alias_path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        alias_source = f"external:{alias_path.name}"
+    raw_locators = narration.get("pronunciation_dictionary_locators")
+    if raw_locators is None or raw_locators == "":
+        raw_locators = os.environ.get("ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS")
+    locators = [dict(value) for value in parse_pronunciation_dictionary_locators(raw_locators)]
+    public = {
+        "voice_id": str(narration.get("voice_id") or os.environ.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID),
+        "model_id": str(narration.get("model_id") or os.environ.get("ELEVENLABS_MODEL_ID") or "eleven_v3"),
+        "voice_settings": _dict_value(narration.get("voice_settings")),
+        "output_format": str(narration.get("output_format") or os.environ.get("ELEVENLABS_OUTPUT_FORMAT") or "mp3_44100_128"),
+        "language_code": str(
+            narration.get("language_code")
+            or os.environ.get("ELEVENLABS_LANGUAGE_CODE")
+            or DEFAULT_ELEVENLABS_LANGUAGE_CODE
+        ),
+        "pronunciation_dictionary_locators": locators,
+        "pronunciation_alias_source": alias_source,
+        "pronunciation_alias_sha256": alias_sha256,
+    }
+    return {
+        **public,
+        "pronunciation_alias_path": str(alias_path),
+        "effective_delivery_hash": _full_json_hash(public),
+    }
+
+
+def _generate_elevenlabs_audio(path: Path, text: str, request: NarrationGenerateItem) -> None:
     if not text.strip():
         raise ValueError("narration text is required for elevenlabs")
     from toc.providers.elevenlabs import ElevenLabsClient, ElevenLabsConfig
 
     load_env_files(repo_root=ROOT)
-    client = ElevenLabsClient(ElevenLabsConfig.from_env())
-    alias_file = os.environ.get("TOC_TTS_PRONUNCIATION_ALIAS_FILE") or str(ROOT / "config" / "tts-pronunciation-aliases.tsv")
+    config = ElevenLabsConfig.from_env(
+        voice_id=request.voice_id,
+        model_id=request.model_id,
+        output_format=request.output_format,
+        language_code=request.language_code,
+        pronunciation_dictionary_locators=request.pronunciation_dictionary_locators,
+    )
+    client = ElevenLabsClient(config)
+    alias_file = request.pronunciation_alias_path or str(ROOT / "config" / "tts-pronunciation-aliases.tsv")
     aliases = load_pronunciation_aliases(alias_file)
     prepared = prepare_elevenlabs_tts_text(text, pronunciation_aliases=aliases)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(client.tts(text=prepared.text))
+    path.write_bytes(
+        client.tts(
+            text=prepared.text,
+            voice_id=request.voice_id,
+            model_id=request.model_id,
+            output_format=request.output_format,
+            language_code=request.language_code,
+            pronunciation_dictionary_locators=request.pronunciation_dictionary_locators,
+            voice_settings=request.voice_settings or None,
+            previous_text=request.previous_text,
+            next_text=request.next_text,
+        )
+    )
 
 
 def _generate_macos_say_audio(path: Path, text: str) -> None:
@@ -2156,31 +2385,448 @@ def _read_manifest_data(run_dir: Path) -> tuple[Path, str, dict[str, Any]]:
     return manifest_path, original, data
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    _atomic_write_bytes(path, content.encode("utf-8"))
+
+
+def _capture_file_transaction(paths: Iterable[Path]) -> dict[Path, bytes | None]:
+    return {
+        path: path.read_bytes() if path.is_file() else None
+        for path in dict.fromkeys(paths)
+    }
+
+
+def _restore_file_transaction(snapshot: dict[Path, bytes | None]) -> None:
+    for path, previous_content in snapshot.items():
+        if previous_content is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic_write_bytes(path, previous_content)
+
+
 def _write_manifest_data(manifest_path: Path, original_text: str, data: dict[str, Any]) -> None:
     yaml_text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
     if "```yaml" not in original_text:
-        manifest_path.write_text(f"```yaml\n{yaml_text}```\n", encoding="utf-8")
+        _atomic_write_text(manifest_path, f"```yaml\n{yaml_text}```\n")
         return
     start = original_text.find("```yaml")
     yaml_start = original_text.find("\n", start)
     if yaml_start == -1:
-        manifest_path.write_text(f"```yaml\n{yaml_text}```\n", encoding="utf-8")
+        _atomic_write_text(manifest_path, f"```yaml\n{yaml_text}```\n")
         return
     yaml_start += 1
     yaml_end = original_text.find("```", yaml_start)
     if yaml_end == -1:
-        manifest_path.write_text(original_text[:yaml_start] + yaml_text, encoding="utf-8")
+        _atomic_write_text(manifest_path, original_text[:yaml_start] + yaml_text)
         return
-    manifest_path.write_text(original_text[:yaml_start] + yaml_text + original_text[yaml_end:], encoding="utf-8")
+    _atomic_write_text(manifest_path, original_text[:yaml_start] + yaml_text + original_text[yaml_end:])
 
 
-def _manifest_scene_targets(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _full_json_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_script_data(run_dir: Path) -> tuple[Path, str, dict[str, Any]]:
+    script_path = run_dir / "script.md"
+    if not script_path.exists():
+        raise FileNotFoundError("script.md not found")
+    original, data = load_structured_document(script_path)
+    if not data:
+        raise ValueError("script.md must contain structured YAML before frontend narration authoring")
+    return script_path, original, data
+
+
+def _script_cut_for_manifest_target(script_data: dict[str, Any], target: dict[str, Any]) -> dict[str, Any] | None:
+    target_scene_id = normalize_dotted_id(target.get("scene_id"))
+    target_cut = _dict_value(target.get("cut"))
+    target_cut_id = normalize_dotted_id(target_cut.get("cut_id"))
+    if not target_cut_id and target.get("cut_index") is not None:
+        target_cut_id = str(int(target["cut_index"]) + 1)
+    for scene in _list_value(script_data.get("scenes")):
+        if not isinstance(scene, dict) or normalize_dotted_id(scene.get("scene_id")) != target_scene_id:
+            continue
+        cuts = scene.get("cuts")
+        if not isinstance(cuts, list) or not cuts:
+            return scene if target.get("cut_index") is None else None
+        for index, cut in enumerate(cuts):
+            if not isinstance(cut, dict):
+                continue
+            cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index + 1)
+            if cut_id == target_cut_id:
+                return cut
+    return None
+
+
+def _invalidate_narration_run_approval(data: dict[str, Any], *, reason: str) -> None:
+    workflow = _dict_value(data.get("narration_workflow"))
+    final_review = _dict_value(workflow.get("final_audio_review"))
+    if final_review.get("status") == "approved":
+        final_review["status"] = "stale"
+    else:
+        final_review["status"] = "pending"
+    final_review["approved_audio_set_hash"] = ""
+    final_review["invalidated_at"] = now_iso()
+    final_review["invalidation_reason"] = reason
+    workflow["schema_version"] = "narration_run_workflow_v1"
+    workflow["final_audio_review"] = final_review
+    data["narration_workflow"] = workflow
+
+
+def _narration_summary(target: dict[str, Any]) -> dict[str, Any]:
+    node = _dict_value(target.get("cut"))
+    narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+    revision = _dict_value(narration.get("revision"))
+    generation = _dict_value(narration.get("generation"))
+    audio_review = _dict_value(narration.get("audio_review"))
+    candidates = [candidate for candidate in _list_value(narration.get("candidates")) if isinstance(candidate, dict)]
+    current_candidate = next(
+        (
+            candidate
+            for candidate in reversed(candidates)
+            if str(candidate.get("candidate_id") or "") == str(generation.get("candidate_id") or "")
+        ),
+        None,
+    )
+    approved_candidate_id = str(audio_review.get("approved_candidate_id") or "")
+    approved_candidate = next(
+        (
+            candidate
+            for candidate in candidates
+            if str(candidate.get("candidate_id") or "") == approved_candidate_id
+        ),
+        None,
+    )
+    return {
+        "itemId": str(target.get("selector") or ""),
+        "authoringStatus": str(narration.get("authoring_status") or ""),
+        "status": str(narration.get("status") or ""),
+        "text": str(narration.get("text") or ""),
+        "ttsText": str(narration.get("tts_text") or ""),
+        "tool": str(narration.get("tool") or "elevenlabs"),
+        "output": str(narration.get("output") or "") or None,
+        "revision": revision,
+        "generation": generation,
+        "audioReview": audio_review,
+        "candidate": current_candidate,
+        "approvedCandidate": approved_candidate,
+    }
+
+
+def _narration_grounding_values(target: dict[str, Any]) -> dict[str, str]:
+    node = _dict_value(target.get("cut"))
+    return {
+        "script_selector": str(target.get("selector") or ""),
+        "contract_hash": _full_json_hash(_dict_value(node.get("cut_contract"))),
+        "visual_grounding_hash": _full_json_hash(_dict_value(node.get("image_generation"))),
+    }
+
+
+def _narration_grounding_is_current(target: dict[str, Any], narration: dict[str, Any]) -> bool:
+    binding = _dict_value(narration.get("source_binding"))
+    expected = _narration_grounding_values(target)
+    return all(str(binding.get(key) or "") == value for key, value in expected.items())
+
+
+def _require_script_narration_source_current(
+    script_cut: dict[str, Any], narration: dict[str, Any], request: NarrationTextSaveRequest
+) -> None:
+    script_text = str(script_cut.get("narration") or "").strip()
+    script_tts_text = resolve_script_cut_tts_text(script_cut)
+    binding = _dict_value(narration.get("source_binding"))
+    revision = _dict_value(narration.get("revision"))
+    tool = str(narration.get("tool") or request.tool or "elevenlabs").strip().lower()
+    delivery = {
+        "elevenlabs_prompt": _dict_value(narration.get("elevenlabs_prompt")),
+        "model_id": str(narration.get("model_id") or "").strip(),
+        "voice_id": str(narration.get("voice_id") or "").strip(),
+        "voice_settings": _dict_value(narration.get("voice_settings")),
+    }
+    script_text_hash = narration_text_hash(script_text, tool=tool)
+    script_tts_hash = narration_tts_hash(script_tts_text, tool=tool, delivery=delivery)
+    bound_text_hash = str(binding.get("semantic_hash") or revision.get("text_hash") or "")
+    bound_tts_hash = str(binding.get("tts_request_hash") or revision.get("tts_hash") or "")
+    has_bound_source = bool(str(binding.get("script_selector") or "").strip())
+    if has_bound_source and (script_text_hash != bound_text_hash or script_tts_hash != bound_tts_hash):
+        raise NarrationRevisionConflict(
+            "script.md narration changed outside the frontend revision; sync or reload it before saving"
+        )
+    if not has_bound_source and (script_text or script_tts_text):
+        requested_text = request.text.strip()
+        requested_tts = (request.tts_text or request.text).strip()
+        if requested_text != script_text or requested_tts != script_tts_text:
+            raise NarrationRevisionConflict(
+                "script.md already contains a newer canonical narration; sync it before frontend editing"
+            )
+    authoring = _dict_value(script_cut.get("narration_authoring"))
+    metadata_text_hash = str(authoring.get("semantic_hash") or "")
+    metadata_tts_hash = str(authoring.get("tts_request_hash") or "")
+    if metadata_text_hash and metadata_text_hash != script_text_hash:
+        raise NarrationRevisionConflict("script.md narration_authoring semantic hash does not match its text")
+    if metadata_tts_hash and metadata_tts_hash != script_tts_hash:
+        raise NarrationRevisionConflict("script.md narration_authoring TTS hash does not match its text")
+
+
+def _invalidate_narration_for_grounding_rebind(
+    narration: dict[str, Any], *, at: str, bump_revision: bool
+) -> None:
+    had_candidate = False
+    for candidate in _list_value(narration.get("candidates")):
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("status") or "") not in {"failed", "rejected"}:
+            candidate["status"] = "stale"
+            had_candidate = True
+    had_audio = bool(str(narration.get("output") or "").strip()) or had_candidate
+    narration["output"] = ""
+    narration["status"] = "stale" if had_audio else "draft"
+    narration["generation"] = {
+        "status": "stale" if had_audio else "missing",
+        "candidate_id": "",
+        "generated_from_tts_hash": "",
+    }
+    narration["audio_review"] = {
+        "status": "pending",
+        "approved_candidate_id": "",
+        "approved_revision": 0,
+        "approved_text_hash": "",
+        "approved_tts_hash": "",
+        "approved_at": "",
+    }
+    review = _dict_value(narration.get("review"))
+    review.update(
+        {
+            "status": "pending",
+            "agent_review_ok": None,
+            "agent_review_reason_keys": [],
+            "agent_review_reason_messages": [],
+            "human_review_ok": False,
+            "semantic": {"status": "stale", "reviewed_text_hash": ""},
+            "delivery": {"status": "stale", "reviewed_tts_hash": ""},
+            "arc": {"status": "stale", "narration_set_hash": ""},
+        }
+    )
+    narration["review"] = review
+    revision = _dict_value(narration.get("revision"))
+    if bump_revision:
+        revision["number"] = int(revision.get("number") or 0) + 1
+    revision["source"] = "frontend_grounding_rebind"
+    revision["updated_at"] = at
+    narration["revision"] = revision
+
+
+def _append_narration_reopened_state(run_dir: Path, *, phase: str, note: str) -> None:
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "status": "P720",
+            "runtime.stage": "narration_frontend_revision_workflow",
+            "runtime.narration.phase": phase,
+            "slot.p710.status": "done",
+            "slot.p720.status": "in_progress",
+            "slot.p720.note": note,
+            "slot.p730.status": "in_progress" if phase == "tts_preview" else "pending",
+            "slot.p740.status": "pending",
+            "slot.p750.status": "pending",
+            "stage.narration.status": "in_progress",
+            "review.narration.status": "pending",
+            "gate.narration_review": "required",
+        },
+    )
+
+
+def _append_narration_preview_state(
+    run_dir: Path,
+    *,
+    note: str,
+    runtime_stage: str = "narration_audio_candidate_preview",
+) -> None:
+    """Record an alternate TTS preview without reopening current text/audio approvals."""
+
+    current = parse_state_file(run_dir / "state.txt")
+    if str(current.get("slot.p750.status") or "").strip().lower() == "done":
+        updates = {
+            "runtime.narration.preview_stage": runtime_stage,
+            "runtime.narration.preview_note": note,
+        }
+    else:
+        updates = {
+            "runtime.stage": runtime_stage,
+            "runtime.narration.phase": "tts_preview",
+            "runtime.narration.preview_note": note,
+            "slot.p730.status": "in_progress",
+            "slot.p730.note": note,
+        }
+    append_state_snapshot(
+        run_dir / "state.txt",
+        updates,
+    )
+
+
+def _save_frontend_narration_text(run_dir: Path, request: NarrationTextSaveRequest) -> dict[str, Any]:
+    manifest_path, manifest_original, manifest_data = _read_manifest_data(run_dir)
+    target = _target_by_item_id(manifest_data, request.item_id)
+    if target is None:
+        raise ValueError(f"video manifest target not found: {request.item_id}")
+    script_path, script_original, script_data = _read_script_data(run_dir)
+    script_cut = _script_cut_for_manifest_target(script_data, target)
+    if script_cut is None:
+        raise ValueError(f"script.md narration target not found: {target['selector']}")
+
+    node = _dict_value(target.get("cut"))
+    audio = _dict_value(node.get("audio"))
+    narration = _dict_value(audio.get("narration"))
+    _require_script_narration_source_current(script_cut, narration, request)
+    updated_at = now_iso()
+    changed = apply_authoring_update(
+        narration,
+        text=request.text,
+        tts_text=request.tts_text,
+        tool=request.tool,
+        authoring_status=request.authoring_status,
+        source="frontend",
+        expected_revision=request.expected_revision,
+        now=updated_at,
+    )
+    grounding_current = _narration_grounding_is_current(target, narration)
+    if not changed and grounding_current:
+        return _narration_summary(target)
+    if not grounding_current:
+        _invalidate_narration_for_grounding_rebind(
+            narration,
+            at=updated_at,
+            bump_revision=not changed,
+        )
+    revision = _dict_value(narration.get("revision"))
+    selector = str(target.get("selector") or request.item_id)
+    grounding = _narration_grounding_values(target)
+    narration["source_binding"] = {
+        **grounding,
+        "semantic_revision": int(revision.get("text_revision") or 0),
+        "semantic_hash": str(revision.get("text_hash") or ""),
+        "tts_revision": int(revision.get("tts_revision") or 0),
+        "tts_request_hash": str(revision.get("tts_hash") or ""),
+        "synced_at": updated_at,
+    }
+    audio["narration"] = narration
+    node["audio"] = audio
+
+    script_cut["narration"] = request.text.strip()
+    script_cut["tts_text"] = (request.tts_text or request.text).strip()
+    script_cut["narration_authoring"] = {
+        "schema_version": "narration_authoring_v1",
+        "status": request.authoring_status,
+        "semantic_revision": int(revision.get("text_revision") or 0),
+        "semantic_hash": str(revision.get("text_hash") or ""),
+        "tts_revision": int(revision.get("tts_revision") or 0),
+        "tts_request_hash": str(revision.get("tts_hash") or ""),
+        "source": "frontend",
+        "updated_at": str(revision.get("updated_at") or updated_at),
+        "updated_by": "frontend",
+    }
+    human_review = _dict_value(script_cut.get("human_review"))
+    if request.authoring_status in {"human_locked", "silent"}:
+        human_review.update(
+            {
+                "status": "approved",
+                "approved_narration": request.text.strip(),
+                "approved_tts_text": (request.tts_text or request.text).strip(),
+                "approved_at": now_iso(),
+            }
+        )
+    else:
+        human_review.update(
+            {
+                "status": "pending",
+                "approved_narration": "",
+                "approved_tts_text": "",
+                "approved_at": "",
+            }
+        )
+    script_cut["human_review"] = human_review
+    reconcile_audio_story_text(script_data)
+    for projection_key in ("audio_story_plan", "narration_spans"):
+        if projection_key in script_data:
+            manifest_data[projection_key] = deepcopy(script_data[projection_key])
+    refs_by_selector = narration_span_refs(script_data)
+    for manifest_target in _manifest_scene_targets(manifest_data):
+        manifest_node = _dict_value(manifest_target.get("cut"))
+        manifest_audio = _dict_value(manifest_node.get("audio"))
+        manifest_narration = _dict_value(manifest_audio.get("narration"))
+        manifest_narration["span_refs"] = deepcopy(
+            refs_by_selector.get(str(manifest_target.get("selector") or ""), [])
+        )
+        manifest_audio["narration"] = manifest_narration
+        manifest_node["audio"] = manifest_audio
+    reconcile_audio_story_text(manifest_data)
+    invalidate_stale_tts_context_audio(manifest_data)
+    _invalidate_narration_run_approval(manifest_data, reason=f"narration text saved: {selector}")
+
+    transaction = _capture_file_transaction(
+        [
+            script_path,
+            manifest_path,
+            run_dir / "state.txt",
+            run_dir / "run_status.json",
+            run_dir / "p000_index.md",
+        ]
+    )
+    _backup_run_file(run_dir, "script.md", label="before_frontend_narration_text_save")
+    _backup_run_file(run_dir, "video_manifest.md", label="before_frontend_narration_text_save")
+    try:
+        _write_manifest_data(script_path, script_original, script_data)
+        _write_manifest_data(manifest_path, manifest_original, manifest_data)
+        if changed or not grounding_current:
+            _append_narration_reopened_state(
+                run_dir,
+                phase="authoring" if request.authoring_status == "draft" else "review",
+                note=(
+                    "frontend narration text revision saved; downstream audio approval "
+                    "invalidated when hashes changed"
+                ),
+            )
+    except Exception:
+        _restore_file_transaction(transaction)
+        raise
+    return _narration_summary(target)
+
+
+def _is_non_renderable_manifest_node(node: dict[str, Any]) -> bool:
+    return is_non_renderable_manifest_node(node)
+
+
+def _manifest_scene_targets(
+    data: dict[str, Any], *, include_non_renderable: bool = False
+) -> list[dict[str, Any]]:
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
         return []
     targets: list[dict[str, Any]] = []
     for scene_index, scene in enumerate(scenes):
         if not isinstance(scene, dict):
+            continue
+        if not include_non_renderable and _is_non_renderable_manifest_node(scene):
             continue
         scene_id = normalize_dotted_id(scene.get("scene_id"))
         if not scene_id:
@@ -2189,6 +2835,8 @@ def _manifest_scene_targets(data: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(cuts, list) and cuts:
             for cut_index, cut in enumerate(cuts):
                 if not isinstance(cut, dict):
+                    continue
+                if not include_non_renderable and _is_non_renderable_manifest_node(cut):
                     continue
                 cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index + 1)
                 aliases = selector_aliases(scene_id, cut_id)
@@ -2227,6 +2875,66 @@ def _target_by_item_id(data: dict[str, Any], item_id: str) -> dict[str, Any] | N
     return next((target for target in _manifest_scene_targets(data) if item_id in target["aliases"]), None)
 
 
+def _apply_v2_visual_plan_patch_and_compile(
+    original_plan: dict[str, Any],
+    patch: dict[str, Any],
+    *,
+    character_ids: Iterable[str],
+    object_ids: Iterable[str],
+    location_ids: Iterable[str],
+    references: Iterable[str],
+    review_metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan = deepcopy(original_plan)
+    if str(plan.get("schema_version") or "") != "first_frame_visual_plan_v1":
+        raise ValueError("compiled_v2_first_frame_visual_plan_v1_required")
+
+    def assign_text(container: dict[str, Any], key: str, patch_key: str) -> None:
+        value = str(patch.get(patch_key) or "").strip()
+        if value:
+            container[key] = value
+
+    temporal = _dict_value(plan.get("temporal_boundary"))
+    assign_text(temporal, "event_fact_visible_in_still", "event_fact_visible_in_still")
+    plan["temporal_boundary"] = temporal
+
+    subject_binding = _dict_value(plan.get("subject_binding"))
+    primary_subject = _dict_value(subject_binding.get("primary_subject"))
+    assign_text(primary_subject, "name", "primary_subject_name")
+    subject_binding["primary_subject"] = primary_subject
+    plan["subject_binding"] = subject_binding
+
+    character_state = _dict_value(plan.get("character_state_gate"))
+    for key in ("costume_state", "pose", "gaze"):
+        assign_text(character_state, key, key)
+    plan["character_state_gate"] = character_state
+
+    composition = _dict_value(plan.get("spatial_composition"))
+    for key in ("foreground", "midground", "background"):
+        assign_text(composition, key, key)
+    plan["spatial_composition"] = composition
+
+    material = _dict_value(plan.get("scene_material_pack"))
+    for key in ("light_source", "light_direction", "story_specific_texture"):
+        assign_text(material, key, key)
+    dominant_materials = patch.get("dominant_materials")
+    if isinstance(dominant_materials, list):
+        cleaned_materials = [str(value).strip() for value in dominant_materials if str(value).strip()]
+        if cleaned_materials:
+            material["dominant_materials"] = cleaned_materials
+    plan["scene_material_pack"] = material
+
+    payload = compile_image_api_prompt_v2(
+        first_frame_visual_plan=plan,
+        character_ids=character_ids,
+        object_ids=object_ids,
+        location_ids=location_ids,
+        reference_images=references,
+        review_metadata=review_metadata,
+    )
+    return plan, payload
+
+
 def _default_narration_output_for_target(target: dict[str, Any]) -> str:
     selector = str(target["selector"])
     return f"assets/audio/{selector}/{selector}_narration.mp3"
@@ -2239,6 +2947,25 @@ def _json_hash(value: Any) -> str:
 
 def _dict_value(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _int_value(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _float_value(value: Any, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return result if math.isfinite(result) else default
 
 
 def _list_value(value: Any) -> list[Any]:
@@ -2506,6 +3233,10 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
         scene = target["scene"]
         audio = _dict_value(node.get("audio"))
         previous = _dict_value(audio.get("narration"))
+        previous_authoring_status = str(previous.get("authoring_status") or "").strip().lower()
+        if previous_authoring_status in {"human_locked", "reviewed", "silent"}:
+            skipped.append(str(target["selector"]))
+            continue
         if not replace and _has_existing_narration_review(previous):
             skipped.append(str(target["selector"]))
             continue
@@ -2523,7 +3254,6 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
             "materialized": "",
         }
         tts_text = ""
-        output = str(previous.get("output") or _default_narration_output_for_target(target)).strip()
         narration = {
             **previous,
             "status": "",
@@ -2546,7 +3276,9 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
                 "reason": "",
             },
             "tool": "silent" if is_silent else str(previous.get("tool") or "elevenlabs"),
-            "output": "" if is_silent else output,
+            # ``output`` is the selected, explicitly approved audio file.  A
+            # planned destination must never look like an existing approval.
+            "output": "",
             "review": {
                 "status": "",
                 "human_review_ok": False,
@@ -2555,6 +3287,7 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
             },
             "normalize_to_scene_duration": False,
         }
+        ensure_narration_revision(narration)
         audio["narration"] = narration
         node["audio"] = audio
         updated.append(str(target["selector"]))
@@ -2573,13 +3306,46 @@ def _create_narration_drafts_in_manifest(run_dir: Path, *, replace: bool) -> dic
             "slot.p730.status": "pending",
             "slot.p740.status": "pending",
             "slot.p750.status": "pending",
-            "stage.narration.status": "authoring_missing",
+            "stage.narration.status": "in_progress",
             "review.narration.status": "not_started",
             "gate.narration_review": "required",
             "artifact.narration_authoring_report": report_path.relative_to(run_dir).as_posix(),
         },
     )
     return {"updated": updated, "skipped": skipped, "reportPath": report_path.relative_to(run_dir).as_posix()}
+
+
+def _materialize_narration_authoring_workspace(run_dir: Path) -> dict[str, Any]:
+    runner = ROOT / "scripts" / "ai" / "toc-immersive-narration-multiagent.py"
+    if not runner.is_file():
+        return {"status": "unavailable", "warning": f"authoring runner not found: {runner}"}
+    result = subprocess.run(
+        [sys.executable, str(runner), "--run-dir", str(run_dir)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "warning": result.stderr.strip() or result.stdout.strip() or "authoring workspace creation failed",
+        }
+    scratch_dir = run_dir / "scratch" / "narration"
+    payload = {
+        "status": "ready",
+        "audioStoryPath": (scratch_dir / "audio_story.yaml").relative_to(run_dir).as_posix(),
+        "authoringPromptPath": (scratch_dir / "authoring_prompt.md").relative_to(run_dir).as_posix(),
+    }
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "artifact.narration_audio_story_scratch": payload["audioStoryPath"],
+            "artifact.narration_authoring_prompt": payload["authoringPromptPath"],
+        },
+    )
+    return payload
 
 
 def _narration_silent_ok(run_dir: Path, *, item_id: str, reason: str | None = None) -> dict[str, Any]:
@@ -2592,31 +3358,51 @@ def _narration_silent_ok(run_dir: Path, *, item_id: str, reason: str | None = No
     contract = _cut_narration_contract(node)
     audio = _dict_value(node.get("audio"))
     narration = _dict_value(audio.get("narration"))
+    revision = ensure_narration_revision(narration)
+    silence_contract = _silence_contract_payload(contract, confirmed_by_human=True, reason=reason)
+    silence_contract["revision_hash"] = str(revision.get("source_hash") or "")
     narration.update(
         {
             "tool": "silent",
             "status": "audio_ready",
+            "authoring_status": "silent",
             "text": "",
             "tts_text": "",
             "output": "",
-            "silence_contract": _silence_contract_payload(contract, confirmed_by_human=True, reason=reason),
+            "silence_contract": silence_contract,
+            "generation": {
+                "status": "human_approved",
+                "candidate_id": f"silent-revision-{int(revision.get('number') or 0)}",
+                "generated_from_tts_hash": str(revision.get("tts_hash") or ""),
+            },
+            "audio_review": {
+                "status": "approved",
+                "approved_candidate_id": f"silent-revision-{int(revision.get('number') or 0)}",
+                "approved_revision": int(revision.get("number") or 0),
+                "approved_text_hash": str(revision.get("text_hash") or ""),
+                "approved_tts_hash": str(revision.get("tts_hash") or ""),
+                "approved_at": now_iso(),
+                "note": "frontend explicitly approved intentional silence",
+            },
             "review": {
                 **_dict_value(narration.get("review")),
-                "status": "approved",
-                "human_review_ok": True,
-                "approved_at": _now_stamp(),
-                "note": "frontend marked this cut as intentional silence",
+                "status": "pending",
+                "human_review_ok": False,
             },
         }
     )
     audio["narration"] = narration
     node["audio"] = audio
+    _invalidate_narration_run_approval(data, reason=f"intentional silence approved: {target['selector']}")
     _write_manifest_data(manifest_path, original_text, data)
     return {"itemId": str(target["selector"]), "status": "silent_ok"}
 
 
-def _narration_audio_readiness(run_dir: Path) -> dict[str, Any]:
-    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+def _narration_audio_readiness(
+    run_dir: Path, data: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if data is None:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
     ready: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
     for target in _manifest_scene_targets(data):
@@ -2624,6 +3410,51 @@ def _narration_audio_readiness(run_dir: Path) -> dict[str, Any]:
         node = target["cut"]
         audio = _dict_value(node.get("audio"))
         narration = _dict_value(audio.get("narration"))
+        revision_aware = _dict_value(narration.get("revision")).get("schema_version") == REVISION_SCHEMA_VERSION
+        if revision_aware:
+            if not _narration_grounding_is_current(target, narration):
+                missing.append({"itemId": selector, "reason": "narration_grounding_revision_stale"})
+                continue
+            if not current_audio_is_human_approved(narration):
+                missing.append({"itemId": selector, "reason": "current_revision_audio_not_human_approved"})
+                continue
+            if str(narration.get("tool") or "").strip().lower() == "silent":
+                ready.append({"itemId": selector, "kind": "silent_ok"})
+                continue
+            output = str(narration.get("output") or "").strip()
+            try:
+                _validate_run_relative_audio_path(run_dir, output, must_exist=True)
+                output_path = resolve_run_relative(run_dir, output)
+                audio_review = _dict_value(narration.get("audio_review"))
+                approved_candidate_id = str(audio_review.get("approved_candidate_id") or "")
+                approved_candidate = next(
+                    (
+                        candidate
+                        for candidate in _list_value(narration.get("candidates"))
+                        if isinstance(candidate, dict)
+                        and str(candidate.get("candidate_id") or "") == approved_candidate_id
+                    ),
+                    None,
+                )
+                if not _narration_candidate_context_is_current(
+                    data,
+                    selector=selector,
+                    candidate=approved_candidate,
+                ):
+                    missing.append({"itemId": selector, "reason": "approved_audio_tts_context_stale"})
+                    continue
+                expected_sha256 = str((approved_candidate or {}).get("output_sha256") or "")
+                if (
+                    output_path.is_file()
+                    and expected_sha256
+                    and _audio_file_sha256(output_path) == expected_sha256
+                ):
+                    ready.append({"itemId": selector, "kind": "audio_file"})
+                    continue
+            except ValueError:
+                pass
+            missing.append({"itemId": selector, "reason": "approved_audio_file_missing_or_hash_mismatch"})
+            continue
         if _narration_has_confirmed_silence(narration):
             ready.append({"itemId": selector, "kind": "silent_ok"})
             continue
@@ -2643,6 +3474,8 @@ def _narration_audio_readiness(run_dir: Path) -> dict[str, Any]:
 
 
 def _narration_has_confirmed_silence(narration: dict[str, Any]) -> bool:
+    if _dict_value(narration.get("revision")).get("schema_version") == REVISION_SCHEMA_VERSION:
+        return current_audio_is_human_approved(narration)
     tool = str(narration.get("tool") or "").strip().lower()
     silence_contract = _dict_value(narration.get("silence_contract"))
     return (
@@ -2654,24 +3487,182 @@ def _narration_has_confirmed_silence(narration: dict[str, Any]) -> bool:
     )
 
 
+def _duration_state_value(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _narration_duration_readiness_for_data(
+    run_dir: Path,
+    data: dict[str, Any],
+    *,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    audio_readiness = _narration_audio_readiness(run_dir, data)
+    metadata = _dict_value(data.get("video_metadata"))
+    try:
+        target_seconds = normalize_target_duration(metadata.get("target_duration_seconds"))
+    except ValueError as exc:
+        return {
+            **audio_readiness,
+            "audioReady": bool(audio_readiness["ready"]),
+            "ready": False,
+            "durationPassed": False,
+            "durationError": str(exc),
+            "measurement": None,
+            "audit": None,
+            "manifestPath": manifest_path,
+        }
+
+    measurement = measure_manifest_runtime(
+        data,
+        base_dir=run_dir,
+        probe=_probe_media_duration_seconds,
+    )
+    duration_audit = audit_duration(
+        target_seconds=target_seconds,
+        actual_seconds=measurement.effective_seconds,
+        measurement_layer="frontend_audio_video_timeline",
+    )
+    audio_ready = bool(audio_readiness["ready"])
+    duration_passed = bool(measurement.complete and duration_audit.passed)
+    return {
+        **audio_readiness,
+        "audioReady": audio_ready,
+        "ready": bool(audio_ready and duration_passed),
+        "durationPassed": duration_passed,
+        "durationError": "" if measurement.complete else "manifest runtime measurement is incomplete",
+        "measurement": measurement,
+        "audit": duration_audit,
+        "manifestPath": manifest_path,
+    }
+
+
+def _narration_duration_readiness(run_dir: Path) -> dict[str, Any]:
+    manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    return _narration_duration_readiness_for_data(
+        run_dir,
+        data,
+        manifest_path=manifest_path,
+    )
+
+
+def _narration_duration_state_updates(readiness: dict[str, Any]) -> dict[str, str]:
+    measurement = readiness.get("measurement")
+    duration_audit = readiness.get("audit")
+    if measurement is None or duration_audit is None:
+        return {
+            "review.duration_fit.status": "changes_requested",
+            "review.duration_fit.note": str(readiness.get("durationError") or "duration contract is invalid"),
+            "review.duration_fit.at": now_iso(),
+        }
+
+    def measurement_value(key: str, default: Any = 0) -> Any:
+        return getattr(measurement, key, default)
+
+    return {
+        "review.duration_fit.status": "passed" if readiness.get("durationPassed") else "changes_requested",
+        "review.duration_fit.target_seconds": str(duration_audit.target_seconds),
+        "review.duration_fit.minimum_seconds": _duration_state_value(duration_audit.minimum_seconds),
+        "review.duration_fit.actual_seconds": _duration_state_value(duration_audit.actual_seconds),
+        "review.duration_fit.ratio": f"{duration_audit.ratio:.6f}",
+        "review.duration_fit.measurement_layer": duration_audit.measurement_layer,
+        "review.duration_fit.measurement_complete": str(bool(measurement_value("complete", True))).lower(),
+        "review.duration_fit.spoken_audio_seconds": _duration_state_value(
+            float(measurement_value("spoken_audio_seconds", 0))
+        ),
+        "review.duration_fit.intentional_silence_seconds": _duration_state_value(
+            float(measurement_value("intentional_silence_seconds", 0))
+        ),
+        "review.duration_fit.audio_timeline_seconds": _duration_state_value(
+            float(measurement_value("audio_timeline_seconds", 0))
+        ),
+        "review.duration_fit.video_timeline_seconds": _duration_state_value(
+            float(measurement_value("video_timeline_seconds", 0))
+        ),
+        "review.duration_fit.video_timeline_source": str(measurement_value("video_timeline_source", "unknown")),
+        "review.duration_fit.missing_items": json.dumps(
+            list(measurement_value("missing_items", [])), ensure_ascii=False
+        ),
+        "review.duration_fit.invalid_items": json.dumps(
+            list(measurement_value("invalid_items", [])), ensure_ascii=False
+        ),
+        "review.duration_fit.at": now_iso(),
+    }
+
+
 def _append_narration_review_approved_if_ready(run_dir: Path) -> dict[str, Any]:
-    readiness = _narration_audio_readiness(run_dir)
-    if not readiness["ready"]:
+    readiness = _narration_duration_readiness(run_dir)
+    if not readiness["audioReady"]:
         return readiness
+    measurement = readiness.get("measurement")
+    duration_audit = readiness.get("audit")
+    if measurement is None or duration_audit is None:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.duration_fit.status": "changes_requested",
+                "review.duration_fit.note": str(readiness.get("durationError") or "duration contract is invalid"),
+                "review.duration_fit.at": now_iso(),
+                "slot.p740.status": "failed",
+                "slot.p740.note": "duration contract could not be evaluated",
+                "slot.p750.status": "blocked",
+            },
+        )
+        return readiness
+
+    duration_updates = _narration_duration_state_updates(readiness)
+    if not readiness["durationPassed"]:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                **duration_updates,
+                "review.duration_fit.note": "measured audio/video timeline is below 80% of target or incomplete",
+                "slot.p740.status": "failed",
+                "slot.p740.note": "measured narration timeline did not pass the 80% duration gate",
+                "slot.p750.status": "blocked",
+                "slot.p750.note": "audio QA is blocked by duration fit",
+            },
+        )
+        return readiness
+    _manifest_path, _manifest_original, data = _read_manifest_data(run_dir)
+    review_blockers = _narration_review_blockers(data, run_dir=run_dir)
+    if review_blockers:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                **duration_updates,
+                "runtime.narration.phase": "review",
+                "slot.p720.status": "in_progress",
+                "slot.p720.note": "unresolved narration findings: " + ",".join(review_blockers[:20]),
+                "slot.p740.status": "blocked",
+                "slot.p750.status": "blocked",
+                "stage.narration.status": "in_progress",
+                "review.narration.status": "changes_requested",
+                "gate.narration_review": "required",
+            },
+        )
+        return readiness
+    final_review_current = _narration_final_review_is_current(data, run_dir=run_dir)
     append_state_snapshot(
         run_dir / "state.txt",
         {
+            **duration_updates,
+            "review.duration_fit.note": "measured audio/video timeline satisfies at least 80% of target",
             "slot.p720.status": "done",
             "slot.p720.note": "frontend narration text review completed through TTS/silent review",
             "slot.p730.status": "done",
             "slot.p730.note": "all cuts have audio files or intentional silence approvals",
             "slot.p740.status": "done",
-            "slot.p740.note": "audio readiness accepted before video generation",
-            "slot.p750.status": "approved",
-            "slot.p750.note": "frontend audio QA cleared before p800",
-            "stage.narration.status": "approved",
-            "review.narration.status": "approved",
-            "gate.narration_review": "cleared",
+            "slot.p740.note": "duration and current per-cut audio approvals passed",
+            "slot.p750.status": "done" if final_review_current else "awaiting_approval",
+            "slot.p750.note": (
+                "full narration track explicitly approved"
+                if final_review_current
+                else "waiting for explicit frontend approval of the full narration track"
+            ),
+            "stage.narration.status": "done" if final_review_current else "awaiting_approval",
+            "review.narration.status": "approved" if final_review_current else "pending",
+            "gate.narration_review": "required",
         },
     )
     return readiness
@@ -2680,9 +3671,29 @@ def _append_narration_review_approved_if_ready(run_dir: Path) -> dict[str, Any]:
 def _require_narration_ready_for_video(run_dir: Path) -> dict[str, Any]:
     readiness = _append_narration_review_approved_if_ready(run_dir)
     if readiness["ready"]:
-        return readiness
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+        if _narration_final_review_is_current(data, run_dir=run_dir):
+            return readiness
+        # Legacy manifests without the revision contract retain their previous
+        # readiness behavior. Once a frontend revision exists, p750 is explicit.
+        if not _revision_aware_narration_items(data):
+            return readiness
+        raise NarrationRevisionConflict(
+            "video generation requires explicit p750 approval of the current full narration track"
+        )
+    if readiness.get("audioReady"):
+        audit = readiness.get("audit")
+        if audit is not None:
+            raise NarrationRevisionConflict(
+                "video generation requires measured duration of at least 80% of target: "
+                f"actual={_duration_state_value(audit.actual_seconds)}s "
+                f"minimum={_duration_state_value(audit.minimum_seconds)}s"
+            )
+        raise NarrationRevisionConflict("video generation requires a valid measured duration contract")
     missing = ", ".join(item["itemId"] for item in readiness["missingItems"][:20])
-    raise ValueError("video generation requires audio files or silent approvals for all cuts: " + (missing or "none"))
+    raise NarrationRevisionConflict(
+        "video generation requires audio files or silent approvals for all cuts: " + (missing or "none")
+    )
 
 
 def _default_video_output_for_target(target: dict[str, Any]) -> str:
@@ -2703,8 +3714,9 @@ def _candidate_video_output_for_item(run_dir: Path, item_id: str) -> str | None:
     return None
 
 
-def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
-    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if data is None:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
     items: list[dict[str, Any]] = []
     for target in _manifest_scene_targets(data):
         selector = str(target["selector"])
@@ -2721,14 +3733,64 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
             and silence_contract.get("intentional") is True
             and silence_contract.get("confirmed_by_human") is True
         )
+        revision = _dict_value(narration.get("revision"))
+        revision_aware = revision.get("schema_version") == REVISION_SCHEMA_VERSION
+        generation = _dict_value(narration.get("generation"))
+        audio_review = _dict_value(narration.get("audio_review"))
+        narration_candidates = [value for value in _list_value(narration.get("candidates")) if isinstance(value, dict)]
+        narration_candidate = next(
+            (
+                value
+                for value in reversed(narration_candidates)
+                if str(value.get("candidate_id") or "") == str(generation.get("candidate_id") or "")
+            ),
+            None,
+        )
+        approved_candidate_id = str(audio_review.get("approved_candidate_id") or "")
+        approved_candidate = next(
+            (
+                value
+                for value in narration_candidates
+                if str(value.get("candidate_id") or "") == approved_candidate_id
+            ),
+            None,
+        )
+        narration_candidate_output = str((narration_candidate or {}).get("output") or "").strip()
+        resolved_narration_candidate = (
+            resolve_run_relative(run_dir, narration_candidate_output)
+            if narration_candidate_output
+            else run_dir / "__missing_narration_candidate__"
+        )
         raw_narration_output = str(narration.get("output") or "").strip()
-        narration_output = raw_narration_output or ("" if narration_silent_ok else _default_narration_output_for_target(target))
+        narration_output = raw_narration_output or (
+            "" if narration_silent_ok or revision_aware else _default_narration_output_for_target(target)
+        )
         video_output = str(video_generation.get("output") or _default_video_output_for_target(target)).strip()
         candidate_output = _candidate_video_output_for_item(run_dir, selector)
         resolved_audio = resolve_run_relative(run_dir, narration_output) if narration_output else run_dir / "__missing_narration__"
         resolved_video = resolve_run_relative(run_dir, candidate_output or video_output)
         audio_duration = _probe_media_duration_seconds(resolved_audio)
         video_duration = _probe_media_duration_seconds(resolved_video)
+        narration_audio_human_approved = bool(
+            revision_aware
+            and _narration_grounding_is_current(target, narration)
+            and current_audio_is_human_approved(narration)
+            and (
+                narration_tool == "silent"
+                or _narration_candidate_context_is_current(
+                    data,
+                    selector=selector,
+                    candidate=approved_candidate,
+                )
+            )
+        )
+        if narration_audio_human_approved and narration_tool != "silent":
+            expected_output_sha256 = str((approved_candidate or {}).get("output_sha256") or "")
+            narration_audio_human_approved = bool(
+                resolved_audio.is_file()
+                and expected_output_sha256
+                and _audio_file_sha256(resolved_audio) == expected_output_sha256
+            )
         api_prompt_payload = image_generation.get("api_prompt_payload") if isinstance(image_generation.get("api_prompt_payload"), dict) else {}
         api_prompt_policy = str(api_prompt_payload.get("policy_version") or "").strip()
         api_prompt = str(api_prompt_payload.get("prompt") or "")
@@ -2763,6 +3825,31 @@ def _manifest_narration_items(run_dir: Path) -> list[dict[str, Any]]:
                 "narrationTool": narration_tool,
                 "narrationStatus": str(narration.get("status") or ""),
                 "narrationReviewStatus": str((narration.get("review") if isinstance(narration.get("review"), dict) else {}).get("status") or ""),
+                "narrationAuthoringStatus": str(narration.get("authoring_status") or ""),
+                "narrationRevision": int(revision.get("number") or 0),
+                "narrationTextHash": str(revision.get("text_hash") or ""),
+                "narrationTtsHash": str(revision.get("tts_hash") or ""),
+                "narrationGenerationStatus": str(generation.get("status") or ""),
+                "narrationCandidateId": str((narration_candidate or {}).get("candidate_id") or "") or None,
+                "narrationCandidateOutput": narration_candidate_output or None,
+                "narrationCandidateStatus": str((narration_candidate or {}).get("status") or ""),
+                "narrationCandidateExists": resolved_narration_candidate.is_file(),
+                "narrationCandidateDurationSeconds": (
+                    float((narration_candidate or {}).get("duration_seconds"))
+                    if (narration_candidate or {}).get("duration_seconds") is not None
+                    else None
+                ),
+                "narrationGeneratedFromTtsHash": str(
+                    (
+                        approved_candidate
+                        if narration_audio_human_approved
+                        else narration_candidate
+                    or {}
+                    ).get("generated_from_tts_hash")
+                    or ""
+                ),
+                "narrationAudioReviewStatus": str(audio_review.get("status") or ""),
+                "narrationAudioHumanApproved": narration_audio_human_approved,
                 "narrationSilentOk": narration_silent_ok,
                 "narrationExists": resolved_audio.is_file(),
                 "narrationDurationSeconds": audio_duration,
@@ -2797,6 +3884,21 @@ def _write_narration_debug_log(
         "itemId": item_id,
         "destination": destination.relative_to(run_dir).as_posix(),
         "tool": request.tool,
+        "providerRequest": {
+            "voice_id": request.voice_id,
+            "model_id": request.model_id,
+            "voice_settings": request.voice_settings,
+            "output_format": request.output_format,
+            "language_code": request.language_code,
+            "pronunciation_dictionary_locators": request.pronunciation_dictionary_locators,
+            "pronunciation_alias_source": request.pronunciation_alias_source,
+            "pronunciation_alias_sha256": request.pronunciation_alias_sha256,
+            "effective_delivery_hash": request.effective_delivery_hash,
+            "tts_generation_group_id": request.tts_generation_group_id,
+            "tts_continuity_hash": request.tts_continuity_hash,
+            "previous_text": request.previous_text,
+            "next_text": request.next_text,
+        },
         "status": "failed" if error else "completed",
         "durationSeconds": duration_seconds,
         "error": error,
@@ -2805,44 +3907,212 @@ def _write_narration_debug_log(
     return log_path
 
 
-def _update_manifest_narration_items(run_dir: Path, items: list[NarrationGenerateItem]) -> dict[str, Any]:
+def _narration_candidate_output(target: dict[str, Any], requested_output: str | None, candidate_id: str) -> str:
+    base = Path(requested_output or _default_narration_output_for_target(target))
+    suffix = base.suffix or ".mp3"
+    return (base.parent / "candidates" / f"{candidate_id}{suffix}").as_posix()
+
+
+def _narration_tts_context_by_selector(data: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Build stable adjacent-text context for each full-run TTS continuity group."""
+
+    refs_by_selector = narration_span_refs(data)
+    for selector, refs in refs_by_selector.items():
+        group_ids = {
+            str(ref.get("tts_generation_group_id") or "").strip()
+            for ref in refs
+            if str(ref.get("audio_visual_relation") or "").strip() != "voice_silence"
+            and str(ref.get("tts_generation_group_id") or "").strip()
+        }
+        if len(group_ids) > 1:
+            raise ValueError(f"{selector}: narration spans assign more than one tts_generation_group_id")
+    return tts_continuity_contexts(data)
+
+
+def _narration_candidate_context_is_current(
+    data: dict[str, Any], *, selector: str, candidate: dict[str, Any] | None
+) -> bool:
+    if candidate is None:
+        return False
+    current_hash = str(
+        _dict_value(_narration_tts_context_by_selector(data).get(selector)).get("tts_continuity_hash") or ""
+    )
+    frozen_hash = str(_dict_value(candidate.get("provider_request")).get("tts_continuity_hash") or "")
+    return frozen_hash == current_hash
+
+
+def _prepare_narration_generation_request_snapshot(
+    run_dir: Path,
+    prepared: list[dict[str, Any]],
+) -> tuple[str, dict[Path, str]]:
+    snapshot_dir = run_dir / "logs" / "providers" / "narration" / "generation_requests"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _now_stamp()
+    path = snapshot_dir / f"{stamp}.json"
+    latest = snapshot_dir / "latest.json"
+    payload = {
+        "schemaVersion": "narration_generation_request_snapshot_v1",
+        "createdAt": now_iso(),
+        "items": [
+            {
+                "itemId": str(entry["request"].item_id),
+                "tool": str(entry["request"].tool),
+                **_dict_value(entry.get("snapshot")),
+            }
+            for entry in prepared
+        ],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return path.relative_to(run_dir).as_posix(), {path: serialized, latest: serialized}
+
+
+def _prepare_manifest_narration_generation(
+    run_dir: Path, items: list[NarrationGenerateItem]
+) -> list[dict[str, Any]]:
+    item_ids = [item.item_id for item in items]
+    if len(item_ids) != len(set(item_ids)):
+        raise ValueError("bulk narration generation contains duplicate item_id values")
     manifest_path, original_text, data = _read_manifest_data(run_dir)
-    targets_by_id: dict[str, dict[str, Any]] = {}
-    missing: list[str] = []
-    normalized: list[dict[str, Any]] = []
+    tts_contexts = _narration_tts_context_by_selector(data)
+    prepared: list[dict[str, Any]] = []
     for item in items:
         target = _target_by_item_id(data, item.item_id)
         if target is None:
-            missing.append(item.item_id)
-            continue
-        output = item.output or _default_narration_output_for_target(target)
-        _validate_run_relative_audio_path(run_dir, output, must_exist=False)
-        targets_by_id[item.item_id] = target
-        normalized.append({"item": item, "target": target, "output": output})
-    if missing:
-        raise ValueError(f"video manifest targets not found: {', '.join(missing)}")
-    _backup_run_file(run_dir, "video_manifest.md", label="before_narration_generate")
-    updated: list[str] = []
-    for entry in normalized:
-        item = entry["item"]
-        target = entry["target"]
-        node = target["cut"]
-        audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
-        narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
-        narration.update(
-            {
-                "tool": item.tool,
-                "text": item.text,
-                "tts_text": item.tts_text or item.text,
-                "output": entry["output"],
-                "normalize_to_scene_duration": False,
-            }
+            raise ValueError(f"video manifest target not found: {item.item_id}")
+        node = _dict_value(target.get("cut"))
+        audio = _dict_value(node.get("audio"))
+        narration = _dict_value(audio.get("narration"))
+        revision = ensure_narration_revision(narration)
+        current_text = str(narration.get("text") or "")
+        current_tts = str(narration.get("tts_text") or current_text)
+        requested_text = item.text.strip()
+        requested_tts = (item.tts_text or "").strip()
+        requested_payload_differs = bool(
+            (requested_text and requested_text != current_text)
+            or (requested_tts and requested_tts != current_tts)
+            or (item.tool and item.tool != str(narration.get("tool") or "elevenlabs"))
+        )
+        if requested_payload_differs:
+            raise NarrationRevisionConflict(
+                "narration payload differs from the canonical saved revision; save text before generating"
+            )
+        source_binding = _dict_value(narration.get("source_binding"))
+        if int(revision.get("number") or 0) <= 0 or not str(source_binding.get("script_selector") or "").strip():
+            raise ValueError(f"narration text must be saved before generation: {item.item_id}")
+        if not _narration_grounding_is_current(target, narration):
+            raise NarrationRevisionConflict(
+                f"narration grounding changed; save and review the current text before generation: {item.item_id}"
+            )
+        candidate_id = f"{_now_stamp()}_{uuid.uuid4().hex[:12]}"
+        candidate_output = _narration_candidate_output(target, item.output, candidate_id)
+        _validate_run_relative_audio_path(run_dir, candidate_output, must_exist=False)
+        effective_delivery = _effective_narration_delivery(narration) if item.tool == "elevenlabs" else {}
+        tts_context = tts_contexts.get(str(target["selector"]), {}) if item.tool == "elevenlabs" else {}
+        provider_request = {
+            key: value
+            for key, value in {**effective_delivery, **tts_context}.items()
+            if key != "pronunciation_alias_path"
+        }
+        snapshot = prepare_audio_candidate(
+            narration,
+            candidate_id=candidate_id,
+            output=candidate_output,
+            expected_revision=item.expected_revision,
+            expected_tts_hash=item.expected_tts_hash,
+            now=now_iso(),
+            provider_request=provider_request,
         )
         audio["narration"] = narration
         node["audio"] = audio
-        updated.append(item.item_id)
+        prepared_request = item.model_copy(
+            update={
+                "text": str(narration.get("text") or ""),
+                "tts_text": str(narration.get("tts_text") or ""),
+                "tool": str(narration.get("tool") or item.tool),
+                "output": candidate_output,
+                **effective_delivery,
+                **tts_context,
+            }
+        )
+        prepared.append({"request": prepared_request, "snapshot": snapshot, "selector": str(target["selector"])})
+    snapshot_path, snapshot_writes = _prepare_narration_generation_request_snapshot(run_dir, prepared)
+    transaction = _capture_file_transaction(
+        [
+            manifest_path,
+            run_dir / "state.txt",
+            run_dir / "run_status.json",
+            run_dir / "p000_index.md",
+            *snapshot_writes,
+        ]
+    )
+    _backup_run_file(run_dir, "video_manifest.md", label="before_narration_candidate_prepare")
+    try:
+        _write_manifest_data(manifest_path, original_text, data)
+        for path, content in snapshot_writes.items():
+            _atomic_write_text(path, content)
+        _append_narration_preview_state(
+            run_dir,
+            note="alternate narration TTS candidate generation started; current approval is unchanged",
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {"artifact.narration_generation_request_snapshot": snapshot_path},
+        )
+    except Exception:
+        _restore_file_transaction(transaction)
+        raise
+    return prepared
+
+
+def _audio_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _record_manifest_narration_generation_results(
+    run_dir: Path, prepared: list[dict[str, Any]], results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    prepared_by_id = {str(entry["request"].item_id): entry for entry in prepared}
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    invalidate_stale_tts_context_audio(data)
+    recorded: list[dict[str, Any]] = []
+    for result in results:
+        item_id = str(result.get("itemId") or "")
+        entry = prepared_by_id.get(item_id)
+        if entry is None:
+            continue
+        target = _target_by_item_id(data, item_id)
+        if target is None:
+            continue
+        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        snapshot = _dict_value(entry.get("snapshot"))
+        path_text = str(result.get("path") or snapshot.get("output") or "")
+        output_path = resolve_run_relative(run_dir, path_text) if path_text else run_dir / "__missing_narration_candidate__"
+        succeeded = result.get("status") == "completed" and output_path.is_file()
+        status = record_audio_candidate_result(
+            narration,
+            snapshot=snapshot,
+            succeeded=succeeded,
+            duration_seconds=float(result["durationSeconds"]) if result.get("durationSeconds") is not None else None,
+            output_sha256=_audio_file_sha256(output_path) if succeeded else "",
+            now=now_iso(),
+        )
+        recorded.append(
+            {
+                **result,
+                "providerStatus": str(result.get("status") or ""),
+                "status": status,
+                "candidateId": str(snapshot.get("candidate_id") or ""),
+                "generatedFromTtsHash": str(snapshot.get("generated_from_tts_hash") or ""),
+                "requestRevision": int(snapshot.get("request_revision") or 0),
+                "path": path_text or None,
+            }
+        )
     _write_manifest_data(manifest_path, original_text, data)
-    return {"updated": updated, "missing": []}
+    return recorded
 
 
 def _apply_audio_duration_to_manifest(run_dir: Path, durations_by_item: dict[str, float]) -> list[str]:
@@ -2872,43 +4142,599 @@ def _apply_audio_duration_to_manifest(run_dir: Path, durations_by_item: dict[str
     return updated
 
 
-def _mark_manifest_narration_audio_ready(run_dir: Path, results: list[dict[str, Any]]) -> list[str]:
-    completed = [result for result in results if result.get("status") == "completed" and result.get("itemId")]
-    if not completed:
-        return []
+def _approve_manifest_narration_audio(
+    run_dir: Path,
+    *,
+    item_id: str,
+    candidate_id: str,
+    expected_revision: int,
+    expected_tts_hash: str,
+    note: str | None,
+) -> dict[str, Any]:
     manifest_path, original_text, data = _read_manifest_data(run_dir)
-    updated: list[str] = []
-    for result in completed:
-        item_id = str(result["itemId"])
-        target = _target_by_item_id(data, item_id)
-        if target is None:
+    target = _target_by_item_id(data, item_id)
+    if target is None:
+        raise ValueError(f"video manifest target not found: {item_id}")
+    node = _dict_value(target.get("cut"))
+    narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+    candidate = next(
+        (
+            value
+            for value in _list_value(narration.get("candidates"))
+            if isinstance(value, dict) and str(value.get("candidate_id") or "") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise NarrationRevisionConflict(f"narration candidate not found: {candidate_id}")
+    candidate_output = str(candidate.get("output") or "").strip()
+    _validate_run_relative_audio_path(run_dir, candidate_output, must_exist=True)
+    candidate_path = resolve_run_relative(run_dir, candidate_output)
+    if not candidate_path.is_file():
+        raise ValueError(f"narration candidate audio file not found: {candidate_output}")
+    expected_output_sha256 = str(candidate.get("output_sha256") or "").strip()
+    actual_output_sha256 = _audio_file_sha256(candidate_path)
+    if not expected_output_sha256 or actual_output_sha256 != expected_output_sha256:
+        raise NarrationRevisionConflict("narration candidate audio bytes no longer match the generated snapshot")
+    if not _narration_candidate_context_is_current(
+        data,
+        selector=str(target["selector"]),
+        candidate=candidate,
+    ):
+        raise NarrationRevisionConflict("narration candidate was generated with stale full-run TTS context")
+    if not _narration_grounding_is_current(target, narration):
+        raise NarrationRevisionConflict("narration grounding changed after candidate generation")
+    transaction = _capture_file_transaction(
+        [
+            manifest_path,
+            run_dir / "state.txt",
+            run_dir / "run_status.json",
+            run_dir / "p000_index.md",
+        ]
+    )
+    try:
+        approved = approve_audio_candidate(
+            narration,
+            candidate_id=candidate_id,
+            expected_revision=expected_revision,
+            expected_tts_hash=expected_tts_hash,
+            now=now_iso(),
+        )
+        audio_review = _dict_value(narration.get("audio_review"))
+        audio_review["note"] = (
+            note or "frontend explicitly approved this narration audio after playback"
+        ).strip()
+        narration["audio_review"] = audio_review
+        _invalidate_narration_run_approval(
+            data,
+            reason=f"narration candidate approved: {target['selector']}",
+        )
+        _backup_run_file(run_dir, "video_manifest.md", label="before_narration_audio_approve")
+        _write_manifest_data(manifest_path, original_text, data)
+        duration = approved.get("duration_seconds")
+        duration_updated = _apply_audio_duration_to_manifest(
+            run_dir,
+            {str(target["selector"]): float(duration)} if duration is not None else {},
+        )
+        _append_narration_review_approved_if_ready(run_dir)
+        _manifest_path, _manifest_original, latest_data = _read_manifest_data(run_dir)
+        latest_target = _target_by_item_id(latest_data, item_id)
+        if latest_target is None:
+            raise ValueError(f"video manifest target disappeared during approval: {item_id}")
+    except Exception:
+        _restore_file_transaction(transaction)
+        raise
+    return {
+        "item": _narration_summary(latest_target),
+        "durationUpdated": duration_updated,
+        "audioSetHash": _manifest_narration_audio_set_hash(latest_data),
+    }
+
+
+def _revision_aware_narration_items(data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    items: list[tuple[str, dict[str, Any]]] = []
+    for target in _manifest_scene_targets(data):
+        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        if _dict_value(narration.get("revision")).get("schema_version") == REVISION_SCHEMA_VERSION:
+            items.append((str(target["selector"]), narration))
+    return items
+
+
+def _revision_aware_narration_contexts_are_current(data: dict[str, Any]) -> bool:
+    for target in _manifest_scene_targets(data):
+        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        if _dict_value(narration.get("revision")).get("schema_version") != REVISION_SCHEMA_VERSION:
             continue
-        node = target["cut"]
-        audio = _dict_value(node.get("audio"))
-        narration = _dict_value(audio.get("narration"))
-        if result.get("path"):
-            narration["output"] = str(result["path"])
-        narration["status"] = "audio_ready"
-        review = _dict_value(narration.get("review"))
-        review.update(
+        if str(narration.get("tool") or "").strip().lower() == "silent":
+            continue
+        review = _dict_value(narration.get("audio_review"))
+        approved_id = str(review.get("approved_candidate_id") or "")
+        candidate = next(
+            (
+                item
+                for item in _list_value(narration.get("candidates"))
+                if isinstance(item, dict) and str(item.get("candidate_id") or "") == approved_id
+            ),
+            None,
+        )
+        if not _narration_candidate_context_is_current(
+            data,
+            selector=str(target["selector"]),
+            candidate=candidate,
+        ):
+            return False
+    return True
+
+
+async def _run_narration_semantic_review(
+    run_dir: Path,
+    data: dict[str, Any],
+    *,
+    expected_text_set_hash: str,
+    expected_input_hash: str,
+) -> dict[str, Any]:
+    return await run_narration_semantic_critics(
+        run_dir,
+        data,
+        expected_narration_text_set_hash=expected_text_set_hash,
+        expected_semantic_review_input_hash=expected_input_hash,
+        client_factory=create_codex_app_server_client,
+        disabled=app_server_disabled(),
+        timeout_seconds=600,
+        max_concurrency=3,
+    )
+
+
+def _prepare_narration_semantic_review_artifacts(
+    run_dir: Path, aggregate: dict[str, Any]
+) -> tuple[str, str, dict[Path, str]]:
+    review_dir = run_dir / "logs" / "eval" / "narration" / "semantic_critics"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _now_stamp()
+    report_path = review_dir / f"{stamp}_review.md"
+    json_path = review_dir / f"{stamp}_review.json"
+    latest_report = review_dir / "latest.md"
+    latest_json = review_dir / "latest.json"
+    report_text = str(aggregate.get("report") or "").rstrip() + "\n"
+    json_text = json.dumps(aggregate, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    writes = {
+        report_path: report_text,
+        json_path: json_text,
+        latest_report: report_text,
+        latest_json: json_text,
+    }
+    return (
+        report_path.relative_to(run_dir).as_posix(),
+        json_path.relative_to(run_dir).as_posix(),
+        writes,
+    )
+
+
+def _semantic_review_manifest_record(
+    aggregate: dict[str, Any], *, report_path: str, json_path: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": str(aggregate.get("schema_version") or ""),
+        "status": str(aggregate.get("status") or "changes_requested"),
+        "narration_text_set_hash": str(aggregate.get("narration_text_set_hash") or ""),
+        "semantic_review_input_hash": str(
+            aggregate.get("semantic_review_input_hash") or ""
+        ),
+        "reviewed_at": str(aggregate.get("reviewed_at") or now_iso()),
+        "critics": deepcopy(_list_value(aggregate.get("critics"))),
+        "findings": deepcopy(_list_value(aggregate.get("findings"))),
+        "report": report_path,
+        "json": json_path,
+    }
+
+
+def _narration_review_blockers(
+    data: dict[str, Any],
+    *,
+    run_dir: Path | None = None,
+    semantic_artifact: dict[str, Any] | None = None,
+) -> list[str]:
+    blockers = deterministic_narration_review_blockers(data)
+    workflow = _dict_value(data.get("narration_workflow"))
+    revision_aware_items = _revision_aware_narration_items(data)
+    if revision_aware_items or "semantic_critic_review" in workflow:
+        semantic_review = _dict_value(workflow.get("semantic_critic_review"))
+        if not narration_semantic_review_is_current(
+            data,
+            semantic_review,
+            run_dir=run_dir,
+            artifact_aggregate=semantic_artifact,
+        ):
+            blockers.append("full_run_semantic_critics")
+    return blockers
+
+
+def _manifest_narration_audio_set_hash(data: dict[str, Any]) -> str:
+    payload: list[dict[str, Any]] = []
+    for target in _manifest_scene_targets(data):
+        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        revision = _dict_value(narration.get("revision"))
+        audio_review = _dict_value(narration.get("audio_review"))
+        approved_candidate_id = str(audio_review.get("approved_candidate_id") or "")
+        candidate = next(
+            (
+                value
+                for value in _list_value(narration.get("candidates"))
+                if isinstance(value, dict) and str(value.get("candidate_id") or "") == approved_candidate_id
+            ),
+            None,
+        )
+        payload.append(
             {
-                "status": "approved",
-                "human_review_ok": True,
-                "approved_at": _now_stamp(),
-                "note": "frontend generated and accepted this narration audio",
+                "candidate_id": approved_candidate_id,
+                "duration_seconds": candidate.get("duration_seconds") if candidate else None,
+                "output": str(narration.get("output") or ""),
+                "output_sha256": str((candidate or {}).get("output_sha256") or ""),
+                "tts_continuity_hash": str(
+                    _dict_value((candidate or {}).get("provider_request")).get("tts_continuity_hash") or ""
+                ),
+                "selector": str(target["selector"]),
+                "source_hash": str(revision.get("source_hash") or ""),
+                "status": str(narration.get("status") or ""),
+                "tool": str(narration.get("tool") or ""),
             }
         )
-        narration["review"] = review
-        if str(narration.get("tool") or "").strip().lower() == "silent":
-            silence_contract = _dict_value(narration.get("silence_contract"))
-            if silence_contract:
-                silence_contract["confirmed_by_human"] = True
-                narration["silence_contract"] = silence_contract
-        audio["narration"] = narration
-        node["audio"] = audio
-        updated.append(str(target["selector"]))
-    _write_manifest_data(manifest_path, original_text, data)
-    return updated
+    return _full_json_hash(payload)
+
+
+def _manifest_narration_timeline_hash(data: dict[str, Any]) -> str:
+    payload: list[dict[str, Any]] = []
+    for target in _manifest_scene_targets(data):
+        node = _dict_value(target["cut"])
+        render = _dict_value(node.get("render"))
+        video_generation = _dict_value(node.get("video_generation"))
+        payload.append(
+            {
+                "selector": str(target["selector"]),
+                "video_duration_seconds": _int_value(
+                    render.get("video_duration_seconds")
+                    or video_generation.get("duration_seconds")
+                    or 0
+                ),
+                "narration_offset_seconds": round(
+                    _float_value(render.get("narration_offset_seconds") or 0),
+                    3,
+                ),
+            }
+        )
+    return _full_json_hash(payload)
+
+
+def _render_unit_timeline_issues(
+    data: dict[str, Any], *, synchronize: bool = False
+) -> list[str]:
+    """Validate/synchronize render-unit durations against the approved cut timeline."""
+
+    issues: list[str] = []
+    for target in _manifest_scene_targets(data):
+        scene = _dict_value(target.get("scene"))
+        if _list_value(scene.get("render_units")):
+            continue
+        node = _dict_value(target.get("cut"))
+        render = _dict_value(node.get("render"))
+        generation = _dict_value(node.get("video_generation"))
+        duration = _int_value(
+            render.get("video_duration_seconds") or generation.get("duration_seconds") or 0
+        )
+        if duration > VIDEO_GENERATION_DURATION_MAX_SECONDS:
+            issues.append(
+                f"{target['selector']}: approved duration {duration}s exceeds the "
+                f"{VIDEO_GENERATION_DURATION_MAX_SECONDS}s video-generation limit; split the cut"
+            )
+    for scene_index, scene in enumerate(_list_value(data.get("scenes"))):
+        if not isinstance(scene, dict) or _is_non_renderable_manifest_node(scene):
+            continue
+        raw_render_units = _list_value(scene.get("render_units"))
+        if not raw_render_units:
+            continue
+        render_units = [unit for unit in raw_render_units if isinstance(unit, dict)]
+        scene_id = normalize_dotted_id(scene.get("scene_id")) or str(scene_index + 1)
+        if len(render_units) != len(raw_render_units):
+            issues.append(f"scene{scene_id}: render_units must contain only mappings")
+        active_cuts = [
+            cut
+            for cut in _list_value(scene.get("cuts"))
+            if isinstance(cut, dict) and not _is_non_renderable_manifest_node(cut)
+        ]
+        cut_durations: dict[str, int] = {}
+        for cut_index, cut in enumerate(active_cuts):
+            cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index + 1)
+            render = _dict_value(cut.get("render"))
+            generation = _dict_value(cut.get("video_generation"))
+            duration = _int_value(
+                render.get("video_duration_seconds") or generation.get("duration_seconds") or 0
+            )
+            if duration <= 0:
+                issues.append(f"scene{scene_id}_cut{cut_id}: approved video duration is missing")
+                continue
+            cut_durations[cut_id] = duration
+
+        ownership: dict[str, str] = {}
+        canonical_source_ids = list(cut_durations)
+        flattened_source_ids: list[str] = []
+        seen_unit_ids: set[str] = set()
+        for unit_index, unit in enumerate(render_units):
+            unit_id = normalize_dotted_id(unit.get("unit_id")) or str(unit_index + 1)
+            selector = f"scene{scene_id}_unit{unit_id}"
+            if unit_id in seen_unit_ids:
+                issues.append(f"{selector}: duplicate render unit id")
+            seen_unit_ids.add(unit_id)
+            if _is_non_renderable_manifest_node(unit):
+                issues.append(f"{selector}: deleted/reference render units are not supported")
+                continue
+            raw_source_ids = unit.get("source_cut_ids")
+            if not isinstance(raw_source_ids, list) or not raw_source_ids:
+                issues.append(f"{selector}: source_cut_ids must be a non-empty list")
+                continue
+            source_ids: list[str] = []
+            for raw_source_id in raw_source_ids:
+                source_id = normalize_dotted_id(raw_source_id)
+                if source_id is None or source_id not in cut_durations:
+                    issues.append(f"{selector}: unknown or deleted source cut {raw_source_id!r}")
+                    continue
+                if source_id in source_ids:
+                    issues.append(f"{selector}: duplicate source cut {source_id}")
+                    continue
+                previous_owner = ownership.get(source_id)
+                if previous_owner is not None:
+                    issues.append(f"scene{scene_id}_cut{source_id}: owned by both {previous_owner} and {selector}")
+                    continue
+                ownership[source_id] = selector
+                source_ids.append(source_id)
+                flattened_source_ids.append(source_id)
+            if not source_ids:
+                continue
+            expected_duration = sum(cut_durations[source_id] for source_id in source_ids)
+            if expected_duration > VIDEO_GENERATION_DURATION_MAX_SECONDS:
+                issues.append(
+                    f"{selector}: approved source-cut total {expected_duration}s exceeds the "
+                    f"{VIDEO_GENERATION_DURATION_MAX_SECONDS}s render-unit generation limit; split the unit"
+                )
+            generation = _dict_value(unit.get("video_generation"))
+            actual_duration = _int_value(generation.get("duration_seconds") or 0)
+            if synchronize:
+                generation["duration_seconds"] = expected_duration
+                unit["video_generation"] = generation
+            elif actual_duration != expected_duration:
+                issues.append(
+                    f"{selector}: duration {actual_duration}s does not match approved source-cut total "
+                    f"{expected_duration}s"
+                )
+
+        missing_cut_ids = [cut_id for cut_id in cut_durations if cut_id not in ownership]
+        if missing_cut_ids:
+            issues.append(
+                f"scene{scene_id}: active cuts missing from render_units: {', '.join(missing_cut_ids)}"
+            )
+        if flattened_source_ids != canonical_source_ids:
+            issues.append(
+                f"scene{scene_id}: render_units source-cut order must match canonical cut order "
+                f"({', '.join(canonical_source_ids)})"
+            )
+    return issues
+
+
+def _apply_narration_approval_timeline(
+    data: dict[str, Any], timeline: list[NarrationTimelineItem]
+) -> str:
+    targets = _manifest_scene_targets(data)
+    expected_ids = [str(target["selector"]) for target in targets]
+    requested_ids = [item.item_id for item in timeline]
+    if requested_ids != expected_ids:
+        raise NarrationRevisionConflict(
+            "full narration timeline must include every manifest cut exactly once in canonical order"
+        )
+    for target, item in zip(targets, timeline, strict=True):
+        node = _dict_value(target["cut"])
+        narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+        video_generation = _dict_value(node.get("video_generation"))
+        render = _dict_value(node.get("render"))
+        audio_review = _dict_value(narration.get("audio_review"))
+        approved_candidate_id = str(audio_review.get("approved_candidate_id") or "")
+        approved_candidate = next(
+            (
+                candidate
+                for candidate in _list_value(narration.get("candidates"))
+                if isinstance(candidate, dict)
+                and str(candidate.get("candidate_id") or "") == approved_candidate_id
+            ),
+            None,
+        )
+        raw_audio_duration = (approved_candidate or {}).get("duration_seconds")
+        revision_aware_spoken = bool(
+            _dict_value(narration.get("revision")).get("schema_version") == REVISION_SCHEMA_VERSION
+            and str(narration.get("tool") or "").strip().lower() != "silent"
+        )
+        audio_duration = _float_value(raw_audio_duration)
+        if revision_aware_spoken and (not math.isfinite(audio_duration) or audio_duration <= 0):
+            raise NarrationRevisionConflict(
+                f"approved narration candidate has no positive measured duration: {item.item_id}"
+            )
+        required_duration = max(
+            1,
+            math.ceil(audio_duration + float(item.narration_offset_seconds)),
+        )
+        if item.video_duration_seconds < required_duration:
+            raise NarrationRevisionConflict(
+                f"approved narration timeline would truncate audio for {item.item_id}: "
+                f"required={required_duration}s requested={item.video_duration_seconds}s"
+            )
+        video_generation["duration_seconds"] = item.video_duration_seconds
+        node["video_generation"] = video_generation
+        render["video_duration_seconds"] = item.video_duration_seconds
+        render["narration_offset_seconds"] = float(item.narration_offset_seconds)
+        node["render"] = render
+    render_unit_issues = _render_unit_timeline_issues(data, synchronize=True)
+    if render_unit_issues:
+        raise NarrationRevisionConflict("invalid render-unit timeline: " + "; ".join(render_unit_issues[:20]))
+    return _manifest_narration_timeline_hash(data)
+
+
+def _narration_final_review_is_current(
+    data: dict[str, Any],
+    *,
+    run_dir: Path | None = None,
+) -> bool:
+    items = _revision_aware_narration_items(data)
+    if items and not all(current_audio_is_human_approved(narration) for _selector, narration in items):
+        return False
+    if items and not _revision_aware_narration_contexts_are_current(data):
+        return False
+    if items and _narration_review_blockers(data, run_dir=run_dir):
+        return False
+    if _render_unit_timeline_issues(data):
+        return False
+    final_review = _dict_value(_dict_value(data.get("narration_workflow")).get("final_audio_review"))
+    current_set_hash = _manifest_narration_audio_set_hash(data)
+    listen_evidence = _dict_value(final_review.get("listen_evidence"))
+    expected_item_ids = [str(target["selector"]) for target in _manifest_scene_targets(data)]
+    expected_timeline = [
+        {
+            "item_id": str(target["selector"]),
+            "video_duration_seconds": _int_value(
+                _dict_value(target["cut"].get("render")).get("video_duration_seconds")
+                or _dict_value(target["cut"].get("video_generation")).get("duration_seconds")
+                or 0
+            ),
+            "narration_offset_seconds": _float_value(
+                _dict_value(target["cut"].get("render")).get("narration_offset_seconds") or 0
+            ),
+        }
+        for target in _manifest_scene_targets(data)
+    ]
+    return bool(
+        final_review.get("status") == "approved"
+        and str(final_review.get("approved_audio_set_hash") or "") == current_set_hash
+        and str(final_review.get("approved_timeline_hash") or "")
+        == _manifest_narration_timeline_hash(data)
+        and listen_evidence.get("mode") == "sequential_full_run"
+        and str(listen_evidence.get("audio_set_hash") or "") == current_set_hash
+        and _list_value(listen_evidence.get("item_ids")) == expected_item_ids
+        and _list_value(listen_evidence.get("timeline")) == expected_timeline
+        and bool(str(listen_evidence.get("completed_at") or "").strip())
+    )
+
+
+def _approve_narration_full_run(
+    run_dir: Path,
+    *,
+    note: str,
+    expected_audio_set_hash: str,
+    timeline: list[NarrationTimelineItem],
+    listen_evidence: NarrationListenEvidence,
+) -> dict[str, Any]:
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    review_blockers = _narration_review_blockers(data, run_dir=run_dir)
+    if review_blockers:
+        raise ValueError("full narration approval has unresolved p720 findings: " + ", ".join(review_blockers[:20]))
+    items = _revision_aware_narration_items(data)
+    if items and not all(current_audio_is_human_approved(narration) for _selector, narration in items):
+        raise ValueError("full narration approval contains stale or unapproved revision-aware audio")
+    if items and not _revision_aware_narration_contexts_are_current(data):
+        raise ValueError("full narration approval contains audio generated from stale full-run TTS context")
+    approved_set_hash = _manifest_narration_audio_set_hash(data)
+    if expected_audio_set_hash != approved_set_hash:
+        raise NarrationRevisionConflict(
+            "full narration audio set changed after it was loaded; reload and listen to the current set"
+        )
+    expected_item_ids = [str(target["selector"]) for target in _manifest_scene_targets(data)]
+    if listen_evidence.audio_set_hash != approved_set_hash:
+        raise NarrationRevisionConflict("full-run listen evidence belongs to a different narration audio set")
+    if listen_evidence.item_ids != expected_item_ids:
+        raise NarrationRevisionConflict("full-run listen evidence must cover every cut in canonical order")
+    if [_model_dump(item) for item in listen_evidence.timeline] != [_model_dump(item) for item in timeline]:
+        raise NarrationRevisionConflict("full-run listen evidence belongs to a different narration timeline")
+    approved_timeline_hash = _apply_narration_approval_timeline(data, timeline)
+    post_timeline_blockers = _narration_review_blockers(data, run_dir=run_dir)
+    if post_timeline_blockers:
+        raise NarrationRevisionConflict(
+            "requested p740 timeline differs from the timing reviewed at p720; persist the timing first, "
+            "rerun p720, and listen to the current full run: "
+            + ", ".join(post_timeline_blockers[:20])
+        )
+    readiness = _narration_duration_readiness_for_data(
+        run_dir,
+        data,
+        manifest_path=manifest_path,
+    )
+    if not readiness.get("audioReady"):
+        missing = ", ".join(str(item.get("itemId") or "") for item in readiness.get("missingItems", [])[:20])
+        raise ValueError("full narration approval requires current human-approved audio for every cut: " + (missing or "none"))
+    if not readiness.get("durationPassed"):
+        audit = readiness.get("audit")
+        detail = (
+            f" actual={getattr(audit, 'actual_seconds', 0)}s minimum={getattr(audit, 'minimum_seconds', 0)}s"
+            if audit is not None
+            else ""
+        )
+        raise ValueError("full narration approval requires the requested p740 timeline to pass" + detail)
+    workflow = _dict_value(data.get("narration_workflow"))
+    workflow["schema_version"] = "narration_run_workflow_v1"
+    workflow["final_audio_review"] = {
+        "status": "approved",
+        "approved_audio_set_hash": approved_set_hash,
+        "approved_timeline_hash": approved_timeline_hash,
+        "approved_at": now_iso(),
+        "approved_by": "frontend_human",
+        "note": note.strip(),
+        "listen_evidence": _model_dump(listen_evidence),
+        "listen_evidence_hash": _full_json_hash(_model_dump(listen_evidence)),
+    }
+    data["narration_workflow"] = workflow
+    _backup_run_file(run_dir, "video_manifest.md", label="before_narration_full_run_approve")
+    transaction_paths = [
+        manifest_path,
+        run_dir / "state.txt",
+        run_dir / "run_status.json",
+        run_dir / "p000_index.md",
+    ]
+    before_transaction = {
+        path: path.read_bytes() if path.is_file() else None
+        for path in transaction_paths
+    }
+    try:
+        _write_manifest_data(manifest_path, original_text, data)
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                **_narration_duration_state_updates(readiness),
+                "review.duration_fit.note": "requested p740 timeline passed the measured duration gate",
+                "status": "P750",
+                "runtime.stage": "narration_audio_frontend_approved",
+                "runtime.narration.phase": "done",
+                "runtime.narration.approved_audio_set_hash": approved_set_hash,
+                "runtime.narration.approved_timeline_hash": approved_timeline_hash,
+                "slot.p720.status": "done",
+                "slot.p730.status": "done",
+                "slot.p740.status": "done",
+                "slot.p750.status": "done",
+                "slot.p750.note": "frontend explicitly approved the full narration track",
+                "stage.narration.status": "done",
+                "review.narration.status": "approved",
+                "gate.narration_review": "required",
+            },
+        )
+    except Exception:
+        for path, previous_content in before_transaction.items():
+            if previous_content is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write_bytes(path, previous_content)
+        raise
+    audit = readiness.get("audit")
+    return {
+        "status": "approved",
+        "approvedAudioSetHash": approved_set_hash,
+        "approvedTimelineHash": approved_timeline_hash,
+        "durationReady": True,
+        "actualSeconds": float(getattr(audit, "actual_seconds", 0)) if audit is not None else None,
+        "targetSeconds": float(getattr(audit, "target_seconds", 0)) if audit is not None else None,
+    }
 
 
 def _narration_min_duration_seconds(run_dir: Path, item_id: str) -> float | None:
@@ -2944,7 +4770,7 @@ def _generate_narration_file_blocking(run_dir: Path, request: NarrationGenerateI
     if request.tool == "silent":
         _write_silence_audio(destination, float(request.duration_seconds or 1))
     elif request.tool == "elevenlabs":
-        _generate_elevenlabs_audio(destination, spoken_text)
+        _generate_elevenlabs_audio(destination, spoken_text, request)
     elif request.tool in {"macos_say", "say"}:
         _generate_macos_say_audio(destination, spoken_text)
     else:
@@ -3007,9 +4833,32 @@ def _render_asset_dir(run_dir: Path, kind: str) -> Path:
     return path
 
 
-def _prepare_render_video_clip(run_dir: Path, source: Path, item: RenderInputItem) -> Path:
+def _require_prepared_media_duration(path: Path, *, expected_seconds: float, label: str) -> None:
+    actual_seconds = _probe_media_duration_seconds(path)
+    if actual_seconds is None:
+        raise ValueError(f"{label} duration could not be measured after p750 render preparation: {path}")
+    if abs(float(actual_seconds) - float(expected_seconds)) > 0.35:
+        raise ValueError(
+            f"{label} duration does not match the p750 timeline: "
+            f"actual={actual_seconds:.3f}s expected={expected_seconds:.3f}s"
+        )
+
+
+def _prepare_render_video_clip(
+    run_dir: Path,
+    source: Path,
+    item: RenderInputItem,
+    *,
+    strict: bool = False,
+) -> Path:
     duration = max(1, int(item.video_duration_seconds))
     if not shutil.which("ffmpeg"):
+        if strict:
+            _require_prepared_media_duration(
+                source,
+                expected_seconds=float(duration),
+                label=f"{item.item_id} video",
+            )
         return source
     output = _render_asset_dir(run_dir, "video") / f"{_safe_artifact_id(item.item_id)}_{duration:03d}s.mp4"
     try:
@@ -3038,16 +4887,41 @@ def _prepare_render_video_clip(run_dir: Path, source: Path, item: RenderInputIte
             text=True,
             timeout=300,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise ValueError(f"failed to prepare p750 video clip: {item.item_id}: {exc}") from exc
         return source
-    return output if output.is_file() else source
+    prepared = output if output.is_file() else source
+    if strict:
+        if prepared == source:
+            raise ValueError(f"p750 video preparation produced no output: {item.item_id}")
+        _require_prepared_media_duration(
+            prepared,
+            expected_seconds=float(duration),
+            label=f"{item.item_id} video",
+        )
+    return prepared
 
 
-def _prepare_render_narration(run_dir: Path, source: Path, item: RenderInputItem) -> Path:
+def _prepare_render_narration(
+    run_dir: Path,
+    source: Path,
+    item: RenderInputItem,
+    *,
+    strict: bool = False,
+) -> Path:
     offset = max(0.0, float(item.narration_offset_seconds))
     duration = max(1.0, float(item.video_duration_seconds))
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
+        if strict:
+            if offset > 0:
+                raise ValueError(f"ffmpeg is required to apply the approved narration offset: {item.item_id}")
+            _require_prepared_media_duration(
+                source,
+                expected_seconds=duration,
+                label=f"{item.item_id} narration",
+            )
         return source
     safe_id = _safe_artifact_id(item.item_id)
     centiseconds = int(round(offset * 100))
@@ -3095,9 +4969,20 @@ def _prepare_render_narration(run_dir: Path, source: Path, item: RenderInputItem
         ]
     try:
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise ValueError(f"failed to prepare p750 narration: {item.item_id}: {exc}") from exc
         return source
-    return output if output.is_file() else source
+    prepared = output if output.is_file() else source
+    if strict:
+        if prepared == source:
+            raise ValueError(f"p750 narration preparation produced no output: {item.item_id}")
+        _require_prepared_media_duration(
+            prepared,
+            expected_seconds=duration,
+            label=f"{item.item_id} narration",
+        )
+    return prepared
 
 
 def _silent_render_narration_path(run_dir: Path, item: RenderInputItem) -> str:
@@ -3117,29 +5002,144 @@ def _silent_render_narration_path(run_dir: Path, item: RenderInputItem) -> str:
 def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_id: str | None = None) -> dict[str, Any]:
     _validate_run_relative_render_output(run_dir, req.output)
     manifest_path, original_text, data = _read_manifest_data(run_dir)
+    manifest_targets = _manifest_scene_targets(data)
+    revision_aware = bool(_revision_aware_narration_items(data))
+    approved_audio_set_hash = ""
+    approved_timeline_hash = ""
+    if revision_aware:
+        _require_narration_ready_for_video(run_dir)
+        final_review = _dict_value(_dict_value(data.get("narration_workflow")).get("final_audio_review"))
+        approved_audio_set_hash = str(final_review.get("approved_audio_set_hash") or "")
+        approved_timeline_hash = str(final_review.get("approved_timeline_hash") or "")
+        if not approved_audio_set_hash or not approved_timeline_hash:
+            raise NarrationRevisionConflict("revision-aware render requires immutable p750 approval hashes")
+        expected_item_ids = [str(target["selector"]) for target in manifest_targets]
+        requested_item_ids = [str(item.item_id) for item in req.items]
+        if requested_item_ids != expected_item_ids:
+            raise NarrationRevisionConflict(
+                "revision-aware render inputs must include every manifest cut exactly once in canonical order"
+            )
+        for target, item in zip(manifest_targets, req.items, strict=True):
+            node = _dict_value(target["cut"])
+            render = _dict_value(node.get("render"))
+            video_generation = _dict_value(node.get("video_generation"))
+            approved_duration = _int_value(
+                render.get("video_duration_seconds")
+                or video_generation.get("duration_seconds")
+                or 0
+            )
+            approved_offset = round(_float_value(render.get("narration_offset_seconds") or 0), 3)
+            if (
+                item.video_duration_seconds != approved_duration
+                or round(float(item.narration_offset_seconds), 3) != approved_offset
+            ):
+                raise NarrationRevisionConflict(
+                    f"render timeline differs from the p750-approved timeline: {item.item_id}"
+                )
     _backup_run_file(run_dir, "video_manifest.md", label="before_render_freeze")
     clips: list[Path] = []
     narrations: list[Path] = []
     warnings: list[str] = []
     updated: list[str] = []
+    request_by_id = {str(item.item_id): item for item in req.items}
+    targets_by_scene_index: dict[int, list[dict[str, Any]]] = {}
+    for target in manifest_targets:
+        targets_by_scene_index.setdefault(int(target["scene_index"]), []).append(target)
+
+    render_unit_issues = _render_unit_timeline_issues(data)
+    if render_unit_issues:
+        raise NarrationRevisionConflict("invalid render-unit timeline: " + "; ".join(render_unit_issues[:20]))
+
+    for scene_index, scene in enumerate(_list_value(data.get("scenes"))):
+        scene_targets = targets_by_scene_index.get(scene_index, [])
+        if not scene_targets:
+            continue
+        render_units = [unit for unit in _list_value(scene.get("render_units")) if isinstance(unit, dict)]
+        if render_units:
+            scene_id = normalize_dotted_id(scene.get("scene_id")) or str(scene_index + 1)
+            for unit_index, unit in enumerate(render_units):
+                unit_id = normalize_dotted_id(unit.get("unit_id")) or str(unit_index + 1)
+                unit_selector = f"scene{scene_id}_unit{unit_id}"
+                generation = _dict_value(unit.get("video_generation"))
+                video_path = (
+                    _candidate_video_output_for_item(run_dir, unit_selector)
+                    or str(generation.get("output") or "").strip()
+                )
+                _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
+                duration = _int_value(generation.get("duration_seconds"))
+                if duration <= 0:
+                    raise NarrationRevisionConflict(f"render unit has no approved duration: {unit_selector}")
+                unit_item = RenderInputItem(
+                    item_id=unit_selector,
+                    video_path=video_path,
+                    narration_path=None,
+                    video_duration_seconds=duration,
+                    narration_offset_seconds=0,
+                )
+                unit_source = resolve_run_relative(run_dir, video_path)
+                clips.append(
+                    _prepare_render_video_clip(run_dir, unit_source, unit_item, strict=True)
+                    if revision_aware
+                    else _prepare_render_video_clip(run_dir, unit_source, unit_item)
+                )
+                generation["output"] = video_path
+                unit["video_generation"] = generation
+            warnings.append(
+                f"scene{scene_id}: using {len(render_units)} render unit video clip(s) for the approved cut timeline"
+            )
+            continue
+        for target in scene_targets:
+            selector = str(target["selector"])
+            item = request_by_id.get(selector)
+            if item is None:
+                raise NarrationRevisionConflict(f"render request is missing canonical item: {selector}")
+            node = _dict_value(target["cut"])
+            video_generation = _dict_value(node.get("video_generation"))
+            video_path = (
+                item.video_path
+                or _candidate_video_output_for_item(run_dir, selector)
+                or str(video_generation.get("output") or "")
+            )
+            _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
+            video_source = resolve_run_relative(run_dir, video_path)
+            clips.append(
+                _prepare_render_video_clip(run_dir, video_source, item, strict=True)
+                if revision_aware
+                else _prepare_render_video_clip(run_dir, video_source, item)
+            )
+            video_generation["duration_seconds"] = item.video_duration_seconds
+            video_generation["output"] = video_path
+            node["video_generation"] = video_generation
+            render = _dict_value(node.get("render"))
+            render["video_path"] = video_path
+            node["render"] = render
+
     for item in req.items:
         target = _target_by_item_id(data, item.item_id)
         if target is None:
             raise ValueError(f"video manifest target not found: {item.item_id}")
         node = target["cut"]
-        video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
         audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
         narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
-        video_path = item.video_path or _candidate_video_output_for_item(run_dir, item.item_id) or str(video_generation.get("output") or "")
-        narration_path = item.narration_path or str(narration.get("output") or "")
-        _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
+        approved_narration_path = str(narration.get("output") or "")
+        if revision_aware:
+            is_silent = str(narration.get("tool") or "").strip().lower() == "silent"
+            if is_silent and item.narration_path:
+                raise NarrationRevisionConflict("revision-aware silent render audio is materialized by the server")
+            if not is_silent and item.narration_path and item.narration_path != approved_narration_path:
+                raise NarrationRevisionConflict(
+                    f"render narration path differs from the p750-approved output: {item.item_id}"
+                )
+            narration_path = "" if is_silent else approved_narration_path
+        else:
+            narration_path = item.narration_path or approved_narration_path
         if _narration_has_confirmed_silence(narration) and not narration_path:
             narration_path = _silent_render_narration_path(run_dir, item)
-            narration["output"] = narration_path
-            audio["narration"] = narration
-            node["audio"] = audio
+            if not revision_aware:
+                narration["output"] = narration_path
+                audio["narration"] = narration
+                node["audio"] = audio
         _validate_run_relative_audio_path(run_dir, narration_path, must_exist=True)
-        video_source = resolve_run_relative(run_dir, video_path)
         narration_source = resolve_run_relative(run_dir, narration_path)
         audio_duration = _probe_media_duration_seconds(narration_source)
         if audio_duration is not None and item.video_duration_seconds < math.ceil(audio_duration + item.narration_offset_seconds):
@@ -3149,20 +5149,18 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         render = node.get("render") if isinstance(node.get("render"), dict) else {}
         render.update(
             {
-                "video_path": video_path,
                 "narration_path": narration_path,
                 "video_duration_seconds": item.video_duration_seconds,
                 "narration_offset_seconds": item.narration_offset_seconds,
             }
         )
         node["render"] = render
-        video_generation["duration_seconds"] = item.video_duration_seconds
-        video_generation["output"] = video_path
-        node["video_generation"] = video_generation
-        clips.append(_prepare_render_video_clip(run_dir, video_source, item))
-        narrations.append(_prepare_render_narration(run_dir, narration_source, item))
+        narrations.append(
+            _prepare_render_narration(run_dir, narration_source, item, strict=True)
+            if revision_aware
+            else _prepare_render_narration(run_dir, narration_source, item)
+        )
         updated.append(item.item_id)
-    _write_manifest_data(manifest_path, original_text, data)
     if snapshot_id:
         list_dir = _frontend_review_dir(run_dir) / "render_inputs"
         list_dir.mkdir(parents=True, exist_ok=True)
@@ -3172,38 +5170,64 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
     else:
         clips_path = run_dir / "video_clips.txt"
         narration_path = run_dir / "video_narration_list.txt"
-    clips_path.write_text("\n".join(_concat_list_line(path) for path in clips) + ("\n" if clips else ""), encoding="utf-8")
-    narration_path.write_text("\n".join(_concat_list_line(path) for path in narrations) + ("\n" if narrations else ""), encoding="utf-8")
     review_dir = _frontend_review_dir(run_dir)
     review_dir.mkdir(parents=True, exist_ok=True)
     plan_path = review_dir / (f"render_plan_{safe_snapshot}.json" if snapshot_id else "render_plan_latest.json")
-    plan_path.write_text(
+    clips_text = "\n".join(_concat_list_line(path) for path in clips) + ("\n" if clips else "")
+    narration_text = "\n".join(_concat_list_line(path) for path in narrations) + ("\n" if narrations else "")
+    plan_text = (
         json.dumps(
             {
                 "output": req.output,
                 "clips": [str(path) for path in clips],
                 "narrations": [str(path) for path in narrations],
                 "items": [_model_dump(item) for item in req.items],
+                "approvedAudioSetHash": approved_audio_set_hash,
+                "approvedTimelineHash": approved_timeline_hash,
                 "warnings": warnings,
             },
             ensure_ascii=False,
             indent=2,
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
-    append_state_snapshot(
+    transaction_paths = [
+        manifest_path,
+        clips_path,
+        narration_path,
+        plan_path,
         run_dir / "state.txt",
-        {
-            "status": "P910",
-            "runtime.stage": "render_inputs_frozen",
-            "slot.p910.status": "done",
-            "slot.p910.note": "frontend render inputs frozen",
-            "artifact.video_clips": str(clips_path.resolve()),
-            "artifact.video_narration_list": str(narration_path.resolve()),
-            "review.frontend.render.plan": plan_path.relative_to(run_dir).as_posix(),
-        },
-    )
+        run_dir / "run_status.json",
+        run_dir / "p000_index.md",
+    ]
+    before_transaction = {
+        path: path.read_bytes() if path.is_file() else None
+        for path in transaction_paths
+    }
+    try:
+        _write_manifest_data(manifest_path, original_text, data)
+        _atomic_write_text(clips_path, clips_text)
+        _atomic_write_text(narration_path, narration_text)
+        _atomic_write_text(plan_path, plan_text)
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "status": "P910",
+                "runtime.stage": "render_inputs_frozen",
+                "slot.p910.status": "done",
+                "slot.p910.note": "frontend render inputs frozen",
+                "artifact.video_clips": str(clips_path.resolve()),
+                "artifact.video_narration_list": str(narration_path.resolve()),
+                "review.frontend.render.plan": plan_path.relative_to(run_dir).as_posix(),
+            },
+        )
+    except Exception:
+        for path, previous_content in before_transaction.items():
+            if previous_content is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write_bytes(path, previous_content)
+        raise
     return {
         "runId": run_dir.name,
         "status": "frozen",
@@ -3213,7 +5237,86 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         "narrationList": narration_path.relative_to(run_dir).as_posix(),
         "planPath": plan_path.relative_to(run_dir).as_posix(),
         "output": req.output,
+        "approvedAudioSetHash": approved_audio_set_hash,
+        "approvedTimelineHash": approved_timeline_hash,
     }
+
+
+def _require_frozen_render_narration_current(run_dir: Path, freeze_result: dict[str, Any]) -> None:
+    expected_audio_set_hash = str(freeze_result.get("approvedAudioSetHash") or "")
+    expected_timeline_hash = str(freeze_result.get("approvedTimelineHash") or "")
+    if not expected_audio_set_hash and not expected_timeline_hash:
+        return
+    _require_narration_ready_for_video(run_dir)
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    final_review = _dict_value(_dict_value(data.get("narration_workflow")).get("final_audio_review"))
+    if (
+        str(final_review.get("approved_audio_set_hash") or "") != expected_audio_set_hash
+        or str(final_review.get("approved_timeline_hash") or "") != expected_timeline_hash
+    ):
+        raise NarrationRevisionConflict(
+            "narration audio set or timeline changed while final render was running; rendered output is stale"
+        )
+
+
+def _apply_final_video_duration_gate(run_dir: Path, out_path: Path) -> dict[str, Any]:
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    metadata = _dict_value(data.get("video_metadata"))
+    try:
+        target_seconds = normalize_target_duration(metadata.get("target_duration_seconds"))
+    except ValueError as exc:
+        raise ValueError(f"final video duration target is invalid: {exc}") from exc
+    actual_seconds = _probe_media_duration_seconds(out_path)
+    if actual_seconds is None:
+        raise ValueError("final video duration could not be measured with ffprobe")
+    duration_audit = audit_duration(
+        target_seconds=target_seconds,
+        actual_seconds=actual_seconds,
+        measurement_layer="frontend_final_video_ffprobe",
+    )
+    state_updates = {
+        "review.final.duration_fit.status": duration_audit.status,
+        "review.final.duration_fit.target_seconds": str(duration_audit.target_seconds),
+        "review.final.duration_fit.minimum_seconds": _duration_state_value(duration_audit.minimum_seconds),
+        "review.final.duration_fit.actual_seconds": _duration_state_value(duration_audit.actual_seconds),
+        "review.final.duration_fit.ratio": f"{duration_audit.ratio:.6f}",
+        "review.final.duration_fit.measurement_layer": duration_audit.measurement_layer,
+        "review.final.duration_fit.at": now_iso(),
+        "artifact.final_video": str(out_path.resolve()),
+    }
+    if not duration_audit.passed:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                **state_updates,
+                "runtime.stage": "final_render_duration_failed",
+                "slot.p920.status": "failed",
+                "slot.p920.note": "final video is shorter than 80% of target",
+                "slot.p930.status": "blocked",
+                "slot.p930.note": "final QA blocked by duration fit",
+                "review.final.status": "changes_requested",
+            },
+        )
+        raise ValueError(
+            "final video duration must be at least 80% of target: "
+            f"actual={_duration_state_value(duration_audit.actual_seconds)}s "
+            f"minimum={_duration_state_value(duration_audit.minimum_seconds)}s"
+        )
+
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            **state_updates,
+            "status": "P930",
+            "runtime.stage": "final_render_ready_for_qa",
+            "slot.p920.status": "done",
+            "slot.p920.note": "final video rendered and duration gate passed",
+            "slot.p930.status": "awaiting_approval",
+            "slot.p930.note": "final QA ready in frontend",
+            "review.final.status": "pending",
+        },
+    )
+    return duration_audit.to_dict()
 
 
 async def _run_final_render(run_dir: Path, req: FinalRenderRequest, freeze_result: dict[str, Any]) -> dict[str, Any]:
@@ -3242,23 +5345,28 @@ async def _run_final_render(run_dir: Path, req: FinalRenderRequest, freeze_resul
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"render-video.sh exited with status {proc.returncode}")
     async with _serialized_run_write(run_dir, "run_artifacts"):
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "status": "P930",
-                "runtime.stage": "final_render_ready_for_qa",
-                "slot.p920.status": "done",
-                "slot.p920.note": "final video rendered",
-                "slot.p930.status": "awaiting_approval",
-                "slot.p930.note": "final QA ready in frontend",
-                "artifact.final_video": str(out_path.resolve()),
-                "review.final.status": "pending",
-            },
-        )
+        try:
+            _require_frozen_render_narration_current(run_dir, freeze_result)
+        except NarrationRevisionConflict:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.stage": "final_render_narration_stale",
+                    "slot.p920.status": "blocked",
+                    "slot.p920.note": "rendered output used a stale narration approval snapshot",
+                    "slot.p930.status": "blocked",
+                    "slot.p930.note": "final QA requires rerendering the current p750 narration set",
+                    "review.final.status": "changes_requested",
+                    "artifact.stale_final_video": str(out_path.resolve()),
+                },
+            )
+            raise
+        final_duration_audit = _apply_final_video_duration_gate(run_dir, out_path)
     return {
         **freeze_result,
         "status": "rendered",
         "finalOutput": out_path.relative_to(run_dir).as_posix(),
+        "durationAudit": final_duration_audit,
         "stdout": stdout.decode("utf-8", errors="replace").strip(),
     }
 
@@ -3911,7 +6019,11 @@ def _insert_cut_in_manifest(run_dir: Path, req: InsertCutRequest) -> dict[str, s
     requested_cut_id = normalize_dotted_id(req.cut_id) if req.cut_id else None
     cut_id = requested_cut_id or _next_cut_id(cuts)
     selector = make_scene_cut_selector(scene_id, cut_id)
-    existing_aliases = {alias for target_info in _manifest_scene_targets(data) for alias in target_info["aliases"]}
+    existing_aliases = {
+        alias
+        for target_info in _manifest_scene_targets(data, include_non_renderable=True)
+        for alias in target_info["aliases"]
+    }
     if selector in existing_aliases:
         raise ValueError(f"cut selector already exists: {selector}")
     scene_dir = f"assets/scenes/{selector}"
@@ -4040,6 +6152,103 @@ async def _regenerate_prompt_with_log(
         raise
 
 
+async def _revise_v2_visual_plan_with_log(
+    client: CodexAppServerClient,
+    *,
+    run_dir: Path,
+    item: dict[str, Any],
+    current_plan: dict[str, Any],
+    instruction: str,
+    setting_content: str,
+) -> dict[str, Any]:
+    item_id = str(item.get("id") or item.get("itemId") or "prompt")
+    request = {
+        "target": "scene",
+        "itemId": item_id,
+        "instructionLength": len(instruction),
+        "settingLength": len(setting_content),
+        "operation": "compiled_v2_recompile",
+    }
+    try:
+        patch = await client.revise_first_frame_visual_plan(
+            item=item,
+            current_plan=current_plan,
+            instruction=instruction,
+            setting_content=setting_content,
+            run_dir=run_dir,
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="prompt_recompile",
+            status="visual_plan_patch_completed",
+            item_id=item_id,
+            request=request,
+            response={"patchFields": sorted(patch)},
+        )
+        return patch
+    except Exception as exc:
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="prompt_recompile",
+            status="failed",
+            item_id=item_id,
+            request=request,
+            error=str(exc),
+        )
+        raise
+
+
+def _recompile_v2_scene_manifest(
+    run_dir: Path,
+    revisions: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    compiled: dict[str, dict[str, Any]] = {}
+    canonical_payload_keys = {
+        "policy_version",
+        "compiler_version",
+        "source_digest",
+        "prompt",
+        "negative_prompt",
+        "reference_instructions",
+        "reference_images",
+        "sha256",
+        "drawable_prompt_ir",
+    }
+    for item_id, revision in revisions.items():
+        target = _target_by_item_id(data, item_id)
+        if target is None:
+            raise ValueError(f"video manifest target not found: {item_id}")
+        node = _dict_value(target.get("cut"))
+        image_generation = _dict_value(node.get("image_generation"))
+        current_plan = _dict_value(image_generation.get("first_frame_visual_plan"))
+        if _json_hash(current_plan) != str(revision.get("expected_plan_hash") or ""):
+            raise ValueError(f"compiled_v2_plan_revision_conflict: {item_id}")
+        existing_payload = _dict_value(image_generation.get("api_prompt_payload"))
+        if str(existing_payload.get("policy_version") or "") != "image_api_prompt_v2":
+            raise ValueError(f"compiled_v2_policy_required: {item_id}")
+        review_metadata = {
+            key: deepcopy(value)
+            for key, value in existing_payload.items()
+            if key not in canonical_payload_keys
+        }
+        plan, payload = _apply_v2_visual_plan_patch_and_compile(
+            current_plan,
+            _dict_value(revision.get("patch")),
+            character_ids=_list_value(image_generation.get("character_ids")),
+            object_ids=_list_value(image_generation.get("object_ids")),
+            location_ids=_list_value(image_generation.get("location_ids")),
+            references=_list_value(image_generation.get("references")),
+            review_metadata=review_metadata,
+        )
+        image_generation["first_frame_visual_plan"] = plan
+        image_generation["api_prompt_payload"] = payload
+        node["image_generation"] = image_generation
+        compiled[item_id] = payload
+    _write_manifest_data(manifest_path, original_text, data)
+    return compiled
+
+
 async def _start_app_server_with_log(client: CodexAppServerClient, *, run_dir: Path, operation: str, item_id: str) -> None:
     try:
         await client.start()
@@ -4116,6 +6325,17 @@ def _run_relative_key(run_dir: Path, value: str) -> str:
     return resolve_run_relative(run_dir, value).resolve().relative_to(run_dir.resolve()).as_posix()
 
 
+def _generation_order_references(item: Any) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *(getattr(item, "references", []) or []),
+                *(getattr(item, "dependency_references", []) or []),
+            ]
+        )
+    )
+
+
 def _build_generation_groups(items: list[Any], *, run_dir: Path, kind: str) -> list[list[Any]]:
     output_items = [item for item in items if getattr(item, "output", None)]
     if not output_items:
@@ -4130,7 +6350,7 @@ def _build_generation_groups(items: list[Any], *, run_dir: Path, kind: str) -> l
     dependencies: dict[str, set[str]] = {item.id: set() for item in output_items}
     item_by_id = {item.id: item for item in output_items}
     for item in output_items:
-        for ref in getattr(item, "references", []) or []:
+        for ref in _generation_order_references(item):
             ref_key = _run_relative_key(run_dir, str(ref))
             producer = output_to_item.get(ref_key)
             if producer is not None:
@@ -4162,7 +6382,7 @@ def _validate_generation_groups(groups: list[list[Any]], *, run_dir: Path, kind:
     for index, group in enumerate(groups, start=1):
         group_outputs = {str(item.output) for item in group if getattr(item, "output", None)}
         for item in group:
-            for ref in getattr(item, "references", []) or []:
+            for ref in _generation_order_references(item):
                 ref_key = _run_relative_key(run_dir, str(ref))
                 if ref_key in group_outputs:
                     raise RuntimeError(f"{kind} generation group {index} has same-phase reference dependency: {item.id}: {ref}")
@@ -4466,9 +6686,15 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
             "allowGeneratedImagesFallback": allow_generated_images_fallback,
         },
     )
-    client = create_codex_app_server_client(cwd=ROOT)
+    client = create_codex_app_server_client(
+        cwd=ROOT,
+        scrub_sensitive_env=True,
+        require_chatgpt_account=True,
+        require_chatgpt_pro=True,
+    )
     result = None
     debug_log = None
+    retention_record: dict[str, Any] | None = None
     try:
         await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         async with _generated_images_fallback_claim_scope(allow_generated_images_fallback):
@@ -4489,7 +6715,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                             provenance_policy=provenance_policy,
                             timeout_seconds=max(1, int(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS)),
                         ),
-                        timeout=IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS,
+                        timeout=_image_generation_outer_timeout_seconds(),
                     )
                     if result.saved_path is None:
                         raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
@@ -4505,6 +6731,25 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                             prompt_sha256=prompt_sha256,
                             reference_sha256s=reference_sha256s,
                         )
+                    retention_record = retain_first_image(
+                        result.saved_path,
+                        root=ROOT,
+                        run_id=run_dir.name,
+                        kind=kind,
+                        item_id=str(item.id),
+                        candidate_index=1,
+                        destination=str(item.output),
+                        storage_role="canonical",
+                        provenance={
+                            "generationJobId": generation_job_id,
+                            "turnId": getattr(result, "turn_id", None),
+                            "imageGenerationItemId": getattr(result, "image_generation_item_id", None),
+                            "promptSha256": prompt_sha256,
+                            "referenceSha256s": reference_sha256s,
+                            "provenancePolicy": provenance_policy,
+                            "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
+                        },
+                    )
                     break
                 except Exception as exc:
                     if attempt >= IMAGE_GENERATION_ITEM_MAX_ATTEMPTS or not _is_transient_codex_image_error(exc):
@@ -4564,6 +6809,8 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                 "imageGenerationItemId": getattr(result, "image_generation_item_id", None),
                 "provenancePolicy": provenance_policy,
                 "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
+                "retainedFirstImage": bool(retention_record),
+                "retainedFirstImageCreated": bool(retention_record and retention_record.get("created")),
             },
         )
     except Exception as exc:
@@ -5298,6 +7545,23 @@ async def _run_image_prompt_semantic_review(job_id: str, *, run_dir: Path) -> No
     await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
 
 
+def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) -> None:
+    result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
+    if not result_path.exists():
+        return
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict) or payload.get("status") == "invalidated":
+        return
+    payload["previous_status"] = str(payload.get("status") or "unknown")
+    payload["status"] = "invalidated"
+    payload["invalidated_at"] = now_iso()
+    payload["invalidated_by"] = invalidated_by
+    _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
 async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Path, stage: str) -> str | None:
     try:
         await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
@@ -5305,11 +7569,22 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
     except Exception as exc:
         if is_codex_transport_error(exc):
             transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
+            current_state = parse_state_file(run_dir / "state.txt")
+            repair_status = str(current_state.get(f"review.semantic.{stage}.repair.status") or "")
+            failure_phase = "semantic_producer_repair" if repair_status else "semantic_review"
+            blocked_by = f"semantic.{stage}.{failure_phase}"
+            invalidated_by = f"semantic.{stage}.transport.{transport_kind}"
+            last_progress_at = str(
+                current_state.get(f"review.semantic.{stage}.repair.pending.updated_at")
+                or current_state.get(f"review.semantic.{stage}.watchdog.last_progress_at")
+                or "unknown"
+            )
             blocked_item_ids = (
                 _localized_semantic_blocked_image_item_ids(run_dir, stage=stage)
                 if stage in {"scene_detail", "cut_blueprint", "asset_plan", "image_prompt"}
                 else set()
             )
+            _invalidate_p600_supervisor_result(run_dir, invalidated_by=invalidated_by)
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
@@ -5320,6 +7595,17 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                     "runtime.stage": "semantic_review_blocked_transport",
                     "runtime.app_server.transport.status": "failed",
                     "runtime.app_server.transport.error_kind": transport_kind,
+                    "runtime.failure.stage": stage,
+                    "runtime.failure.phase": failure_phase,
+                    "runtime.failure.error_kind": transport_kind,
+                    "runtime.failure.last_progress_at": last_progress_at,
+                    "image_generation.status": "not_started",
+                    "image_generation.started": "false",
+                    "image_generation.generated_count": "0",
+                    "image_generation.blocked_by": blocked_by,
+                    "image_generation.block_reason": f"app_server_transport_{transport_kind}",
+                    "orchestration.p600.supervisor.status": "invalidated",
+                    "orchestration.p600.supervisor.invalidated_by": invalidated_by,
                     "slot.p660.status": "pending",
                     "slot.p660.note": f"blocked before image generation by {stage} transport failure",
                     "slot.p670.status": "pending",
@@ -5360,6 +7646,24 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                     f"review.semantic.{stage}.localization.status": "not_localized",
                     f"review.semantic.{stage}.localization.reason": "transport failure did not map to scene image request items",
                 },
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="transport_blocked_before_image_generation",
+                item_id=job_id,
+                request={"stage": stage, "phase": failure_phase},
+                response={
+                    "errorKind": transport_kind,
+                    "imageGenerationStatus": "not_started",
+                    "imageGenerationStarted": False,
+                    "generatedCount": 0,
+                    "blockedBy": blocked_by,
+                    "lastProgressAt": last_progress_at,
+                    "p600SupervisorStatus": "invalidated",
+                    "p600SupervisorInvalidatedBy": invalidated_by,
+                },
+                error=f"{type(exc).__name__}: {exc}",
             )
             slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
             if slot:
@@ -5462,6 +7766,8 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
 
 
 SEMANTIC_REVIEW_SLOT_BY_STAGE = {
+    "research": "p130",
+    "story": "p230",
     "scene_set": "p410",
     "scene_detail": "p410",
     "cut_blueprint": "p420",
@@ -6279,6 +8585,17 @@ async def _run_semantic_review_once(
             report_path=report_path,
             is_completed=_semantic_review_report_completed,
         )
+        if not _semantic_review_report_completed(report_path):
+            report_from_agent = _semantic_report_text_from_transcript(transcript, stage)
+            if report_from_agent is not None:
+                report_path.write_text(report_from_agent, encoding="utf-8")
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.report.source": "agent_message_transport_fallback",
+                        f"review.semantic.{stage}.report.materialized_at": now_iso(),
+                    },
+                )
         if completed_from_report:
             write_app_server_debug_log(
                 run_dir=run_dir,
@@ -6415,13 +8732,24 @@ def _semantic_review_prompt_for_attempt(prompt: str, *, stage: str, final_attemp
     marker = "## Final Attempt Review Policy"
     if marker in prompt:
         return prompt
+    if stage in {"research", "story"}:
+        final_policy = (
+            "A missing or contradictory internal baseline, timeline, character/conflict chain, unresolved internal reference, "
+            "or unallocated required event is fatal because cut generation must not invent the foundation.\n"
+            "Do not browse or judge external URLs, editions, translations, rights, or factual fidelity; those are outside this gate.\n"
+            "Use `status: passed` only when the complete scope is internally sufficient for the next stage.\n"
+        )
+    else:
+        final_policy = (
+            "Use `status: passed` unless you find a fatal defect that would break the story meaning, source identity, reveal order, safety, or the next downstream stage.\n"
+            "Treat non-fatal polish issues, minor wording weakness, and repairable prompt-strengthening suggestions as notes rather than blockers.\n"
+        )
     return (
         prompt.rstrip()
         + "\n\n"
         + f"{marker}\n\n"
         + f"This is the final semantic review attempt for `{stage}`. If this report is `failed`, the project run will stop before downstream generation.\n"
-        + "Use `status: passed` unless you find a fatal defect that would break the story meaning, source identity, reveal order, safety, or the next downstream stage.\n"
-        + "Treat non-fatal polish issues, minor wording weakness, and repairable prompt-strengthening suggestions as notes rather than blockers.\n"
+        + final_policy
         + "If you pass with reservations, include the reservations in `notes` and keep `blocked_entries` and `failed_selectors` empty.\n"
     )
 
@@ -8266,6 +10594,43 @@ SEMANTIC_TURN_ARTIFACT_POLL_SECONDS = 2.0
 SEMANTIC_TURN_COMPLETION_GRACE_SECONDS = 15.0
 
 
+def _semantic_report_text_from_transcript(
+    transcript: list[dict[str, Any]],
+    stage: str,
+) -> str | None:
+    """Recover a complete AI verdict when it was returned in chat instead of the report file."""
+
+    for notification in reversed(transcript):
+        if notification.get("method") != "item/completed":
+            continue
+        params = notification.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        status = parse_judgment_report_status(text)
+        if status not in {"passed", "failed"}:
+            match = re.search(
+                r"(?im)^\s*(?:recommended\s+overall\s+)?status\s*:\s*`?(passed|failed)`?\s*$",
+                text,
+            )
+            status = match.group(1).lower() if match else ""
+        required_fields = ("reviewed_entries:", "blocked_entries:", "failed_selectors:")
+        if status not in {"passed", "failed"} or any(field not in text for field in required_fields):
+            continue
+        if stage in {"research", "story"} and "criteria_results_json:" not in text:
+            continue
+        return (
+            f"status: {status}\n"
+            "report_transport: agent_message_fallback\n"
+            + text
+            + "\n"
+        )
+    return None
+
+
 async def _run_turn_until_semantic_artifact_completed(
     client: CodexAppServerClient,
     *,
@@ -8646,6 +11011,25 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
     return message
 
 
+def _create_job_failure_diagnostics(run_dir: Path) -> dict[str, Any]:
+    state = parse_state_file(run_dir / "state.txt")
+    generated_count = str(state.get("image_generation.generated_count") or "0")
+    return {
+        "runtimeStage": str(state.get("runtime.stage") or "unknown"),
+        "failureStage": str(state.get("runtime.failure.stage") or "unknown"),
+        "failurePhase": str(state.get("runtime.failure.phase") or "unknown"),
+        "errorKind": str(state.get("runtime.failure.error_kind") or "unknown"),
+        "lastProgressAt": str(state.get("runtime.failure.last_progress_at") or "unknown"),
+        "imageGenerationStatus": str(state.get("image_generation.status") or "unknown"),
+        "imageGenerationStarted": str(state.get("image_generation.started") or "unknown") == "true",
+        "generatedCount": int(generated_count) if generated_count.isdigit() else 0,
+        "blockedBy": str(state.get("image_generation.blocked_by") or "unknown"),
+        "blockReason": str(state.get("image_generation.block_reason") or "unknown"),
+        "p600SupervisorStatus": str(state.get("orchestration.p600.supervisor.status") or "unknown"),
+        "p600SupervisorInvalidatedBy": str(state.get("orchestration.p600.supervisor.invalidated_by") or ""),
+    }
+
+
 async def _run_create_job(
     job_id: str,
     *,
@@ -8655,9 +11039,12 @@ async def _run_create_job(
     generate_images: bool = True,
     create_mode: str = CREATE_MODE_NORMAL,
     stop_target: str = "p680",
+    target_duration_seconds: int = 300,
 ) -> None:
     if stop_target not in CREATE_STOP_TARGETS:
         raise ValueError("stop_target must be p650 or p680")
+    if not 300 <= target_duration_seconds <= 1200:
+        raise ValueError("target_duration_seconds must be between 300 and 1200")
     run_dir_for_log = safe_run_dir(run_id, ROOT)
     job_started = time.monotonic()
     try:
@@ -8677,6 +11064,7 @@ async def _run_create_job(
                 "runId": run_id,
                 "createMode": create_mode,
                 "stopTarget": stop_target,
+                "targetDurationSeconds": target_duration_seconds,
             },
         )
         if generate_images:
@@ -8686,6 +11074,7 @@ async def _run_create_job(
                 source=source,
                 run_id=run_id,
                 stop_target=stop_target,
+                target_duration_seconds=target_duration_seconds,
             )
         else:
             await _set_create_job(job_id, {"message": f"本家ToC工程を画像生成なしで{stop_target}まで実行中", "stopTarget": stop_target, "currentProcess": "p000"})
@@ -8694,6 +11083,7 @@ async def _run_create_job(
                 source=source,
                 run_id=run_id,
                 stop_target=stop_target,
+                target_duration_seconds=target_duration_seconds,
                 materialize_only=True,
             )
         await _sync_process_current_process(job_id, run_id)
@@ -8714,7 +11104,7 @@ async def _run_create_job(
             operation="create_job_step",
             status="completed",
             item_id=job_id,
-            request={"step": "frontend_create_cli", "runId": run_id, "createMode": create_mode, "stopTarget": stop_target},
+            request={"step": "frontend_create_cli", "runId": run_id, "createMode": create_mode, "stopTarget": stop_target, "targetDurationSeconds": target_duration_seconds},
             response={"elapsedMs": int((time.monotonic() - job_started) * 1000)},
         )
         validation_started = time.monotonic()
@@ -8761,8 +11151,11 @@ async def _run_create_job(
                 operation="create_job_step",
                 status="failed",
                 item_id=job_id,
-                request={"runId": run_id, "title": title, "sourceLength": len(source), "createMode": create_mode, "stopTarget": stop_target},
-                response={"elapsedMs": int((time.monotonic() - job_started) * 1000)},
+                request={"runId": run_id, "title": title, "sourceLength": len(source), "createMode": create_mode, "stopTarget": stop_target, "targetDurationSeconds": target_duration_seconds},
+                response={
+                    "elapsedMs": int((time.monotonic() - job_started) * 1000),
+                    **_create_job_failure_diagnostics(run_dir),
+                },
                 error=f"{type(exc).__name__}: {exc}",
             )
             if (run_dir / "state.txt").exists():
@@ -8825,6 +11218,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="title must not be blank")
     source = (req.source or "").strip() or title
     stop_target = req.stop_target
+    target_duration_seconds = req.target_duration_seconds
     job_id = uuid.uuid4().hex
     async with _create_jobs_lock:
         running_count = sum(1 for existing in _create_jobs.values() if existing.get("status") == "running")
@@ -8847,6 +11241,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "status": "running",
             "title": title,
             "createMode": CREATE_MODE_NORMAL,
+            "targetDurationSeconds": target_duration_seconds,
             "stopTarget": stop_target,
             "stopTargetNumber": _process_number(stop_target),
             "currentProcess": "p000",
@@ -8886,6 +11281,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "generateImages": bool(req.generate_images),
             "createMode": CREATE_MODE_NORMAL,
             "stopTarget": stop_target,
+            "targetDurationSeconds": target_duration_seconds,
             "processStore": process_store_result,
         },
         response={"path": f"output/{run_id}"},
@@ -8899,6 +11295,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             generate_images=bool(req.generate_images),
             create_mode=CREATE_MODE_NORMAL,
             stop_target=stop_target,
+            target_duration_seconds=target_duration_seconds,
         )
     )
     return job
@@ -8911,6 +11308,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
         raise HTTPException(status_code=400, detail="title must not be blank")
     source = (req.source or "").strip() or title
     stop_target = req.stop_target
+    target_duration_seconds = req.target_duration_seconds
     job_id = uuid.uuid4().hex
     async with _create_jobs_lock:
         running_count = sum(1 for existing in _create_jobs.values() if existing.get("status") == "running")
@@ -8933,6 +11331,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             "status": "running",
             "title": title,
             "createMode": CREATE_MODE_SCENE_STORYBOARD,
+            "targetDurationSeconds": target_duration_seconds,
             "stopTarget": stop_target,
             "stopTargetNumber": _process_number(stop_target),
             "currentProcess": "p000",
@@ -8972,6 +11371,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             "generateImages": True,
             "createMode": CREATE_MODE_SCENE_STORYBOARD,
             "stopTarget": stop_target,
+            "targetDurationSeconds": target_duration_seconds,
             "processStore": process_store_result,
         },
         response={"path": f"output/{run_id}"},
@@ -8985,6 +11385,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             generate_images=True,
             create_mode=CREATE_MODE_SCENE_STORYBOARD,
             stop_target=stop_target,
+            target_duration_seconds=target_duration_seconds,
         )
     )
     return job
@@ -9032,6 +11433,19 @@ async def api_run_process(run_id: str) -> dict[str, Any]:
     }
 
 
+def _target_duration_seconds_for_run(run_dir: Path) -> int:
+    manifest_path = run_dir / "video_manifest.md"
+    if manifest_path.is_file():
+        _path, _original_text, data = _read_manifest_data(run_dir)
+        metadata = _dict_value(data.get("video_metadata"))
+        if "target_duration_seconds" in metadata:
+            return normalize_target_duration(metadata.get("target_duration_seconds"))
+    state = parse_state_file(run_dir / "state.txt")
+    if str(state.get("runtime.target_video_seconds") or "").strip():
+        return normalize_target_duration(state["runtime.target_video_seconds"])
+    return normalize_target_duration(None)
+
+
 @router.post("/api/image-gen/runs/{run_id}/resume")
 async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
@@ -9052,6 +11466,10 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
     title = record.title if record else run_id
     source = record.source if record and record.source else title
     create_mode = record.create_mode if record else CREATE_MODE_NORMAL
+    try:
+        target_duration_seconds = _target_duration_seconds_for_run(run_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"run target duration is invalid: {exc}") from exc
     job_id = uuid.uuid4().hex
     try:
         await _acquire_run_execution_lease(job_id, run_dir)
@@ -9064,6 +11482,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
         "status": "running",
         "title": title,
         "createMode": create_mode,
+        "targetDurationSeconds": target_duration_seconds,
         "stopTarget": req.stop_target,
         "stopTargetNumber": _process_number(req.stop_target),
         "currentProcess": current_process,
@@ -9109,6 +11528,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             "fromProcess": current_process,
             "fromProcessNumber": current_process_number,
             "stopTarget": req.stop_target,
+            "targetDurationSeconds": target_duration_seconds,
             "resumeImages": resume_images,
             "resumePolicy": "hash_aware_partial",
             "processStore": process_store_result,
@@ -9124,6 +11544,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             generate_images=True,
             create_mode=create_mode,
             stop_target=req.stop_target,
+            target_duration_seconds=target_duration_seconds,
         )
     )
     return job
@@ -9131,18 +11552,58 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
 
 @router.get("/api/image-gen/requests")
 async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")) -> dict[str, Any]:
-    run_dir = safe_run_dir(run_id, ROOT)
+    try:
+        run_dir = safe_run_dir(run_id, ROOT)
+    except FileNotFoundError:
+        restored = restore_first_image_retention_run(run_id, root=ROOT)
+        if restored is None:
+            raise
+        run_dir = restored
+    if is_first_image_retention_restored_run(run_dir):
+        restore_first_image_retention_run(run_id, root=ROOT)
     items = []
     request_items = load_request_items(run_dir, kind)
     blocked_scene_item_ids = _semantic_blocked_image_item_ids(run_dir, request_items) if kind == "scene" else set()
     for item in request_items:
         payload = item_to_api(item)
+        rehydrate_retained_first_image(
+            run_dir,
+            root=ROOT,
+            kind=kind,
+            item_id=str(item.id),
+        )
+        persisted_candidates = list_candidate_items(run_dir, item.id)
         if str(item.id) in blocked_scene_item_ids:
             payload["generationStatus"] = "blocked"
-            payload["candidates"] = [_semantic_blocked_candidate(run_dir, item)]
+            payload["candidates"] = persisted_candidates or [_semantic_blocked_candidate(run_dir, item)]
         else:
-            payload["candidates"] = list_candidate_items(run_dir, item.id)
+            payload["candidates"] = persisted_candidates
         items.append(payload)
+    if not request_items and is_first_image_retention_restored_run(run_dir):
+        for retention in list_first_image_retentions(root=ROOT, run_id=run_id, kind=kind):
+            item_id = str(retention["itemId"])
+            output = str(retention.get("destination") or "") if retention.get("storageRole") == "canonical" else None
+            items.append(
+                {
+                    "id": item_id,
+                    "kind": kind,
+                    "assetType": None,
+                    "tool": "codex_builtin_image",
+                    "output": output,
+                    "prompt": "",
+                    "promptPolicyVersion": None,
+                    "debugPromptSource": {
+                        "retentionArchive": True,
+                        "retainedAt": retention.get("retainedAt"),
+                    },
+                    "references": [],
+                    "referenceCount": 0,
+                    "executionLane": "retention_archive",
+                    "generationStatus": "retained",
+                    "existingImage": None,
+                    "candidates": list_candidate_items(run_dir, item_id),
+                }
+            )
     references = [reference_to_api(option) for option in list_reference_options(run_dir)]
     return {
         "run": {"id": run_id, "path": f"output/{run_id}"},
@@ -9157,13 +11618,18 @@ async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")
 async def api_narration_items(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
     try:
-        items = _manifest_narration_items(run_dir)
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            _manifest_path, _manifest_original, manifest_data = _read_manifest_data(run_dir)
+            items = _manifest_narration_items(run_dir, manifest_data)
+            audio_set_hash = _manifest_narration_audio_set_hash(manifest_data)
+            progress = read_run_progress(run_dir)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "run": {"id": run_id, "path": f"output/{run_id}"},
         "items": items,
-        "progress": read_run_progress(run_dir),
+        "audioSetHash": audio_set_hash,
+        "progress": progress,
     }
 
 
@@ -9434,8 +11900,36 @@ async def api_audio_file(run_id: str, path: str) -> FileResponse:
 
 
 @router.get("/api/image-gen/candidates")
-async def api_candidates(run_id: str, item_id: str = Query(min_length=1, max_length=200)) -> dict[str, Any]:
-    run_dir = safe_run_dir(run_id, ROOT)
+async def api_candidates(
+    run_id: str,
+    item_id: str = Query(min_length=1, max_length=200),
+    kind: str | None = None,
+) -> dict[str, Any]:
+    try:
+        run_dir = safe_run_dir(run_id, ROOT)
+    except FileNotFoundError:
+        restored = restore_first_image_retention_run(run_id, root=ROOT)
+        if restored is None:
+            raise
+        run_dir = restored
+    if is_first_image_retention_restored_run(run_dir):
+        restore_first_image_retention_run(run_id, root=ROOT)
+        archived = list_first_image_retentions(root=ROOT, run_id=run_id, kind=kind, item_id=item_id) if kind in {"asset", "scene"} else list_first_image_retentions(root=ROOT, run_id=run_id, item_id=item_id)
+        if not archived:
+            return {"itemId": item_id, "candidates": []}
+        return {"itemId": item_id, "candidates": list_candidate_items(run_dir, item_id)}
+    kinds = [kind] if kind in {"asset", "scene"} else ["scene", "asset"]
+    for request_kind in kinds:
+        if not any(item.id == item_id for item in load_request_items(run_dir, request_kind)):
+            continue
+        restored = rehydrate_retained_first_image(
+            run_dir,
+            root=ROOT,
+            kind=request_kind,
+            item_id=item_id,
+        )
+        if restored is not None:
+            break
     return {"itemId": item_id, "candidates": list_candidate_items(run_dir, item_id)}
 
 
@@ -9445,6 +11939,7 @@ async def api_create_narration_drafts(req: NarrationDraftCreateRequest) -> dict[
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             result = _create_narration_drafts_in_manifest(run_dir, replace=req.replace)
+            authoring_workspace = await asyncio.to_thread(_materialize_narration_authoring_workspace, run_dir)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
@@ -9453,6 +11948,7 @@ async def api_create_narration_drafts(req: NarrationDraftCreateRequest) -> dict[
         "runId": req.run_id,
         "status": "completed",
         **result,
+        "authoringWorkspace": authoring_workspace,
         "progress": read_run_progress(run_dir),
     }
 
@@ -9462,13 +11958,70 @@ async def api_narration_silent_ok(req: NarrationSilentOkRequest) -> dict[str, An
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            result = _narration_silent_ok(run_dir, item_id=req.item_id, reason=req.reason)
+            transaction = _capture_file_transaction(
+                [
+                    run_dir / "script.md",
+                    run_dir / "video_manifest.md",
+                    run_dir / "state.txt",
+                    run_dir / "run_status.json",
+                    run_dir / "p000_index.md",
+                ]
+            )
+            try:
+                _save_frontend_narration_text(
+                    run_dir,
+                    NarrationTextSaveRequest(
+                        run_id=req.run_id,
+                        item_id=req.item_id,
+                        text="",
+                        tts_text="",
+                        tool="silent",
+                        authoring_status="silent",
+                        expected_revision=req.expected_revision,
+                    ),
+                )
+                result = _narration_silent_ok(
+                    run_dir,
+                    item_id=req.item_id,
+                    reason=req.reason,
+                )
+                _append_narration_review_approved_if_ready(run_dir)
+                _manifest_path, _manifest_original, latest_data = _read_manifest_data(run_dir)
+                result["audioSetHash"] = _manifest_narration_audio_set_hash(latest_data)
+                progress = read_run_progress(run_dir)
+            except Exception:
+                _restore_file_transaction(transaction)
+                raise
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "runId": req.run_id,
         **result,
-        "progress": read_run_progress(run_dir),
+        "progress": progress,
+    }
+
+
+@router.post("/api/image-gen/narration-text/save")
+async def api_narration_text_save(req: NarrationTextSaveRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            item = _save_frontend_narration_text(run_dir, req)
+            _manifest_path, _manifest_original, latest_data = _read_manifest_data(run_dir)
+            audio_set_hash = _manifest_narration_audio_set_hash(latest_data)
+            progress = read_run_progress(run_dir)
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "runId": req.run_id,
+        "status": "saved",
+        "item": item,
+        "audioSetHash": audio_set_hash,
+        "progress": progress,
     }
 
 
@@ -9478,39 +12031,53 @@ async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any
     item = NarrationGenerateItem.model_validate(req.model_dump(exclude={"run_id"}))
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            update_result = _update_manifest_narration_items(run_dir, [item])
+            prepared = _prepare_manifest_narration_generation(run_dir, [item])
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    result = await _generate_narration_one(run_dir, item)
-    durations = {result["itemId"]: float(result["durationSeconds"])} if result.get("durationSeconds") else {}
+    provider_result = await _generate_narration_one(run_dir, prepared[0]["request"])
     async with _serialized_run_write(run_dir, "run_artifacts"):
-        audio_ready_updates = _mark_manifest_narration_audio_ready(run_dir, [result])
-        duration_updates = _apply_audio_duration_to_manifest(run_dir, durations)
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "status": "P750" if result.get("status") == "completed" else "P730",
-                "runtime.stage": "narration_audio_frontend_review_in_progress" if result.get("status") == "completed" else "narration_generation_failed",
-                "slot.p710.status": "done",
-                "slot.p710.note": "frontend narration grounding loaded from video_manifest",
-                "slot.p720.status": "done" if result.get("status") == "completed" else "awaiting_approval",
-                "slot.p720.note": "frontend narration text reviewed through TTS generation",
-                "slot.p730.status": "done" if result.get("status") == "completed" else "failed",
-                "slot.p730.note": "narration audio generated from frontend",
-                "slot.p740.status": "done" if duration_updates or result.get("status") == "completed" else "pending",
-                "slot.p740.note": "video duration minimum synced from generated narration",
-                "slot.p750.status": "awaiting_approval" if result.get("status") == "completed" else "pending",
-                "slot.p750.note": "narration audio review is complete per-cut when every cut has audio or silent ok",
-            },
+        transaction = _capture_file_transaction(
+            [
+                run_dir / "video_manifest.md",
+                run_dir / "state.txt",
+                run_dir / "run_status.json",
+                run_dir / "p000_index.md",
+            ]
         )
+        try:
+            result = _record_manifest_narration_generation_results(
+                run_dir,
+                prepared,
+                [provider_result],
+            )[0]
+            _append_narration_preview_state(
+                run_dir,
+                runtime_stage=(
+                    "narration_audio_candidate_ready"
+                    if result.get("status") == "candidate"
+                    else "narration_generation_stale_or_failed"
+                ),
+                note=(
+                    "generated alternate audio candidate; current approval remains unchanged"
+                    if result.get("status") == "candidate"
+                    else "alternate audio candidate failed or became stale; current approval remains unchanged"
+                ),
+            )
+        except Exception:
+            _restore_file_transaction(transaction)
+            raise
+        progress = read_run_progress(run_dir)
     return {
         "runId": req.run_id,
         "status": result.get("status"),
-        "updated": update_result["updated"],
-        "audioReadyUpdated": audio_ready_updates,
-        "durationUpdated": duration_updates,
+        "updated": [str(prepared[0]["selector"])],
+        "audioReadyUpdated": [],
+        "durationUpdated": [],
+        "durationReady": False,
         "item": result,
-        "progress": read_run_progress(run_dir),
+        "progress": progress,
     }
 
 
@@ -9519,47 +12086,339 @@ async def api_narration_generate_bulk(req: BulkNarrationGenerateRequest) -> dict
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            update_result = _update_manifest_narration_items(run_dir, req.items)
+            prepared = _prepare_manifest_narration_generation(run_dir, req.items)
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     semaphore = asyncio.Semaphore(req.concurrency)
 
-    async def guarded(item: NarrationGenerateItem) -> dict[str, Any]:
+    async def guarded(entry: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await _generate_narration_one(run_dir, item)
+            return await _generate_narration_one(run_dir, entry["request"])
 
-    results = await asyncio.gather(*(guarded(item) for item in req.items))
-    durations = {str(result["itemId"]): float(result["durationSeconds"]) for result in results if result.get("durationSeconds")}
-    failed = [result for result in results if result.get("status") != "completed"]
+    provider_results = await asyncio.gather(*(guarded(entry) for entry in prepared))
     async with _serialized_run_write(run_dir, "run_artifacts"):
-        audio_ready_updates = _mark_manifest_narration_audio_ready(run_dir, results)
-        duration_updates = _apply_audio_duration_to_manifest(run_dir, durations)
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "status": "P750" if not failed else "P730",
-                "runtime.stage": "narration_audio_frontend_review_in_progress" if not failed else "narration_generation_partial_failure",
-                "slot.p710.status": "done",
-                "slot.p710.note": "frontend narration grounding loaded from video_manifest",
-                "slot.p720.status": "done",
-                "slot.p720.note": "frontend narration text reviewed through TTS generation",
-                "slot.p730.status": "done" if not failed else "failed",
-                "slot.p730.note": f"generated {len(results) - len(failed)}/{len(results)} narration files",
-                "slot.p740.status": "done" if durations else "pending",
-                "slot.p740.note": "video duration minimum synced from generated narration",
-                "slot.p750.status": "awaiting_approval" if not failed else "pending",
-                "slot.p750.note": "narration audio review is complete when every cut has audio or silent ok",
-            },
+        transaction = _capture_file_transaction(
+            [
+                run_dir / "video_manifest.md",
+                run_dir / "state.txt",
+                run_dir / "run_status.json",
+                run_dir / "p000_index.md",
+            ]
         )
+        try:
+            results = _record_manifest_narration_generation_results(
+                run_dir,
+                prepared,
+                provider_results,
+            )
+            failed = [result for result in results if result.get("status") == "failed"]
+            _append_narration_preview_state(
+                run_dir,
+                runtime_stage=(
+                    "narration_audio_candidates_ready"
+                    if not failed
+                    else "narration_generation_partial_failure"
+                ),
+                note=(
+                    f"generated {len(results) - len(failed)}/{len(results)} alternate narration candidates; "
+                    "current approvals remain unchanged"
+                ),
+            )
+        except Exception:
+            _restore_file_transaction(transaction)
+            raise
+        progress = read_run_progress(run_dir)
     return {
         "runId": req.run_id,
         "status": "completed" if not failed else "partial_failure",
-        "updated": update_result["updated"],
-        "audioReadyUpdated": audio_ready_updates,
-        "durationUpdated": duration_updates,
+        "updated": [str(entry["selector"]) for entry in prepared],
+        "audioReadyUpdated": [],
+        "durationUpdated": [],
+        "durationReady": False,
         "results": results,
+        "progress": progress,
+    }
+
+
+@router.post("/api/image-gen/narration-audio/approve")
+async def api_narration_audio_approve(req: NarrationAudioApproveRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            result = _approve_manifest_narration_audio(
+                run_dir,
+                item_id=req.item_id,
+                candidate_id=req.candidate_id,
+                expected_revision=req.expected_revision,
+                expected_tts_hash=req.expected_tts_hash,
+                note=req.note,
+            )
+            progress = read_run_progress(run_dir)
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"runId": req.run_id, "status": "approved", **result, "progress": progress}
+
+
+@router.post("/api/image-gen/narration-review/run")
+async def api_narration_review_run(req: NarrationReviewRunRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    review_run_id = uuid.uuid4().hex
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "run-p720-narration-l3.py"),
+        "--run-dir",
+        str(run_dir),
+    ]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(status_code=500, detail=f"p720 narration review failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "p720 narration review failed"
+        raise HTTPException(status_code=409, detail=detail)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            _manifest_path, _original_text, review_snapshot = _read_manifest_data(run_dir)
+            expected_text_set_hash = narration_text_set_hash(review_snapshot)
+            expected_input_hash = str(
+                build_narration_semantic_review_pack(
+                    review_snapshot,
+                    text_set_hash=expected_text_set_hash,
+                )["semantic_review_input_hash"]
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.stage": "narration_semantic_critics_running",
+                    "runtime.narration.phase": "review",
+                    "slot.p720.status": "in_progress",
+                    "slot.p720.note": "five independent full-run semantic critics are reviewing one frozen text set",
+                    "review.narration.semantic_critics.status": "in_progress",
+                    "review.narration.semantic_critics.text_set_hash": expected_text_set_hash,
+                    "review.narration.semantic_critics.input_hash": expected_input_hash,
+                    "review.narration.semantic_critics.review_run_id": review_run_id,
+                    "gate.narration_review": "required",
+                },
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    semantic_review = await _run_narration_semantic_review(
+        run_dir,
+        review_snapshot,
+        expected_text_set_hash=expected_text_set_hash,
+        expected_input_hash=expected_input_hash,
+    )
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            manifest_path, original_text, data = _read_manifest_data(run_dir)
+            active_review_run_id = str(
+                parse_state_file(run_dir / "state.txt").get(
+                    "review.narration.semantic_critics.review_run_id"
+                )
+                or ""
+            )
+            if active_review_run_id != review_run_id:
+                raise NarrationRevisionConflict(
+                    "a newer p720 semantic review superseded this result"
+                )
+            current_text_set_hash = narration_text_set_hash(data)
+            current_input_hash = str(
+                build_narration_semantic_review_pack(
+                    data,
+                    text_set_hash=current_text_set_hash,
+                )["semantic_review_input_hash"]
+            )
+            if (
+                current_text_set_hash != expected_text_set_hash
+                or current_input_hash != expected_input_hash
+            ):
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "runtime.stage": "narration_semantic_critics_stale",
+                        "slot.p720.status": "in_progress",
+                        "slot.p720.note": "narration or critic-visible context changed during semantic review; rerun p720",
+                        "review.narration.semantic_critics.status": "stale",
+                        "review.narration.semantic_critics.text_set_hash": expected_text_set_hash,
+                        "review.narration.semantic_critics.input_hash": expected_input_hash,
+                    },
+                )
+                raise NarrationRevisionConflict(
+                    "narration or critic-visible context changed while semantic critics were running; rerun p720"
+                )
+            if str(semantic_review.get("narration_text_set_hash") or "") != current_text_set_hash:
+                raise NarrationRevisionConflict(
+                    "semantic critic result is not bound to the current narration text set"
+                )
+            if str(semantic_review.get("semantic_review_input_hash") or "") != current_input_hash:
+                raise NarrationRevisionConflict(
+                    "semantic critic result is not bound to the current exact review pack"
+                )
+            validate_narration_semantic_aggregate(
+                semantic_review,
+                expected_text_set_hash=current_text_set_hash,
+                expected_semantic_review_input_hash=current_input_hash,
+            )
+            semantic_report_path, semantic_json_path, semantic_artifact_writes = (
+                _prepare_narration_semantic_review_artifacts(run_dir, semantic_review)
+            )
+            workflow = _dict_value(data.get("narration_workflow"))
+            workflow["schema_version"] = "narration_run_workflow_v1"
+            workflow["semantic_critic_review"] = _semantic_review_manifest_record(
+                semantic_review,
+                report_path=semantic_report_path,
+                json_path=semantic_json_path,
+            )
+            data["narration_workflow"] = workflow
+            review_blockers = _narration_review_blockers(
+                data,
+                semantic_artifact=semantic_review,
+            )
+            review_status = "passed" if not review_blockers else "changes_requested"
+            if review_status != "passed":
+                _invalidate_narration_run_approval(
+                    data,
+                    reason="p720 deterministic or semantic narration review requested changes",
+                )
+
+            transaction_paths = [
+                manifest_path,
+                run_dir / "state.txt",
+                run_dir / "run_status.json",
+                run_dir / "p000_index.md",
+                *semantic_artifact_writes,
+            ]
+            before_transaction = {
+                path: path.read_bytes() if path.is_file() else None
+                for path in transaction_paths
+            }
+            state_updates = {
+                "runtime.stage": (
+                    "narration_text_semantic_review_passed"
+                    if review_status == "passed"
+                    else "narration_text_semantic_review_changes_requested"
+                ),
+                "runtime.narration.phase": "review",
+                "slot.p720.status": "done" if review_status == "passed" else "blocked",
+                "slot.p720.note": (
+                    "deterministic checks and five independent full-run semantic critics passed"
+                    if review_status == "passed"
+                    else "p720 full-run narration review has unresolved findings"
+                ),
+                "review.narration.status": "approved" if review_status == "passed" else "changes_requested",
+                "review.narration.semantic_critics.status": str(semantic_review.get("status") or "changes_requested"),
+                "review.narration.semantic_critics.text_set_hash": current_text_set_hash,
+                "review.narration.semantic_critics.input_hash": current_input_hash,
+                "review.narration.semantic_critics.review_run_id": review_run_id,
+                "artifact.narration_semantic_review": semantic_report_path,
+                "artifact.narration_semantic_review_json": semantic_json_path,
+                "gate.narration_review": "required",
+            }
+            if review_status != "passed":
+                state_updates.update(
+                    {
+                        "status": "P720",
+                        "slot.p730.status": "blocked",
+                        "slot.p740.status": "blocked",
+                        "slot.p750.status": "blocked",
+                        "stage.narration.status": "in_progress",
+                    }
+                )
+            _backup_run_file(run_dir, "video_manifest.md", label="before_narration_semantic_review")
+            try:
+                for path, content in semantic_artifact_writes.items():
+                    _atomic_write_text(path, content)
+                _write_manifest_data(manifest_path, original_text, data)
+                append_state_snapshot(run_dir / "state.txt", state_updates)
+            except Exception:
+                for path, previous_content in before_transaction.items():
+                    if previous_content is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        _atomic_write_bytes(path, previous_content)
+                raise
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    arc_review = _dict_value(_dict_value(data.get("narration_workflow")).get("arc_review"))
+    arc_findings = [str(value) for value in _list_value(arc_review.get("findings"))]
+    cut_findings: list[dict[str, Any]] = []
+    for target in _manifest_scene_targets(data):
+        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        review = _dict_value(narration.get("review"))
+        keys = [str(value) for value in _list_value(review.get("agent_review_reason_keys")) if str(value)]
+        messages = [
+            str(value)
+            for value in _list_value(review.get("agent_review_reason_messages"))
+            if str(value)
+        ]
+        if review.get("agent_review_ok") is not True and (keys or messages):
+            cut_findings.append(
+                {
+                    "itemId": str(target["selector"]),
+                    "reasonKeys": keys,
+                    "messages": messages,
+                }
+            )
+    combined_findings = list(arc_findings)
+    for finding in cut_findings:
+        messages = finding["messages"] or finding["reasonKeys"]
+        combined_findings.extend(f"{finding['itemId']}: {message}" for message in messages)
+    semantic_findings = deepcopy(_list_value(semantic_review.get("findings")))
+    combined_findings.extend(
+        f"{str(finding.get('critic_label') or finding.get('critic_id') or 'semantic critic')}: "
+        f"{str(finding.get('message') or '')}"
+        for finding in semantic_findings
+        if isinstance(finding, dict)
+    )
+    return {
+        "runId": req.run_id,
+        "status": review_status,
+        "findings": combined_findings,
+        "arcFindings": arc_findings,
+        "cutFindings": cut_findings,
+        "semanticFindings": semantic_findings,
+        "semanticCritics": deepcopy(_list_value(semantic_review.get("critics"))),
+        "narrationTextSetHash": current_text_set_hash,
+        "semanticReviewInputHash": current_input_hash,
+        "report": semantic_report_path,
+        "arcReport": str(arc_review.get("report") or "narration_text_review.md"),
+        "semanticReport": semantic_report_path,
+        "stdout": result.stdout.strip(),
         "progress": read_run_progress(run_dir),
     }
+
+
+@router.post("/api/image-gen/narration-review/approve")
+async def api_narration_review_approve(req: NarrationRunApproveRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    try:
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            result = _approve_narration_full_run(
+                run_dir,
+                note=req.note,
+                expected_audio_set_hash=req.expected_audio_set_hash,
+                timeline=req.timeline,
+                listen_evidence=req.listen_evidence,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"runId": req.run_id, **result, "progress": read_run_progress(run_dir)}
 
 
 @router.post("/api/image-gen/video-generate")
@@ -9610,6 +12469,8 @@ async def api_render_inputs_freeze(req: RenderFreezeRequest) -> dict[str, Any]:
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             result = _freeze_render_inputs(run_dir, req)
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {**result, "runId": req.run_id, "progress": read_run_progress(run_dir)}
@@ -9622,9 +12483,637 @@ async def api_final_render(req: FinalRenderRequest) -> dict[str, Any]:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             freeze_result = _freeze_render_inputs(run_dir, req, snapshot_id=_now_stamp())
         result = await _run_final_render(run_dir, req, freeze_result)
+    except NarrationRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {**result, "runId": req.run_id, "progress": read_run_progress(run_dir)}
+
+
+def _bulk_generation_job_dir(run_dir: Path) -> Path:
+    return run_dir / "logs" / "image_generation_jobs"
+
+
+def _bulk_generation_job_path(run_dir: Path, job_id: str) -> Path:
+    if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        raise ValueError("invalid bulk generation job id")
+    return _bulk_generation_job_dir(run_dir) / f"{job_id}.json"
+
+
+def _persist_bulk_generation_job(job: dict[str, Any]) -> None:
+    run_dir = safe_run_dir(str(job.get("runId") or ""), ROOT)
+    path = _bulk_generation_job_path(run_dir, str(job.get("jobId") or ""))
+    _atomic_write_text(path, json.dumps(job, ensure_ascii=False, indent=2) + "\n")
+
+
+def _load_bulk_generation_job_path(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != BULK_GENERATION_JOB_SCHEMA:
+        return None
+    return payload
+
+
+def _bulk_generation_job_files(run_dir: Path) -> list[Path]:
+    directory = _bulk_generation_job_dir(run_dir)
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob("*.json"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+
+
+def _refresh_bulk_generation_job_counts(job: dict[str, Any]) -> None:
+    results = job.get("results") or []
+    for result in results:
+        candidates = result.get("candidates") or []
+        statuses = [str(candidate.get("status") or "queued") for candidate in candidates]
+        if any(status == "running" for status in statuses):
+            result["status"] = "running"
+        elif any(status == "queued" for status in statuses):
+            result["status"] = "queued"
+        elif statuses and all(status == "blocked" for status in statuses):
+            result["status"] = "blocked"
+        elif any(status in {"failed", "blocked"} for status in statuses):
+            result["status"] = "failed"
+        elif any(candidate.get("path") for candidate in candidates):
+            result["status"] = "completed"
+            result.pop("error", None)
+        else:
+            result["status"] = "failed"
+        if result.get("status") in {"failed", "blocked"}:
+            errors = [str(candidate.get("error") or "").strip() for candidate in candidates]
+            result["error"] = next((error for error in errors if error), "generation failed")
+
+    item_statuses = [str(result.get("status") or "queued") for result in results]
+    job["totalCount"] = len(results)
+    job["completedCount"] = sum(status == "completed" for status in item_statuses)
+    job["failedCount"] = sum(status in {"failed", "blocked"} for status in item_statuses)
+    job["runningCount"] = sum(status == "running" for status in item_statuses)
+    job["queuedCount"] = sum(status == "queued" for status in item_statuses)
+
+
+def _reconcile_bulk_generation_job_candidates(job: dict[str, Any], run_dir: Path) -> None:
+    """Merge validated run-local files without replacing transient job status."""
+    for result in job.get("results") or []:
+        item_id = str(result.get("itemId") or "").strip()
+        if not item_id:
+            continue
+        disk_candidates = list_candidate_items(run_dir, item_id)
+        candidates = result.setdefault("candidates", [])
+        by_index = {
+            int(candidate.get("index") or 0): candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        }
+        for disk_candidate in disk_candidates:
+            index = int(disk_candidate.get("index") or 0)
+            current = by_index.get(index)
+            if current is None:
+                current = dict(disk_candidate)
+                candidates.append(current)
+                by_index[index] = current
+                continue
+            if not current.get("path"):
+                current["path"] = disk_candidate.get("path")
+            if disk_candidate.get("mtimeMs") is not None:
+                current["mtimeMs"] = disk_candidate["mtimeMs"]
+        candidates.sort(key=lambda candidate: int(candidate.get("index") or 0))
+
+
+def _patch_bulk_generation_candidate(
+    job: dict[str, Any],
+    *,
+    item_id: str,
+    candidate_index: int,
+    patch: dict[str, Any],
+) -> None:
+    for result in job.get("results") or []:
+        if result.get("itemId") != item_id:
+            continue
+        for candidate in result.get("candidates") or []:
+            request_index = candidate.get("requestIndex", candidate.get("index"))
+            if int(request_index or 0) == candidate_index:
+                candidate.update(patch)
+                return
+    raise KeyError(f"bulk generation candidate not found: {item_id}:{candidate_index}")
+
+
+def _patch_bulk_generation_group(job: dict[str, Any], *, group_index: int, status: str) -> None:
+    for group in job.get("groups") or []:
+        if int(group.get("index") or 0) == group_index:
+            group["status"] = status
+            return
+
+
+def _interrupt_bulk_generation_job(job: dict[str, Any], message: str) -> None:
+    for result in job.get("results") or []:
+        for candidate in result.get("candidates") or []:
+            if candidate.get("status") in {"queued", "running"}:
+                candidate.update({"status": "failed", "error": message})
+    job.update(
+        {
+            "status": "interrupted",
+            "completedAt": now_iso(),
+            "error": message,
+        }
+    )
+
+
+def _fail_bulk_generation_job(job: dict[str, Any], message: str) -> None:
+    for result in job.get("results") or []:
+        for candidate in result.get("candidates") or []:
+            if candidate.get("status") in {"queued", "running"}:
+                candidate.update({"status": "failed", "error": message})
+    job.update(
+        {
+            "status": "failed",
+            "completedAt": now_iso(),
+            "error": message,
+        }
+    )
+
+
+async def _mutate_bulk_generation_job(
+    job_id: str,
+    mutation: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    async with _bulk_generation_jobs_lock:
+        job = _bulk_generation_jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"bulk generation job not found: {job_id}")
+        mutation(job)
+        run_dir = safe_run_dir(str(job.get("runId") or ""), ROOT)
+        _reconcile_bulk_generation_job_candidates(job, run_dir)
+        _refresh_bulk_generation_job_counts(job)
+        job["updatedAt"] = now_iso()
+        _persist_bulk_generation_job(job)
+        return deepcopy(job)
+
+
+def _prepare_bulk_generation_plan(
+    *,
+    run_dir: Path,
+    req: BulkGenerateRequest,
+) -> list[list[_BulkGenerationPlanItem]]:
+    canonical_item_list = load_request_items(run_dir, req.kind)
+    canonical_items = {item.id: item for item in canonical_item_list}
+    if not canonical_items:
+        raise ValueError(f"{req.kind} request file has no items")
+    canonical_output_paths = {
+        _run_relative_key(run_dir, str(item.output))
+        for item in canonical_item_list
+        if item.output
+    }
+    seen: set[str] = set()
+    plan_items: list[_BulkGenerationPlanItem] = []
+    for submitted in req.items:
+        if submitted.item_id in seen:
+            raise ValueError(f"duplicate bulk generation item: {submitted.item_id}")
+        seen.add(submitted.item_id)
+        canonical = canonical_items.get(submitted.item_id)
+        if canonical is None:
+            raise ValueError(f"bulk generation item is not in canonical request: {submitted.item_id}")
+        if not canonical.output:
+            raise ValueError(f"bulk generation item has no output: {submitted.item_id}")
+        # Older frontend builds omitted every reference when a deferred producer
+        # did not exist yet. Preserve the canonical inputs for that payload, but
+        # keep explicit reference edits independent from immutable canonical DAG
+        # edges so adding one unrelated reference cannot collapse generation
+        # groups or bypass a failed producer.
+        references = list(submitted.references) or list(canonical.references)
+        dependency_references = list(
+            dict.fromkeys(
+                ref
+                for ref in canonical.references
+                if _run_relative_key(run_dir, str(ref)) in canonical_output_paths
+            )
+        )
+        normalized = submitted.model_copy(
+            update={
+                "run_id": req.run_id,
+                "kind": req.kind,
+                "references": references,
+            }
+        )
+        plan_items.append(
+            _BulkGenerationPlanItem(
+                id=submitted.item_id,
+                output=str(canonical.output),
+                references=references,
+                dependency_references=dependency_references,
+                request=normalized,
+            )
+        )
+    groups = _build_generation_groups(plan_items, run_dir=run_dir, kind=req.kind)
+    _validate_generation_groups(groups, run_dir=run_dir, kind=req.kind)
+    return groups
+
+
+def _bulk_generation_fingerprint(
+    *,
+    run_id: str,
+    kind: str,
+    groups: list[list[_BulkGenerationPlanItem]],
+) -> str:
+    payload = {
+        "runId": run_id,
+        "kind": kind,
+        "groups": [
+            [
+                {
+                    "itemId": item.id,
+                    "output": item.output,
+                    "references": item.references,
+                    "dependencyReferences": item.dependency_references,
+                    "prompt": item.request.prompt,
+                    "promptPolicyVersion": item.request.prompt_policy_version,
+                    "debugPromptSource": item.request.debug_prompt_source,
+                    "candidateCount": item.request.candidate_count,
+                }
+                for item in group
+            ]
+            for group in groups
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _initial_bulk_generation_job(
+    *,
+    req: BulkGenerateRequest,
+    groups: list[list[_BulkGenerationPlanItem]],
+    fingerprint: str,
+) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    created_at = now_iso()
+    group_index_by_item = {
+        item.id: group_index
+        for group_index, group in enumerate(groups, start=1)
+        for item in group
+    }
+    plan_by_id = {item.id: item for group in groups for item in group}
+    results = []
+    for submitted in req.items:
+        plan = plan_by_id[submitted.item_id]
+        results.append(
+            {
+                "itemId": submitted.item_id,
+                "status": "queued",
+                "groupIndex": group_index_by_item[submitted.item_id],
+                "output": plan.output,
+                "references": list(plan.references),
+                "dependencyReferences": list(plan.dependency_references),
+                "candidates": [
+                    {"index": index, "requestIndex": index, "status": "queued", "path": None}
+                    for index in range(1, submitted.candidate_count + 1)
+                ],
+            }
+        )
+    job: dict[str, Any] = {
+        "schemaVersion": BULK_GENERATION_JOB_SCHEMA,
+        "jobId": job_id,
+        "runId": req.run_id,
+        "kind": req.kind,
+        "status": "queued",
+        "fingerprint": fingerprint,
+        "serverInstanceId": _BULK_GENERATION_SERVER_INSTANCE_ID,
+        "pid": os.getpid(),
+        "groupCount": len(groups),
+        "currentGroup": None,
+        "groups": [
+            {
+                "index": index,
+                "status": "queued",
+                "itemIds": [item.id for item in group],
+            }
+            for index, group in enumerate(groups, start=1)
+        ],
+        "results": results,
+        "createdAt": created_at,
+        "startedAt": None,
+        "updatedAt": created_at,
+        "completedAt": None,
+        "error": None,
+    }
+    _refresh_bulk_generation_job_counts(job)
+    return job
+
+
+def _loaded_bulk_generation_job(job: dict[str, Any]) -> dict[str, Any]:
+    try:
+        run_dir = safe_run_dir(str(job.get("runId") or ""), ROOT)
+    except (FileNotFoundError, ValueError):
+        run_dir = None
+    if run_dir is not None:
+        _reconcile_bulk_generation_job_candidates(job, run_dir)
+    if (
+        job.get("status") in {"queued", "running"}
+        and job.get("serverInstanceId") != _BULK_GENERATION_SERVER_INSTANCE_ID
+    ):
+        _interrupt_bulk_generation_job(
+            job,
+            "server restarted while image generation was running; start a new job to resume safely",
+        )
+        _refresh_bulk_generation_job_counts(job)
+        job["updatedAt"] = job["completedAt"]
+        _persist_bulk_generation_job(job)
+    return job
+
+
+def _bulk_generation_job_from_disk(job_id: str) -> dict[str, Any] | None:
+    if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        raise ValueError("invalid bulk generation job id")
+    for path in output_root(ROOT).glob(f"*/logs/image_generation_jobs/{job_id}.json"):
+        job = _load_bulk_generation_job_path(path)
+        if job is not None:
+            return _loaded_bulk_generation_job(job)
+    return None
+
+
+async def _run_bulk_generation_job(
+    *,
+    job_id: str,
+    run_dir: Path,
+    groups: list[list[_BulkGenerationPlanItem]],
+    requested_concurrency: int,
+) -> None:
+    plan_by_id = {item.id: item for group in groups for item in group}
+    output_to_item_id = {
+        _run_relative_key(run_dir, item.output): item.id
+        for group in groups
+        for item in group
+    }
+    successful_candidates: dict[str, dict[int, str]] = {
+        item_id: {} for item_id in plan_by_id
+    }
+    effective_parallelism = max(
+        1,
+        min(
+            int(requested_concurrency),
+            int(_effective_image_generation_parallelism()),
+        ),
+    )
+    semaphore = asyncio.Semaphore(effective_parallelism)
+
+    try:
+        await _mutate_bulk_generation_job(
+            job_id,
+            lambda job: job.update(
+                {
+                    "status": "running",
+                    "startedAt": now_iso(),
+                    "effectiveConcurrency": effective_parallelism,
+                }
+            ),
+        )
+        for group_index, group in enumerate(groups, start=1):
+            def start_group(job: dict[str, Any], index: int = group_index) -> None:
+                job["currentGroup"] = index
+                _patch_bulk_generation_group(job, group_index=index, status="running")
+
+            await _mutate_bulk_generation_job(job_id, start_group)
+
+            async def generate_candidate(plan: _BulkGenerationPlanItem, candidate_index: int) -> None:
+                async with semaphore:
+                    await _mutate_bulk_generation_job(
+                        job_id,
+                        lambda job: _patch_bulk_generation_candidate(
+                            job,
+                            item_id=plan.id,
+                            candidate_index=candidate_index,
+                            patch={"status": "running", "error": None},
+                        ),
+                    )
+                    resolved_references: list[str] = []
+                    blocked_reason: str | None = None
+
+                    def producer_candidate(reference: str) -> tuple[str | None, str | None]:
+                        producer_id = output_to_item_id.get(
+                            _run_relative_key(run_dir, reference)
+                        )
+                        if producer_id is None:
+                            return None, None
+                        producer_successes = successful_candidates.get(producer_id, {})
+                        producer_plan = plan_by_id[producer_id]
+                        replacement = producer_successes.get(candidate_index)
+                        if replacement is None and producer_plan.request.candidate_count == 1:
+                            replacement = producer_successes.get(1)
+                        return producer_id, replacement
+
+                    def add_resolved_reference(reference: str) -> None:
+                        if reference not in resolved_references:
+                            resolved_references.append(reference)
+
+                    for dependency_reference in plan.dependency_references:
+                        producer_id, replacement = producer_candidate(dependency_reference)
+                        if producer_id is None:
+                            add_resolved_reference(dependency_reference)
+                        elif replacement is None:
+                            blocked_reason = (
+                                f"dependency candidate unavailable: {producer_id} "
+                                f"candidate {candidate_index}"
+                            )
+                            break
+                        else:
+                            add_resolved_reference(replacement)
+
+                    for reference in plan.references:
+                        if blocked_reason is not None:
+                            break
+                        producer_id, replacement = producer_candidate(reference)
+                        if producer_id is None:
+                            add_resolved_reference(reference)
+                            continue
+                        if replacement is None:
+                            blocked_reason = (
+                                f"dependency candidate unavailable: {producer_id} "
+                                f"candidate {candidate_index}"
+                            )
+                            break
+                        add_resolved_reference(replacement)
+                    if blocked_reason is not None:
+                        await _mutate_bulk_generation_job(
+                            job_id,
+                            lambda job: _patch_bulk_generation_candidate(
+                                job,
+                                item_id=plan.id,
+                                candidate_index=candidate_index,
+                                patch={
+                                    "status": "blocked",
+                                    "path": None,
+                                    "error": blocked_reason,
+                                },
+                            ),
+                        )
+                        return
+
+                    request = plan.request.model_copy(
+                        update={"references": resolved_references}
+                    )
+                    try:
+                        candidate = await _generate_one(run_dir, request, candidate_index)
+                        candidate = dict(candidate)
+                        path = str(candidate.get("path") or "").strip()
+                        if path:
+                            _validate_run_relative_image_path(run_dir, path, must_exist=True)
+                            validate_image_bytes(resolve_run_relative(run_dir, path))
+                            successful_candidates[plan.id][candidate_index] = path
+                            candidate["status"] = "completed"
+                        else:
+                            candidate["status"] = "failed"
+                            candidate.setdefault("error", "generation did not import an image")
+                    except Exception as exc:
+                        candidate = {
+                            "index": candidate_index,
+                            "status": "failed",
+                            "path": None,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    await _mutate_bulk_generation_job(
+                        job_id,
+                        lambda job: _patch_bulk_generation_candidate(
+                            job,
+                            item_id=plan.id,
+                            candidate_index=candidate_index,
+                            patch=candidate,
+                        ),
+                    )
+
+            tasks = [
+                asyncio.create_task(generate_candidate(plan, candidate_index))
+                for plan in group
+                for candidate_index in range(1, plan.request.candidate_count + 1)
+            ]
+            await asyncio.gather(*tasks)
+            snapshot = await _mutate_bulk_generation_job(
+                job_id,
+                lambda job: _patch_bulk_generation_group(
+                    job,
+                    group_index=group_index,
+                    status="completed",
+                ),
+            )
+            if any(
+                result.get("groupIndex") == group_index
+                and result.get("status") in {"failed", "blocked"}
+                for result in snapshot.get("results") or []
+            ):
+                await _mutate_bulk_generation_job(
+                    job_id,
+                    lambda job: _patch_bulk_generation_group(
+                        job,
+                        group_index=group_index,
+                        status="completed_with_errors",
+                    ),
+                )
+
+        async with _bulk_generation_jobs_lock:
+            current = _bulk_generation_jobs[job_id]
+            has_failures = any(
+                result.get("status") in {"failed", "blocked"}
+                for result in current.get("results") or []
+            )
+        await _mutate_bulk_generation_job(
+            job_id,
+            lambda job: job.update(
+                {
+                    "status": "failed" if has_failures else "completed",
+                    "completedAt": now_iso(),
+                    "error": "one or more image items failed" if has_failures else None,
+                }
+            ),
+        )
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await _mutate_bulk_generation_job(
+                job_id,
+                lambda job: _interrupt_bulk_generation_job(
+                    job,
+                    "image generation job was cancelled",
+                ),
+            )
+        raise
+    except Exception as exc:
+        with suppress(Exception):
+            await _mutate_bulk_generation_job(
+                job_id,
+                lambda job: _fail_bulk_generation_job(
+                    job,
+                    f"{type(exc).__name__}: {exc}",
+                ),
+            )
+    finally:
+        _bulk_generation_tasks.pop(job_id, None)
+
+
+async def _create_bulk_generation_job(
+    *,
+    run_dir: Path,
+    req: BulkGenerateRequest,
+) -> dict[str, Any]:
+    groups = _prepare_bulk_generation_plan(run_dir=run_dir, req=req)
+    fingerprint = _bulk_generation_fingerprint(
+        run_id=req.run_id,
+        kind=req.kind,
+        groups=groups,
+    )
+    async with _bulk_generation_jobs_lock:
+        known_jobs = [
+            job
+            for job in _bulk_generation_jobs.values()
+            if job.get("runId") == req.run_id and job.get("kind") == req.kind
+        ]
+        known_ids = {str(job.get("jobId") or "") for job in known_jobs}
+        for path in _bulk_generation_job_files(run_dir):
+            disk_job = _load_bulk_generation_job_path(path)
+            if disk_job is None or str(disk_job.get("jobId") or "") in known_ids:
+                continue
+            known_jobs.append(_loaded_bulk_generation_job(disk_job))
+        existing = next(
+            (
+                job
+                for job in known_jobs
+                if job.get("fingerprint") == fingerprint
+                and job.get("status") in {"queued", "running"}
+            ),
+            None,
+        )
+        if existing is not None:
+            _bulk_generation_jobs[str(existing["jobId"])] = existing
+            return deepcopy(existing)
+        active = next(
+            (
+                job
+                for job in known_jobs
+                if job.get("status") in {"queued", "running"}
+            ),
+            None,
+        )
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"bulk image generation is already running: {active.get('jobId')}",
+            )
+        job = _initial_bulk_generation_job(
+            req=req,
+            groups=groups,
+            fingerprint=fingerprint,
+        )
+        _bulk_generation_jobs[str(job["jobId"])] = job
+        _persist_bulk_generation_job(job)
+
+    task = asyncio.create_task(
+        _run_bulk_generation_job(
+            job_id=str(job["jobId"]),
+            run_dir=run_dir,
+            groups=groups,
+            requested_concurrency=int(req.concurrency),
+        )
+    )
+    _bulk_generation_tasks[str(job["jobId"])] = task
+    return deepcopy(job)
 
 
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
@@ -9675,9 +13164,15 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
         },
     )
     async with _generation_semaphore, _global_image_generation_slot(provenance_policy):
-        client = create_codex_app_server_client(cwd=ROOT)
+        client = create_codex_app_server_client(
+            cwd=ROOT,
+            scrub_sensitive_env=True,
+            require_chatgpt_account=True,
+            require_chatgpt_pro=True,
+        )
         result = None
         debug_log = None
+        retention_record: dict[str, Any] | None = None
         try:
             await client.start()
             async with _generated_images_fallback_claim_scope(allow_generated_images_fallback):
@@ -9692,6 +13187,7 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                     generation_job_id=generation_job_id,
                     allow_generated_images_fallback=allow_generated_images_fallback,
                     provenance_policy=provenance_policy,
+                    timeout_seconds=max(1, int(IMAGE_GENERATION_ITEM_TIMEOUT_SECONDS)),
             )
             reject_local_raster_image_result(result, item_id=req.item_id)
             if (
@@ -9711,6 +13207,26 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
                     destination=destination,
                     prompt_sha256=prompt_sha256,
                     reference_sha256s=reference_sha256s,
+                )
+            if result.saved_path is not None:
+                retention_record = retain_first_image(
+                    result.saved_path,
+                    root=ROOT,
+                    run_id=run_dir.name,
+                    kind=req.kind,
+                    item_id=req.item_id,
+                    candidate_index=index,
+                    destination=destination.relative_to(run_dir).as_posix(),
+                    storage_role="candidate",
+                    provenance={
+                        "generationJobId": generation_job_id,
+                        "turnId": getattr(result, "turn_id", None),
+                        "imageGenerationItemId": getattr(result, "image_generation_item_id", None),
+                        "promptSha256": prompt_sha256,
+                        "referenceSha256s": reference_sha256s,
+                        "provenancePolicy": provenance_policy,
+                        "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
+                    },
                 )
         except Exception as exc:
             debug_log = write_app_server_image_debug_log(
@@ -9787,7 +13303,12 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "provenancePolicy": provenance_policy,
         }
     try:
-        copy_saved_image(result.saved_path, destination)
+        destination, index = copy_saved_image_to_new_candidate(
+            result.saved_path,
+            run_dir=run_dir,
+            item_id=req.item_id,
+            requested_index=index,
+        )
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=req.item_id,
@@ -9849,6 +13370,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
             "turnId": getattr(result, "turn_id", None),
             "provenancePolicy": provenance_policy,
             "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
+            "retainedFirstImage": bool(retention_record),
+            "retainedFirstImageCreated": bool(retention_record and retention_record.get("created")),
         },
     )
     return {
@@ -9861,6 +13384,8 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
         "generationJobId": generation_job_id,
         "provenancePolicy": provenance_policy,
         "provenanceAuthoritative": bool(getattr(result, "provenance_authoritative", False)),
+        "retainedFirstImage": bool(retention_record),
+        "retainedFirstImageCreated": bool(retention_record and retention_record.get("created")),
     }
 
 
@@ -9872,11 +13397,17 @@ async def api_generate(req: GenerateRequest) -> dict[str, Any]:
 
 
 @router.post("/api/image-gen/generate-bulk")
-async def api_generate_bulk(req: BulkGenerateRequest) -> dict[str, Any]:
+async def api_generate_bulk(req: BulkGenerateRequest) -> Any:
     run_dir = safe_run_dir(req.run_id, ROOT)
     total_candidates = sum(item.candidate_count for item in req.items)
     if total_candidates > 100:
         raise HTTPException(status_code=400, detail="bulk generation is limited to 100 total candidates")
+    if req.background:
+        try:
+            job = await _create_bulk_generation_job(run_dir=run_dir, req=req)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(status_code=202, content=job)
     normalized_items = [item.model_copy(update={"run_id": req.run_id, "kind": req.kind}) for item in req.items]
     candidates_by_item: list[list[dict[str, Any]]] = [[] for _ in normalized_items]
     semaphore = asyncio.Semaphore(min(req.concurrency, max(total_candidates, 1)))
@@ -9912,6 +13443,68 @@ async def api_generate_bulk(req: BulkGenerateRequest) -> dict[str, Any]:
     return {"runId": req.run_id, "kind": req.kind, "results": payload}
 
 
+@router.get("/api/image-gen/generate-bulk/{job_id}")
+async def api_generate_bulk_status(job_id: str) -> dict[str, Any]:
+    async with _bulk_generation_jobs_lock:
+        job = _bulk_generation_jobs.get(job_id)
+        if job is not None:
+            try:
+                run_dir = safe_run_dir(str(job.get("runId") or ""), ROOT)
+            except (FileNotFoundError, ValueError):
+                run_dir = None
+            if run_dir is not None:
+                _reconcile_bulk_generation_job_candidates(job, run_dir)
+                _refresh_bulk_generation_job_counts(job)
+            return deepcopy(job)
+    try:
+        job = _bulk_generation_job_from_disk(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="bulk generation job not found")
+    async with _bulk_generation_jobs_lock:
+        _bulk_generation_jobs[job_id] = job
+    return deepcopy(job)
+
+
+@router.get("/api/image-gen/runs/{run_id}/generate-bulk/active")
+async def api_active_generate_bulk_job(
+    run_id: str,
+    kind: str = Query(pattern="^(asset|scene)$"),
+) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id, ROOT)
+    async with _bulk_generation_jobs_lock:
+        jobs = [
+            deepcopy(job)
+            for job in _bulk_generation_jobs.values()
+            if job.get("runId") == run_id and job.get("kind") == kind
+        ]
+    for job in jobs:
+        _reconcile_bulk_generation_job_candidates(job, run_dir)
+        _refresh_bulk_generation_job_counts(job)
+    known_ids = {str(job.get("jobId") or "") for job in jobs}
+    for path in _bulk_generation_job_files(run_dir):
+        disk_job = _load_bulk_generation_job_path(path)
+        if (
+            disk_job is None
+            or disk_job.get("kind") != kind
+            or str(disk_job.get("jobId") or "") in known_ids
+        ):
+            continue
+        jobs.append(_loaded_bulk_generation_job(disk_job))
+    if not jobs:
+        raise HTTPException(status_code=404, detail="bulk generation job not found")
+    active_jobs = [job for job in jobs if job.get("status") in {"queued", "running"}]
+    candidates = active_jobs or jobs
+    latest = max(
+        candidates,
+        key=lambda job: str(job.get("updatedAt") or job.get("createdAt") or ""),
+    )
+    async with _bulk_generation_jobs_lock:
+        _bulk_generation_jobs[str(latest["jobId"])] = latest
+    return deepcopy(latest)
+
+
 @router.post("/api/image-gen/regenerate-prompts")
 async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
@@ -9932,6 +13525,24 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
         items = [item for item in items if item.id in requested_ids]
     if not items:
         raise HTTPException(status_code=400, detail="no matching prompt items")
+    v2_items = [item for item in items if str(getattr(item, "prompt_policy_version", "") or "") == "image_api_prompt_v2"]
+    if v2_items and kind != "scene":
+        raise HTTPException(status_code=409, detail="compiled_v2_recompile_is_supported_for_scene_items_only")
+    manifest_plans: dict[str, dict[str, Any]] = {}
+    if v2_items:
+        try:
+            _manifest_path, _manifest_original, manifest_data = _read_manifest_data(run_dir)
+            for item in v2_items:
+                target = _target_by_item_id(manifest_data, item.id)
+                if target is None:
+                    raise ValueError(f"video manifest target not found: {item.id}")
+                image_generation = _dict_value(_dict_value(target.get("cut")).get("image_generation"))
+                plan = _dict_value(image_generation.get("first_frame_visual_plan"))
+                if not plan:
+                    raise ValueError(f"compiled_v2_first_frame_visual_plan_missing: {item.id}")
+                manifest_plans[item.id] = deepcopy(plan)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     semaphore = asyncio.Semaphore(req.concurrency)
 
     async def regenerate_one(item: Any) -> dict[str, Any]:
@@ -9939,6 +13550,21 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
             client = create_codex_app_server_client(cwd=ROOT)
             try:
                 await _start_app_server_with_log(client, run_dir=run_dir, operation="prompt_regeneration", item_id=item.id)
+                if item.id in manifest_plans:
+                    patch = await _revise_v2_visual_plan_with_log(
+                        client,
+                        run_dir=run_dir,
+                        item=item_to_api(item),
+                        current_plan=manifest_plans[item.id],
+                        instruction=req.instruction,
+                        setting_content=setting["content"],
+                    )
+                    return {
+                        "itemId": item.id,
+                        "operation": "recompiled",
+                        "patch": patch,
+                        "expectedPlanHash": _json_hash(manifest_plans[item.id]),
+                    }
                 prompt = await _regenerate_prompt_with_log(
                     client,
                     run_dir=run_dir,
@@ -9948,35 +13574,100 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
                     setting_content=setting["content"],
                     operation="prompt_regeneration",
                 )
-                return {"itemId": item.id, "prompt": prompt}
+                return {"itemId": item.id, "prompt": prompt, "operation": "direct_update"}
             finally:
                 await client.stop()
 
     results = await asyncio.gather(*(regenerate_one(item) for item in items), return_exceptions=True)
     failures: list[dict[str, str]] = []
     prompts: dict[str, str] = {}
+    v2_revisions: dict[str, dict[str, Any]] = {}
     for item, result in zip(items, results, strict=False):
         if isinstance(result, Exception):
             failures.append({"itemId": item.id, "error": str(result)})
         else:
-            prompts[str(result["itemId"])] = str(result["prompt"])
+            item_id = str(result["itemId"])
+            if result.get("operation") == "recompiled":
+                v2_revisions[item_id] = {
+                    "patch": _dict_value(result.get("patch")),
+                    "expected_plan_hash": str(result.get("expectedPlanHash") or ""),
+                }
+            else:
+                prompts[item_id] = str(result["prompt"])
     if failures:
         raise HTTPException(status_code=500, detail={"status": "failed", "failures": failures})
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             async with _serialized_run_write(run_dir, f"{kind}_request_revision"):
-                update_result = update_request_prompts(run_dir, kind, prompts)
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                rollback_paths = (
+                    run_dir / "video_manifest.md",
+                    run_dir / "image_generation_requests.md",
+                    run_dir / "image_generation_request_snapshot.json",
+                    run_dir / "asset_generation_requests.md",
+                    run_dir / "asset_generation_request_snapshot.json",
+                )
+                before = _capture_file_transaction(rollback_paths)
+                try:
+                    compiled = _recompile_v2_scene_manifest(run_dir, v2_revisions) if v2_revisions else {}
+                    if v2_revisions:
+                        await _materialize_scene_requests(req.run_id)
+                    update_result = update_request_prompts(run_dir, kind, prompts) if prompts else {"updated": [], "missing": []}
+                    reloaded = {item.id: item for item in load_request_items(run_dir, kind)}
+                    missing_recompiled = sorted(set(v2_revisions) - set(reloaded))
+                    if missing_recompiled:
+                        raise ValueError(f"recompiled request items missing: {', '.join(missing_recompiled)}")
+                    if v2_revisions:
+                        append_state_snapshot(
+                            run_dir / "state.txt",
+                            {
+                                "runtime.stage": "prompt_recompiled_awaiting_image_generation",
+                                "review.frontend.prompt_recompile.status": "done",
+                                "review.frontend.prompt_recompile.items": ", ".join(v2_revisions),
+                                "review.semantic.image_prompt.status": "pending",
+                                "review.image.status": "pending",
+                                "slot.p650.status": "done",
+                                "slot.p650.note": "compiled-v2 scene requests rematerialized after frontend visual plan revision",
+                                "slot.p660.status": "pending",
+                                "slot.p670.status": "pending",
+                                "slot.p680.status": "pending",
+                                "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+                                "artifact.image_generation_requests": str((run_dir / "image_generation_requests.md").resolve()),
+                                "artifact.image_generation_request_snapshot": str(
+                                    (run_dir / "image_generation_request_snapshot.json").resolve()
+                                ),
+                            },
+                        )
+                except Exception:
+                    _restore_file_transaction(before)
+                    raise
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        status_code = 409 if "conflict" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     if update_result["missing"]:
         raise HTTPException(status_code=400, detail={"missingPromptSections": update_result["missing"]})
+    response_prompts = [
+        {
+            "itemId": item_id,
+            "prompt": str(reloaded[item_id].prompt),
+            "promptPolicyVersion": str(reloaded[item_id].prompt_policy_version or ""),
+            "operation": "recompiled",
+            "requestRevision": str(reloaded[item_id].request_revision or ""),
+            "sourceDigest": str(compiled[item_id].get("source_digest") or ""),
+            "compilerVersion": str(compiled[item_id].get("compiler_version") or ""),
+        }
+        for item_id in v2_revisions
+    ] + [
+        {"itemId": item_id, "prompt": prompt, "operation": "direct_update"}
+        for item_id, prompt in prompts.items()
+    ]
     return {
         "runId": req.run_id,
         "target": req.target,
         "kind": kind,
         "status": "completed",
-        "prompts": [{"itemId": item_id, "prompt": prompt} for item_id, prompt in prompts.items()],
-        "updated": update_result["updated"],
+        "operation": "recompiled" if v2_revisions else "direct_update",
+        "prompts": response_prompts,
+        "updated": [*v2_revisions.keys(), *update_result["updated"]],
         "missing": update_result["missing"],
     }
 

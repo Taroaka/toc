@@ -24,6 +24,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,12 @@ try:
     import yaml  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.story_duration import measure_manifest_runtime  # noqa: E402
 
 
 def extract_yaml_block(text: str) -> str:
@@ -164,6 +171,66 @@ def _is_intentional_silent(container: dict) -> bool:
     return (_as_opt_str(narration.get("tool")) or "").strip().lower() == "silent"
 
 
+def _has_complete_silence_contract(container: dict) -> bool:
+    audio = container.get("audio")
+    narration = audio.get("narration") if isinstance(audio, dict) else None
+    contract = narration.get("silence_contract") if isinstance(narration, dict) else None
+    return (
+        isinstance(contract, dict)
+        and contract.get("intentional") is True
+        and contract.get("confirmed_by_human") is True
+        and bool(str(contract.get("kind") or "").strip())
+        and bool(str(contract.get("reason") or "").strip())
+    )
+
+
+def _video_duration_seconds(container: dict, *, key_path: str) -> float | None:
+    video_generation = container.get("video_generation")
+    if not isinstance(video_generation, dict) or video_generation.get("duration_seconds") is None:
+        return None
+    raw = video_generation.get("duration_seconds")
+    try:
+        duration = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{key_path}: invalid video_generation.duration_seconds: {raw!r}") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise SystemExit(f"{key_path}: invalid video_generation.duration_seconds: {raw!r}")
+    return duration
+
+
+def _scene_video_timeline_seconds(scene: dict) -> float:
+    scene_id = scene.get("scene_id")
+    render_units = scene.get("render_units")
+    if isinstance(render_units, list) and render_units:
+        total = 0.0
+        for index, unit in enumerate(render_units, start=1):
+            if not isinstance(unit, dict):
+                raise SystemExit(f"scene{scene_id}_unit{index}: render unit must be a mapping")
+            if str(unit.get("cut_status") or unit.get("status") or "").strip().lower() == "deleted":
+                continue
+            unit_id = unit.get("unit_id") or index
+            duration = _video_duration_seconds(unit, key_path=f"scene{scene_id}_unit{unit_id}")
+            if duration is not None:
+                total += duration
+        return total
+
+    raw_cuts = scene.get("cuts")
+    nodes = raw_cuts if isinstance(raw_cuts, list) and raw_cuts else [scene]
+    total = 0.0
+    for index, node in enumerate(nodes, start=1):
+        if not isinstance(node, dict) or str(node.get("cut_status") or "").strip().lower() == "deleted":
+            continue
+        cut_id = node.get("cut_id") or index
+        duration = _video_duration_seconds(node, key_path=f"scene{scene_id}_cut{cut_id}")
+        if duration is not None:
+            total += duration
+    return total
+
+
+def _manifest_number(value: float) -> int | float:
+    return int(value) if float(value).is_integer() else round(float(value), 6)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync manifest durations/timestamps from narration audio lengths.")
     parser.add_argument("--manifest", required=True, help="Path to video_manifest.md")
@@ -214,14 +281,12 @@ def main() -> None:
     if not isinstance(scenes, list):
         raise SystemExit("Manifest YAML scenes must be a list.")
 
-    cursor = 0
-    total_video_seconds = 0
+    cursor = 0.0
     changed = 0
+    probed_durations: dict[Path, float] = {}
 
     def update_one_duration(*, container: dict, role: str, audio_out: str, key_path: str) -> int | None:
         nonlocal changed
-        if _is_intentional_silent(container):
-            return None
         audio_path = _resolve_path(base_dir, audio_out)
         if not audio_path:
             return None
@@ -232,6 +297,7 @@ def main() -> None:
             raise SystemExit(f"Missing narration audio: {audio_path}")
 
         dur_f = _ffprobe_duration_seconds(audio_path)
+        probed_durations[audio_path] = dur_f
         min_s, max_s = _role_bounds(role=role)
         if dur_f > max_s:
             raise SystemExit(f"{key_path}: narration is {dur_f:.2f}s (> {max_s}s). Split into multiple cuts.")
@@ -263,8 +329,6 @@ def main() -> None:
             continue
 
         scene_start = cursor
-        scene_video_seconds = 0
-
         raw_cuts = scene.get("cuts")
         if isinstance(raw_cuts, list) and raw_cuts:
             cut_count = len(raw_cuts)
@@ -274,6 +338,12 @@ def main() -> None:
 
                 audio = cut.get("audio")
                 narration = audio.get("narration") if isinstance(audio, dict) else None
+                if _is_intentional_silent(cut):
+                    if not _has_complete_silence_contract(cut):
+                        raise SystemExit(
+                            f"scene{scene.get('scene_id')}_cut{cut.get('cut_id')}: silent narration requires a complete silence_contract"
+                        )
+                    continue
                 narration_out = _as_opt_str(narration.get("output")) if isinstance(narration, dict) else None
                 if not narration_out:
                     continue
@@ -281,38 +351,61 @@ def main() -> None:
                 role = _infer_cut_role(cut=cut, cut_index=idx, cut_count=cut_count)
                 sid = scene.get("scene_id")
                 cid = cut.get("cut_id")
-                dur = update_one_duration(
+                update_one_duration(
                     container=cut,
                     role=role,
                     audio_out=narration_out,
                     key_path=f"scene{sid}_cut{cid}",
                 )
-                if dur is not None:
-                    scene_video_seconds += int(dur)
         else:
             audio = scene.get("audio")
             narration = audio.get("narration") if isinstance(audio, dict) else None
-            narration_out = _as_opt_str(narration.get("output")) if isinstance(narration, dict) else None
+            if _is_intentional_silent(scene):
+                if not _has_complete_silence_contract(scene):
+                    raise SystemExit(f"scene{scene.get('scene_id')}: silent narration requires a complete silence_contract")
+                narration_out = None
+            else:
+                narration_out = _as_opt_str(narration.get("output")) if isinstance(narration, dict) else None
             if narration_out:
                 sid = scene.get("scene_id")
-                dur = update_one_duration(container=scene, role="main", audio_out=narration_out, key_path=f"scene{sid}")
-                if dur is not None:
-                    scene_video_seconds += int(dur)
+                update_one_duration(container=scene, role="main", audio_out=narration_out, key_path=f"scene{sid}")
 
+        scene_video_seconds = _scene_video_timeline_seconds(scene)
         if scene_video_seconds > 0:
             cursor += scene_video_seconds
-            scene["timestamp"] = f"{_mmss(scene_start)}-{_mmss(cursor)}"
-            total_video_seconds = cursor
+            timestamp = f"{_mmss(scene_start)}-{_mmss(cursor)}"
+            if scene.get("timestamp") != timestamp:
+                scene["timestamp"] = timestamp
+                changed += 1
         else:
             # Keep timestamp null/unchanged for non-video scenes (e.g. reference images).
             pass
 
-    vm = manifest.get("video_metadata")
-    if isinstance(vm, dict):
+    def probe_for_measurement(path: Path) -> float | None:
+        if path in probed_durations:
+            return probed_durations[path]
+        if not path.exists():
+            return None
+        duration = _ffprobe_duration_seconds(path)
+        probed_durations[path] = duration
+        return duration
+
+    measurement = measure_manifest_runtime(manifest, base_dir=base_dir, probe=probe_for_measurement)
+    if not measurement.complete and not args.skip_missing_audio:
+        details = ", ".join([*measurement.missing_items, *measurement.invalid_items])
+        raise SystemExit(f"Manifest runtime measurement is incomplete: {details or 'unknown reason'}")
+
+    if measurement.complete:
+        vm = manifest.get("video_metadata")
+        if not isinstance(vm, dict):
+            vm = {}
+            manifest["video_metadata"] = vm
+            changed += 1
+        derived_duration = _manifest_number(measurement.effective_seconds)
         prev_total = vm.get("duration_seconds")
-        if prev_total != total_video_seconds:
-            print(f"[update] video_metadata.duration_seconds {prev_total!r} -> {total_video_seconds}")
-            vm["duration_seconds"] = int(total_video_seconds)
+        if prev_total != derived_duration:
+            print(f"[update] video_metadata.duration_seconds {prev_total!r} -> {derived_duration}")
+            vm["duration_seconds"] = derived_duration
             changed += 1
 
     if args.dry_run:

@@ -10,6 +10,8 @@ from toc.semantic_review import SEMANTIC_REVIEW_STAGES
 
 
 SPECIALIZED_COLLECTORS = {
+    "research": "toc.semantic_pack_foundation",
+    "story": "toc.semantic_pack_foundation",
     "scene_set": "toc.semantic_pack_scene",
     "scene_detail": "toc.semantic_pack_scene",
     "cut_blueprint": "toc.semantic_pack_scene",
@@ -324,6 +326,8 @@ def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None =
             if isinstance(entries, list) and (entries or stage != "cut_blueprint"):
                 return entries
         except Exception:
+            if stage in {"research", "story"}:
+                raise
             # Fall back to the conservative built-in collector so pack generation
             # stays available even when an optional specialized module is absent
             # or cannot parse an older run shape.

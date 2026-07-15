@@ -99,13 +99,14 @@ generator の既定参照順:
 記録先:
 - `video_manifest.md` の `scenes[]`
 
-## Cut（カット）設計: ナレーション起点（推奨）
+## Audio Story設計: 全編原稿からcutへanchorする（推奨）
 
 基本:
-- **1カット = 1ナレーション**
+- **cutは映像編集単位、narration spanは文章・演技単位**として分離する
+- **1 spanは1つ以上のcutをまたいでよい**。`1 cut = 1 narration` は互換defaultに留める
 - **メインカット**（最低1つ）: **5–15 秒**
 - **サブカット**（任意 / 複数可）: **3–15 秒**
-  - 1ナレーション=1カットのとき、3秒のカットは通常使わない（最短は5秒）
+  - 3秒のcutへ独立した短文を必ず置かず、前後spanの継続または無音を使う
   - 複数カットに分割できる場合のみ、短尺（3–4秒）を **サブカット**として選択できる
 - 例外:
   - `visual_value.md` に基づく **視覚報酬カット** は、**4秒固定 / ナレーションなし** を許可する
@@ -125,7 +126,11 @@ generator の既定参照順:
 3) p710 で `script.md` / `video_manifest.md` / 生成済み scene image を grounding し、image-to-voice の読み取りを行う
    - first frame / approved image から、見えている subject / action / emotion / location rule / handoff anchor を読む
    - `visual_distance.visible_facts_in_frame` と `visual_distance.narration_should_add` を確認し、声が映像をキャプション化しないようにする
-4) Narration Writer が、確定した visual に合わせて `audio.narration.text` と `audio.narration.tts_text` を確定する
+4) Narration Writer が、確定した visual に合わせて `script.md` を正本として全編音声を作る
+  - 先に `audio_story_plan`（narrator bible / audience state / open loop-payoff / causal handoff / silence budget）を作る
+  - 次にcut境界なしの `continuous_full_draft` を通しで書き、全編の反復・情報負荷・視点・問いの回収をreviewする
+  - 最後に `narration_spans[]` とcut anchorsへ割り当て、公開`text`とprovider用`tts_text`を分離する
+  - 承認後、`scripts/sync-narration-from-script.py` でmanifestへ一方向同期する。manifestを言語正本として直接育てない
   - `audio.narration.contract` を更新し、必要なら image 後の読み取りを反映する
     - `story_role.narrative_position`: `opening|middle|ending`
     - `story_role.cut_function`: `setup|pressure|threshold|turn|payoff|reaction|handoff`
@@ -152,47 +157,126 @@ generator の既定参照順:
    - 深い設計意図や抽象テーマは、基本的にナレーションで説明せず映像側へ置く
    - 終盤の学び/余韻パートだけ、満足感のために軽く言語化してよい
    - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
-5) Narration review を実行し、finding を source manifest に書き戻す
-  - `python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings`
-  - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、音声生成へ進めない
-  - p720 runner は deterministic reviewer で `audio.narration.review` を source manifest に書き戻し、その結果を `logs/eval/narration/round_01/critic_*.md` と `aggregated_review.md` へ L3 artifact として展開する
+5) Narration review を実行し、finding をhash付きでmanifestへ記録し、修正は`script.md`正本へ戻す
+  - CLIは決定論的検査を先、独立semantic criticを後の順で実行する
+
+    ```bash
+    python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings
+    python scripts/run-p720-narration-semantic.py --run-dir output/<run> --fail-on-findings
+    ```
+
+  - frontendでは「p720全編レビュー」が`POST /api/image-gen/narration-review/run`を呼ぶ。このendpointもlock付き
+    deterministic runnerを先に実行し、成功時の凍結snapshotに対して5つのapp-server semantic criticを実行する。
+    global/cut/semantic findingとreport pathを表示し、修正→候補試聴→再reviewをUI内で往復できる
+  - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、
+    p750の全編承認とvideo handoffへ進めない。frontendのp730 candidate previewは修正loop中にも行えるが、承認の代替にはならない
+  - `run-p720-narration-l3.py`はdeterministic reviewerであり、`audio.narration.review`と
+    `narration_workflow.arc_review`を書き戻す。`logs/eval/narration/round_01/critic_*.md`と`aggregated_review.md`は
+    rule findingを観点別に投影した互換artifactで、5つの独立LLM判定ではない
+  - `run-p720-narration-semantic.py`は同一のtext hashとexact semantic input hashへ束縛したfull-run packを、
+    別app-server threadの5 criticへ渡す
+    - `retention_hook`: 冒頭の約束、open loop、注意の更新、視聴継続
+    - `narrator_voice_persona`: narrator bible、知識境界、一人の語り手としての声
+    - `causal_information_rhythm`: 因果・reveal順、情報密度、理解と呼吸
+    - `audio_visual_distance`: 映像の字幕化、音声先取り、沈黙、映像へ追加する価値
+    - `payoff_ending`: audience promiseの回収、reaction、余韻
+  - semantic criticはstrict JSONを返し、aggregateを`narration_workflow.semantic_critic_review`と
+    `logs/eval/narration/semantic_critics/`へ保存する。app-server無効、実行失敗、欠落/malformed JSON、hash不一致は
+    passへfallbackせずblocking resultにする。input hashはvisual/contract/prompt/timingも含み、固定5 criticの完全性と
+    response/aggregate/report/json一致を保存時とp750時に検証する。隔離cwd、secret env除去、tool無効config、structured output、
+    instruction/data分離を使い、tool-like eventがあればfail closedにする。review中にtext/input hashまたはactive review idが
+    変わった結果は書き戻さずstaleとして再実行する
+  - p750では個別承認だけで終えず、approved audio / offset / cut末の間 / intentional silenceをcanonical順に通し再生する。
+    完走evidenceをcurrent audio set hashとtimelineへ束縛し、欠落・staleなら全編承認を拒否する
   - p720 では YouTube 由来の薄さ対策を必ず見る
     - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
     - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
     - 言葉の薄さ: `フォーマット` / `フレーム` / `フェーズ` / `構造` / `観点` のような抽象語を連発せず、次文で具体的な人物・行動・場所・物へ落とす
-  - p720 L3 critic の設計目標は次の 5 役。現行 runner がまだ v2-aware でない間は、critic report / aggregator report 内で同じ観点を明示して補う
-    - critic 1 `story_role`: cut role, voice function, must cover / must avoid, reveal timing
-    - critic 2 `visual_distance`: 映像説明の重複、image / motion との距離、camera / prompt 語の混入
-    - critic 3 `tts_delivery`: `tts_text`, pause, sentence length, audio tag, pronunciation candidates
-    - critic 4 `arc_and_pacing`: cut 間接続、scene voice arc、duration density、ending 余韻
-    - critic 5 `spoken_japanese`: 聞いたときの自然さ、AI っぽい抽象語、比喩過多、文末の単調さ
+  - deterministic reportの5分類は`tts_readiness` / `story_role` / `visual_redundancy` / `pacing` /
+    `spoken_japanese`であり、semantic criticの5役とは別契約である
   - p720 は設計目標として `logs/eval/narration/round_01/pronunciation_candidates.tsv` を作れる。現行 runner が直接 materialize しない場合は、aggregator report の pronunciation section か human handoff で候補を明示する
     - columns: `surface`, `reading`, `selector`, `reason`, `status`
     - p730 前に unresolved candidate を `tts_text` / alias file / official pronunciation dictionary / rejected のいずれかへ解決する
   - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
   - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
   - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
-  - aggregator は設計目標として、cut 単体の finding に加えて軽量な `narration_arc_review` を持てる
-    - 初期運用では scene-level の voice continuity / emotional curve / information flow / repetition control を warning として扱う
-    - full-run blocking gate 化は運用が安定してから行う
+  - aggregator はcut単体のfindingに加えてfull-run `narration_arc_review`を必須で持つ
+    - voice continuity / emotional curve / information flow / repetition / open-loop payoff / ending重複を確認する
+    - revision-aware runでは、結果を`narration_workflow.arc_review`へ書き、`status: passed`とcurrent
+      `narration_text_set_hash`の一致をp750/video handoffの必須条件にする
+    - hashは`audio_story_plan`、`narration_spans[]`、canonical cut順、各cutの公開/TTS文面、tool、span参照を束ねる。
+      どれかが変われば再reviewする
+    - full-run blocking finding が1件でも残る場合はp750のfinal audio承認へ進めない
+  - revision-aware p750はcurrent `narration_workflow.arc_review.status: passed`だけでなく、current
+    `narration_workflow.semantic_critic_review.status: passed`も必須にする。どちらも現在の`narration_text_set_hash`と一致させ、
+    semantic reviewは現在の`semantic_review_input_hash`とも一致させる
   - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
   - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
    - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
-6) 次に音声だけ生成して秒数を確定する（audio-only）
+6) revision-aware runでは、frontendでcurrent revisionに対する音声候補を生成し、cutごとに試聴承認する
+   - 文面保存/確定、候補生成、候補承認は別操作とする。生成成功を承認として扱わない
+   - save/silent/generate/approveは画面が読んだ`expected_revision`を渡す。generate/approveは
+     `expected_tts_hash`も渡し、古いtabや生成中更新からの書き戻しを拒否する
+   - provider実行前にeffective voice/model/settings、発音辞書、alias hashを含むimmutable request snapshotを作る
+   - `tts_generation_group_id`ごとにvoiced cutをcanonical順で並べ、各cutの直前/直後の`tts_text`を
+     ElevenLabs `previous_text` / `next_text`へ渡す。group idと前後文脈の`tts_continuity_hash`もsnapshotへ固定する
+   - output/candidate/個別承認はcut単位を維持する。隣接memberのTTS文面変更でcontinuity hashが変わった音声もstaleにする
+   - 生成完了時にrevision/hashが変わっていたcandidateは`stale`で保存するが、`output`へ昇格しない
+   - `output`は人間がcurrent candidateを承認した時だけ更新し、p750前にもfile content hashを再照合する
+7) legacy narrationだけは、次のCLIで音声だけ生成して秒数を確定できる（audio-only）
    - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
    - `--skip-narration-review` を付けない限り、この audio-only 実行は p730 前に p720 L3 runner を自動実行する
+   - revision-aware manifestではこの直接audio passを拒否する。frontend candidate/CAS/個別試聴を使い、CLIは`--skip-audio`で残りのassetだけを扱う
    - ElevenLabs の pronunciation dictionary を使う場合は、`ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS="dictionary_id:version_id"` または `--elevenlabs-pronunciation-dictionary-locator dictionary_id:version_id` を使う
    - repo 側の簡易読み替え表を使う場合は、`TOC_TTS_PRONUNCIATION_ALIAS_FILE=path/to/aliases.tsv` または `--tts-pronunciation-alias-file path/to/aliases.tsv` を使う
      - TSV 例: `売上	うりあげ`
      - `=>` 形式も可: `取得=>しゅとく`
    - 日本語では IPA/CMU より alias 型の読み替えを優先する。公式 pronunciation dictionary は最大 3 locator までを TTS request に渡す
-7) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
+8) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
    - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
-8) 実尺が target を満たすかを gate する
+9) 実尺が target を満たすかを p740 で gate する
    - `python scripts/check-audio-duration-gate.py --manifest output/<run>/video_manifest.md --run-dir output/<run>`
    - `cinematic_story` は既定で 300 秒以上を target にする
    - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
-   - gate を超えた run だけが video generation / render に進む
+   - gate を超えただけではrevision-aware runのvideo generation / renderへ進まない。p750の明示全編承認も必要
+10) frontendでp750を明示承認する
+   - 一覧取得時の`audioSetHash`を`expected_audio_set_hash`として送る。対象はcanonical cut順のcurrent
+     candidate/silence、source hash、output path/content hash、実測尺、toolを束ねた集合である
+   - `timeline[]`は全manifest cutをちょうど1回ずつcanonical順に含め、各itemで
+     `video_duration_seconds`と`narration_offset_seconds`を確定する
+   - durationは仮の既存値から短縮できるが、`ceil(audio duration + offset)`未満にはできない
+   - cut/render unitはprovider上限60秒以下にし、超える場合はp740で拒否して分割する
+   - 成功時に`narration_workflow.final_audio_review.approved_audio_set_hash`と`approved_timeline_hash`を固定する
+11) revision-aware renderはp750のexact bindingだけを使う
+   - render inputも全cut・同順・同duration・同offsetであることを要求する
+   - spoken cutへ別audio pathを差し替えず、silent cutの無音はserverが承認済みdurationからmaterializeする
+   - 文面、TTS、delivery、candidate、audio file、timelineが変わった場合はp750を再承認する
+
+### Frontend p720 <-> p730 resumable loop
+
+frontendは文面確定とTTS生成を途中入力できる。runtimeは次を別commandとして扱う。
+
+- `POST /api/image-gen/narration-text/save`: `script.md`正本へdraft/human_lockedを保存し、manifestへ同期
+- `POST /api/image-gen/narration-review/run`: deterministic arc/cut検査と5つの独立semantic criticを順に実行
+- `POST /api/image-gen/narration-generate`: current revision/hashからimmutable audio candidateを作成
+- `POST /api/image-gen/narration-audio/approve`: 人間が試聴したcurrent candidateだけをcut outputへ昇格
+- `POST /api/image-gen/narration-review/approve`: 全cutのcurrent audio/silenceとp740尺を再検証し、全編p750を明示承認
+
+各nodeはfull SHA-256とcompare-and-swap revisionを持つ。TTS実行中に文面が変わった場合、完了音声は
+revision別pathに`stale`候補として残すが、current output、duration、review、p750を更新しない。
+音声候補の生成成功は`human_review_ok`やp720/p750承認を意味しない。
+
+`scripts/toc-immersive-ride-generate.sh` はrevision-aware narrationを検出したらfrontendの代わりに候補生成しない。
+current p750が無い場合は`runtime.stage=narration_frontend_handoff`として停止する。frontendで全編承認を完了して
+同じCLIを再実行した場合だけ、video generation側へ継続する。`generate-assets-from-manifest.py`もrevision-aware音声の
+直接生成を拒否し、manifestから直接TTSを生成するCLI経路はlegacy互換だけに限定する。
+
+状態は次で固定する。
+
+- p720/p730往復中: `stage.narration.status=in_progress`。p720 doneにはcurrent deterministic arc passとsemantic critic passの両方が必要
+- p740合格・全編未承認: `stage.narration.status=awaiting_approval`, `slot.p750.status=awaiting_approval`
+- 全編明示承認後のみ: `stage.narration.status=done`, `slot.p750.status=done`
+- `gate.narration_review`はpolicyなので`required|optional|skipped`以外を書かない
 
 ### Narration Role Matrix
 
@@ -251,12 +335,15 @@ TTS に弱い文:
 
 render unit の扱い:
 
-- 標準では `1 cut = 1 narration = 1 video clip` でよい
+- 互換defaultでは`1 cut = 1 video clip`でよいが、narration span / TTS generation groupはcut境界から独立させる
 - ただし、複数 cut の narration を 1 本の動画で受けたい scene では、`video_manifest.md.scenes[].render_units[]` を使う
 - `render_units[]` は最終 render 用の動画クリップ単位で、`unit_id`, `source_cut_ids[]`, `video_generation` を持つ
 - cut は引き続き story / image / audio の正本のまま残す
 - scene に `render_units[]` がある場合、最終 render の動画正本は cut 側 `video_generation` ではなく render unit 側を使う
-- `video_clips.txt` は render unit 順、`video_narration_list.txt` は各 unit の `source_cut_ids[]` を flatten した順で作る
+- revision-aware renderでは`scripts/freeze-approved-render-inputs.py`を使い、`video_clips.txt` は render unit 順、
+  `video_narration_list.txt` は各 unit の `source_cut_ids[]` をflattenしたcanonical順で作る
+- narration listへはraw provider MP3ではなく、p750で承認したcut duration/offsetに合わせて先頭無音と末尾余白をmaterializeした音声を入れる。
+  unit durationはsource cut duration合計と一致させ、60秒を超えるunitは分割する
 - したがって `動画2本 / 音声3本` のような編集構成も、ffmpeg concat 前に manifest で明示できる
 
 silent cut の扱い:
@@ -264,7 +351,7 @@ silent cut の扱い:
 - `audio.narration.tool: "silent"` の cut は、Narration Writer の対象外としてよい
 - ただし renderable cut では、`audio.narration.silence_contract.intentional: true` と `confirmed_by_human: true` を必須にする
 - 追加カットで narration を入れない場合は、この `silence_contract` を使って「意図的に無音」と明示する
-- その場合でも `audio.narration.output` は持たせ、無音 mp3 を生成できる状態にする
+- revision-aware runでは`audio.narration.output`へ任意の無音pathを入れず、render freeze時にserverが承認尺から無音mp3を生成する
 - `video_generation.duration_seconds` は `4` 秒を基本にする
 - 最終音声連結では、その cut の `duration_seconds` 分の無音 mp3 が `video_narration_list.txt` 経由で連結される
 
@@ -367,4 +454,5 @@ ffmpeg -i sceneXX_compiled.mp4 \
 
 - `docs/video-generation.md`
 - `scripts/build-clip-lists.py`
+- `scripts/freeze-approved-render-inputs.py`
 - `scripts/render-video.sh`
