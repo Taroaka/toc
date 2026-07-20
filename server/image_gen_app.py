@@ -19,6 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 try:
@@ -79,7 +80,31 @@ from .codex_app_server import (
 )
 from toc.env import load_env_files
 from toc.http import HttpError
+from toc.asset_prompt_compiler import (
+    ASSET_PROMPT_COMPILER_VERSION,
+    ASSET_PROMPT_POLICY_VERSION,
+    asset_prompt_source_digest,
+    compile_asset_prompt,
+)
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
+from toc.video_prompt_compiler import (
+    VIDEO_API_PROMPT_POLICY_VERSION,
+    VIDEO_PROMPT_COMPILER_VERSION,
+    VIDEO_REFERENCE_ROLE_INSTRUCTIONS,
+    compile_video_api_prompt_v1,
+    compose_video_render_unit_contract,
+)
+from toc.video_prompt_projection_registry import resolve_video_prompt_contract
+from toc.video_provider_capabilities import resolve_video_provider_capabilities
+from toc.image_request_snapshot import (
+    ImageRequestSnapshotError,
+    bind_request_snapshot_references,
+    current_reference_sha256s,
+    load_request_snapshot,
+    materialize_request_snapshot,
+    sha256_canonical_json,
+    write_request_snapshot_atomic,
+)
 from toc.immersive_manifest import (
     is_non_renderable_manifest_node,
     make_scene_cut_selector,
@@ -459,6 +484,7 @@ class VideoPromptCreateRequest(BaseModel):
     items: list[FrontendReviewItem] = Field(min_length=1, max_length=256)
     note: str | None = Field(default=None, max_length=2000)
     replace_all: bool = True
+    approve_for_generation: bool = False
 
 
 class NarrationDraftCreateRequest(BaseModel):
@@ -480,11 +506,17 @@ class VideoGenerateItem(BaseModel):
     first_reference: str | None = Field(default=None, max_length=500)
     last_reference: str | None = Field(default=None, max_length=500)
     references: list[str] = Field(default_factory=list, max_length=32)
+    negative_prompt: str | None = Field(default=None, max_length=40000)
     quality: str = Field(default="1080p", pattern="^(720p|1080p|4K)$")
     aspect_ratio: str = Field(default="16:9", pattern="^(16:9|9:16|1:1|4:3)$")
     duration_seconds: int = Field(default=8, ge=1, le=VIDEO_GENERATION_DURATION_MAX_SECONDS)
     tool: str = Field(default="kling_3_0", pattern="^(kling_3_0|kling_3_0_omni|seedance)$")
     candidate_count: int = Field(default=3, ge=1, le=8)
+    prompt_policy_version: str | None = Field(default=None, max_length=100)
+    prompt_compiler_version: str | None = Field(default=None, max_length=100)
+    prompt_sha256: str | None = Field(default=None, max_length=80)
+    prompt_source_digest: str | None = Field(default=None, max_length=80)
+    provider_execution_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class VideoGenerateRequest(VideoGenerateItem):
@@ -860,39 +892,230 @@ def _extract_manifest_yaml_text(manifest_text: str) -> str:
     return manifest_text[start + 1 : end if end != -1 else len(manifest_text)]
 
 
-def _asset_prompt(*, topic: str, asset_kind: str, asset_id: str, output: str, fixed_prompts: list[str]) -> str:
-    details = "\n".join(f"- {item}" for item in fixed_prompts if item.strip()) or "- 後続cutで同じ参照画像として使える一貫した外観"
-    if asset_kind == "character":
-        target = "キャラクター参照画像"
-        rules = "顔、髪型、衣装、年齢感、体格、シルエットを固定する。"
-    elif asset_kind == "object":
-        target = "アイテム参照画像"
-        rules = "silhouette、材質、装飾、縮尺感、物語上の役割が一目で分かるように固定する。"
-    elif asset_kind == "style":
-        target = "スタイル参照画像"
-        rules = "後続cutが共有する画調、光、色、質感、レンズ感を固定する。特定人物や読める文字は入れない。"
-    else:
-        target = "場所参照画像"
-        rules = "spatial identity、主要構造、光環境、場所固有の空気を固定する。人物は入れない。"
-    return "\n".join(
-        [
-            "[素材設計]",
-            f"この画像は物語「{topic}」で後続cutが参照する{target}。",
-            "",
-            "[対象]",
-            f"{asset_id} / {output}",
-            "",
-            "[不変条件]",
-            details,
-            "",
-            "[生成方針]",
-            rules,
-            "実写、シネマティック。文字なし、ロゴなし、ウォーターマークなし。",
-            "",
-            "[禁止]",
-            "別物化、字幕、説明的UI、ロゴ、ウォーターマーク、読める文字。",
-        ]
+def _asset_prompt(
+    *,
+    topic: str,
+    asset_kind: str,
+    asset_id: str,
+    output: str,
+    fixed_prompts: list[str],
+    story_time: str = "",
+) -> str:
+    asset_type = {
+        "character": "character_reference",
+        "object": "object_reference",
+        "location": "location_reference",
+        "style": "style_reference",
+    }.get(asset_kind, f"{asset_kind}_reference")
+    return compile_asset_prompt(
+        {
+            "asset_id": asset_id,
+            "asset_type": asset_type,
+            "fixed_prompts": fixed_prompts,
+            "visual_spec": {"subject": (fixed_prompts or [asset_id])[0]},
+            "generation_plan": {"output": output, "reference_inputs": []},
+        },
+        topic_label=topic,
+        story_time=story_time,
     )
+
+
+def _asset_usage_by_id(manifest: dict[str, Any], id_key: str) -> dict[str, list[str]]:
+    usage: dict[str, list[str]] = {}
+    scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
+    for scene in scenes:
+        if not isinstance(scene, dict) or is_non_renderable_manifest_node(scene):
+            continue
+        scene_id = str(scene.get("scene_id") or "")
+        cuts = scene.get("cuts") if isinstance(scene.get("cuts"), list) else [scene]
+        for cut_index, cut in enumerate(cuts, start=1):
+            if not isinstance(cut, dict) or is_non_renderable_manifest_node(cut):
+                continue
+            selector = str(cut.get("selector") or "").strip()
+            if not selector:
+                selector = make_scene_cut_selector(
+                    scene_id,
+                    str(cut.get("cut_id") or cut_index),
+                )
+            image_generation = cut.get("image_generation") if isinstance(cut.get("image_generation"), dict) else {}
+            for asset_id in image_generation.get(id_key) or []:
+                normalized_id = str(asset_id or "").strip()
+                if normalized_id:
+                    usage.setdefault(normalized_id, []).append(selector)
+    return {key: list(dict.fromkeys(value)) for key, value in usage.items()}
+
+
+def _project_asset_plan_from_manifest(
+    run_dir: Path,
+    manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project reviewed asset bibles into the canonical asset-plan source."""
+
+    asset_plan_path = run_dir / "asset_plan.md"
+    original_plan_text = asset_plan_path.read_text(encoding="utf-8") if asset_plan_path.exists() else "# Asset Plan\n\n```yaml\nassets: []\n```\n"
+    try:
+        plan_data = yaml.safe_load(_extract_manifest_yaml_text(original_plan_text)) or {}
+    except yaml.YAMLError:
+        plan_data = {}
+    if not isinstance(plan_data, dict):
+        plan_data = {}
+    old_entries = plan_data.get("assets") if isinstance(plan_data.get("assets"), list) else []
+    old_entries = [deepcopy(entry) for entry in old_entries if isinstance(entry, dict)]
+    old_by_output: dict[str, dict[str, Any]] = {}
+    old_by_id: dict[str, list[dict[str, Any]]] = {}
+    for entry in old_entries:
+        generation_plan = entry.get("generation_plan") if isinstance(entry.get("generation_plan"), dict) else {}
+        output = str(generation_plan.get("output") or "").strip()
+        asset_id = str(entry.get("asset_id") or "").strip()
+        if output:
+            old_by_output[output] = entry
+        if asset_id:
+            old_by_id.setdefault(asset_id, []).append(entry)
+
+    usage_by_kind = {
+        "character_reference": _asset_usage_by_id(manifest, "character_ids"),
+        "object_reference": _asset_usage_by_id(manifest, "object_ids"),
+        "location_reference": _asset_usage_by_id(manifest, "location_ids"),
+    }
+    assets = manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {}
+    projected: list[dict[str, Any]] = []
+    claimed_old_entries: set[int] = set()
+
+    def append_nodes(
+        *,
+        nodes: Any,
+        id_key: str,
+        asset_type: str,
+        default_style: str,
+        default_forbidden: list[str],
+        default_views: list[str],
+    ) -> None:
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            asset_id = str(node.get(id_key) or node.get("asset_id") or "").strip()
+            if not asset_id:
+                continue
+            outputs = [str(value).strip() for value in node.get("reference_images") or [] if str(value).strip()]
+            for output in outputs:
+                existing = old_by_output.get(output)
+                if existing is None:
+                    existing = next(
+                        (candidate for candidate in old_by_id.get(asset_id, []) if id(candidate) not in claimed_old_entries),
+                        None,
+                    )
+                if existing is not None:
+                    claimed_old_entries.add(id(existing))
+                entry = deepcopy(existing) if existing is not None else {}
+                cinematic = node.get("cinematic") if isinstance(node.get("cinematic"), dict) else {}
+                fixed_prompts = [str(value).strip() for value in node.get("fixed_prompts") or [] if str(value).strip()]
+                visual_spec = entry.get("visual_spec") if isinstance(entry.get("visual_spec"), dict) else {}
+                visual_spec = deepcopy(visual_spec)
+                subject = str(cinematic.get("visual_subject") or "").strip()
+                if subject:
+                    visual_spec["subject"] = subject
+                elif not str(visual_spec.get("subject") or "").strip() and fixed_prompts:
+                    visual_spec["subject"] = fixed_prompts[0]
+                visual_spec.setdefault("style", default_style)
+                visual_spec.setdefault("forbidden", default_forbidden)
+
+                generation_plan = entry.get("generation_plan") if isinstance(entry.get("generation_plan"), dict) else {}
+                generation_plan = deepcopy(generation_plan)
+                explicit_reference_inputs: list[str] | None = None
+                for key in ("generation_references", "reference_inputs"):
+                    if key in node:
+                        explicit_reference_inputs = [
+                            str(value).strip() for value in node.get(key) or [] if str(value).strip()
+                        ]
+                        break
+                reference_inputs = (
+                    explicit_reference_inputs
+                    if explicit_reference_inputs is not None
+                    else [str(value).strip() for value in generation_plan.get("reference_inputs") or [] if str(value).strip()]
+                )
+                generation_plan.update(
+                    {
+                        "execution_lane": "standard" if reference_inputs else "bootstrap_builtin",
+                        "bootstrap_allowed": not reference_inputs,
+                        "required_views": generation_plan.get("required_views") or default_views,
+                        "reference_inputs": reference_inputs,
+                        "output": output,
+                    }
+                )
+                role = str(cinematic.get("role") or "").strip()
+                entry.update(
+                    {
+                        "asset_id": asset_id,
+                        "asset_type": asset_type,
+                        "source_script_selectors": usage_by_kind.get(asset_type, {}).get(asset_id, []),
+                        "story_purpose": role or str(entry.get("story_purpose") or "").strip(),
+                        "fixed_prompts": fixed_prompts,
+                        "visual_spec": visual_spec,
+                        "generation_plan": generation_plan,
+                        "review": entry.get("review") or {"status": "approved", "reason": "reviewed asset bible projection"},
+                    }
+                )
+                if "generation_prompt" in node:
+                    entry["generation_prompt"] = str(node.get("generation_prompt") or "").strip()
+                else:
+                    # The reviewed manifest bible is canonical.  Never let an
+                    # explicit prompt from an older asset-plan revision bypass
+                    # newly reviewed fixed prompts or visual subjects.
+                    entry.pop("generation_prompt", None)
+                projected.append(entry)
+
+    append_nodes(
+        nodes=assets.get("character_bible"),
+        id_key="character_id",
+        asset_type="character_reference",
+        default_style="photorealistic live-action cinematic",
+        default_forbidden=["文字", "ロゴ", "アニメ"],
+        default_views=["front", "side", "back"],
+    )
+    append_nodes(
+        nodes=assets.get("object_bible"),
+        id_key="object_id",
+        asset_type="object_reference",
+        default_style="photorealistic live-action product still",
+        default_forbidden=["文字", "ロゴ", "玩具風"],
+        default_views=["front"],
+    )
+    append_nodes(
+        nodes=assets.get("location_bible"),
+        id_key="location_id",
+        asset_type="location_reference",
+        default_style="photorealistic live-action cinematic location still",
+        default_forbidden=["文字", "ロゴ", "人物主役", "アニメ"],
+        default_views=["wide"],
+    )
+
+    style_guide = assets.get("style_guide") if isinstance(assets.get("style_guide"), dict) else {}
+    style_refs = [str(value).strip() for value in style_guide.get("reference_images") or [] if str(value).strip()]
+    if style_refs:
+        append_nodes(
+            nodes=[
+                {
+                    "asset_id": "style_guide",
+                    "reference_images": style_refs,
+                    "fixed_prompts": [str(style_guide.get("visual_style") or "").strip()],
+                    "cinematic": {"visual_subject": str(style_guide.get("visual_style") or "").strip()},
+                    "generation_prompt": str(style_guide.get("generation_prompt") or "").strip(),
+                }
+            ],
+            id_key="asset_id",
+            asset_type="style_reference",
+            default_style=str(style_guide.get("visual_style") or "photorealistic live-action cinematic"),
+            default_forbidden=[str(value) for value in style_guide.get("forbidden") or [] if str(value).strip()],
+            default_views=["wide"],
+        )
+
+    updated_plan = deepcopy(plan_data)
+    updated_plan["assets"] = projected
+    if updated_plan != plan_data or not asset_plan_path.exists():
+        _write_manifest_data(asset_plan_path, original_plan_text, updated_plan)
+    return projected
 
 
 def _asset_entries_from_manifest(run_dir: Path) -> list[dict[str, Any]]:
@@ -901,55 +1124,32 @@ def _asset_entries_from_manifest(run_dir: Path) -> list[dict[str, Any]]:
     data = yaml.safe_load(_extract_manifest_yaml_text(manifest_text)) or {}
     if not isinstance(data, dict):
         return []
-    topic = str((data.get("video_metadata") or {}).get("topic") or data.get("topic") or run_dir.name)
-    assets = data.get("assets") if isinstance(data.get("assets"), dict) else {}
+    video_metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
+    topic = str(video_metadata.get("topic") or data.get("topic") or run_dir.name)
+    story_time = str(video_metadata.get("time") or "").strip()
     entries: list[dict[str, Any]] = []
-
-    def append_refs(kind: str, nodes: Any, id_key: str) -> None:
-        if not isinstance(nodes, list):
-            return
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            asset_id = str(node.get(id_key) or node.get("asset_id") or "").strip() or kind
-            fixed = [str(item) for item in node.get("fixed_prompts") or [] if str(item).strip()]
-            for ref in node.get("reference_images") or []:
-                output = str(ref or "").strip()
-                if not output:
-                    continue
-                selector = Path(output).stem
-                entries.append(
-                    {
-                        "selector": selector,
-                        "tool": "codex_builtin_image",
-                        "asset_type": f"{kind}_reference" if kind != "location" else "location_anchor",
-                        "execution_lane": "bootstrap_builtin",
-                        "reference_count": 0,
-                        "output": output,
-                        "prompt": _asset_prompt(topic=topic, asset_kind=kind, asset_id=asset_id, output=output, fixed_prompts=fixed),
-                    }
-                )
-
-    append_refs("character", assets.get("character_bible"), "character_id")
-    append_refs("object", assets.get("object_bible"), "object_id")
-    append_refs("location", assets.get("location_bible"), "location_id")
-    style_guide = assets.get("style_guide") if isinstance(assets.get("style_guide"), dict) else {}
-    style_prompts = [str(style_guide.get("visual_style") or "").strip()]
-    style_prompts.extend(str(item) for item in style_guide.get("forbidden") or [] if str(item).strip())
-    for ref in style_guide.get("reference_images") or []:
-        output = str(ref or "").strip()
+    for plan_index, plan_entry in enumerate(_project_asset_plan_from_manifest(run_dir, data), start=1):
+        generation_plan = plan_entry.get("generation_plan") if isinstance(plan_entry.get("generation_plan"), dict) else {}
+        output = str(generation_plan.get("output") or "").strip()
         if not output:
             continue
-        selector = Path(output).stem
+        asset_id = str(plan_entry.get("asset_id") or f"asset_{plan_index}").strip()
+        asset_type = str(plan_entry.get("asset_type") or "asset_reference").strip()
+        references = [str(value).strip() for value in generation_plan.get("reference_inputs") or [] if str(value).strip()]
         entries.append(
             {
-                "selector": selector,
+                "asset_id": asset_id,
+                "selector": f"{asset_type}_{asset_id}",
                 "tool": "codex_builtin_image",
-                "asset_type": "style_reference",
-                "execution_lane": "bootstrap_builtin",
-                "reference_count": 0,
+                "asset_type": asset_type,
+                "execution_lane": "standard" if references else "bootstrap_builtin",
+                "references": references,
                 "output": output,
-                "prompt": _asset_prompt(topic=topic, asset_kind="style", asset_id="style_guide", output=output, fixed_prompts=style_prompts),
+                "prompt": compile_asset_prompt(
+                    plan_entry,
+                    topic_label=topic,
+                    story_time=story_time,
+                ),
             }
         )
     return entries
@@ -957,6 +1157,37 @@ def _asset_entries_from_manifest(run_dir: Path) -> list[dict[str, Any]]:
 
 def _write_asset_request_files(run_dir: Path) -> list[dict[str, Any]]:
     entries = _asset_entries_from_manifest(run_dir)
+    try:
+        existing_by_output = {
+            str(item.output or ""): item
+            for item in load_request_items(run_dir, "asset")
+            if str(item.output or "").strip()
+        }
+    except (ImageRequestSnapshotError, ValueError):
+        existing_by_output = {}
+    used_selectors: set[str] = set()
+    for entry in entries:
+        references = [str(value) for value in entry.get("references") or [] if str(value).strip()]
+        existing = existing_by_output.get(str(entry["output"]))
+        existing_selector = str(existing.id or "").strip() if existing is not None else ""
+        if existing_selector and existing_selector not in used_selectors:
+            selector = existing_selector
+        else:
+            selector = _safe_artifact_id(str(entry.get("selector") or entry.get("asset_id") or "asset"))
+            if selector in used_selectors:
+                selector = f"{selector}_{hashlib.sha256(str(entry['output']).encode('utf-8')).hexdigest()[:8]}"
+        used_selectors.add(selector)
+        entry["selector"] = selector
+        entry["references"] = references
+        entry["reference_count"] = len(references)
+        entry["execution_lane"] = "standard" if references else "bootstrap_builtin"
+        entry["prompt_policy_version"] = ASSET_PROMPT_POLICY_VERSION
+        entry["compiler_version"] = ASSET_PROMPT_COMPILER_VERSION
+        entry["source_digest"] = asset_prompt_source_digest(
+            prompt=str(entry["prompt"]),
+            output=str(entry["output"]),
+            references=references,
+        )
     lines = ["# Asset Generation Requests", ""]
     for entry in entries:
         lines.extend(
@@ -964,13 +1195,18 @@ def _write_asset_request_files(run_dir: Path) -> list[dict[str, Any]]:
                 f"## {entry['selector']}",
                 "",
                 f"- tool: `{entry['tool']}`",
+                f"- prompt_policy_version: `{entry['prompt_policy_version']}`",
                 f"- asset_type: `{entry['asset_type']}`",
                 f"- execution_lane: `{entry['execution_lane']}`",
                 f"- reference_count: `{entry['reference_count']}`",
                 f"- output: `{entry['output']}`",
-                "- references: `[]`",
+                *(
+                    ["- references:", *[f"  - `参照画像{index}`: `{reference}`" for index, reference in enumerate(entry["references"], start=1)]]
+                    if entry["references"]
+                    else ["- references: `[]`"]
+                ),
                 "",
-                "```text",
+                "```api_prompt",
                 str(entry["prompt"]).strip(),
                 "```",
                 "",
@@ -993,6 +1229,31 @@ def _write_asset_request_files(run_dir: Path) -> list[dict[str, Any]]:
         manifest_lines.append("  []")
     manifest_lines.append("```")
     (run_dir / "asset_generation_manifest.md").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+    if entries:
+        snapshot = materialize_request_snapshot(
+            run_dir,
+            kind="asset",
+            items=[
+                {
+                    "item_id": entry["selector"],
+                    "destination": entry["output"],
+                    "prompt": entry["prompt"],
+                    "prompt_policy_version": entry["prompt_policy_version"],
+                    "compiler_version": entry["compiler_version"],
+                    "source_digest": entry["source_digest"],
+                    "references": entry["references"],
+                }
+                for entry in entries
+            ],
+            source_artifact="asset_generation_requests.md",
+        )
+        write_request_snapshot_atomic(
+            run_dir / "asset_generation_request_snapshot.json",
+            snapshot,
+            run_dir=run_dir,
+        )
+    else:
+        (run_dir / "asset_generation_request_snapshot.json").unlink(missing_ok=True)
     return entries
 
 
@@ -1179,6 +1440,747 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3)
     return issues, required_outputs
 
 
+def _validate_image_prompt_request_revision(
+    run_dir: Path,
+    manifest_data: dict[str, Any],
+    *,
+    require_resolved_references: bool = False,
+    require_compiled_v2: bool = False,
+) -> str:
+    """Verify the scene request snapshot against Markdown and manifest v2 payloads."""
+
+    snapshot_path = run_dir / "image_generation_request_snapshot.json"
+    if not snapshot_path.is_file():
+        raise RuntimeError(
+            "ToC run did not reach p650: missing image_generation_request_snapshot.json"
+        )
+    try:
+        snapshot = load_request_snapshot(
+            snapshot_path,
+            run_dir=run_dir,
+            verify_references=True,
+        )
+    except ImageRequestSnapshotError as exc:
+        raise RuntimeError(
+            f"ToC run did not reach p650: invalid image request snapshot: {exc}"
+        ) from exc
+    if snapshot.kind != "scene":
+        raise RuntimeError(
+            f"ToC run did not reach p650: image request snapshot kind must be scene, got {snapshot.kind}"
+        )
+    try:
+        markdown_items = load_request_items(run_dir, "scene")
+    except (ImageRequestSnapshotError, ValueError) as exc:
+        raise RuntimeError(
+            f"ToC run did not reach p650: request Markdown/snapshot mismatch: {exc}"
+        ) from exc
+    if {item.id for item in markdown_items} != {item.item_id for item in snapshot.items}:
+        raise RuntimeError(
+            "ToC run did not reach p650: request Markdown/snapshot item mismatch"
+        )
+    if require_resolved_references:
+        try:
+            for item in snapshot.items:
+                deferred = [reference.path for reference in item.references if reference.deferred]
+                if deferred:
+                    raise ImageRequestSnapshotError(
+                        f"snapshot still defers references for {item.item_id}: {', '.join(deferred)}"
+                    )
+                current_reference_sha256s(run_dir, item, allow_deferred=False)
+        except ImageRequestSnapshotError as exc:
+            raise RuntimeError(
+                f"ToC run did not reach p650: unresolved image request reference: {exc}"
+            ) from exc
+
+    targets = _manifest_scene_targets(manifest_data)
+    frontend_v2_contract = str(manifest_data.get("schema_version") or "") == "scene_event_v1"
+    matched_selectors: set[str] = set()
+    for item in snapshot.items:
+        target = next(
+            (candidate for candidate in targets if item.item_id in candidate["aliases"]),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"ToC run did not reach p650: snapshot item is absent from manifest: {item.item_id}"
+            )
+        selector = str(target["selector"])
+        matched_selectors.add(selector)
+        node = target["cut"] if isinstance(target.get("cut"), dict) else {}
+        image_generation = (
+            node.get("image_generation")
+            if isinstance(node.get("image_generation"), dict)
+            else {}
+        )
+        output = str(image_generation.get("output") or "").strip()
+        if item.destination != output:
+            raise RuntimeError(
+                f"ToC run did not reach p650: snapshot/manifest output mismatch for {selector}"
+            )
+        payload = image_generation.get("api_prompt_payload")
+        payload = payload if isinstance(payload, dict) else {}
+        policy_version = str(payload.get("policy_version") or "").strip()
+        plan = image_generation.get("first_frame_visual_plan")
+        has_v1_plan = isinstance(plan, dict) and str(plan.get("schema_version") or "") == "first_frame_visual_plan_v1"
+        if (
+            require_compiled_v2
+            and (frontend_v2_contract or has_v1_plan)
+            and policy_version != "image_api_prompt_v2"
+        ):
+            raise RuntimeError(
+                f"ToC run did not reach p650: compiled v2 manifest payload required for {selector}"
+            )
+        if policy_version != "image_api_prompt_v2":
+            if item.prompt_policy_version == "image_api_prompt_v2":
+                raise RuntimeError(
+                    f"ToC run did not reach p650: v2 snapshot item lacks v2 manifest payload for {selector}"
+                )
+            continue
+        expected = {
+            "prompt": str(payload.get("prompt") or ""),
+            "prompt_policy_version": policy_version,
+            "compiler_version": str(payload.get("compiler_version") or ""),
+            "source_digest": str(payload.get("source_digest") or ""),
+            "prompt_sha256": str(payload.get("sha256") or ""),
+        }
+        actual = {
+            "prompt": item.prompt,
+            "prompt_policy_version": item.prompt_policy_version,
+            "compiler_version": item.compiler_version,
+            "source_digest": item.source_digest,
+            "prompt_sha256": item.prompt_sha256,
+        }
+        mismatched = [key for key, value in expected.items() if value != actual[key]]
+        manifest_references = [
+            str(value).strip()
+            for value in payload.get("reference_images") or []
+            if str(value).strip()
+        ]
+        snapshot_references = [reference.path for reference in item.references]
+        if manifest_references != snapshot_references:
+            mismatched.append("reference_images")
+        if mismatched:
+            raise RuntimeError(
+                "ToC run did not reach p650: snapshot/manifest revision mismatch "
+                f"for {selector}: {', '.join(mismatched)}"
+            )
+
+    missing_v2_targets = [
+        str(target["selector"])
+        for target in targets
+        if str(
+            (
+                (
+                    target["cut"].get("image_generation")
+                    if isinstance(target.get("cut"), dict)
+                    and isinstance(target["cut"].get("image_generation"), dict)
+                    else {}
+                ).get("api_prompt_payload")
+                or {}
+            ).get("policy_version")
+            or ""
+        )
+        == "image_api_prompt_v2"
+        and str(target["selector"]) not in matched_selectors
+    ]
+    if missing_v2_targets:
+        raise RuntimeError(
+            "ToC run did not reach p650: v2 manifest cuts missing from request snapshot "
+            + ", ".join(missing_v2_targets)
+        )
+    return snapshot.request_revision
+
+
+def _image_prompt_story_review_scalar(report_text: str, key: str) -> str:
+    match = re.search(
+        rf"(?mi)^\s*-?\s*{re.escape(key)}\s*:\s*`?([^`\n]+?)`?\s*$",
+        report_text,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _deterministic_image_prompt_review_sources_are_current(run_dir: Path) -> bool:
+    report_path = run_dir / "image_prompt_story_review.md"
+    source_paths = [run_dir / name for name in ("story.md", "script.md", "video_manifest.md")]
+    if not report_path.is_file() or any(not path.is_file() for path in source_paths):
+        return False
+    report_mtime_ns = report_path.stat().st_mtime_ns
+    return all(path.stat().st_mtime_ns <= report_mtime_ns for path in source_paths)
+
+
+def _deterministic_image_prompt_review_sections(
+    report_text: str,
+) -> list[tuple[str, str]]:
+    headings = list(re.finditer(r"(?m)^##\s+([^\r\n]+?)\s*$", report_text))
+    sections: list[tuple[str, str]] = []
+    for index, heading in enumerate(headings):
+        selector = heading.group(1).strip().strip("`\"'")
+        body_start = heading.end()
+        body_end = headings[index + 1].start() if index + 1 < len(headings) else len(report_text)
+        sections.append((selector, report_text[body_start:body_end]))
+    return sections
+
+
+def _canonical_deterministic_image_prompt_selector(value: Any) -> str:
+    raw = str(value or "").strip().strip("`\"'")
+    match = re.fullmatch(
+        r"scene[_:]?([0-9]+(?:\.[0-9]+)*)[_-]?cut[_:]?([0-9]+(?:\.[0-9]+)*)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return raw
+    return make_scene_cut_selector(match.group(1), match.group(2))
+
+
+def _deterministic_image_prompt_review_structure_errors(report_text: str) -> list[str]:
+    errors: list[str] = []
+    format_version = _image_prompt_story_review_scalar(report_text, "review_format_version")
+    if format_version != "deterministic_image_prompt_review_v2":
+        errors.append("deterministic image prompt story review format is missing or unsupported")
+
+    scalar_values: dict[str, int] = {}
+    for key in (
+        "reviewed_entries",
+        "entries_with_findings",
+        "findings",
+        "hard_findings",
+        "blocking_hard_findings",
+        "soft_findings",
+        "unresolved_entries",
+    ):
+        raw = _image_prompt_story_review_scalar(report_text, key)
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = -1
+        scalar_values[key] = parsed
+        if parsed < 0:
+            errors.append(
+                f"deterministic image prompt story review {key} is missing or invalid"
+            )
+
+    reviewed_entries = scalar_values["reviewed_entries"]
+    finding_count = scalar_values["findings"]
+    blocking_hard_findings = scalar_values["blocking_hard_findings"]
+    unresolved_entries = scalar_values["unresolved_entries"]
+    if reviewed_entries == 0:
+        errors.append("deterministic image prompt story review has no reviewed entries")
+    empty_scope = _image_prompt_story_review_scalar(
+        report_text,
+        "empty_review_scope",
+    ).lower()
+    if empty_scope not in {"true", "false", "1", "0", "yes", "no"}:
+        errors.append(
+            "deterministic image prompt story review empty_review_scope is missing or invalid"
+        )
+    elif reviewed_entries > 0 and empty_scope in {"true", "1", "yes"}:
+        errors.append(
+            "deterministic image prompt story review marks a non-empty review as empty"
+        )
+    elif reviewed_entries == 0 and empty_scope in {"false", "0", "no"}:
+        errors.append(
+            "deterministic image prompt story review empty scope flag contradicts reviewed_entries"
+        )
+
+    status = _image_prompt_story_review_scalar(report_text, "status").upper()
+    expected_status = (
+        "FAIL"
+        if reviewed_entries == 0 or unresolved_entries > 0
+        else ("WARN" if finding_count > 0 else "PASS")
+    )
+    if status not in {"PASS", "WARN", "FAIL"}:
+        errors.append("deterministic image prompt story review status is missing or invalid")
+    elif finding_count >= 0 and unresolved_entries >= 0 and status != expected_status:
+        errors.append(
+            "deterministic image prompt story review status contradicts its finding summary: "
+            f"status={status}, expected={expected_status}"
+        )
+    sections = _deterministic_image_prompt_review_sections(report_text)
+    canonical_selectors = [
+        _canonical_deterministic_image_prompt_selector(selector)
+        for selector, _body in sections
+    ]
+    invalid_selectors = [
+        selector
+        for (selector, _body), canonical in zip(sections, canonical_selectors)
+        if not re.fullmatch(
+            r"scene[0-9]+(?:\.[0-9]+)*_cut[0-9]+(?:\.[0-9]+)*",
+            canonical,
+        )
+    ]
+    if invalid_selectors:
+        errors.append(
+            "deterministic image prompt story review has invalid selectors: "
+            + ", ".join(invalid_selectors)
+        )
+    if reviewed_entries >= 0 and len(sections) != reviewed_entries:
+        errors.append(
+            "deterministic image prompt story review section coverage mismatch: "
+            f"reviewed_entries={reviewed_entries}, sections={len(sections)}"
+        )
+    if len(set(canonical_selectors)) != len(canonical_selectors):
+        errors.append("deterministic image prompt story review has duplicate selectors")
+    derived_entries_with_findings = 0
+    derived_finding_count = 0
+    derived_hard_finding_count = 0
+    derived_soft_finding_count = 0
+    for selector, body in sections:
+        for required_key in ("output", "narration", "rubric_scores"):
+            if not _image_prompt_story_review_scalar(body, required_key):
+                errors.append(
+                    "deterministic image prompt story review section "
+                    f"{required_key} is missing for {selector}"
+                )
+        overall_score_text = _image_prompt_story_review_scalar(body, "overall_score")
+        try:
+            overall_score = float(overall_score_text)
+        except ValueError:
+            overall_score = -1.0
+        if not 0.0 <= overall_score <= 1.0:
+            errors.append(
+                "deterministic image prompt story review section overall_score is missing or invalid "
+                f"for {selector}"
+            )
+        raw_hard_codes = {
+            code.strip().strip("`\"'")
+            for code in _image_prompt_story_review_scalar(
+                body,
+                "hard_finding_codes",
+            ).split(",")
+            if code.strip().strip("`\"'")
+        }
+        soft_codes = {
+            code.strip().strip("`\"'")
+            for code in _image_prompt_story_review_scalar(
+                body,
+                "soft_finding_codes",
+            ).split(",")
+            if code.strip().strip("`\"'")
+        }
+        blocking_hard_codes = {
+            code.strip().strip("`\"'")
+            for code in _image_prompt_story_review_scalar(
+                body,
+                "blocking_hard_finding_codes",
+            ).split(",")
+            if code.strip().strip("`\"'")
+        }
+        human_review_requested = _image_prompt_story_review_scalar(
+            body,
+            "human_review_ok",
+        ).lower() in {"true", "1", "yes"}
+        human_review_reason = _image_prompt_story_review_scalar(
+            body,
+            "human_review_reason",
+        )
+        human_review_ok = bool(human_review_requested and human_review_reason.strip())
+        if human_review_requested and raw_hard_codes and not human_review_reason.strip():
+            errors.append(
+                "deterministic image prompt story review human override reason is missing for "
+                f"{selector}"
+            )
+        expected_blocking_codes = set() if human_review_ok else raw_hard_codes
+        if blocking_hard_codes != expected_blocking_codes:
+            errors.append(
+                "deterministic image prompt story review blocking code mismatch for "
+                f"{selector}"
+            )
+        finding_codes = [
+            finding_match.group(1).strip()
+            for finding_match in re.finditer(
+                r"(?m)^-\s+([a-z][a-z0-9_]*)\s*:\s*(.+?)\s*$",
+                body,
+            )
+            if finding_match.group(1).strip()
+            not in _DETERMINISTIC_REVIEW_METADATA_KEYS
+        ]
+        declared_codes = raw_hard_codes | soft_codes
+        if set(finding_codes) != declared_codes:
+            errors.append(
+                "deterministic image prompt story review finding code/detail mismatch for "
+                f"{selector}"
+            )
+        if finding_codes:
+            derived_entries_with_findings += 1
+        derived_finding_count += len(finding_codes)
+        derived_hard_finding_count += sum(
+            1 for code in finding_codes if code in raw_hard_codes
+        )
+        derived_soft_finding_count += sum(
+            1 for code in finding_codes if code in soft_codes
+        )
+        section_review = _image_prompt_story_review_scalar(body, "review").upper()
+        expected_section_review = (
+            "FAIL"
+            if raw_hard_codes and not human_review_ok
+            else ("WARN" if finding_codes else "PASS")
+        )
+        if section_review not in {"PASS", "WARN", "FAIL"}:
+            errors.append(
+                "deterministic image prompt story review section review status is missing or invalid "
+                f"for {selector}"
+            )
+        elif section_review != expected_section_review:
+            errors.append(
+                "deterministic image prompt story review section review status contradicts findings "
+                f"for {selector}: review={section_review}, expected={expected_section_review}"
+            )
+    hard_findings = scalar_values["hard_findings"]
+    entries_with_findings = scalar_values["entries_with_findings"]
+    soft_findings = scalar_values["soft_findings"]
+    if entries_with_findings >= 0 and entries_with_findings != derived_entries_with_findings:
+        errors.append(
+            "deterministic image prompt story review entries_with_findings detail mismatch: "
+            f"summary={entries_with_findings}, sections={derived_entries_with_findings}"
+        )
+    if finding_count >= 0 and finding_count != derived_finding_count:
+        errors.append(
+            "deterministic image prompt story review finding detail count mismatch: "
+            f"summary={finding_count}, details={derived_finding_count}"
+        )
+    if hard_findings >= 0 and hard_findings != derived_hard_finding_count:
+        errors.append(
+            "deterministic image prompt story review hard finding detail mismatch: "
+            f"summary={hard_findings}, details={derived_hard_finding_count}"
+        )
+    if soft_findings >= 0 and soft_findings != derived_soft_finding_count:
+        errors.append(
+            "deterministic image prompt story review soft finding detail mismatch: "
+            f"summary={soft_findings}, details={derived_soft_finding_count}"
+        )
+    if hard_findings >= 0 and blocking_hard_findings > hard_findings:
+        errors.append(
+            "deterministic image prompt story review has more blocking hard findings than hard findings"
+        )
+    derived_blocking_findings = _deterministic_image_prompt_hard_findings_from_report_text(
+        report_text
+    )
+    derived_unresolved_selectors = {
+        _canonical_deterministic_image_prompt_selector(detail["selector"])
+        for detail in derived_blocking_findings
+    }
+    if (
+        blocking_hard_findings >= 0
+        and blocking_hard_findings != len(derived_blocking_findings)
+    ):
+        errors.append(
+            "deterministic image prompt story review blocking finding detail mismatch: "
+            f"summary={blocking_hard_findings}, details={len(derived_blocking_findings)}"
+        )
+    if unresolved_entries >= 0 and unresolved_entries != len(derived_unresolved_selectors):
+        errors.append(
+            "deterministic image prompt story review unresolved selector detail mismatch: "
+            f"summary={unresolved_entries}, selectors={len(derived_unresolved_selectors)}"
+        )
+    return _dedupe_preserve_order(errors)
+
+
+def _deterministic_image_prompt_review_binding_errors(
+    run_dir: Path,
+    report_text: str,
+) -> list[str]:
+    errors: list[str] = []
+    canonical_manifest = (run_dir / "video_manifest.md").resolve()
+    reported_manifest_text = _image_prompt_story_review_scalar(report_text, "manifest")
+    if not reported_manifest_text:
+        errors.append("deterministic image prompt story review manifest binding is missing")
+    else:
+        reported_manifest = Path(reported_manifest_text)
+        if not reported_manifest.is_absolute():
+            reported_manifest = (ROOT / reported_manifest).resolve()
+        else:
+            reported_manifest = reported_manifest.resolve()
+        if reported_manifest != canonical_manifest:
+            errors.append(
+                "deterministic image prompt story review targets a different manifest"
+            )
+
+    for filename, key in (
+        ("video_manifest.md", "manifest_sha256"),
+        ("story.md", "story_sha256"),
+        ("script.md", "script_sha256"),
+    ):
+        source_path = run_dir / filename
+        reported_digest = _image_prompt_story_review_scalar(report_text, key).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", reported_digest):
+            errors.append(
+                f"deterministic image prompt story review {key} is missing or invalid"
+            )
+            continue
+        if not source_path.is_file() or _file_sha256(source_path) != reported_digest:
+            errors.append(
+                f"deterministic image prompt story review {filename} digest is stale"
+            )
+    return _dedupe_preserve_order(errors)
+
+
+def _deterministic_image_prompt_hard_gate_errors(
+    run_dir: Path,
+    *,
+    require_current: bool = True,
+) -> list[str]:
+    report_path = run_dir / "image_prompt_story_review.md"
+    if not report_path.is_file():
+        return ["deterministic image prompt story review is missing"]
+    errors: list[str] = []
+    if require_current and not _deterministic_image_prompt_review_sources_are_current(run_dir):
+        errors.append("deterministic image prompt story review is stale")
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    errors.extend(_deterministic_image_prompt_review_structure_errors(report_text))
+    errors.extend(_deterministic_image_prompt_review_binding_errors(run_dir, report_text))
+    status = _image_prompt_story_review_scalar(report_text, "status").upper()
+    blocking_hard_text = _image_prompt_story_review_scalar(
+        report_text,
+        "blocking_hard_findings",
+    )
+    unresolved_text = _image_prompt_story_review_scalar(report_text, "unresolved_entries")
+    empty_scope = _image_prompt_story_review_scalar(report_text, "empty_review_scope").lower()
+    try:
+        blocking_hard_findings = int(blocking_hard_text)
+    except ValueError:
+        blocking_hard_findings = -1
+    try:
+        unresolved_entries = int(unresolved_text)
+    except ValueError:
+        unresolved_entries = -1
+    if status not in {"PASS", "WARN"}:
+        errors.append(f"deterministic image prompt story review status is {status or '(missing)'}")
+    if blocking_hard_findings != 0:
+        errors.append(
+            "deterministic image prompt story review has "
+            f"{blocking_hard_text or '(missing)'} blocking hard finding(s)"
+        )
+    if unresolved_entries != 0:
+        errors.append(
+            "deterministic image prompt story review has "
+            f"{unresolved_text or '(missing)'} unresolved entrie(s)"
+        )
+    if empty_scope not in {"false", "0", "no"}:
+        errors.append("deterministic image prompt story review has an empty or invalid scope")
+    return _dedupe_preserve_order(errors)
+
+
+_DETERMINISTIC_REVIEW_METADATA_KEYS = {
+    "output",
+    "narration",
+    "overall_score",
+    "rubric_scores",
+    "agent_review_ok",
+    "human_review_ok",
+    "human_review_reason",
+    "review",
+    "agent_review_reason_keys",
+    "hard_finding_codes",
+    "blocking_hard_finding_codes",
+    "soft_finding_codes",
+    "suggested_character_ids",
+    "suggested_object_ids",
+}
+
+
+def _deterministic_image_prompt_hard_findings_from_report_text(
+    report_text: str,
+) -> list[dict[str, str]]:
+    """Return unapproved selector/code/message detail from report text.
+
+    Current reports name hard codes explicitly.  For an older report, an
+    agent_review_ok=false section is still surfaced with all of its concrete
+    finding lines so repair keeps the selector and evidence instead of falling
+    back to an opaque run-wide error.
+    """
+
+    details: list[dict[str, str]] = []
+    for selector, body in _deterministic_image_prompt_review_sections(report_text):
+        human_review_requested = _image_prompt_story_review_scalar(
+            body,
+            "human_review_ok",
+        ).lower() in {"true", "1", "yes"}
+        human_review_reason = _image_prompt_story_review_scalar(
+            body,
+            "human_review_reason",
+        )
+        if human_review_requested and human_review_reason.strip():
+            continue
+        hard_code_text = _image_prompt_story_review_scalar(
+            body,
+            "hard_finding_codes",
+        )
+        hard_codes = {
+            code.strip().strip("`\"'")
+            for code in hard_code_text.split(",")
+            if code.strip().strip("`\"'")
+        }
+        legacy_hard_section = (
+            not hard_codes
+            and _image_prompt_story_review_scalar(body, "agent_review_ok").lower()
+            in {"false", "0", "no"}
+        )
+        if not hard_codes and not legacy_hard_section:
+            continue
+        for finding_match in re.finditer(
+            r"(?m)^-\s+([a-z][a-z0-9_]*)\s*:\s*(.+?)\s*$",
+            body,
+        ):
+            code = finding_match.group(1).strip()
+            if code in _DETERMINISTIC_REVIEW_METADATA_KEYS:
+                continue
+            if hard_codes and code not in hard_codes:
+                continue
+            details.append(
+                {
+                    "selector": selector,
+                    "code": code,
+                    "message": finding_match.group(2).strip(),
+                }
+            )
+    return details
+
+
+def _deterministic_image_prompt_hard_findings(run_dir: Path) -> list[dict[str, str]]:
+    report_path = run_dir / "image_prompt_story_review.md"
+    if not report_path.is_file():
+        return []
+    return _deterministic_image_prompt_hard_findings_from_report_text(
+        report_path.read_text(encoding="utf-8", errors="replace")
+    )
+
+
+def _deterministic_image_prompt_hard_finding_details_are_complete(
+    run_dir: Path,
+    details: list[dict[str, str]],
+    entry_ids: list[str],
+) -> bool:
+    report_path = run_dir / "image_prompt_story_review.md"
+    if not report_path.is_file() or not details:
+        return False
+    if not _deterministic_image_prompt_review_sources_are_current(run_dir):
+        return False
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    if _deterministic_image_prompt_review_structure_errors(report_text):
+        return False
+    if _deterministic_image_prompt_review_binding_errors(run_dir, report_text):
+        return False
+    try:
+        blocking_hard_findings = int(
+            _image_prompt_story_review_scalar(report_text, "blocking_hard_findings")
+        )
+        unresolved_entries = int(
+            _image_prompt_story_review_scalar(report_text, "unresolved_entries")
+        )
+    except ValueError:
+        return False
+    if blocking_hard_findings <= 0 or blocking_hard_findings != len(details):
+        return False
+
+    canonical_entry_tokens = [
+        _canonical_deterministic_image_prompt_selector(entry_id)
+        for entry_id in entry_ids
+    ]
+    if len(set(canonical_entry_tokens)) != len(canonical_entry_tokens):
+        return False
+    canonical_entry_token_set = set(canonical_entry_tokens)
+    detail_tokens = {
+        _canonical_deterministic_image_prompt_selector(detail.get("selector"))
+        for detail in details
+    }
+    if not detail_tokens or not detail_tokens.issubset(canonical_entry_token_set):
+        return False
+    return unresolved_entries == len(detail_tokens)
+
+
+def _refresh_deterministic_image_prompt_review_if_stale(run_dir: Path) -> None:
+    report_path = run_dir / "image_prompt_story_review.md"
+    if _deterministic_image_prompt_review_sources_are_current(run_dir):
+        report_text = report_path.read_text(encoding="utf-8", errors="replace")
+        if (
+            _image_prompt_story_review_scalar(report_text, "review_format_version")
+            == "deterministic_image_prompt_review_v2"
+            and not _deterministic_image_prompt_review_binding_errors(
+                run_dir,
+                report_text,
+            )
+        ):
+            return
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
+            "--manifest",
+            str(run_dir / "video_manifest.md"),
+            "--story",
+            str(run_dir / "story.md"),
+            "--script",
+            str(run_dir / "script.md"),
+            "--out",
+            str(run_dir / "image_prompt_story_review.md"),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    refreshed_text = (
+        report_path.read_text(encoding="utf-8", errors="replace")
+        if report_path.is_file()
+        else ""
+    )
+    if (
+        result.returncode != 0
+        or not _deterministic_image_prompt_review_sources_are_current(run_dir)
+        or _image_prompt_story_review_scalar(refreshed_text, "review_format_version")
+        != "deterministic_image_prompt_review_v2"
+        or _deterministic_image_prompt_review_binding_errors(run_dir, refreshed_text)
+    ):
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(detail or "deterministic image prompt review refresh failed")
+
+
+def _prepare_image_prompt_request_revision_for_review(run_dir: Path) -> str:
+    """Bind the provider-ready revision before building the semantic pack."""
+
+    snapshot_path = run_dir / "image_generation_request_snapshot.json"
+    try:
+        draft_snapshot = load_request_snapshot(
+            snapshot_path,
+            run_dir=run_dir,
+            verify_references=False,
+        )
+        state = parse_state_file(run_dir / "state.txt")
+        is_frozen = state.get("review.image_prompt.request_freeze.status") == "frozen"
+        provider_snapshot = bind_request_snapshot_references(
+            draft_snapshot,
+            run_dir=run_dir,
+            allow_existing_hash_changes=not is_frozen,
+        )
+        if provider_snapshot.request_revision != draft_snapshot.request_revision:
+            if is_frozen:
+                raise ImageRequestSnapshotError(
+                    "frozen image request revision cannot rebind reference bytes"
+                )
+            write_request_snapshot_atomic(
+                snapshot_path,
+                provider_snapshot,
+                run_dir=run_dir,
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.image_prompt.request_freeze.status": "draft",
+                    "review.image_prompt.request_freeze.provider_ready_revision": (
+                        provider_snapshot.request_revision
+                    ),
+                    "review.image_prompt.request_freeze.references_bound_at": now_iso(),
+                },
+            )
+    except ImageRequestSnapshotError as exc:
+        raise RuntimeError(
+            f"ToC run did not reach p650: unresolved image request reference: {exc}"
+        ) from exc
+    _refresh_deterministic_image_prompt_review_if_stale(run_dir)
+    return provider_snapshot.request_revision
+
+
 def _validate_p650_run_core(
     run_id: str,
     *,
@@ -1196,6 +2198,7 @@ def _validate_p650_run_core(
         "asset_generation_requests.md",
         "asset_generation_manifest.md",
         "image_generation_requests.md",
+        "image_generation_request_snapshot.json",
         "p000_index.md",
     ]
     missing = [name for name in required if not (run_dir / name).is_file()]
@@ -1236,6 +2239,12 @@ def _validate_p650_run_core(
     missing_scene_requests = sorted(required_scene_outputs - request_outputs)
     if missing_scene_requests:
         raise RuntimeError(f"ToC run did not reach p650: missing scene cut requests {', '.join(missing_scene_requests)}")
+    image_prompt_request_revision = _validate_image_prompt_request_revision(
+        run_dir,
+        manifest_data,
+        require_resolved_references=require_downstream_semantic_reviews,
+        require_compiled_v2=require_downstream_semantic_reviews,
+    )
     _validate_semantic_reviews(run_dir, ("research", "story"))
     if require_downstream_semantic_reviews:
         _validate_semantic_reviews(
@@ -1252,6 +2261,21 @@ def _validate_p650_run_core(
             raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
 
     state = parse_state_file(run_dir / "state.txt")
+    freeze_status = (state.get("review.image_prompt.request_freeze.status") or "").lower()
+    if require_downstream_semantic_reviews and freeze_status != "frozen":
+        raise RuntimeError(
+            "ToC run did not reach p650: image prompt request freeze is not frozen"
+        )
+    if require_downstream_semantic_reviews and state.get(
+        "review.image_prompt.request_freeze.request_revision"
+    ) != image_prompt_request_revision:
+        raise RuntimeError(
+            "ToC run did not reach p650: frozen image prompt request revision is stale"
+        )
+    if not require_downstream_semantic_reviews and freeze_status not in {"draft", "frozen"}:
+        raise RuntimeError(
+            "ToC run did not reach p650: image prompt request freeze state is missing"
+        )
     if state.get("runtime.scaffold.content_status") == "placeholder":
         raise RuntimeError("ToC run did not reach p650: runtime scaffold content is still placeholder")
     scaffold_keys = [key for key, value in state.items() if key.startswith("artifact.") and value == "scaffold"]
@@ -1264,6 +2288,11 @@ def _validate_p650_run_core(
         f"{slot}={state.get(f'slot.{slot}.status')}"
         for slot in P650_FIXED_SLOTS
         if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
+        and not (
+            not require_downstream_semantic_reviews
+            and slot == "p650"
+            and (state.get("slot.p650.status") or "").lower() == "pending"
+        )
     ]
     if incomplete_slots:
         raise RuntimeError(f"ToC run did not reach p650: incomplete fixed slot states {', '.join(incomplete_slots)}")
@@ -1824,12 +2853,131 @@ def _safe_artifact_id(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value).strip("_") or "item"
 
 
-def _video_candidate_dir(run_dir: Path, item_id: str) -> Path:
-    return run_dir / "assets" / "test" / "video_gen_candidates" / _safe_artifact_id(item_id)
+VIDEO_CANDIDATE_REVISION_SCHEMA = "video_candidate_revision_v1"
+VIDEO_CANDIDATE_PROVENANCE_KEY = "_toc_candidate_revision"
 
 
-def _video_candidate_path(run_dir: Path, item_id: str, index: int) -> Path:
-    return _video_candidate_dir(run_dir, item_id) / f"candidate_{index:02d}.mp4"
+def _video_candidate_revision_provenance(
+    *,
+    item_id: str,
+    request_section_sha256: str,
+    source_digest: str,
+) -> dict[str, str]:
+    request_digest = request_section_sha256.strip().lower()
+    design_digest = source_digest.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", request_digest) is None:
+        raise ValueError("approved video request section hash is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", design_digest) is None:
+        raise ValueError("approved video prompt source digest is invalid")
+    revision_id = sha256_canonical_json(
+        {
+            "schema_version": VIDEO_CANDIDATE_REVISION_SCHEMA,
+            "item_id": item_id,
+            "request_section_sha256": request_digest,
+            "source_digest": design_digest,
+        }
+    )
+    return {
+        "schema_version": VIDEO_CANDIDATE_REVISION_SCHEMA,
+        "item_id": item_id,
+        "request_section_sha256": request_digest,
+        "source_digest": design_digest,
+        "revision_id": revision_id,
+    }
+
+
+def _video_candidate_provenance_from_request(
+    request: VideoGenerateItem,
+) -> dict[str, str]:
+    raw = _dict_value(
+        _dict_value(request.provider_execution_options).get(
+            VIDEO_CANDIDATE_PROVENANCE_KEY
+        )
+    )
+    expected = _video_candidate_revision_provenance(
+        item_id=request.item_id,
+        request_section_sha256=str(raw.get("request_section_sha256") or ""),
+        source_digest=str(raw.get("source_digest") or ""),
+    )
+    if any(str(raw.get(field) or "") != value for field, value in expected.items()):
+        raise ValueError(
+            "materialized video candidate revision provenance is missing or invalid"
+        )
+    return expected
+
+
+def _current_approved_video_candidate_provenance(
+    run_dir: Path,
+    item_id: str,
+) -> dict[str, str] | None:
+    """Resolve the one candidate namespace bound to the current item approval."""
+
+    try:
+        binding = _reviewed_video_request_binding(run_dir, item_id)
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+        target = _video_target_by_item_id(data, item_id)
+        if target is None:
+            return None
+        generation = _dict_value(
+            _dict_value(target.get("cut")).get("video_generation")
+        )
+        payload = _dict_value(generation.get("api_prompt_payload"))
+        source_digest = str(payload.get("source_digest") or "")
+        prompt_sha256 = str(payload.get("sha256") or "")
+        if (
+            binding.get("source_digest") != source_digest
+            or binding.get("prompt_sha256") != prompt_sha256
+        ):
+            return None
+        state_path = run_dir / "state.txt"
+        state = parse_state_file(state_path) if state_path.is_file() else {}
+        prefix = _video_prompt_approval_state_prefix(item_id)
+        expected_state = {
+            "status": "approved",
+            "request_section_sha256": binding["request_section_sha256"],
+            "prompt_sha256": prompt_sha256,
+            "source_digest": source_digest,
+        }
+        if any(
+            str(state.get(f"{prefix}.{field}") or "") != expected
+            for field, expected in expected_state.items()
+        ):
+            return None
+        return _video_candidate_revision_provenance(
+            item_id=item_id,
+            request_section_sha256=binding["request_section_sha256"],
+            source_digest=source_digest,
+        )
+    except (FileNotFoundError, TypeError, ValueError):
+        return None
+
+
+def _video_candidate_dir(
+    run_dir: Path,
+    item_id: str,
+    revision_id: str,
+) -> Path:
+    if re.fullmatch(r"[0-9a-f]{64}", revision_id) is None:
+        raise ValueError("invalid video candidate revision id")
+    return (
+        run_dir
+        / "assets"
+        / "test"
+        / "video_gen_candidates"
+        / _safe_artifact_id(item_id)
+        / revision_id
+    )
+
+
+def _video_candidate_path(
+    run_dir: Path,
+    item_id: str,
+    revision_id: str,
+    index: int,
+) -> Path:
+    return _video_candidate_dir(
+        run_dir, item_id, revision_id
+    ) / f"candidate_{index:02d}.mp4"
 
 
 def _probe_media_duration_seconds(path: Path) -> float | None:
@@ -2006,6 +3154,160 @@ def _parse_optional_json_env(*names: str) -> dict[str, Any] | None:
     return None
 
 
+def _server_video_execution_options(
+    *,
+    tool: str,
+    has_first_frame: bool,
+    has_reference_images: bool = False,
+) -> dict[str, Any]:
+    load_env_files(repo_root=ROOT)
+    if tool in {"kling_3_0", "kling_3_0_omni"}:
+        is_omni = tool == "kling_3_0_omni"
+        model = (
+            os.environ.get("KLING_OMNI_VIDEO_MODEL", "kling-3.0-omni")
+            if is_omni
+            else os.environ.get("KLING_VIDEO_MODEL", "kling-3.0")
+        )
+        extra_payload = (
+            _parse_optional_json_env("KLING_OMNI_EXTRA_JSON", "KLING_EXTRA_JSON")
+            if is_omni
+            else _parse_optional_json_env("KLING_EXTRA_JSON")
+        )
+        return {
+            "backend": "kling",
+            "model": str(model),
+            "extra_payload": extra_payload or {},
+        }
+    if tool == "seedance":
+        if has_first_frame or has_reference_images:
+            model = (
+                os.environ.get("ARK_SEEDANCE_I2V_MODEL")
+                or os.environ.get("SEEDANCE_I2V_MODEL")
+                or "seedance-1-0-lite-i2v-250428"
+            )
+        else:
+            model = (
+                os.environ.get("ARK_SEEDANCE_T2V_MODEL")
+                or os.environ.get("SEEDANCE_T2V_MODEL")
+                or "seedance-1-0-pro-250528"
+            )
+        return {
+            "backend": "ark",
+            "model": str(model),
+            "generate_audio": False,
+            "watermark": False,
+            "extra_payload": _parse_optional_json_env("ARK_EXTRA_JSON") or {},
+        }
+    return {"backend": tool}
+
+
+def _video_generation_provider_context(
+    video_generation: dict[str, Any],
+    *,
+    input_mode: str = "",
+) -> tuple[str, str, str]:
+    tool = str(video_generation.get("tool") or "kling_3_0").strip()
+    payload = _dict_value(video_generation.get("api_prompt_payload"))
+    binding = _dict_value(payload.get("provider_request_binding"))
+    execution_options = _dict_value(binding.get("execution_options"))
+    model = str(execution_options.get("model") or "").strip()
+    mode = str(input_mode or payload.get("mode") or "").strip()
+    if not mode:
+        references = _list_value(video_generation.get("references"))
+        first_frame = str(
+            video_generation.get("first_frame")
+            or video_generation.get("input_image")
+            or ""
+        ).strip()
+        mode = "reference_images" if references and not first_frame else ""
+    return tool, model, mode
+
+
+def _video_provider_capability_issues(
+    *,
+    label: str,
+    tool: str,
+    model: str = "",
+    input_mode: str = "",
+    duration_seconds: int,
+    reference_count: int,
+    validate_reference_count: bool = True,
+) -> list[str]:
+    capabilities = resolve_video_provider_capabilities(
+        tool=tool,
+        model=model,
+        input_mode=input_mode,
+    )
+    issues: list[str] = []
+    if not capabilities.supported:
+        issues.append(
+            f"{label}: {capabilities.unsupported_reason or 'provider capability contract is unsupported'}"
+        )
+        return issues
+    if not (
+        capabilities.duration_min_seconds
+        <= int(duration_seconds)
+        <= capabilities.duration_max_seconds
+    ):
+        issues.append(
+            f"{label}: duration {int(duration_seconds)}s is outside the {tool} "
+            f"{input_mode or 'default'} limit "
+            f"{capabilities.duration_min_seconds}-{capabilities.duration_max_seconds}s"
+        )
+    if validate_reference_count and not (
+        capabilities.reference_images_min
+        <= int(reference_count)
+        <= capabilities.reference_images_max
+    ):
+        issues.append(
+            f"{label}: reference image count {int(reference_count)} is outside the {tool} "
+            f"{input_mode or 'default'} limit "
+            f"{capabilities.reference_images_min}-{capabilities.reference_images_max}"
+        )
+    return issues
+
+
+def _video_request_input_mode(request: VideoGenerateItem) -> str:
+    if request.first_reference and request.last_reference:
+        return "first_last_frame"
+    if request.first_reference:
+        return "image_to_video"
+    if request.references:
+        return "reference_to_video"
+    return "text_to_video"
+
+
+def _assert_video_request_within_provider_capabilities(
+    request: VideoGenerateItem,
+    *,
+    label: str | None = None,
+) -> None:
+    execution_options = _dict_value(request.provider_execution_options)
+    issues = _video_provider_capability_issues(
+        label=label or request.item_id,
+        tool=request.tool,
+        model=str(execution_options.get("model") or "").strip(),
+        input_mode=_video_request_input_mode(request),
+        duration_seconds=request.duration_seconds,
+        reference_count=len(request.references),
+    )
+    if issues:
+        raise ValueError("; ".join(issues))
+
+
+def _assert_video_auxiliary_references_supported(
+    *,
+    tool: str,
+    references: Iterable[str],
+) -> None:
+    normalized = [str(value).strip() for value in references if str(value).strip()]
+    if normalized and tool in {"kling_3_0", "kling_3_0_omni"}:
+        raise ValueError(
+            f"{tool} adapter cannot encode auxiliary reference images; "
+            "use first/last frame only or select seedance"
+        )
+
+
 def _video_poll_every_seconds() -> float:
     try:
         return float(os.environ.get("VIDEO_POLL_EVERY_SECONDS") or os.environ.get("POLL_EVERY_SECONDS") or "5")
@@ -2046,12 +3348,53 @@ def _write_video_generation_debug_log(
         "firstReference": request.first_reference,
         "lastReference": request.last_reference,
         "references": request.references,
+        "prompt": request.prompt,
+        "negativePrompt": request.negative_prompt,
+        "promptPolicyVersion": request.prompt_policy_version,
+        "promptCompilerVersion": request.prompt_compiler_version,
+        "promptSha256": request.prompt_sha256 or hashlib.sha256(request.prompt.encode("utf-8")).hexdigest(),
+        "promptSourceDigest": request.prompt_source_digest,
+        "providerExecutionOptions": request.provider_execution_options,
         "status": "failed" if error else "completed",
         "error": error,
         "provider": provider_result or {},
     }
+    payload = _redact_video_provider_log_payload(payload)
     log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return log_path
+
+
+_HTTP_URL_IN_LOG_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def _redact_video_provider_log_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_video_provider_log_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_video_provider_log_payload(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    def redact_url(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            parsed = urlsplit(candidate)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return "<redacted-media-url>"
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+            return candidate
+        safe_host = f"[{hostname}]" if ":" in hostname else hostname
+        safe_netloc = f"{safe_host}:{port}" if port is not None else safe_host
+        return urlunsplit(
+            (parsed.scheme.lower(), safe_netloc, parsed.path, "", "")
+        )
+
+    return _HTTP_URL_IN_LOG_RE.sub(redact_url, value)
 
 
 def _generate_kling_video_file(
@@ -2062,13 +3405,13 @@ def _generate_kling_video_file(
     out_path: Path,
 ) -> dict[str, Any]:
     load_env_files(repo_root=ROOT)
-    is_omni = request.tool == "kling_3_0_omni"
-    model = (
-        os.environ.get("KLING_OMNI_VIDEO_MODEL", "kling-3.0-omni")
-        if is_omni
-        else os.environ.get("KLING_VIDEO_MODEL", "kling-3.0")
-    )
-    extra_payload = _parse_optional_json_env("KLING_OMNI_EXTRA_JSON", "KLING_EXTRA_JSON") if is_omni else _parse_optional_json_env("KLING_EXTRA_JSON")
+    execution_options = dict(request.provider_execution_options or {})
+    model = str(execution_options.get("model") or "").strip()
+    if not model:
+        raise ValueError("materialized Kling model is missing")
+    extra_payload = execution_options.get("extra_payload") or None
+    if extra_payload is not None and not isinstance(extra_payload, dict):
+        raise ValueError("materialized Kling extra_payload must be an object")
     client = KlingClient(KlingConfig.from_env(video_model=model))
     submit = client.start_video_generation(
         prompt=request.prompt,
@@ -2077,7 +3420,7 @@ def _generate_kling_video_file(
         resolution=request.quality,
         input_image=input_image,
         last_frame_image=last_frame_image,
-        negative_prompt=(os.environ.get("VIDEO_NEGATIVE_PROMPT") or "").strip() or None,
+        negative_prompt=(request.negative_prompt or "").strip() or None,
         model=model,
         extra_payload=extra_payload,
         timeout_seconds=180.0,
@@ -2104,11 +3447,13 @@ def _generate_seedance_video_file(
     out_path: Path,
 ) -> dict[str, Any]:
     load_env_files(repo_root=ROOT)
-    if input_image is not None:
-        model = os.environ.get("ARK_SEEDANCE_I2V_MODEL") or os.environ.get("SEEDANCE_I2V_MODEL") or "seedance-1-0-lite-i2v-250428"
-    else:
-        model = os.environ.get("ARK_SEEDANCE_T2V_MODEL") or os.environ.get("SEEDANCE_T2V_MODEL") or "seedance-1-0-pro-250528"
-    extra_payload = _parse_optional_json_env("ARK_EXTRA_JSON")
+    execution_options = dict(request.provider_execution_options or {})
+    model = str(execution_options.get("model") or "").strip()
+    if not model:
+        raise ValueError("materialized Seedance model is missing")
+    extra_payload = execution_options.get("extra_payload") or None
+    if extra_payload is not None and not isinstance(extra_payload, dict):
+        raise ValueError("materialized Seedance extra_payload must be an object")
     client = SeedanceClient(SeedanceConfig.from_env())
     payload = client.build_video_payload(
         model=str(model),
@@ -2119,8 +3464,8 @@ def _generate_seedance_video_file(
         input_image=input_image,
         last_frame_image=last_frame_image,
         reference_images=reference_images,
-        generate_audio=False,
-        watermark=False,
+        generate_audio=bool(execution_options.get("generate_audio", False)),
+        watermark=bool(execution_options.get("watermark", False)),
         extra_payload=extra_payload,
     )
     submit = client.create_task(payload=payload)
@@ -2147,24 +3492,46 @@ def _generate_video_file_blocking(
     last_frame_image: Path | None,
     reference_images: list[Path],
 ) -> dict[str, Any]:
+    _assert_video_request_within_provider_capabilities(request)
+    _assert_video_auxiliary_references_supported(
+        tool=request.tool,
+        references=request.references,
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if request.tool in {"kling_3_0", "kling_3_0_omni"}:
-        provider_result = _generate_kling_video_file(
-            request=request,
-            input_image=input_image,
-            last_frame_image=last_frame_image,
-            out_path=destination,
-        )
-    elif request.tool == "seedance":
-        provider_result = _generate_seedance_video_file(
+    snapshot_dir: Path | None = None
+    try:
+        (
+            snapshot_dir,
+            provider_input_image,
+            provider_last_frame_image,
+            provider_reference_images,
+        ) = _snapshot_materialized_video_reference_inputs(
+            run_dir=run_dir,
             request=request,
             input_image=input_image,
             last_frame_image=last_frame_image,
             reference_images=reference_images,
-            out_path=destination,
         )
-    else:
-        raise ValueError(f"unsupported video tool: {request.tool}")
+        if request.tool in {"kling_3_0", "kling_3_0_omni"}:
+            provider_result = _generate_kling_video_file(
+                request=request,
+                input_image=provider_input_image,
+                last_frame_image=provider_last_frame_image,
+                out_path=destination,
+            )
+        elif request.tool == "seedance":
+            provider_result = _generate_seedance_video_file(
+                request=request,
+                input_image=provider_input_image,
+                last_frame_image=provider_last_frame_image,
+                reference_images=provider_reference_images,
+                out_path=destination,
+            )
+        else:
+            raise ValueError(f"unsupported video tool: {request.tool}")
+    finally:
+        if snapshot_dir is not None:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
     if not destination.is_file():
         raise RuntimeError("provider completed without writing a video file")
     debug_log = _write_video_generation_debug_log(
@@ -2184,6 +3551,86 @@ def _generate_video_file_blocking(
     }
 
 
+def _snapshot_materialized_video_reference_inputs(
+    *,
+    run_dir: Path,
+    request: VideoGenerateItem,
+    input_image: Path | None,
+    last_frame_image: Path | None,
+    reference_images: list[Path],
+) -> tuple[Path | None, Path | None, Path | None, list[Path]]:
+    """Copy approved reference bytes before the provider reads them.
+
+    Validation and provider submission are separated by an async boundary.  A
+    path-only binding would therefore permit the file at that path to change
+    after approval.  The provider receives private copies whose bytes are
+    checked against the materialized content hashes.
+    """
+
+    raw_inputs: list[tuple[str, Path | None]] = [
+        (str(request.first_reference or "").strip(), input_image),
+        (str(request.last_reference or "").strip(), last_frame_image),
+        *[
+            (str(reference or "").strip(), path)
+            for reference, path in zip(
+                request.references,
+                reference_images,
+                strict=False,
+            )
+        ],
+    ]
+    present_inputs = [(reference, path) for reference, path in raw_inputs if path]
+    if not present_inputs:
+        return None, None, None, []
+    if len(reference_images) != len(request.references):
+        raise ValueError("materialized video reference list does not match resolved inputs")
+
+    expected_by_path = _dict_value(
+        _dict_value(request.provider_execution_options).get(
+            "reference_content_sha256"
+        )
+    )
+    snapshot_dir = (
+        run_dir
+        / "scratch"
+        / "video_request_inputs"
+        / f"{time.time_ns()}_{uuid.uuid4().hex}"
+    )
+    snapshot_dir.mkdir(parents=True, exist_ok=False)
+    copied_by_source: dict[Path, Path] = {}
+    try:
+        for index, (reference, source) in enumerate(present_inputs, start=1):
+            assert source is not None
+            expected = str(expected_by_path.get(reference) or "").strip()
+            if not reference or not expected:
+                raise ValueError(
+                    "materialized video reference content hash is missing"
+                )
+            copied = copied_by_source.get(source)
+            if copied is None:
+                copied = snapshot_dir / f"reference_{index:02d}{source.suffix.lower()}"
+                shutil.copyfile(source, copied)
+                digest = hashlib.sha256()
+                with copied.open("rb") as file:
+                    for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected:
+                    raise ValueError(
+                        "materialized video reference content changed before provider submission"
+                    )
+                copied_by_source[source] = copied
+
+        copied_input = copied_by_source.get(input_image) if input_image else None
+        copied_last = (
+            copied_by_source.get(last_frame_image) if last_frame_image else None
+        )
+        copied_references = [copied_by_source[path] for path in reference_images]
+        return snapshot_dir, copied_input, copied_last, copied_references
+    except Exception:
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        raise
+
+
 def _resolve_video_reference_image(run_dir: Path, value: str | None, *, field: str) -> Path | None:
     raw = (value or "").strip()
     if not raw:
@@ -2200,6 +3647,7 @@ def _resolve_video_reference_image(run_dir: Path, value: str | None, *, field: s
 
 
 async def _generate_video_one(run_dir: Path, req: VideoGenerateItem, index: int) -> dict[str, Any]:
+    revision = _video_candidate_provenance_from_request(req)
     input_image = _resolve_video_reference_image(run_dir, req.first_reference, field="first_reference")
     last_frame_image = _resolve_video_reference_image(run_dir, req.last_reference, field="last_reference")
     reference_images = [
@@ -2207,10 +3655,15 @@ async def _generate_video_one(run_dir: Path, req: VideoGenerateItem, index: int)
         for image in (_resolve_video_reference_image(run_dir, ref, field="references") for ref in req.references)
         if image is not None
     ]
-    destination = _video_candidate_path(run_dir, req.item_id, index)
+    destination = _video_candidate_path(
+        run_dir,
+        req.item_id,
+        revision["revision_id"],
+        index,
+    )
     async with _video_generation_semaphore:
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _generate_video_file_blocking,
                 run_dir=run_dir,
                 request=req,
@@ -2220,6 +3673,30 @@ async def _generate_video_one(run_dir: Path, req: VideoGenerateItem, index: int)
                 last_frame_image=last_frame_image,
                 reference_images=reference_images,
             )
+            current_revision = _current_approved_video_candidate_provenance(
+                run_dir,
+                req.item_id,
+            )
+            if (
+                result.get("status") == "completed"
+                and (
+                    current_revision is None
+                    or current_revision.get("revision_id")
+                    != revision["revision_id"]
+                )
+            ):
+                stale_path = result.get("path")
+                return {
+                    **result,
+                    "status": "stale",
+                    "path": None,
+                    "stalePath": stale_path,
+                    "error": (
+                        "video candidate completed after its approved prompt "
+                        "revision became stale"
+                    ),
+                }
+            return result
         except (HttpError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
             debug_log = _write_video_generation_debug_log(
                 run_dir=run_dir,
@@ -2240,9 +3717,13 @@ async def _generate_video_one(run_dir: Path, req: VideoGenerateItem, index: int)
 
 
 async def _generate_video_candidates(run_dir: Path, req: VideoGenerateItem) -> dict[str, Any]:
+    _assert_video_request_within_provider_capabilities(req)
     min_duration = _narration_min_duration_seconds(run_dir, req.item_id)
     if min_duration is not None and req.duration_seconds < math.ceil(min_duration):
-        req = req.model_copy(update={"duration_seconds": math.ceil(min_duration)})
+        raise ValueError(
+            "materialized video duration is shorter than the approved narration; "
+            "create video prompts again before generation"
+        )
     candidates = await asyncio.gather(*(_generate_video_one(run_dir, req, index) for index in range(1, req.candidate_count + 1)))
     return {
         "itemId": req.item_id,
@@ -2265,6 +3746,240 @@ def _validate_video_request_reference_paths(run_dir: Path, req: VideoGenerateIte
                 _validate_run_relative_image_path(run_dir, value, must_exist=True)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"{field}: {exc}") from exc
+
+
+def _materialized_video_generate_item(
+    *,
+    run_dir: Path,
+    request: VideoGenerateItem,
+) -> VideoGenerateItem:
+    """Bind a generation request to the exact reviewed provider prompt.
+
+    The browser submits the editable authoring source for drift detection.  The
+    provider only receives the compiled prompt persisted by p800 materialization.
+    """
+
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    target = _video_target_by_item_id(data, request.item_id)
+    if target is None:
+        raise ValueError(f"materialized video prompt target not found: {request.item_id}")
+    node = target["cut"]
+    video_generation = _dict_value(node.get("video_generation"))
+    payload = _dict_value(video_generation.get("api_prompt_payload"))
+    prompt = str(payload.get("prompt") or "").strip()
+    if (
+        not prompt
+        or str(payload.get("policy_version") or "") != VIDEO_API_PROMPT_POLICY_VERSION
+        or str(payload.get("compiler_version") or "") != VIDEO_PROMPT_COMPILER_VERSION
+    ):
+        raise ValueError(
+            "materialized video prompt is missing or uses an obsolete policy; "
+            "create video prompts before generation"
+        )
+
+    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    if str(payload.get("sha256") or "") != prompt_sha256:
+        raise ValueError("materialized video prompt hash does not match its provider prompt")
+
+    authoring_source = str(
+        video_generation.get("prompt_authoring_source")
+        or video_generation.get("source_motion_prompt")
+        or ""
+    ).strip()
+    submitted_prompt = request.prompt.strip()
+    accepted_request_prompts = {prompt}
+    if authoring_source:
+        accepted_request_prompts.add(authoring_source)
+    if submitted_prompt not in accepted_request_prompts:
+        raise ValueError(
+            "request prompt does not match the materialized video prompt source; "
+            "materialize the current edit before generation"
+        )
+
+    first_reference = str(
+        video_generation.get("first_frame") or video_generation.get("input_image") or ""
+    ).strip()
+    last_reference = str(video_generation.get("last_frame") or "").strip()
+    references = [
+        str(value).strip()
+        for value in _list_value(video_generation.get("references"))
+        if str(value).strip()
+    ]
+    quality = str(video_generation.get("quality") or "1080p").strip()
+    aspect_ratio = str(video_generation.get("aspect_ratio") or "16:9").strip()
+    duration_seconds = int(video_generation.get("duration_seconds") or 8)
+    tool = str(video_generation.get("tool") or "kling_3_0").strip()
+    _assert_video_auxiliary_references_supported(
+        tool=tool,
+        references=references,
+    )
+
+    mismatches: list[str] = []
+    for field, submitted, materialized in (
+        ("first_reference", (request.first_reference or "").strip(), first_reference),
+        ("last_reference", (request.last_reference or "").strip(), last_reference),
+        ("quality", request.quality, quality),
+        ("aspect_ratio", request.aspect_ratio, aspect_ratio),
+        ("duration_seconds", request.duration_seconds, duration_seconds),
+        ("tool", request.tool, tool),
+    ):
+        if submitted != materialized:
+            mismatches.append(field)
+    if request.references != references:
+        mismatches.append("references")
+    if mismatches:
+        raise ValueError(
+            "request settings do not match the materialized video prompt: "
+            + ", ".join(mismatches)
+        )
+
+    current_item = FrontendReviewItem(
+        item_id=request.item_id,
+        kind="scene",
+        video_prompt=authoring_source,
+        video_quality=quality,
+        video_aspect_ratio=aspect_ratio,
+        video_duration_seconds=duration_seconds,
+        video_first_reference=first_reference or None,
+        video_last_reference=last_reference or None,
+        video_references=references,
+        video_tool=tool,
+    )
+    try:
+        _target, current_payload = _compile_frontend_video_prompt_payload(
+            data=data,
+            item=current_item,
+            run_dir=run_dir,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "materialized video prompt is stale for the current design; "
+            "create video prompts again before generation"
+        ) from exc
+    _assert_video_prompt_quality_allows_provider_execution(
+        selector=request.item_id,
+        payload=current_payload,
+    )
+    _assert_video_prompt_quality_allows_provider_execution(
+        selector=request.item_id,
+        payload=payload,
+    )
+    for field in ("prompt", "negative_prompt", "sha256", "source_digest"):
+        if str(current_payload.get(field) or "") != str(payload.get(field) or ""):
+            raise ValueError(
+                "materialized video prompt is stale for the current design; "
+                "create video prompts again before generation"
+            )
+    if current_payload.get("provider_request_binding") != payload.get(
+        "provider_request_binding"
+    ):
+        raise ValueError(
+            "materialized video provider request binding is stale or changed; "
+            "create video prompts again before generation"
+        )
+
+    narration_duration = _narration_min_duration_seconds(run_dir, request.item_id)
+    if narration_duration is not None and duration_seconds < math.ceil(narration_duration):
+        raise ValueError(
+            "materialized video duration is shorter than the approved narration; "
+            "create video prompts again before generation"
+        )
+
+    reviewed = _reviewed_video_request_binding(run_dir, request.item_id)
+    negative_prompt = str(payload.get("negative_prompt") or "")
+    reviewed_expected = {
+        "tool": tool,
+        "output": str(video_generation.get("output") or "").strip(),
+        "duration_seconds": str(duration_seconds),
+        "quality": quality,
+        "aspect_ratio": aspect_ratio,
+        "first_frame": first_reference,
+        "last_frame": last_reference,
+        "prompt_policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
+        "compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
+        "source_digest": str(payload.get("source_digest") or ""),
+        "prompt_sha256": prompt_sha256,
+        "negative_prompt_sha256": hashlib.sha256(
+            negative_prompt.encode("utf-8")
+        ).hexdigest(),
+        "references_digest": sha256_canonical_json(references),
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+    }
+    reviewed_mismatches = [
+        field
+        for field, expected in reviewed_expected.items()
+        if str(reviewed.get(field) or "") != str(expected)
+    ]
+    if reviewed_mismatches:
+        raise ValueError(
+            "reviewed video generation request is stale or changed: "
+            + ", ".join(reviewed_mismatches)
+        )
+
+    state_path = run_dir / "state.txt"
+    state = parse_state_file(state_path) if state_path.is_file() else {}
+    approval_prefix = _video_prompt_approval_state_prefix(request.item_id)
+    approval_expected = {
+        "status": "approved",
+        "request_section_sha256": reviewed["request_section_sha256"],
+        "prompt_sha256": prompt_sha256,
+        "source_digest": str(payload.get("source_digest") or ""),
+    }
+    approval_mismatches = [
+        field
+        for field, expected in approval_expected.items()
+        if str(state.get(f"{approval_prefix}.{field}") or "") != expected
+    ]
+    if approval_mismatches:
+        raise ValueError(
+            "reviewed video generation request is not approved for generation: "
+            + ", ".join(approval_mismatches)
+        )
+
+    provider_request_binding = _dict_value(
+        payload.get("provider_request_binding")
+    )
+    provider_execution_options = _dict_value(
+        provider_request_binding.get("execution_options")
+    )
+    if not provider_execution_options:
+        raise ValueError(
+            "materialized provider execution options are missing; create video prompts again"
+        )
+    provider_execution_options = {
+        **provider_execution_options,
+        VIDEO_CANDIDATE_PROVENANCE_KEY: _video_candidate_revision_provenance(
+            item_id=request.item_id,
+            request_section_sha256=reviewed["request_section_sha256"],
+            source_digest=str(payload.get("source_digest") or ""),
+        ),
+    }
+
+    materialized_request = request.model_copy(
+        update={
+            "prompt": prompt,
+            "first_reference": first_reference or None,
+            "last_reference": last_reference or None,
+            "references": references,
+            "negative_prompt": negative_prompt or None,
+            "quality": quality,
+            "aspect_ratio": aspect_ratio,
+            "duration_seconds": duration_seconds,
+            "tool": tool,
+            "prompt_policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
+            "prompt_compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
+            "prompt_sha256": prompt_sha256,
+            "prompt_source_digest": str(payload.get("source_digest") or ""),
+            "provider_execution_options": provider_execution_options,
+        }
+    )
+    _assert_video_request_within_provider_capabilities(
+        materialized_request,
+        label=f"{request.item_id} materialized provider request",
+    )
+
+    return materialized_request
 
 
 def _require_markdown_scalar(value: str, *, field: str) -> str:
@@ -2875,6 +4590,301 @@ def _target_by_item_id(data: dict[str, Any], item_id: str) -> dict[str, Any] | N
     return next((target for target in _manifest_scene_targets(data) if item_id in target["aliases"]), None)
 
 
+RENDER_UNIT_VIDEO_INPUT_CONTRACT_VERSION = "render_unit_video_input_v1"
+
+
+def _render_unit_video_input_contract(node: dict[str, Any]) -> dict[str, Any]:
+    """Return immutable provider inputs for a storyboard-backed render unit.
+
+    New manifests persist the explicit contract. The storyboard fallback keeps
+    already-created render units protected while they are migrated naturally.
+    """
+
+    raw_contract = node.get("video_input_contract")
+    if isinstance(raw_contract, dict) and raw_contract:
+        return {
+            "schema_version": str(raw_contract.get("schema_version") or "").strip(),
+            "input_mode": str(raw_contract.get("input_mode") or "").strip(),
+            "required_references": [
+                str(value).strip()
+                for value in _list_value(raw_contract.get("required_references"))
+                if str(value).strip()
+            ],
+            "reference_roles": deepcopy(
+                _list_value(raw_contract.get("reference_roles"))
+            ),
+            "explicit": True,
+        }
+    storyboard_image = str(node.get("storyboard_image") or "").strip()
+    if not storyboard_image:
+        return {}
+    return {
+        "schema_version": "legacy_storyboard_binding",
+        "input_mode": "legacy_frame_plus_reference",
+        "required_references": [],
+        "reference_roles": [],
+        "explicit": False,
+    }
+
+
+def _render_unit_video_input_issues(
+    *, selector: str, node: dict[str, Any]
+) -> list[str]:
+    issues: list[str] = []
+    raw_contract = node.get("video_input_contract")
+    if raw_contract is not None and not isinstance(raw_contract, dict):
+        return [f"{selector}: video_input_contract must be a mapping"]
+    contract = _render_unit_video_input_contract(node)
+    if not contract:
+        return issues
+    if contract.get("explicit") and contract.get("schema_version") != RENDER_UNIT_VIDEO_INPUT_CONTRACT_VERSION:
+        issues.append(
+            f"{selector}: unsupported video_input_contract schema_version"
+        )
+    if not contract.get("explicit"):
+        issues.append(
+            f"{selector}: storyboard render unit requires an explicit reference-image video_input_contract"
+        )
+        return issues
+    if contract.get("input_mode") != "reference_images":
+        issues.append(
+            f"{selector}: storyboard video_input_contract input_mode must be reference_images"
+        )
+    required_references = [
+        str(value).strip()
+        for value in _list_value(contract.get("required_references"))
+        if str(value).strip()
+    ]
+    if len(required_references) != len(
+        _list_value(contract.get("required_references"))
+    ) or len(required_references) != len(set(required_references)):
+        issues.append(
+            f"{selector}: required render-unit references must be unique non-empty paths"
+        )
+    reference_roles = _list_value(contract.get("reference_roles"))
+    if len(reference_roles) != len(required_references):
+        issues.append(
+            f"{selector}: video_input_contract.reference_roles count must equal "
+            "ordered required_references count"
+        )
+    indexes: list[int] = []
+    for role_index, raw_role in enumerate(reference_roles, start=1):
+        if not isinstance(raw_role, dict):
+            issues.append(
+                f"{selector}: video_input_contract.reference_roles entries must be mappings"
+            )
+            continue
+        image_index = raw_role.get("image_index")
+        if not isinstance(image_index, int) or isinstance(image_index, bool):
+            issues.append(
+                f"{selector}: reference role image_index must be an integer"
+            )
+        else:
+            indexes.append(image_index)
+            if image_index != role_index:
+                issues.append(
+                    f"{selector}: reference role image_index must be 1-based, consecutive, unique, and ordered"
+                )
+        role = str(raw_role.get("role") or "").strip()
+        if role not in VIDEO_REFERENCE_ROLE_INSTRUCTIONS:
+            issues.append(
+                f"{selector}: unsupported video reference role {role!r}"
+            )
+    if indexes and len(indexes) != len(set(indexes)):
+        issues.append(
+            f"{selector}: reference role image_index must be 1-based, consecutive, unique, and ordered"
+        )
+    storyboard_image = str(node.get("storyboard_image") or "").strip()
+    if storyboard_image and storyboard_image not in required_references:
+        issues.append(
+            f"{selector}: storyboard_image must remain a required render-unit reference"
+        )
+    generation = _dict_value(node.get("video_generation"))
+    generation_first = str(generation.get("first_frame") or "").strip()
+    input_image = str(generation.get("input_image") or "").strip()
+    last_frame = str(generation.get("last_frame") or "").strip()
+    if generation_first or input_image or last_frame:
+        issues.append(
+            f"{selector}: reference-image mode must not combine first_frame/input_image/last_frame "
+            "with multimodal references"
+        )
+    current_references = [
+        str(value).strip()
+        for value in _list_value(generation.get("references"))
+        if str(value).strip()
+    ]
+    if current_references != required_references:
+        issues.append(
+            f"{selector}: video_generation references must exactly preserve the ordered required render-unit references"
+        )
+    return issues
+
+
+def _manifest_video_targets(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the canonical provider targets used by final rendering.
+
+    A scene with render units is generated exclusively by those units. Exposing
+    its source cuts as additional video targets would let the UI purchase clips
+    that the final renderer intentionally ignores.
+    """
+
+    scenes = data.get("scenes")
+    if not isinstance(scenes, list):
+        return []
+    render_unit_issues = _render_unit_timeline_issues(data)
+    if render_unit_issues:
+        raise ValueError(
+            "invalid render-unit timeline: " + "; ".join(render_unit_issues[:20])
+        )
+    cut_targets = _manifest_scene_targets(data)
+    targets: list[dict[str, Any]] = []
+    for scene_index, scene in enumerate(scenes):
+        if not isinstance(scene, dict) or _is_non_renderable_manifest_node(scene):
+            continue
+        scene_id = normalize_dotted_id(scene.get("scene_id"))
+        if not scene_id:
+            continue
+        render_units = [
+            unit
+            for unit in _list_value(scene.get("render_units"))
+            if isinstance(unit, dict) and not _is_non_renderable_manifest_node(unit)
+        ]
+        if not render_units:
+            targets.extend(
+                target for target in cut_targets if target.get("scene") is scene
+            )
+            continue
+        for unit_index, unit in enumerate(render_units):
+            unit_id = normalize_dotted_id(unit.get("unit_id")) or str(
+                unit_index + 1
+            )
+            selector = f"scene{scene_id}_unit{unit_id}"
+            aliases = {
+                selector,
+                f"{make_scene_cut_selector(scene_id)}_unit{unit_id}",
+            }
+            targets.append({
+                "selector": selector,
+                "aliases": aliases,
+                "scene": scene,
+                "scene_id": scene_id,
+                "cuts": render_units,
+                "cut": unit,
+                "cut_index": unit_index,
+                "scene_index": scene_index,
+                "is_render_unit": True,
+            })
+    return targets
+
+
+def _video_target_by_item_id(
+    data: dict[str, Any], item_id: str
+) -> dict[str, Any] | None:
+    return next(
+        (
+            target
+            for target in _manifest_video_targets(data)
+            if item_id in target["aliases"]
+        ),
+        None,
+    )
+
+
+def _video_contract_for_server_target(target: dict[str, Any]) -> dict[str, Any]:
+    node = _dict_value(target.get("cut"))
+    explicit = _dict_value(node.get("cut_contract"))
+    if not target.get("is_render_unit"):
+        return explicit
+
+    scene = _dict_value(target.get("scene"))
+    source_cut_ids = [
+        normalize_dotted_id(value)
+        for value in _list_value(node.get("source_cut_ids"))
+    ]
+    cuts_by_id: dict[str, dict[str, Any]] = {}
+    for index, cut in enumerate(_list_value(scene.get("cuts")), start=1):
+        if not isinstance(cut, dict) or _is_non_renderable_manifest_node(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        cuts_by_id[cut_id] = cut
+    source_contracts = [
+        _dict_value(cuts_by_id[cut_id].get("cut_contract"))
+        for cut_id in source_cut_ids
+        if cut_id and cut_id in cuts_by_id
+    ]
+    composed = compose_video_render_unit_contract(source_contracts)
+    return resolve_video_prompt_contract(
+        {},
+        cut_contract=explicit,
+        scene_contract=composed,
+    )
+
+
+def _video_review_dependencies_for_server_target(
+    target: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not target.get("is_render_unit"):
+        return None
+    node = _dict_value(target.get("cut"))
+    scene = _dict_value(target.get("scene"))
+    source_cut_ids = [
+        normalize_dotted_id(value)
+        for value in _list_value(node.get("source_cut_ids"))
+    ]
+    cuts_by_id: dict[str, dict[str, Any]] = {}
+    for index, cut in enumerate(_list_value(scene.get("cuts")), start=1):
+        if not isinstance(cut, dict) or _is_non_renderable_manifest_node(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        cuts_by_id[cut_id] = cut
+    return {
+        "render_unit_source_cut_ids": [
+            cut_id for cut_id in source_cut_ids if cut_id
+        ],
+        "render_unit_source_cut_contracts": [
+            _dict_value(cuts_by_id[cut_id].get("cut_contract"))
+            for cut_id in source_cut_ids
+            if cut_id and cut_id in cuts_by_id
+        ],
+    }
+
+
+def _first_frame_visual_plan_for_server_target(
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the visual plan for the image that anchors video motion."""
+
+    node = _dict_value(target.get("cut"))
+    own_plan = _dict_value(
+        _dict_value(node.get("image_generation")).get("first_frame_visual_plan")
+    )
+    if own_plan:
+        return own_plan
+    if not target.get("is_render_unit"):
+        return {}
+    source_cut_ids = [
+        normalize_dotted_id(value)
+        for value in _list_value(node.get("source_cut_ids"))
+    ]
+    first_source_id = next((value for value in source_cut_ids if value), None)
+    if not first_source_id:
+        return {}
+    scene = _dict_value(target.get("scene"))
+    for index, cut in enumerate(_list_value(scene.get("cuts")), start=1):
+        if not isinstance(cut, dict) or _is_non_renderable_manifest_node(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        if cut_id != first_source_id:
+            continue
+        source_plan = _dict_value(
+            _dict_value(cut.get("image_generation")).get(
+                "first_frame_visual_plan"
+            )
+        )
+        return source_plan if source_plan else {}
+    return {}
+
+
 def _apply_v2_visual_plan_patch_and_compile(
     original_plan: dict[str, Any],
     patch: dict[str, Any],
@@ -2883,6 +4893,8 @@ def _apply_v2_visual_plan_patch_and_compile(
     object_ids: Iterable[str],
     location_ids: Iterable[str],
     references: Iterable[str],
+    story_time: str = "",
+    scene_time_of_day: str = "",
     review_metadata: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     plan = deepcopy(original_plan)
@@ -2930,6 +4942,8 @@ def _apply_v2_visual_plan_patch_and_compile(
         object_ids=object_ids,
         location_ids=location_ids,
         reference_images=references,
+        story_time=story_time,
+        scene_time_of_day=scene_time_of_day,
         review_metadata=review_metadata,
     )
     return plan, payload
@@ -3708,10 +5722,41 @@ def _default_video_output_for_target(target: dict[str, Any]) -> str:
 
 
 def _candidate_video_output_for_item(run_dir: Path, item_id: str) -> str | None:
-    candidate = _video_candidate_path(run_dir, item_id, 1)
+    revision = _current_approved_video_candidate_provenance(run_dir, item_id)
+    if revision is None:
+        return None
+    candidate = _video_candidate_path(
+        run_dir,
+        item_id,
+        revision["revision_id"],
+        1,
+    )
     if candidate.is_file():
         return candidate.relative_to(run_dir).as_posix()
     return None
+
+
+def _assert_current_video_candidate_path(
+    run_dir: Path,
+    item_id: str,
+    video_path: str,
+) -> None:
+    """Reject a candidate generated for a superseded prompt revision."""
+
+    parts = Path(video_path).parts
+    prefix = (
+        "assets",
+        "test",
+        "video_gen_candidates",
+        _safe_artifact_id(item_id),
+    )
+    if tuple(parts[: len(prefix)]) != prefix:
+        return
+    if len(parts) != len(prefix) + 2:
+        raise ValueError(f"invalid video candidate path: {item_id}")
+    current = _current_approved_video_candidate_provenance(run_dir, item_id)
+    if current is None or parts[len(prefix)] != current["revision_id"]:
+        raise ValueError(f"stale video candidate revision: {item_id}")
 
 
 def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -3812,7 +5857,12 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                 "videoExists": resolved_video.is_file(),
                 "videoDurationSeconds": video_duration,
                 "configuredVideoDurationSeconds": max(1, configured_duration),
-                "videoPrompt": str(video_generation.get("motion_prompt") or ""),
+                "videoPrompt": str(
+                    video_generation.get("prompt_authoring_source")
+                    or video_generation.get("source_motion_prompt")
+                    or video_generation.get("motion_prompt")
+                    or ""
+                ),
                 "videoTool": str(video_generation.get("tool") or "kling_3_0"),
                 "videoQuality": str(video_generation.get("quality") or "1080p"),
                 "videoAspectRatio": str(video_generation.get("aspect_ratio") or "16:9"),
@@ -3862,6 +5912,105 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                 "legacyPrompt": legacy_prompt,
                 "promptPolicyVersion": api_prompt_policy,
                 "debugPromptSource": image_generation.get("debug_prompt_source") if isinstance(image_generation.get("debug_prompt_source"), dict) else {},
+            }
+        )
+    return items
+
+
+def _manifest_video_items(
+    run_dir: Path,
+    data: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Serialize exactly the cut or render-unit targets accepted by video APIs."""
+
+    if data is None:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    items: list[dict[str, Any]] = []
+    for target in _manifest_video_targets(data):
+        selector = str(target["selector"])
+        node = _dict_value(target.get("cut"))
+        image_generation = _dict_value(node.get("image_generation"))
+        video_generation = _dict_value(node.get("video_generation"))
+        input_contract = (
+            _render_unit_video_input_contract(node)
+            if target.get("is_render_unit")
+            else {}
+        )
+        video_input_mode = str(input_contract.get("input_mode") or "").strip()
+        if video_input_mode == "reference_images":
+            first_frame = ""
+        else:
+            first_frame = str(
+                video_generation.get("first_frame")
+                or video_generation.get("input_image")
+                or node.get("storyboard_image")
+                or image_generation.get("output")
+                or ""
+            ).strip()
+        last_frame = str(video_generation.get("last_frame") or "").strip()
+        references = [
+            str(value).strip()
+            for value in _list_value(video_generation.get("references"))
+            if str(value).strip()
+        ]
+        video_output = str(
+            video_generation.get("output") or _default_video_output_for_target(target)
+        ).strip()
+        candidate_output = _candidate_video_output_for_item(run_dir, selector)
+        selected_video = candidate_output or video_output
+        resolved_video = resolve_run_relative(run_dir, selected_video)
+        resolved_first_frame = (
+            resolve_run_relative(run_dir, first_frame)
+            if first_frame
+            else run_dir / "__missing_video_first_frame__"
+        )
+        prompt_authoring_source = str(
+            video_generation.get("prompt_authoring_source")
+            or video_generation.get("source_motion_prompt")
+            or ""
+        ).strip()
+        configured_duration = int(video_generation.get("duration_seconds") or 8)
+        items.append(
+            {
+                "id": selector,
+                "kind": "scene",
+                "assetType": None,
+                "tool": "video_manifest",
+                "output": first_frame or None,
+                "prompt": "",
+                "promptPolicyVersion": None,
+                "debugPromptSource": {
+                    "videoTarget": "render_unit"
+                    if target.get("is_render_unit")
+                    else "cut",
+                    "sourceCutIds": _list_value(node.get("source_cut_ids")),
+                },
+                "references": references,
+                "referenceCount": len(references),
+                "executionLane": "video_render_unit"
+                if target.get("is_render_unit")
+                else "video_cut",
+                "generationStatus": "generated" if resolved_video.is_file() else None,
+                "existingImage": first_frame if resolved_first_frame.is_file() else None,
+                "candidates": [],
+                "sceneId": target.get("scene_id"),
+                "isRenderUnit": bool(target.get("is_render_unit")),
+                "sourceCutIds": _list_value(node.get("source_cut_ids")),
+                "videoPrompt": prompt_authoring_source,
+                "videoOutput": video_output,
+                "selectedVideoPath": selected_video,
+                "videoExists": resolved_video.is_file(),
+                "videoDurationSeconds": _probe_media_duration_seconds(resolved_video),
+                "configuredVideoDurationSeconds": max(1, configured_duration),
+                "videoTool": str(video_generation.get("tool") or "kling_3_0"),
+                "videoQuality": str(video_generation.get("quality") or "1080p"),
+                "videoAspectRatio": str(
+                    video_generation.get("aspect_ratio") or "16:9"
+                ),
+                "videoFirstReference": first_frame,
+                "videoLastReference": last_frame,
+                "videoReferences": references,
+                "videoInputMode": video_input_mode or None,
             }
         )
     return items
@@ -4419,13 +6568,27 @@ def _render_unit_timeline_issues(
         render = _dict_value(node.get("render"))
         generation = _dict_value(node.get("video_generation"))
         duration = _int_value(
-            render.get("video_duration_seconds") or generation.get("duration_seconds") or 0
+            render.get("video_duration_seconds")
+            or generation.get("duration_seconds")
+            or node.get("duration_seconds")
+            or 0
         )
-        if duration > VIDEO_GENERATION_DURATION_MAX_SECONDS:
-            issues.append(
-                f"{target['selector']}: approved duration {duration}s exceeds the "
-                f"{VIDEO_GENERATION_DURATION_MAX_SECONDS}s video-generation limit; split the cut"
+        if duration <= 0:
+            continue
+        tool, model, input_mode = _video_generation_provider_context(generation)
+        issues.extend(
+            _video_provider_capability_issues(
+                label=str(target["selector"]),
+                tool=tool,
+                model=model,
+                input_mode=input_mode,
+                duration_seconds=duration,
+                reference_count=len(_list_value(generation.get("references"))),
+                # Reference edits are approval-payload drift, not timeline
+                # drift. They are checked during materialization and dispatch.
+                validate_reference_count=False,
             )
+        )
     for scene_index, scene in enumerate(_list_value(data.get("scenes"))):
         if not isinstance(scene, dict) or _is_non_renderable_manifest_node(scene):
             continue
@@ -4442,17 +6605,27 @@ def _render_unit_timeline_issues(
             if isinstance(cut, dict) and not _is_non_renderable_manifest_node(cut)
         ]
         cut_durations: dict[str, int] = {}
+        active_cuts_by_id: dict[str, dict[str, Any]] = {}
+        seen_cut_ids: set[str] = set()
         for cut_index, cut in enumerate(active_cuts):
             cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index + 1)
+            if cut_id in seen_cut_ids:
+                issues.append(f"scene{scene_id}_cut{cut_id}: duplicate active cut id")
+                continue
+            seen_cut_ids.add(cut_id)
             render = _dict_value(cut.get("render"))
             generation = _dict_value(cut.get("video_generation"))
             duration = _int_value(
-                render.get("video_duration_seconds") or generation.get("duration_seconds") or 0
+                render.get("video_duration_seconds")
+                or generation.get("duration_seconds")
+                or cut.get("duration_seconds")
+                or 0
             )
             if duration <= 0:
                 issues.append(f"scene{scene_id}_cut{cut_id}: approved video duration is missing")
                 continue
             cut_durations[cut_id] = duration
+            active_cuts_by_id[cut_id] = cut
 
         ownership: dict[str, str] = {}
         canonical_source_ids = list(cut_durations)
@@ -4467,6 +6640,9 @@ def _render_unit_timeline_issues(
             if _is_non_renderable_manifest_node(unit):
                 issues.append(f"{selector}: deleted/reference render units are not supported")
                 continue
+            issues.extend(
+                _render_unit_video_input_issues(selector=selector, node=unit)
+            )
             raw_source_ids = unit.get("source_cut_ids")
             if not isinstance(raw_source_ids, list) or not raw_source_ids:
                 issues.append(f"{selector}: source_cut_ids must be a non-empty list")
@@ -4490,12 +6666,80 @@ def _render_unit_timeline_issues(
             if not source_ids:
                 continue
             expected_duration = sum(cut_durations[source_id] for source_id in source_ids)
-            if expected_duration > VIDEO_GENERATION_DURATION_MAX_SECONDS:
-                issues.append(
-                    f"{selector}: approved source-cut total {expected_duration}s exceeds the "
-                    f"{VIDEO_GENERATION_DURATION_MAX_SECONDS}s render-unit generation limit; split the unit"
-                )
             generation = _dict_value(unit.get("video_generation"))
+            input_contract = _render_unit_video_input_contract(unit)
+            if input_contract.get("input_mode") == "reference_images":
+                first_source_cut = active_cuts_by_id[source_ids[0]]
+                first_source_output = str(
+                    _dict_value(first_source_cut.get("image_generation")).get(
+                        "output"
+                    )
+                    or ""
+                ).strip()
+                storyboard_image = str(
+                    unit.get("storyboard_image") or ""
+                ).strip()
+                if not first_source_output or not storyboard_image:
+                    issues.append(
+                        f"{selector}: reference-image render unit requires the first source-cut "
+                        "image output and storyboard_image"
+                    )
+                else:
+                    expected_references = [first_source_output, storyboard_image]
+                    required_references = [
+                        str(value).strip()
+                        for value in _list_value(
+                            input_contract.get("required_references")
+                        )
+                        if str(value).strip()
+                    ]
+                    current_references = [
+                        str(value).strip()
+                        for value in _list_value(generation.get("references"))
+                        if str(value).strip()
+                    ]
+                    if required_references != expected_references:
+                        issues.append(
+                            f"{selector}: required render-unit references must exactly equal the "
+                            "ordered first source-cut image and storyboard_image"
+                        )
+                    if current_references != expected_references:
+                        issues.append(
+                            f"{selector}: video generation references must exactly equal the "
+                            "ordered first source-cut image and storyboard_image"
+                        )
+                    expected_roles = [
+                        {
+                            "image_index": 1,
+                            "role": "start_state_visual_anchor",
+                        },
+                        {
+                            "image_index": 2,
+                            "role": "ordered_storyboard_sequence_guide",
+                        },
+                    ]
+                    if _list_value(input_contract.get("reference_roles")) != expected_roles:
+                        issues.append(
+                            f"{selector}: reference_roles must exactly bind image 1 as the "
+                            "start-state anchor and image 2 as the ordered storyboard guide"
+                        )
+            tool, model, input_mode = _video_generation_provider_context(
+                generation,
+                input_mode=str(input_contract.get("input_mode") or ""),
+            )
+            capability_issues = _video_provider_capability_issues(
+                label=selector,
+                tool=tool,
+                model=model,
+                input_mode=input_mode,
+                duration_seconds=expected_duration,
+                reference_count=len(_list_value(generation.get("references"))),
+            )
+            issues.extend(capability_issues)
+            if any("duration" in issue for issue in capability_issues):
+                issues.append(
+                    f"{selector}: split the render unit to fit its provider capability"
+                )
             actual_duration = _int_value(generation.get("duration_seconds") or 0)
             if synchronize:
                 generation["duration_seconds"] = expected_duration
@@ -5065,6 +7309,11 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
                     _candidate_video_output_for_item(run_dir, unit_selector)
                     or str(generation.get("output") or "").strip()
                 )
+                _assert_current_video_candidate_path(
+                    run_dir,
+                    unit_selector,
+                    video_path,
+                )
                 _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
                 duration = _int_value(generation.get("duration_seconds"))
                 if duration <= 0:
@@ -5100,6 +7349,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
                 or _candidate_video_output_for_item(run_dir, selector)
                 or str(video_generation.get("output") or "")
             )
+            _assert_current_video_candidate_path(run_dir, selector, video_path)
             _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
             video_source = resolve_run_relative(run_dir, video_path)
             clips.append(
@@ -5374,16 +7624,382 @@ async def _run_final_render(run_dir: Path, req: FinalRenderRequest, freeze_resul
 def _default_video_prompt(item: FrontendReviewItem) -> str:
     if item.video_prompt and item.video_prompt.strip():
         return item.video_prompt.strip()
-    parts = [
-        "静止画の人物・構図・光を保ったまま、自然なカメラ移動と小さな環境変化だけで動かす。",
-    ]
-    if item.prompt.strip():
-        parts.extend(["", "シーン説明:", item.prompt.strip()])
-    return "\n".join(parts).strip()
+    return ""
 
 
 def _video_prompt_for_request(item: FrontendReviewItem) -> str:
     return _require_no_code_fence(_default_video_prompt(item), field="video_prompt")
+
+
+def _video_reference_content_sha256(
+    run_dir: Path | None,
+    references: Iterable[str],
+) -> dict[str, str]:
+    if run_dir is None:
+        return {}
+    bindings: dict[str, str] = {}
+    for raw in references:
+        reference = str(raw or "").strip()
+        if not reference or reference in bindings:
+            continue
+        try:
+            path = resolve_run_relative(run_dir, reference)
+        except ValueError:
+            continue
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        bindings[reference] = digest.hexdigest()
+    return bindings
+
+
+def _compile_frontend_video_prompt_payload(
+    *,
+    data: dict[str, Any],
+    item: FrontendReviewItem,
+    run_dir: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = _video_target_by_item_id(data, item.item_id)
+    if target is None:
+        raise ValueError(f"video manifest target not found: {item.item_id}")
+    node = target["cut"]
+    scene = target["scene"]
+    video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
+    metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
+    source_prompt = _video_prompt_for_request(item)
+    if not source_prompt:
+        source_prompt = str(
+            video_generation.get("prompt_authoring_source")
+            or video_generation.get("source_motion_prompt")
+            or ""
+        ).strip()
+    tool = item.video_tool or str(video_generation.get("tool") or "kling_3_0")
+    input_contract = (
+        _render_unit_video_input_contract(_dict_value(node))
+        if target.get("is_render_unit")
+        else {}
+    )
+    if input_contract.get("input_mode") == "reference_images":
+        first_frame = ""
+    else:
+        first_frame = _default_first_frame(item) or str(
+            video_generation.get("first_frame")
+            or video_generation.get("input_image")
+            or ""
+        )
+    if item.video_last_reference is None:
+        last_frame = str(video_generation.get("last_frame") or "").strip()
+    else:
+        # ``None`` means the field was not edited; an explicit empty string
+        # means the caller intentionally cleared the end-frame constraint.
+        last_frame = item.video_last_reference.strip()
+    execution_options = _server_video_execution_options(
+        tool=tool,
+        has_first_frame=bool(first_frame),
+        has_reference_images=bool(item.video_references),
+    )
+    reference_content_sha256 = _video_reference_content_sha256(
+        run_dir,
+        [first_frame, last_frame, *item.video_references],
+    )
+    if reference_content_sha256:
+        execution_options["reference_content_sha256"] = reference_content_sha256
+    payload = compile_video_api_prompt_v1(
+        cut_contract=_video_contract_for_server_target(target),
+        scene_contract=node.get("scene_contract") if isinstance(node.get("scene_contract"), dict) else {},
+        video_generation=video_generation,
+        source_prompt=source_prompt,
+        story_time=str(metadata.get("time") or "").strip(),
+        time_of_day=str(scene.get("time_of_day") or "").strip(),
+        tool=tool,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        duration_seconds=item.video_duration_seconds or video_generation.get("duration_seconds") or 8,
+        references=item.video_references,
+        reference_roles=(
+            _list_value(input_contract.get("reference_roles"))
+            if input_contract
+            else None
+        ),
+        quality=item.video_quality or str(video_generation.get("quality") or "1080p"),
+        aspect_ratio=item.video_aspect_ratio
+        or str(video_generation.get("aspect_ratio") or "16:9"),
+        execution_options=execution_options,
+        direction_notes=video_generation.get("direction_notes") or (),
+        continuity_notes=video_generation.get("continuity_notes") or (),
+        first_frame_visual_plan=_first_frame_visual_plan_for_server_target(
+            target
+        ),
+        review_only_dependencies=_video_review_dependencies_for_server_target(
+            target
+        ),
+        scene_time_of_day_visual_basis=scene.get(
+            "time_of_day_visual_basis"
+        ),
+        scene_location_mode=str(scene.get("location_mode") or "").strip(),
+        scene_location_sequence=_list_value(scene.get("location_sequence")),
+        scene_location_segments=[
+            dict(value)
+            for value in _list_value(scene.get("location_segments"))
+            if isinstance(value, dict)
+        ],
+    )
+    return target, payload
+
+
+def _frontend_video_payloads(
+    run_dir: Path,
+    items: list[FrontendReviewItem],
+) -> dict[str, dict[str, Any]]:
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    return {
+        item.item_id: _compile_frontend_video_prompt_payload(
+            data=data,
+            item=item,
+            run_dir=run_dir,
+        )[1]
+        for item in items
+    }
+
+
+def _effective_video_materialization_items(
+    run_dir: Path,
+    items: list[FrontendReviewItem],
+) -> list[FrontendReviewItem]:
+    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+    targets_by_id = {
+        str(target["selector"]): target
+        for target in _manifest_video_targets(manifest_data)
+    }
+    final_review = _dict_value(
+        _dict_value(manifest_data.get("narration_workflow")).get(
+            "final_audio_review"
+        )
+    )
+    approved_timeline_locked = bool(
+        final_review.get("status") == "approved"
+        and str(final_review.get("approved_timeline_hash") or "")
+        == _manifest_narration_timeline_hash(manifest_data)
+    )
+    effective: list[FrontendReviewItem] = []
+    for item in items:
+        target = targets_by_id.get(item.item_id)
+        node = _dict_value(target.get("cut")) if target else {}
+        generation = _dict_value(node.get("video_generation"))
+        render = _dict_value(node.get("render"))
+        canonical_render_duration = _int_value(
+            render.get("video_duration_seconds") or 0
+        )
+        current_timeline_duration = _int_value(
+            canonical_render_duration
+            or generation.get("duration_seconds")
+            or 0
+        )
+        requested = int(
+            item.video_duration_seconds
+            or canonical_render_duration
+            or generation.get("duration_seconds")
+            or 8
+        )
+        if (
+            target
+            and not target.get("is_render_unit")
+            and item.video_duration_seconds is not None
+            and canonical_render_duration > 0
+            and requested != canonical_render_duration
+        ):
+            raise ValueError(
+                f"{item.item_id}: duration {requested}s differs from canonical render timeline duration "
+                f"{canonical_render_duration}s"
+            )
+        if (
+            target
+            and not target.get("is_render_unit")
+            and approved_timeline_locked
+            and current_timeline_duration > 0
+            and requested != current_timeline_duration
+        ):
+            raise ValueError(
+                f"{item.item_id}: duration {requested}s differs from p750-approved canonical render "
+                f"timeline duration {current_timeline_duration}s"
+            )
+        if target and target.get("is_render_unit"):
+            scene = _dict_value(target.get("scene"))
+            source_ids = [
+                normalize_dotted_id(value)
+                for value in _list_value(node.get("source_cut_ids"))
+            ]
+            if not source_ids or any(source_id is None for source_id in source_ids):
+                raise ValueError(
+                    f"{item.item_id}: render unit source_cut_ids must be a non-empty valid list"
+                )
+            cuts_by_id = {
+                normalize_dotted_id(cut.get("cut_id")) or str(index): cut
+                for index, cut in enumerate(_list_value(scene.get("cuts")), start=1)
+                if isinstance(cut, dict) and not _is_non_renderable_manifest_node(cut)
+            }
+            source_durations: list[int] = []
+            for source_id in source_ids:
+                source_cut = cuts_by_id.get(source_id or "")
+                if source_cut is None:
+                    raise ValueError(
+                        f"{item.item_id}: render unit has an unknown source cut {source_id!r}"
+                    )
+                source_render = _dict_value(source_cut.get("render"))
+                source_generation = _dict_value(
+                    source_cut.get("video_generation")
+                )
+                duration = _int_value(
+                    source_render.get("video_duration_seconds")
+                    or source_generation.get("duration_seconds")
+                    or source_cut.get("duration_seconds")
+                    or 0
+                )
+                if duration <= 0:
+                    raise ValueError(
+                        f"{item.item_id}: source cut {source_id} duration is missing"
+                    )
+                source_durations.append(duration)
+            expected = sum(source_durations)
+            if item.video_duration_seconds is not None and requested != expected:
+                raise ValueError(
+                    f"{item.item_id}: duration {requested}s must equal source-cut total {expected}s"
+                )
+            requested = expected
+            input_contract = _render_unit_video_input_contract(node)
+            if input_contract.get("input_mode") == "reference_images":
+                if (
+                    item.video_first_reference is not None
+                    and item.video_first_reference.strip()
+                ):
+                    raise ValueError(
+                        f"{item.item_id}: reference-image render unit must keep first frame empty"
+                    )
+                if (
+                    item.video_last_reference is not None
+                    and item.video_last_reference.strip()
+                ):
+                    raise ValueError(
+                        f"{item.item_id}: reference-image render unit must keep last frame empty"
+                    )
+                required_references = [
+                    str(value).strip()
+                    for value in _list_value(
+                        input_contract.get("required_references")
+                    )
+                    if str(value).strip()
+                ]
+                references_were_submitted = "video_references" in getattr(
+                    item, "model_fields_set", set()
+                )
+                submitted_references = [
+                    str(value).strip()
+                    for value in item.video_references
+                    if str(value).strip()
+                ]
+                if (
+                    references_were_submitted
+                    and submitted_references != required_references
+                ):
+                    raise ValueError(
+                        f"{item.item_id}: video_references must exactly preserve the ordered "
+                        "required render-unit references"
+                    )
+                item = item.model_copy(
+                    update={
+                        "video_first_reference": "",
+                        "video_last_reference": "",
+                        "video_references": required_references,
+                    }
+                )
+        narration_duration = _narration_min_duration_seconds(run_dir, item.item_id)
+        duration = max(requested, math.ceil(narration_duration or 0), 1)
+        if (
+            target
+            and not target.get("is_render_unit")
+            and canonical_render_duration > 0
+            and duration != canonical_render_duration
+        ):
+            raise ValueError(
+                f"{item.item_id}: effective duration {duration}s differs from canonical render timeline "
+                f"duration {canonical_render_duration}s"
+            )
+        if target and target.get("is_render_unit") and duration != requested:
+            raise ValueError(
+                f"{item.item_id}: effective duration {duration}s must equal source-cut total "
+                f"{requested}s; update the canonical cut timeline before materialization"
+            )
+        effective_item = item.model_copy(
+            update={"video_duration_seconds": duration}
+        )
+        selected_tool = str(
+            effective_item.video_tool
+            or generation.get("tool")
+            or "kling_3_0"
+        ).strip()
+        input_contract = (
+            _render_unit_video_input_contract(node)
+            if target and target.get("is_render_unit")
+            else {}
+        )
+        reference_image_mode = (
+            input_contract.get("input_mode") == "reference_images"
+        )
+        first_reference = (
+            ""
+            if reference_image_mode
+            else (
+                _default_first_frame(effective_item)
+                or str(
+                    generation.get("first_frame")
+                    or generation.get("input_image")
+                    or ""
+                ).strip()
+            )
+        )
+        last_reference = (
+            ""
+            if reference_image_mode
+            else (
+                str(generation.get("last_frame") or "").strip()
+                if effective_item.video_last_reference is None
+                else effective_item.video_last_reference.strip()
+            )
+        )
+        references = [
+            str(value).strip()
+            for value in effective_item.video_references
+            if str(value).strip()
+        ]
+        provider_options = _server_video_execution_options(
+            tool=selected_tool,
+            has_first_frame=bool(first_reference),
+            has_reference_images=bool(references),
+        )
+        input_mode = (
+            "first_last_frame"
+            if first_reference and last_reference
+            else "image_to_video"
+            if first_reference
+            else "reference_to_video"
+            if references
+            else "text_to_video"
+        )
+        capability_issues = _video_provider_capability_issues(
+            label=item.item_id,
+            tool=selected_tool,
+            model=str(provider_options.get("model") or "").strip(),
+            input_mode=input_mode,
+            duration_seconds=duration,
+            reference_count=len(references),
+        )
+        if capability_issues:
+            raise ValueError("; ".join(capability_issues))
+        effective.append(effective_item)
+    return effective
 
 
 def _default_video_output(item: FrontendReviewItem) -> str:
@@ -5416,6 +8032,7 @@ def _write_video_prompt_design(
     items: list[FrontendReviewItem],
 ) -> Path:
     existing_items = {item.id: item for item in load_request_items(run_dir, "scene")}
+    payloads = _frontend_video_payloads(run_dir, items)
     lines = [
         "# Frontend Video Prompt Design",
         "",
@@ -5427,7 +8044,9 @@ def _write_video_prompt_design(
     ]
     for item in items:
         item_id = _require_markdown_scalar(item.item_id, field="item_id")
-        prompt = _video_prompt_for_request(item)
+        source_prompt = _video_prompt_for_request(item)
+        payload = payloads[item.item_id]
+        prompt = str(payload.get("prompt") or "")
         original = existing_items.get(item.item_id)
         prompt_changed = bool(original and item.prompt.strip() and item.prompt.strip() != original.prompt.strip())
         references_changed = bool(original and sorted(item.references) != sorted(original.references))
@@ -5446,6 +8065,9 @@ def _write_video_prompt_design(
                 f"- video_duration_seconds: `{item.video_duration_seconds or 8}`",
                 f"- first_frame: `{_default_first_frame(item)}`",
                 f"- last_frame: `{item.video_last_reference or ''}`",
+                f"- prompt_policy_version: `{payload['policy_version']}`",
+                f"- compiler_version: `{payload['compiler_version']}`",
+                f"- prompt_sha256: `{payload['sha256']}`",
                 "- selected_references:",
             ]
         )
@@ -5458,7 +8080,19 @@ def _write_video_prompt_design(
             lines.append(f"  - `{ref}`")
         if not item.video_references:
             lines.append("  - `[]`")
-        lines.extend(["", "```text", prompt, "```", ""])
+        lines.extend(
+            [
+                "",
+                "```prompt_authoring_source",
+                source_prompt,
+                "```",
+                "",
+                "```video_prompt",
+                prompt,
+                "```",
+                "",
+            ]
+        )
     path = _frontend_review_dir(run_dir) / "video_prompt_design.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
@@ -5469,14 +8103,31 @@ def _video_generation_request_section(run_dir: Path, item: FrontendReviewItem) -
     video_tool = _require_markdown_scalar(item.video_tool or "kling_3_0", field="video_tool")
     video_quality = _require_markdown_scalar(item.video_quality or "1080p", field="video_quality")
     video_aspect_ratio = _require_markdown_scalar(item.video_aspect_ratio or "16:9", field="video_aspect_ratio")
-    prompt = _video_prompt_for_request(item)
-    output = _default_video_output(item)
+    payload = _frontend_video_payloads(run_dir, [item])[item.item_id]
+    prompt = str(payload.get("prompt") or "")
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    target = _video_target_by_item_id(data, item.item_id)
+    target_node = _dict_value(target.get("cut")) if target is not None else {}
+    video_generation = _dict_value(target_node.get("video_generation"))
+    output = str(video_generation.get("output") or "").strip() or _default_video_output(
+        item
+    )
     _require_asset_video_output(run_dir, output)
-    first_frame = _default_first_frame(item)
-    last_frame = (item.video_last_reference or "").strip()
+    input_contract = (
+        _render_unit_video_input_contract(target_node)
+        if target is not None and target.get("is_render_unit")
+        else {}
+    )
+    reference_image_mode = input_contract.get("input_mode") == "reference_images"
+    first_frame = "" if reference_image_mode else _default_first_frame(item)
+    last_frame = (
+        "" if reference_image_mode else (item.video_last_reference or "").strip()
+    )
     for frame in [first_frame, last_frame, *item.video_references]:
         if frame:
             _validate_run_relative_image_path(run_dir, frame, must_exist=False)
+    refs = list(dict.fromkeys([ref for ref in item.video_references if ref.strip()]))
+    negative_prompt = str(payload.get("negative_prompt") or "")
     lines = [
         f"## {item_id}",
         "",
@@ -5487,17 +8138,33 @@ def _video_generation_request_section(run_dir: Path, item: FrontendReviewItem) -
         f"- resolution: `{video_quality}`",
         f"- aspect_ratio: `{video_aspect_ratio}`",
         f"- first_frame: `{first_frame}`",
+        f"- prompt_policy_version: `{payload['policy_version']}`",
+        f"- compiler_version: `{payload['compiler_version']}`",
+        f"- source_digest: `{payload['source_digest']}`",
+        f"- prompt_sha256: `{payload['sha256']}`",
+        f"- negative_prompt_sha256: `{hashlib.sha256(negative_prompt.encode('utf-8')).hexdigest()}`",
+        f"- references_digest: `{sha256_canonical_json(refs)}`",
     ]
     if last_frame:
         lines.append(f"- last_frame: `{last_frame}`")
     lines.append("- source_cuts:")
     lines.append(f"  - `{item.item_id}`")
-    refs = list(dict.fromkeys([ref for ref in item.video_references if ref.strip()]))
     if refs:
         lines.append("- references:")
         for ref in refs:
             lines.append(f"  - `{ref}`")
-    lines.extend(["", "```text", prompt, "```"])
+    lines.extend(
+        [
+            "",
+            "```video_prompt",
+            prompt,
+            "```",
+            "",
+            "```negative_prompt",
+            negative_prompt,
+            "```",
+        ]
+    )
     return item_id, "\n".join(lines)
 
 
@@ -5522,7 +8189,277 @@ def _split_video_request_sections(text: str) -> tuple[list[str], list[tuple[str,
     return prefix, sections
 
 
-def _merge_video_request_sections(existing_text: str, sections_by_id: dict[str, str]) -> str:
+def _reviewed_video_request_binding(run_dir: Path, item_id: str) -> dict[str, str]:
+    path = run_dir / "video_generation_requests.md"
+    if not path.is_file():
+        raise ValueError("reviewed video generation request is missing")
+    _prefix, sections = _split_video_request_sections(path.read_text(encoding="utf-8"))
+    matches = [lines for title, lines in sections if title == item_id]
+    if len(matches) != 1:
+        raise ValueError("reviewed video generation request is missing or duplicated")
+    # Section separators add/remove trailing blank lines during partial merges.
+    # Bind approval to the canonical section content, not file-layout whitespace.
+    body = "\n".join(matches[0]).strip()
+
+    def scalar(name: str) -> str:
+        match = re.search(rf"(?m)^- {re.escape(name)}: `([^`]*)`\s*$", body)
+        return match.group(1).strip() if match else ""
+
+    def fenced(name: str) -> str:
+        match = re.search(rf"(?ms)```{re.escape(name)}\s*\n(.*?)\n```", body)
+        return match.group(1).strip() if match else ""
+
+    fields = (
+        "tool",
+        "output",
+        "duration_seconds",
+        "quality",
+        "aspect_ratio",
+        "first_frame",
+        "last_frame",
+        "prompt_policy_version",
+        "compiler_version",
+        "source_digest",
+        "prompt_sha256",
+        "negative_prompt_sha256",
+        "references_digest",
+    )
+    return {
+        **{field: scalar(field) for field in fields},
+        "prompt": fenced("video_prompt") or fenced("api_prompt"),
+        "negative_prompt": fenced("negative_prompt"),
+        "request_section_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def _video_prompt_approval_state_prefix(item_id: str) -> str:
+    safe_item_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", item_id).strip("._-")
+    return f"review.video_prompt.item.{safe_item_id or 'unknown'}"
+
+
+def _video_prompt_approval_updates(
+    run_dir: Path,
+    items: list[FrontendReviewItem],
+    *,
+    approved: bool,
+) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for item in items:
+        binding = _reviewed_video_request_binding(run_dir, item.item_id)
+        prefix = _video_prompt_approval_state_prefix(item.item_id)
+        updates.update(
+            {
+                f"{prefix}.status": "approved" if approved else "pending",
+                f"{prefix}.request_section_sha256": binding[
+                    "request_section_sha256"
+                ],
+                f"{prefix}.prompt_sha256": binding["prompt_sha256"],
+                f"{prefix}.source_digest": binding["source_digest"],
+                f"{prefix}.approved_by": (
+                    "frontend_generation_action" if approved else ""
+                ),
+                f"{prefix}.approved_at": _now_stamp() if approved else "",
+            }
+        )
+    return updates
+
+
+def _video_prompt_stage_approval_complete(
+    run_dir: Path,
+    items: list[FrontendReviewItem],
+    *,
+    approval_updates: dict[str, str],
+) -> bool:
+    """Return true when every canonical target has a current item approval."""
+
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    canonical_ids = [
+        str(target["selector"]) for target in _manifest_video_targets(data)
+    ]
+    requested_ids = [item.item_id for item in items]
+    if (
+        len(requested_ids) != len(set(requested_ids))
+        or not set(requested_ids).issubset(set(canonical_ids))
+    ):
+        return False
+    state_path = run_dir / "state.txt"
+    state = parse_state_file(state_path) if state_path.is_file() else {}
+    current_state = {**state, **approval_updates}
+    for item_id in canonical_ids:
+        try:
+            binding = _reviewed_video_request_binding(run_dir, item_id)
+        except ValueError:
+            return False
+        prefix = _video_prompt_approval_state_prefix(item_id)
+        expected = {
+            "status": "approved",
+            "request_section_sha256": binding["request_section_sha256"],
+            "prompt_sha256": binding["prompt_sha256"],
+            "source_digest": binding["source_digest"],
+        }
+        if any(
+            str(current_state.get(f"{prefix}.{field}") or "") != value
+            for field, value in expected.items()
+        ):
+            return False
+    return True
+
+
+def _assert_video_materialization_current_for_approval(
+    run_dir: Path,
+    items: list[FrontendReviewItem],
+) -> None:
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    for item in items:
+        target, current_payload = _compile_frontend_video_prompt_payload(
+            data=data,
+            item=item,
+            run_dir=run_dir,
+        )
+        blocking_issue_codes = _blocking_video_prompt_quality_issue_codes(
+            current_payload
+        )
+        if blocking_issue_codes:
+            raise ValueError(
+                f"video prompt approval blocked for {item.item_id}: "
+                + ", ".join(blocking_issue_codes)
+            )
+        node = _dict_value(target.get("cut"))
+        video_generation = _dict_value(node.get("video_generation"))
+        stored_payload = _dict_value(video_generation.get("api_prompt_payload"))
+        for field in (
+            "policy_version",
+            "compiler_version",
+            "projection_registry_version",
+            "prompt",
+            "negative_prompt",
+            "sha256",
+            "source_digest",
+            "provider_request_binding",
+        ):
+            if stored_payload.get(field) != current_payload.get(field):
+                raise ValueError(
+                    f"video prompt materialization changed during semantic review: "
+                    f"{item.item_id}.{field}"
+                )
+
+        reviewed = _reviewed_video_request_binding(run_dir, item.item_id)
+        expected = {
+            "tool": str(video_generation.get("tool") or "").strip(),
+            "output": str(video_generation.get("output") or "").strip(),
+            "duration_seconds": str(
+                int(video_generation.get("duration_seconds") or 8)
+            ),
+            "quality": str(video_generation.get("quality") or "1080p").strip(),
+            "aspect_ratio": str(
+                video_generation.get("aspect_ratio") or "16:9"
+            ).strip(),
+            "first_frame": str(
+                video_generation.get("first_frame")
+                or video_generation.get("input_image")
+                or ""
+            ).strip(),
+            "last_frame": str(video_generation.get("last_frame") or "").strip(),
+            "prompt_policy_version": str(
+                stored_payload.get("policy_version") or ""
+            ),
+            "compiler_version": str(
+                stored_payload.get("compiler_version") or ""
+            ),
+            "source_digest": str(stored_payload.get("source_digest") or ""),
+            "prompt_sha256": str(stored_payload.get("sha256") or ""),
+            "negative_prompt_sha256": hashlib.sha256(
+                str(stored_payload.get("negative_prompt") or "").encode("utf-8")
+            ).hexdigest(),
+            "references_digest": sha256_canonical_json(
+                [
+                    str(value).strip()
+                    for value in _list_value(video_generation.get("references"))
+                    if str(value).strip()
+                ]
+            ),
+            "prompt": str(stored_payload.get("prompt") or "").strip(),
+            "negative_prompt": str(
+                stored_payload.get("negative_prompt") or ""
+            ).strip(),
+        }
+        mismatches = [
+            field
+            for field, expected_value in expected.items()
+            if str(reviewed.get(field) or "") != expected_value
+        ]
+        if mismatches:
+            raise ValueError(
+                f"video generation request changed during semantic review: "
+                f"{item.item_id} ({', '.join(mismatches)})"
+            )
+
+
+def _blocking_video_prompt_quality_issue_codes(
+    payload: dict[str, Any],
+) -> list[str]:
+    sources = [
+        payload.get("quality_issues"),
+        _dict_value(payload.get("video_prompt_ir")).get("quality_issues"),
+    ]
+    codes: list[str] = []
+    for source in sources:
+        for raw_issue in _list_value(source):
+            if (
+                not isinstance(raw_issue, dict)
+                or raw_issue.get("blocking") is not True
+            ):
+                continue
+            code = (
+                str(raw_issue.get("code") or "").strip()
+                or "video_motion_blocking_quality_issue"
+            )
+            if code and code not in codes:
+                codes.append(code)
+    return codes
+
+
+def _assert_video_prompt_quality_allows_provider_execution(
+    *,
+    selector: str,
+    payload: dict[str, Any],
+) -> None:
+    codes = _blocking_video_prompt_quality_issue_codes(payload)
+    if codes:
+        raise ValueError(
+            f"video provider execution blocked for {selector}: "
+            + ", ".join(codes)
+        )
+
+
+async def _run_video_prompt_semantic_review_before_approval(
+    *,
+    run_dir: Path,
+) -> None:
+    review_job_id = f"video-prompt-approval-{uuid.uuid4().hex}"
+    await _run_semantic_review(
+        review_job_id,
+        run_dir=run_dir,
+        stage="video_motion",
+    )
+    result = check_semantic_review(run_dir, "video_motion")
+    if not result.passed:
+        raise ValueError(
+            "video motion semantic review did not pass: "
+            + "; ".join(result.errors)
+        )
+    if not _semantic_review_report_sources_are_current(run_dir, "video_motion"):
+        raise ValueError(
+            "video motion semantic review became stale before approval"
+        )
+
+
+def _merge_video_request_sections(
+    existing_text: str,
+    sections_by_id: dict[str, str],
+    *,
+    canonical_item_ids: set[str] | None = None,
+) -> str:
     prefix, existing_sections = _split_video_request_sections(existing_text)
     header = "\n".join(prefix).strip() or "# Video Generation Requests"
     output_sections: list[str] = []
@@ -5531,7 +8468,7 @@ def _merge_video_request_sections(existing_text: str, sections_by_id: dict[str, 
         if title in sections_by_id:
             output_sections.append(sections_by_id[title])
             used.add(title)
-        else:
+        elif canonical_item_ids is None or title in canonical_item_ids:
             output_sections.append("\n".join(lines).strip())
     for title, section in sections_by_id.items():
         if title not in used:
@@ -5543,11 +8480,51 @@ def _write_video_generation_requests(run_dir: Path, items: list[FrontendReviewIt
     _backup_run_file(run_dir, "video_generation_requests.md", label="before_video_prompt_create")
     path = run_dir / "video_generation_requests.md"
     sections_by_id = dict(_video_generation_request_section(run_dir, item) for item in items)
+    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+    canonical_item_ids = {
+        str(target["selector"])
+        for target in _manifest_video_targets(manifest_data)
+    }
+    unexpected = sorted(set(sections_by_id).difference(canonical_item_ids))
+    if unexpected:
+        raise ValueError(
+            "video request sections are not canonical manifest targets: "
+            + ", ".join(unexpected)
+        )
+    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    _prefix, existing_sections = _split_video_request_sections(existing_text)
+    existing_ids = {title for title, _lines in existing_sections}
     if replace_all or not path.exists():
         text = "\n\n".join(["# Video Generation Requests", *sections_by_id.values()]).rstrip() + "\n"
     else:
-        text = _merge_video_request_sections(path.read_text(encoding="utf-8"), sections_by_id)
+        text = _merge_video_request_sections(
+            existing_text,
+            sections_by_id,
+            canonical_item_ids=canonical_item_ids,
+        )
     path.write_text(text, encoding="utf-8")
+    _new_prefix, new_sections = _split_video_request_sections(text)
+    retained_ids = {title for title, _lines in new_sections}
+    removed_ids = sorted(existing_ids.difference(retained_ids))
+    if removed_ids:
+        revocation_updates: dict[str, str] = {}
+        for item_id in removed_ids:
+            prefix = _video_prompt_approval_state_prefix(item_id)
+            revocation_updates.update(
+                {
+                    f"{prefix}.status": "revoked",
+                    f"{prefix}.request_section_sha256": "",
+                    f"{prefix}.prompt_sha256": "",
+                    f"{prefix}.source_digest": "",
+                    f"{prefix}.approved_by": "",
+                    f"{prefix}.approved_at": "",
+                    f"{prefix}.revoked_at": _now_stamp(),
+                    f"{prefix}.revocation_reason": (
+                        "request section removed because it is no longer a canonical video target"
+                    ),
+                }
+            )
+        append_state_snapshot(run_dir / "state.txt", revocation_updates)
     return path
 
 
@@ -5594,35 +8571,104 @@ def _storyboard_cut_duration(cut: dict[str, Any]) -> int:
     return 8
 
 
-def _storyboard_motion_prompt(scene: dict[str, Any], scene_selector: str, cuts: list[dict[str, Any]]) -> str:
-    scene_intent = scene.get("scene_intent") if isinstance(scene.get("scene_intent"), dict) else {}
-    scene_event = scene.get("scene_event") if isinstance(scene.get("scene_event"), dict) else {}
+def _partition_storyboard_entries(
+    entries: list[tuple[str, str, dict[str, Any], int]],
+    *,
+    minimum_duration_seconds: int,
+    maximum_duration_seconds: int,
+) -> list[list[tuple[str, str, dict[str, Any], int]]]:
+    """Partition ordered cuts into the fewest provider-valid render units."""
+
+    best: list[list[tuple[int, int]] | None] = [None] * (len(entries) + 1)
+    best[0] = []
+    for start in range(len(entries)):
+        prior = best[start]
+        if prior is None:
+            continue
+        duration = 0
+        for end in range(start, len(entries)):
+            duration += entries[end][3]
+            if duration > maximum_duration_seconds:
+                break
+            if duration < minimum_duration_seconds:
+                continue
+            candidate = [*prior, (start, end + 1)]
+            current = best[end + 1]
+            candidate_boundaries = tuple(
+                group_end for _group_start, group_end in candidate[:-1]
+            )
+            current_boundaries = tuple(
+                group_end for _group_start, group_end in (current or [])[:-1]
+            )
+            if (
+                current is None
+                or len(candidate) < len(current)
+                or (
+                    len(candidate) == len(current)
+                    and candidate_boundaries > current_boundaries
+                )
+            ):
+                best[end + 1] = candidate
+    partition = best[-1]
+    if partition is None:
+        durations = ", ".join(str(entry[3]) for entry in entries)
+        raise ValueError(
+            "ordered cut durations cannot be partitioned into provider-valid "
+            f"{minimum_duration_seconds}-{maximum_duration_seconds}s render units "
+            f"(cuts: {durations})"
+        )
+    return [entries[start:end] for start, end in partition]
+
+
+def _storyboard_motion_prompt(
+    _scene: dict[str, Any],
+    _scene_selector: str,
+    cuts: list[dict[str, Any]],
+) -> str:
+    """Return provider-neutral authoring source, not manifest/debug labels."""
+
     lines = [
-        "この1枚のストーリーボード画像を scene 全体の設計図として読み、分割された一覧画像をそのまま映すのではなく、連続した1本の映画的 scene 動画へ翻訳する。",
-        "各コマは cut の順番と意味を示す。cut ごとの人物・場所・小道具・光・視線方向を保ち、scene 内の因果と感情変化が左上から右下へ自然につながるように動かす。",
-        "画面内テキスト、字幕、ロゴ、パネル枠、分割画面表現を最終動画へ残さない。",
+        "motion_brief: 参照画像から動画を生成する。Image 1を開始状態の視覚アンカー、Image 2を出来事の順序と連続性の参考として読み、参照画像を厳密な先頭フレームまたは末尾フレームとは扱わない。入力されたストーリーボードのコマ順を時間順として読み、登場人物の行動と感情の推移を一つの連続した映画的な動きへつなぐ",
+        "must_preserve: 各コマに写る人物、顔、衣装、場所、小道具、光、視線方向と出来事の順序",
+        "must_not_add: パネル枠、分割画面、画面内テキスト、字幕、ロゴ、ストーリーボードにない人物や重要物",
     ]
-    for key in ("dramatic_question", "scene_spine", "handoff_to_next_scene", "terminal_resolution"):
-        value = str(scene_intent.get(key) or "").strip()
-        if value:
-            lines.append(f"{key}: {value}")
-    event_logline = str(scene_event.get("logline") or scene_event.get("scene_event_logline") or "").strip()
-    if event_logline:
-        lines.append(f"scene_event: {event_logline}")
-    motion_briefs: list[str] = []
-    for cut in cuts:
-        video_generation = cut.get("video_generation") if isinstance(cut.get("video_generation"), dict) else {}
-        cut_contract = cut.get("cut_contract") if isinstance(cut.get("cut_contract"), dict) else {}
-        motion_contract = cut_contract.get("motion_contract") if isinstance(cut_contract.get("motion_contract"), dict) else {}
-        motion = str(video_generation.get("motion_prompt") or motion_contract.get("motion_brief") or "").strip()
-        if motion:
-            motion_briefs.append(motion)
-    if motion_briefs:
-        lines.append("cut_motion_order:")
-        for index, motion in enumerate(motion_briefs[:8], start=1):
-            lines.append(f"- cut {index}: {motion}")
-    lines.append(f"render_unit: {scene_selector}_unit1")
-    return "\n".join(lines).strip()
+    if cuts:
+        start_state = _storyboard_cut_boundary(cuts[0], boundary="start")
+        end_state = _storyboard_cut_boundary(cuts[-1], boundary="end")
+        if start_state:
+            lines.append(f"start_from_visible_state: {start_state}")
+        if end_state:
+            lines.append(f"end_state: {end_state}")
+    return "\n".join(lines)
+
+
+def _storyboard_cut_boundary(cut: dict[str, Any], *, boundary: str) -> str:
+    cut_contract = _dict_value(cut.get("cut_contract"))
+    motion = _dict_value(cut_contract.get("motion_contract"))
+    if boundary == "end":
+        continuity = _dict_value(cut_contract.get("continuity_contract"))
+        candidates = [
+            motion.get("end_state"),
+            motion.get("end_frame_brief"),
+            continuity.get("end_state"),
+        ]
+    else:
+        first_frame = _dict_value(cut_contract.get("first_frame_contract"))
+        visible = _dict_value(first_frame.get("visible_start_state"))
+        candidates = [
+            motion.get("start_from_visible_state"),
+            first_frame.get("first_frame_brief"),
+            *visible.values(),
+        ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidate = "、".join(
+                str(value).strip() for value in candidate.values() if str(value).strip()
+            )
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _compose_storyboard_image(run_dir: Path, *, inputs: list[str], output: str) -> None:
@@ -5676,10 +8722,15 @@ def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list
     for unit in units:
         item_id = _require_markdown_scalar(str(unit.get("request_id") or unit["unit_id"]), field="unit_id")
         first_frame = str(unit["first_frame"])
+        storyboard_image = str(unit.get("storyboard_image") or first_frame)
         output = str(unit["output"])
-        _validate_run_relative_image_path(run_dir, first_frame, must_exist=True)
+        if first_frame:
+            _validate_run_relative_image_path(run_dir, first_frame, must_exist=True)
+        _validate_run_relative_image_path(run_dir, storyboard_image, must_exist=True)
         _require_asset_video_output(run_dir, output)
         references = [str(ref) for ref in unit.get("references", []) if str(ref).strip()]
+        api_prompt_payload = _dict_value(unit.get("api_prompt_payload"))
+        negative_prompt = str(api_prompt_payload.get("negative_prompt") or "")
         for ref in references:
             _validate_run_relative_image_path(run_dir, ref, must_exist=True)
         source_cuts = [_require_markdown_scalar(str(source), field="source_cut_id") for source in unit.get("source_cuts", [])]
@@ -5694,7 +8745,13 @@ def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list
                 "- resolution: `1080p`",
                 "- aspect_ratio: `16:9`",
                 f"- first_frame: `{first_frame}`",
-                f"- storyboard_image: `{first_frame}`",
+                f"- storyboard_image: `{storyboard_image}`",
+                f"- prompt_policy_version: `{api_prompt_payload['policy_version']}`",
+                f"- compiler_version: `{api_prompt_payload['compiler_version']}`",
+                f"- source_digest: `{api_prompt_payload['source_digest']}`",
+                f"- prompt_sha256: `{api_prompt_payload['sha256']}`",
+                f"- negative_prompt_sha256: `{hashlib.sha256(negative_prompt.encode('utf-8')).hexdigest()}`",
+                f"- references_digest: `{sha256_canonical_json(references)}`",
                 "- source_cuts:",
             ]
         )
@@ -5702,7 +8759,19 @@ def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list
         if references:
             lines.append("- references:")
             lines.extend(f"  - `{ref}`" for ref in references)
-        lines.extend(["", "```text", _require_no_code_fence(str(unit["motion_prompt"]), field="motion_prompt"), "```", ""])
+        lines.extend(
+            [
+                "",
+                "```video_prompt",
+                _require_no_code_fence(str(unit["motion_prompt"]), field="motion_prompt"),
+                "```",
+                "",
+                "```negative_prompt",
+                negative_prompt,
+                "```",
+                "",
+            ]
+        )
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return path
 
@@ -5713,6 +8782,35 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
         raise RuntimeError("storyboard create failed: video_manifest.md scenes must be a list")
+
+    storyboard_execution_options = _server_video_execution_options(
+        tool="seedance",
+        has_first_frame=False,
+        has_reference_images=True,
+    )
+    storyboard_model = str(storyboard_execution_options.get("model") or "").strip()
+    storyboard_capabilities = resolve_video_provider_capabilities(
+        tool="seedance",
+        model=storyboard_model,
+        input_mode="reference_to_video",
+    )
+    if not storyboard_capabilities.supported:
+        raise RuntimeError(
+            "storyboard create failed: "
+            + (
+                storyboard_capabilities.unsupported_reason
+                or "Seedance provider capability contract is unsupported"
+            )
+        )
+    if not (
+        storyboard_capabilities.reference_images_min
+        <= 2
+        <= storyboard_capabilities.reference_images_max
+    ):
+        raise RuntimeError(
+            "storyboard create failed: the Seedance reference-image contract "
+            "does not permit the required two ordered references"
+        )
 
     units: list[dict[str, Any]] = []
     storyboard_paths: list[str] = []
@@ -5726,7 +8824,7 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
         cut_outputs: list[str] = []
         source_cut_ids: list[str] = []
         active_cuts: list[dict[str, Any]] = []
-        duration_seconds = 0
+        cut_durations: list[int] = []
         used_cut_ids: set[str] = set()
         for cut_index, cut in enumerate(cuts, start=1):
             if not isinstance(cut, dict):
@@ -5741,49 +8839,174 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
             cut_outputs.append(output)
             source_cut_ids.append(_storyboard_cut_id(cut, cut_index, used_cut_ids))
             active_cuts.append(cut)
-            duration_seconds += _storyboard_cut_duration(cut)
+            cut_duration = _storyboard_cut_duration(cut)
+            if cut_duration > storyboard_capabilities.duration_max_seconds:
+                raise RuntimeError(
+                    f"storyboard create failed: {scene_selector} cut {cut_index} "
+                    f"duration {cut_duration}s exceeds the "
+                    f"{storyboard_capabilities.duration_max_seconds}s Seedance "
+                    "reference-image limit; split the cut"
+                )
+            if _int_value(cut.get("duration_seconds") or 0) <= 0:
+                cut["duration_seconds"] = cut_duration
+            cut_durations.append(cut_duration)
         if not cut_outputs:
             raise RuntimeError(f"storyboard create failed: {scene_selector} has no active cut images")
-        storyboard_output = f"assets/storyboards/{scene_selector}_storyboard.png"
-        _compose_storyboard_image(run_dir, inputs=cut_outputs, output=storyboard_output)
-        unit_id = "1"
-        request_id = f"{scene_selector}_unit1"
-        video_output = f"assets/scenes/{scene_selector}/{request_id}.mp4"
-        motion_prompt = _storyboard_motion_prompt(scene, scene_selector, active_cuts)
-        video_duration_seconds = min(max(1, duration_seconds), VIDEO_GENERATION_DURATION_MAX_SECONDS)
-        video_generation = {
-            "tool": "kling_3_0_omni",
-            "duration_seconds": video_duration_seconds,
-            "first_frame": storyboard_output,
-            "input_image": storyboard_output,
-            "references": [storyboard_output],
-            "motion_prompt": motion_prompt,
-            "output": video_output,
-            "quality": "1080p",
-            "aspect_ratio": "16:9",
-        }
-        scene["render_units"] = [
-            {
-                "unit_id": unit_id,
-                "source_cut_ids": source_cut_ids,
-                "storyboard_image": storyboard_output,
-                "video_generation": video_generation,
-            }
-        ]
-        units.append(
-            {
-                "unit_id": unit_id,
-                "request_id": request_id,
-                "source_cuts": source_cut_ids,
-                "first_frame": storyboard_output,
-                "references": [storyboard_output],
-                "motion_prompt": motion_prompt,
-                "output": video_output,
-                "duration_seconds": video_duration_seconds,
-                "tool": video_generation["tool"],
-            }
+        entries = list(
+            zip(
+                cut_outputs,
+                source_cut_ids,
+                active_cuts,
+                cut_durations,
+                strict=True,
+            )
         )
-        storyboard_paths.append(storyboard_output)
+        try:
+            grouped_entries = _partition_storyboard_entries(
+                entries,
+                minimum_duration_seconds=(
+                    storyboard_capabilities.duration_min_seconds
+                ),
+                maximum_duration_seconds=(
+                    storyboard_capabilities.duration_max_seconds
+                ),
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"storyboard create failed: {scene_selector}: {exc}; split or retime the cuts"
+            ) from exc
+
+        scene_render_units: list[dict[str, Any]] = []
+        multiple_units = len(grouped_entries) > 1
+        video_metadata = _dict_value(data.get("video_metadata"))
+        for unit_index, group in enumerate(grouped_entries, start=1):
+            group_outputs = [entry[0] for entry in group]
+            group_source_ids = [entry[1] for entry in group]
+            group_cuts = [entry[2] for entry in group]
+            video_duration_seconds = sum(entry[3] for entry in group)
+            unit_id = str(unit_index)
+            request_id = f"{scene_selector}_unit{unit_id}"
+            storyboard_output = (
+                f"assets/storyboards/{scene_selector}_unit{unit_id}_storyboard.png"
+                if multiple_units
+                else f"assets/storyboards/{scene_selector}_storyboard.png"
+            )
+            _compose_storyboard_image(
+                run_dir,
+                inputs=group_outputs,
+                output=storyboard_output,
+            )
+            # BytePlus reference-image mode cannot be combined with first/last
+            # frame boundary inputs. Image 1 anchors the start state and Image 2
+            # communicates the ordered storyboard without claiming exact frame
+            # boundary semantics.
+            reference_images = [group_outputs[0], storyboard_output]
+            first_frame = ""
+            video_output = f"assets/scenes/{scene_selector}/{request_id}.mp4"
+            motion_prompt = _storyboard_motion_prompt(
+                scene,
+                scene_selector,
+                group_cuts,
+            )
+            render_unit_contract = compose_video_render_unit_contract(
+                [_dict_value(cut.get("cut_contract")) for cut in group_cuts]
+            )
+            execution_options = dict(storyboard_execution_options)
+            reference_content_sha256 = _video_reference_content_sha256(
+                run_dir,
+                reference_images,
+            )
+            if reference_content_sha256:
+                execution_options["reference_content_sha256"] = (
+                    reference_content_sha256
+                )
+            review_dependencies = {
+                "render_unit_source_cut_ids": list(group_source_ids),
+                "render_unit_source_cut_contracts": [
+                    _dict_value(cut.get("cut_contract")) for cut in group_cuts
+                ],
+            }
+            reference_roles = [
+                {
+                    "image_index": 1,
+                    "role": "start_state_visual_anchor",
+                },
+                {
+                    "image_index": 2,
+                    "role": "ordered_storyboard_sequence_guide",
+                },
+            ]
+            api_prompt_payload = compile_video_api_prompt_v1(
+                cut_contract=render_unit_contract,
+                source_prompt=motion_prompt,
+                story_time=str(video_metadata.get("time") or "").strip(),
+                time_of_day=str(scene.get("time_of_day") or "").strip(),
+                tool="seedance",
+                duration_seconds=video_duration_seconds,
+                references=reference_images,
+                reference_roles=reference_roles,
+                quality="1080p",
+                aspect_ratio="16:9",
+                execution_options=execution_options,
+                review_only_dependencies=review_dependencies,
+                scene_time_of_day_visual_basis=scene.get(
+                    "time_of_day_visual_basis"
+                ),
+                scene_location_mode=str(
+                    scene.get("location_mode") or ""
+                ).strip(),
+                scene_location_sequence=_list_value(
+                    scene.get("location_sequence")
+                ),
+                scene_location_segments=[
+                    dict(value)
+                    for value in _list_value(scene.get("location_segments"))
+                    if isinstance(value, dict)
+                ],
+            )
+            video_generation = {
+                "tool": "seedance",
+                "duration_seconds": video_duration_seconds,
+                "references": reference_images,
+                "prompt_authoring_source": motion_prompt,
+                "motion_prompt": api_prompt_payload["prompt"],
+                "api_prompt_payload": api_prompt_payload,
+                "output": video_output,
+                "quality": "1080p",
+                "aspect_ratio": "16:9",
+            }
+            scene_render_units.append(
+                {
+                    "unit_id": unit_id,
+                    "source_cut_ids": group_source_ids,
+                    "cut_contract": render_unit_contract,
+                    "storyboard_image": storyboard_output,
+                    "video_input_contract": {
+                        "schema_version": RENDER_UNIT_VIDEO_INPUT_CONTRACT_VERSION,
+                        "input_mode": "reference_images",
+                        "required_references": reference_images,
+                        "reference_roles": reference_roles,
+                    },
+                    "video_generation": video_generation,
+                }
+            )
+            units.append(
+                {
+                    "unit_id": unit_id,
+                    "request_id": request_id,
+                    "source_cuts": group_source_ids,
+                    "first_frame": first_frame,
+                    "storyboard_image": storyboard_output,
+                    "references": reference_images,
+                    "motion_prompt": api_prompt_payload["prompt"],
+                    "api_prompt_payload": api_prompt_payload,
+                    "output": video_output,
+                    "duration_seconds": video_duration_seconds,
+                    "tool": video_generation["tool"],
+                }
+            )
+            storyboard_paths.append(storyboard_output)
+        scene["render_units"] = scene_render_units
 
     if not units:
         raise RuntimeError("storyboard create failed: no scene storyboard units were created")
@@ -5820,25 +9043,68 @@ def _validate_scene_storyboard_create_run(run_id: str, *, strict_visual_quality:
             continue
         scene_selector = _storyboard_scene_selector(scene, scene_index)
         render_units = scene.get("render_units")
-        if not isinstance(render_units, list) or len(render_units) != 1:
-            raise RuntimeError(f"storyboard create incomplete: {scene_selector} must have one render_unit")
-        unit = render_units[0]
-        if not isinstance(unit, dict):
-            raise RuntimeError(f"storyboard create incomplete: {scene_selector} render_unit is invalid")
-        unit_id = str(unit.get("unit_id") or "").strip()
-        normalized_unit_id = normalize_dotted_id(unit_id)
-        storyboard = str(unit.get("storyboard_image") or "").strip()
-        video_generation = unit.get("video_generation") if isinstance(unit.get("video_generation"), dict) else {}
-        first_frame = str(video_generation.get("first_frame") or video_generation.get("input_image") or "").strip()
-        if not unit_id or not storyboard or first_frame != storyboard:
-            raise RuntimeError(f"storyboard create incomplete: {scene_selector} render_unit is missing storyboard video input")
-        _validate_run_relative_image_path(run_dir, storyboard, must_exist=True)
-        if not isinstance(unit.get("source_cut_ids"), list) or not unit.get("source_cut_ids"):
-            raise RuntimeError(f"storyboard create incomplete: {scene_selector} render_unit has no source_cut_ids")
-        if normalized_unit_id is None:
-            raise RuntimeError(f"storyboard create incomplete: {scene_selector} render_unit has invalid unit_id")
-        expected_units.append(f"{scene_selector}_unit{normalized_unit_id}")
-        expected_storyboards.append(storyboard)
+        if not isinstance(render_units, list) or not render_units:
+            raise RuntimeError(
+                f"storyboard create incomplete: {scene_selector} has no render_units"
+            )
+        for unit in render_units:
+            if not isinstance(unit, dict):
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit is invalid"
+                )
+            unit_id = str(unit.get("unit_id") or "").strip()
+            normalized_unit_id = normalize_dotted_id(unit_id)
+            storyboard = str(unit.get("storyboard_image") or "").strip()
+            video_generation = (
+                unit.get("video_generation")
+                if isinstance(unit.get("video_generation"), dict)
+                else {}
+            )
+            first_frame = str(
+                video_generation.get("first_frame")
+                or video_generation.get("input_image")
+                or ""
+            ).strip()
+            references = [
+                str(value).strip()
+                for value in _list_value(video_generation.get("references"))
+                if str(value).strip()
+            ]
+            input_issues = _render_unit_video_input_issues(
+                selector=f"{scene_selector}_unit{unit_id or '?'}",
+                node=unit,
+            )
+            if not unit_id or not storyboard:
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit "
+                    "is missing storyboard input"
+                )
+            if first_frame:
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit "
+                    "must use reference-image mode without a first-frame boundary"
+                )
+            if input_issues:
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit input contract: "
+                    + "; ".join(input_issues)
+                )
+            for reference in references:
+                _validate_run_relative_image_path(
+                    run_dir, reference, must_exist=True
+                )
+            if not isinstance(unit.get("source_cut_ids"), list) or not unit.get(
+                "source_cut_ids"
+            ):
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit has no source_cut_ids"
+                )
+            if normalized_unit_id is None:
+                raise RuntimeError(
+                    f"storyboard create incomplete: {scene_selector} render_unit has invalid unit_id"
+                )
+            expected_units.append(f"{scene_selector}_unit{normalized_unit_id}")
+            expected_storyboards.append(storyboard)
     if not expected_units:
         raise RuntimeError("storyboard create incomplete: no storyboard render_units found")
     request_path = run_dir / "video_generation_requests.md"
@@ -5915,7 +9181,7 @@ def _update_manifest_video_generation(run_dir: Path, items: list[FrontendReviewI
     for item in items:
         _require_markdown_scalar(item.item_id, field="item_id")
         _video_prompt_for_request(item)
-        target = _target_by_item_id(data, item.item_id)
+        target = _video_target_by_item_id(data, item.item_id)
         if target is None:
             missing.append(item.item_id)
         else:
@@ -5928,27 +9194,89 @@ def _update_manifest_video_generation(run_dir: Path, items: list[FrontendReviewI
         target = targets_by_item[item.item_id]
         node = target["cut"]
         video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
-        output = _default_video_output(item)
+        _target, api_prompt_payload = _compile_frontend_video_prompt_payload(
+            data=data,
+            item=item,
+            run_dir=run_dir,
+        )
+        prompt_authoring_source = _video_prompt_for_request(item)
+        if not prompt_authoring_source:
+            prompt_authoring_source = str(
+                video_generation.get("prompt_authoring_source")
+                or video_generation.get("source_motion_prompt")
+                or ""
+            ).strip()
+        output = str(video_generation.get("output") or "").strip() or _default_video_output(
+            item
+        )
         _require_asset_video_output(run_dir, output)
+        input_contract = (
+            _render_unit_video_input_contract(_dict_value(node))
+            if target.get("is_render_unit")
+            else {}
+        )
+        reference_image_mode = input_contract.get("input_mode") == "reference_images"
         video_generation.update(
             {
                 "tool": item.video_tool or video_generation.get("tool") or "kling_3_0",
                 "duration_seconds": item.video_duration_seconds or video_generation.get("duration_seconds") or 8,
-                "first_frame": _default_first_frame(item),
-                "motion_prompt": _video_prompt_for_request(item),
+                "prompt_authoring_source": prompt_authoring_source,
+                "motion_prompt": api_prompt_payload["prompt"],
+                "api_prompt_payload": api_prompt_payload,
                 "output": output,
                 "quality": item.video_quality or video_generation.get("quality") or "1080p",
                 "aspect_ratio": item.video_aspect_ratio or video_generation.get("aspect_ratio") or "16:9",
             }
         )
-        if item.video_last_reference:
-            video_generation["last_frame"] = item.video_last_reference
-        elif "last_frame" in video_generation:
+        if reference_image_mode:
+            video_generation.pop("first_frame", None)
+            video_generation.pop("input_image", None)
             video_generation.pop("last_frame", None)
-        if item.video_references:
-            video_generation["references"] = list(dict.fromkeys(item.video_references))
+        else:
+            video_generation["first_frame"] = _default_first_frame(item)
+        if not reference_image_mode and item.video_last_reference is not None:
+            if item.video_last_reference.strip():
+                video_generation["last_frame"] = item.video_last_reference.strip()
+            else:
+                video_generation.pop("last_frame", None)
+        video_generation["references"] = list(dict.fromkeys(item.video_references))
+        provider_binding = _dict_value(
+            api_prompt_payload.get("provider_request_binding")
+        )
+        provider_options = _dict_value(
+            provider_binding.get("execution_options")
+        )
+        capability_issues = _video_provider_capability_issues(
+            label=item.item_id,
+            tool=str(video_generation.get("tool") or "kling_3_0"),
+            model=str(provider_options.get("model") or "").strip(),
+            input_mode=str(api_prompt_payload.get("mode") or "").strip(),
+            duration_seconds=int(video_generation["duration_seconds"]),
+            reference_count=len(video_generation["references"]),
+        )
+        if capability_issues:
+            raise ValueError("; ".join(capability_issues))
         node["video_generation"] = video_generation
+        if not target.get("is_render_unit"):
+            render = _dict_value(node.get("render"))
+            duration = int(video_generation["duration_seconds"])
+            canonical_duration = _int_value(
+                render.get("video_duration_seconds") or 0
+            )
+            if canonical_duration > 0 and canonical_duration != duration:
+                raise ValueError(
+                    f"{item.item_id}: duration {duration}s differs from canonical render timeline "
+                    f"duration {canonical_duration}s"
+                )
+            render["video_duration_seconds"] = duration
+            node["render"] = render
         updated.append(item.item_id)
+    render_unit_issues = _render_unit_timeline_issues(data)
+    if render_unit_issues:
+        raise ValueError(
+            "invalid render-unit timeline after video materialization: "
+            + "; ".join(render_unit_issues[:20])
+        )
     _write_manifest_data(manifest_path, original_text, data)
     return {"updated": updated, "missing": []}
 
@@ -6203,6 +9531,7 @@ def _recompile_v2_scene_manifest(
     revisions: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     manifest_path, original_text, data = _read_manifest_data(run_dir)
+    story_time = str(_dict_value(data.get("video_metadata")).get("time") or "").strip()
     compiled: dict[str, dict[str, Any]] = {}
     canonical_payload_keys = {
         "policy_version",
@@ -6227,26 +9556,589 @@ def _recompile_v2_scene_manifest(
         existing_payload = _dict_value(image_generation.get("api_prompt_payload"))
         if str(existing_payload.get("policy_version") or "") != "image_api_prompt_v2":
             raise ValueError(f"compiled_v2_policy_required: {item_id}")
-        review_metadata = {
-            key: deepcopy(value)
-            for key, value in existing_payload.items()
-            if key not in canonical_payload_keys
-        }
-        plan, payload = _apply_v2_visual_plan_patch_and_compile(
+        character_ids = _list_value(image_generation.get("character_ids"))
+        object_ids = _list_value(image_generation.get("object_ids"))
+        location_ids = _list_value(image_generation.get("location_ids"))
+        references = _list_value(image_generation.get("references"))
+        scene_time_of_day = str(
+            _dict_value(target.get("scene")).get("time_of_day") or ""
+        ).strip()
+        plan, _discarded_payload = _apply_v2_visual_plan_patch_and_compile(
             current_plan,
             _dict_value(revision.get("patch")),
-            character_ids=_list_value(image_generation.get("character_ids")),
-            object_ids=_list_value(image_generation.get("object_ids")),
-            location_ids=_list_value(image_generation.get("location_ids")),
-            references=_list_value(image_generation.get("references")),
+            character_ids=character_ids,
+            object_ids=object_ids,
+            location_ids=location_ids,
+            references=references,
+            story_time=story_time,
+            scene_time_of_day=scene_time_of_day,
+        )
+        review_metadata = _review_metadata_for_recompiled_visual_plan(
+            plan,
+            selector=str(target["selector"]),
+            character_ids=character_ids,
+            object_ids=object_ids,
+            location_ids=location_ids,
+            existing_payload=existing_payload,
+            canonical_payload_keys=canonical_payload_keys,
+        )
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            character_ids=character_ids,
+            object_ids=object_ids,
+            location_ids=location_ids,
+            reference_images=references,
+            story_time=story_time,
+            scene_time_of_day=scene_time_of_day,
             review_metadata=review_metadata,
         )
         image_generation["first_frame_visual_plan"] = plan
         image_generation["api_prompt_payload"] = payload
+        debug_prompt_source = deepcopy(_dict_value(image_generation.get("debug_prompt_source")))
+        debug_prompt_source["first_frame_visual_plan"] = deepcopy(plan)
+        debug_prompt_source["api_prompt_payload"] = {
+            "policy_version": payload["policy_version"],
+            "compiler_version": payload["compiler_version"],
+            "source_digest": payload["source_digest"],
+            "sha256": payload["sha256"],
+        }
+        image_generation["debug_prompt_source"] = debug_prompt_source
         node["image_generation"] = image_generation
         compiled[item_id] = payload
     _write_manifest_data(manifest_path, original_text, data)
     return compiled
+
+
+def _review_metadata_for_recompiled_visual_plan(
+    plan: dict[str, Any],
+    *,
+    selector: str,
+    character_ids: list[str],
+    object_ids: list[str],
+    location_ids: list[str],
+    existing_payload: dict[str, Any],
+    canonical_payload_keys: set[str],
+) -> dict[str, Any]:
+    """Recompute every plan-derived review field from the repaired source."""
+
+    derived_keys = {
+        "shot_design_contract",
+        "cut_location_frame_plan",
+        "cut_visual_delta",
+        "blocking_and_interaction",
+    }
+    metadata = {
+        key: deepcopy(value)
+        for key, value in existing_payload.items()
+        if key not in canonical_payload_keys and key not in derived_keys
+    }
+    source_grounding = _dict_value(plan.get("source_grounding"))
+    temporal = _dict_value(plan.get("temporal_boundary"))
+    composition = _dict_value(plan.get("spatial_composition"))
+    character_gate = _dict_value(plan.get("character_state_gate"))
+    object_gate = _dict_value(plan.get("object_visibility_gate"))
+    progression = _dict_value(plan.get("scene_state_progression"))
+    object_entries = [
+        value for value in object_gate.get("objects") or [] if isinstance(value, dict)
+    ]
+    cut_function = str(source_grounding.get("cut_function") or "").strip()
+    if object_ids and cut_function in {"threshold", "handoff", "payoff", "proof"}:
+        shot_role = "object_proof"
+    elif cut_function == "setup" or not character_ids:
+        shot_role = "establishing"
+    elif cut_function in {"reaction", "payoff"}:
+        shot_role = "reaction"
+    elif cut_function == "handoff":
+        shot_role = "handoff"
+    else:
+        shot_role = "character_action"
+    shot_scale = str(composition.get("shot_size") or "").strip() or (
+        "medium_wide" if shot_role in {"establishing", "handoff", "object_proof"} else "medium"
+    )
+    metadata["shot_design_contract"] = {
+        "shot_role": shot_role,
+        "shot_scale": shot_scale,
+        "a_roll_or_b_roll": "b_roll" if shot_role == "object_proof" else "a_roll",
+        "should_show_face": bool(character_ids) and bool(
+            character_gate.get("face")
+            or character_gate.get("gaze")
+            or character_gate.get("pose")
+        ),
+        "should_show_hands": bool(character_ids) and bool(character_gate.get("hand_position")),
+        "should_show_object_detail": bool(object_ids),
+    }
+    location_zone = str(
+        composition.get("foreground") or composition.get("midground") or ""
+    ).strip()
+    metadata["cut_location_frame_plan"] = {
+        "base_location_reference_id": location_ids[0] if location_ids else "",
+        "use_reference_as": "material_anchor",
+        "location_zone_id": re.sub(r"\s+", "_", location_zone)[:80],
+        "location_zone_description": location_zone,
+    }
+    visible_delta = str(
+        progression.get("visible_state_delta_from_previous_cut")
+        or temporal.get("event_fact_visible_in_still")
+        or temporal.get("first_visible_moment")
+        or ""
+    ).strip()
+    cut_match = re.search(r"cut0*(\d+)$", selector)
+    cut_number = int(cut_match.group(1)) if cut_match else 1
+    previous_selector = (
+        ""
+        if cut_number <= 1
+        else re.sub(r"cut0*\d+$", f"cut{cut_number - 1:02d}", selector)
+    )
+    metadata["cut_visual_delta"] = {
+        "previous_cut_selector": previous_selector,
+        "previous_visible_state_summary": str(
+            progression.get("state_visible_in_first_frame") or ""
+        ),
+        "this_cut_new_information": visible_delta,
+        "cut_delta_visible_in_still": visible_delta,
+    }
+    primary_object = object_entries[0] if object_entries else {}
+    primary_object_id = str(primary_object.get("object_id") or "").strip()
+    if not primary_object_id and object_ids:
+        primary_object_id = object_ids[0]
+    visibility = str(primary_object.get("visibility_in_this_cut") or "").strip()
+    metadata["blocking_and_interaction"] = {
+        "character_blocking": {
+            "gaze_target": str(character_gate.get("gaze") or "").strip(),
+            "hand_position": deepcopy(character_gate.get("hand_position") or ""),
+            "foot_position": deepcopy(character_gate.get("foot_position") or ""),
+        },
+        "object_interaction": {
+            "object_id": primary_object_id,
+            "contact_state": "" if not primary_object_id else (
+                "not_visible" if visibility == "hidden" else "visible"
+            ),
+            "object_screen_position": str(
+                primary_object.get("required_screen_position") or ""
+            ).strip(),
+        },
+    }
+    return metadata
+
+
+def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
+    """Rebuild every compiled-v2 payload from the repaired visual-plan source."""
+
+    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    story_time = str(_dict_value(data.get("video_metadata")).get("time") or "").strip()
+    canonical_payload_keys = {
+        "policy_version",
+        "compiler_version",
+        "source_digest",
+        "prompt",
+        "negative_prompt",
+        "reference_instructions",
+        "reference_images",
+        "sha256",
+        "drawable_prompt_ir",
+    }
+    changed_selectors: list[str] = []
+    for target in _manifest_scene_targets(data):
+        node = _dict_value(target.get("cut"))
+        image_generation = _dict_value(node.get("image_generation"))
+        existing_payload = _dict_value(image_generation.get("api_prompt_payload"))
+        plan = _dict_value(image_generation.get("first_frame_visual_plan"))
+        if str(plan.get("schema_version") or "") != "first_frame_visual_plan_v1":
+            if str(existing_payload.get("policy_version") or "") != "image_api_prompt_v2":
+                continue
+            raise ValueError(
+                f"compiled_v2_first_frame_visual_plan_v1_required: {target['selector']}"
+            )
+        character_ids = _list_value(image_generation.get("character_ids"))
+        object_ids = _list_value(image_generation.get("object_ids"))
+        location_ids = _list_value(image_generation.get("location_ids"))
+        references = _list_value(image_generation.get("references"))
+        scene_time_of_day = str(
+            _dict_value(target.get("scene")).get("time_of_day") or ""
+        ).strip()
+        review_metadata = _review_metadata_for_recompiled_visual_plan(
+            plan,
+            selector=str(target["selector"]),
+            character_ids=character_ids,
+            object_ids=object_ids,
+            location_ids=location_ids,
+            existing_payload=existing_payload,
+            canonical_payload_keys=canonical_payload_keys,
+        )
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            character_ids=character_ids,
+            object_ids=object_ids,
+            location_ids=location_ids,
+            reference_images=references,
+            story_time=story_time,
+            scene_time_of_day=scene_time_of_day,
+            review_metadata=review_metadata,
+        )
+        debug_prompt_source = deepcopy(_dict_value(image_generation.get("debug_prompt_source")))
+        previous_debug_prompt_source = deepcopy(debug_prompt_source)
+        debug_prompt_source["first_frame_visual_plan"] = deepcopy(plan)
+        debug_prompt_source["api_prompt_payload"] = {
+            "policy_version": payload["policy_version"],
+            "compiler_version": payload["compiler_version"],
+            "source_digest": payload["source_digest"],
+            "sha256": payload["sha256"],
+        }
+        if payload == existing_payload and debug_prompt_source == previous_debug_prompt_source:
+            continue
+        image_generation["api_prompt_payload"] = payload
+        image_generation["debug_prompt_source"] = debug_prompt_source
+        node["image_generation"] = image_generation
+        changed_selectors.append(str(target["selector"]))
+    if changed_selectors:
+        _write_manifest_data(manifest_path, original_text, data)
+    return changed_selectors
+
+
+def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
+    """Compile repaired plans and atomically rematerialize request + snapshot files."""
+
+    tracked_paths = (
+        run_dir / "video_manifest.md",
+        run_dir / "image_generation_requests.md",
+        run_dir / "image_generation_request_snapshot.json",
+        run_dir / "asset_generation_requests.md",
+        run_dir / "asset_generation_request_snapshot.json",
+        run_dir / "asset_generation_manifest.md",
+        run_dir / "asset_plan.md",
+        run_dir / "image_prompt_story_review.md",
+    )
+    before = _capture_file_transaction(tracked_paths)
+    asset_snapshot_path = tracked_paths[4]
+
+    def captured_request_item_digests(content: bytes | None) -> tuple[tuple[str, str], ...]:
+        if content is None:
+            return ()
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return ()
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            return ()
+        return tuple(
+            sorted(
+                (
+                    str(item.get("destination") or ""),
+                    str(item.get("request_digest") or ""),
+                )
+                for item in payload["items"]
+                if isinstance(item, dict)
+            )
+        )
+
+    before_asset_request_digests = captured_request_item_digests(before[asset_snapshot_path])
+    try:
+        compiled_selectors = _recompile_image_prompt_payloads_from_plans(run_dir)
+        _write_asset_request_files(run_dir)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "generate-assets-from-manifest.py"),
+                "--manifest",
+                str(run_dir / "video_manifest.md"),
+                "--base-dir",
+                str(run_dir),
+                "--materialize-request-files-only",
+                "--skip-videos",
+                "--skip-audio",
+                "--skip-image-prompt-review",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(detail or "image prompt request rematerialization failed")
+        deterministic_review = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
+                "--manifest",
+                str(run_dir / "video_manifest.md"),
+                "--story",
+                str(run_dir / "story.md"),
+                "--script",
+                str(run_dir / "script.md"),
+                "--out",
+                str(run_dir / "image_prompt_story_review.md"),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if deterministic_review.returncode != 0:
+            detail = deterministic_review.stderr.strip() or deterministic_review.stdout.strip()
+            raise RuntimeError(detail or "deterministic image prompt review refresh failed")
+        for required_path in tracked_paths[1:3]:
+            if not required_path.is_file() or required_path.stat().st_size == 0:
+                raise RuntimeError(f"image prompt repair output missing: {required_path.name}")
+    except Exception:
+        _restore_file_transaction(before)
+        raise
+    try:
+        after_asset_snapshot = load_request_snapshot(
+            asset_snapshot_path,
+            run_dir=run_dir,
+            verify_references=False,
+        )
+        after_asset_request_digests = tuple(
+            sorted((item.destination, item.request_digest) for item in after_asset_snapshot.items)
+        )
+    except ImageRequestSnapshotError:
+        after_asset_request_digests = ()
+    asset_request_changed = before_asset_request_digests != after_asset_request_digests
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.semantic.image_prompt.repair.request_sync.status": "done",
+            "review.semantic.image_prompt.repair.request_sync.compiled_count": str(len(compiled_selectors)),
+            "review.semantic.image_prompt.repair.request_sync.compiled_selectors": ", ".join(compiled_selectors),
+            "review.semantic.image_prompt.repair.request_sync.synced_at": now_iso(),
+            "review.semantic.image_prompt.repair.asset_refresh_required": str(asset_request_changed).lower(),
+            "review.image_prompt.request_freeze.status": "draft",
+            "artifact.image_generation_requests": str(tracked_paths[1].resolve()),
+            "artifact.image_generation_request_snapshot": str(tracked_paths[2].resolve()),
+        },
+    )
+
+
+def _project_image_prompt_reviews_to_p630_p640(
+    run_dir: Path,
+    *,
+    request_revision: str,
+) -> None:
+    """Make legacy p630/p640 audit artifacts reflect the real review gates."""
+
+    deterministic_path = run_dir / "image_prompt_story_review.md"
+    semantic_relpath = semantic_review_relpaths("image_prompt")["report"]
+    semantic_path = run_dir / semantic_relpath
+    deterministic_text = deterministic_path.read_text(encoding="utf-8", errors="replace")
+    semantic_text = semantic_path.read_text(encoding="utf-8", errors="replace")
+    deterministic_status = _image_prompt_story_review_scalar(
+        deterministic_text, "status"
+    ).upper()
+    hard_findings = _image_prompt_story_review_scalar(
+        deterministic_text, "hard_findings"
+    )
+    unresolved_entries = _image_prompt_story_review_scalar(
+        deterministic_text, "unresolved_entries"
+    )
+    hard_aggregate_path = (
+        run_dir
+        / "logs/eval/scene_implementation_hard/round_01/aggregated_review.md"
+    )
+    judgment_aggregate_path = (
+        run_dir
+        / "logs/eval/scene_implementation_judgment/round_01/aggregated_review.md"
+    )
+    hard_aggregate = "\n".join(
+        [
+            "# Hard Scene Eval/Improve Loop / Aggregated Review",
+            "",
+            "status: passed",
+            f"request_revision: {request_revision}",
+            "source_review: image_prompt_story_review.md",
+            f"deterministic_status: {deterministic_status}",
+            f"hard_findings: {hard_findings}",
+            f"unresolved_entries: {unresolved_entries}",
+            "",
+            "実際の deterministic story-consistency gate が同一 request revision を検査し、blocking finding がないことを確認した。",
+            "",
+        ]
+    )
+    judgment_aggregate = "\n".join(
+        [
+            "# Judgment Eval/Improve Loop / Aggregated Review",
+            "",
+            "status: passed",
+            f"request_revision: {request_revision}",
+            f"source_review: {semantic_relpath.as_posix()}",
+            "",
+            "provider-ready prompt の semantic review / repair / recompile / rereview が合格した。",
+            "",
+        ]
+    )
+    _atomic_write_text(hard_aggregate_path, hard_aggregate)
+    _atomic_write_text(judgment_aggregate_path, judgment_aggregate)
+    _atomic_write_text(
+        run_dir / "manifest_review.md",
+        "\n".join(
+            [
+                "# Hard Scene Eval/Improve Loop",
+                "",
+                "status: approved",
+                f"request_revision: {request_revision}",
+                "source_review: image_prompt_story_review.md",
+                "",
+                hard_aggregate,
+            ]
+        ),
+    )
+    _atomic_write_text(
+        run_dir / "image_prompt_judgment_review.md",
+        "\n".join(
+            [
+                "# Judgment Eval/Improve Loop",
+                "",
+                "status: approved",
+                f"request_revision: {request_revision}",
+                f"source_review: {semantic_relpath.as_posix()}",
+                "",
+                judgment_aggregate,
+            ]
+        ),
+    )
+    # The legacy judgment path is still part of the p640 audit surface.  Mirror
+    # the real semantic report rather than leaving its materialization template
+    # in a misleading pending state.
+    _atomic_write_text(run_dir / "logs/review/image_prompt.judgment.md", semantic_text)
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "eval.scene_implementation_hard.loop.status": "passed",
+            "eval.scene_implementation_hard.loop.current_round": "1",
+            "eval.scene_implementation_hard.loop.round_01.status": "passed",
+            "eval.scene_implementation_hard.loop.round_01.aggregated_review": str(
+                hard_aggregate_path.relative_to(run_dir)
+            ),
+            "eval.scene_implementation_judgment.loop.status": "passed",
+            "eval.scene_implementation_judgment.loop.current_round": "1",
+            "eval.scene_implementation_judgment.loop.round_01.status": "passed",
+            "eval.scene_implementation_judgment.loop.round_01.aggregated_review": str(
+                judgment_aggregate_path.relative_to(run_dir)
+            ),
+            "review.image_prompt.judgment.status": "passed",
+            "review.image_prompt.judgment.error_count": "0",
+            "slot.p630.status": "done",
+            "slot.p630.note": "deterministic image-prompt hard gate passed for frozen revision",
+            "slot.p640.status": "done",
+            "slot.p640.note": "semantic image-prompt review and repair loop passed for frozen revision",
+            "artifact.manifest_review": str((run_dir / "manifest_review.md").resolve()),
+            "artifact.image_prompt_judgment_review": str(
+                (run_dir / "image_prompt_judgment_review.md").resolve()
+            ),
+        },
+    )
+
+
+def _mark_image_prompt_request_freeze_done(run_dir: Path) -> None:
+    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+    request_revision = _validate_image_prompt_request_revision(
+        run_dir,
+        manifest_data,
+        require_resolved_references=True,
+        require_compiled_v2=True,
+    )
+    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    if deterministic_errors:
+        raise RuntimeError(
+            "ToC run did not reach p650: deterministic image prompt review failed: "
+            + "; ".join(deterministic_errors)
+        )
+    semantic_result = check_image_prompt_judgment(run_dir)
+    if not semantic_result.passed:
+        raise RuntimeError(
+            "ToC run did not reach p650: semantic image prompt review is not passed: "
+            + "; ".join(semantic_result.errors)
+        )
+    if not _semantic_review_report_sources_are_current(run_dir, "image_prompt"):
+        raise RuntimeError(
+            "ToC run did not reach p650: semantic image prompt review is stale for the request revision"
+        )
+    _project_image_prompt_reviews_to_p630_p640(
+        run_dir,
+        request_revision=request_revision,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.image_prompt.request_freeze.status": "frozen",
+            "review.image_prompt.request_freeze.request_revision": request_revision,
+            "review.image_prompt.request_freeze.reviewed_request_revision": request_revision,
+            "review.image_prompt.request_freeze.semantic_report": str(
+                semantic_review_relpaths("image_prompt")["report"]
+            ),
+            "review.image_prompt.request_freeze.frozen_at": now_iso(),
+            "slot.p650.status": "done",
+            "slot.p650.note": "semantic image-prompt review passed; compiled requests frozen",
+        },
+    )
+    _finalize_p600_supervisor_result(
+        run_dir,
+        completed_slots=("p610", "p620", "p630", "p640", "p650"),
+        terminal_slot="p650",
+        terminal_status="done",
+        review_outputs=(
+            "image_prompt_story_review.md",
+            semantic_review_relpaths("image_prompt")["report"].as_posix(),
+        ),
+    )
+
+
+def _finalize_p600_supervisor_result(
+    run_dir: Path,
+    *,
+    completed_slots: Iterable[str],
+    terminal_slot: str,
+    terminal_status: str,
+    review_outputs: Iterable[str] = (),
+) -> None:
+    """Advance the p600 supervisor artifact to the latest truthful handoff."""
+
+    result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
+    if not result_path.is_file():
+        return
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    completed = _dedupe_preserve_order(
+        [
+            *[str(value).strip() for value in payload.get("completed_slots") or [] if str(value).strip()],
+            *[str(value).strip() for value in completed_slots if str(value).strip()],
+        ]
+    )
+    outputs = _dedupe_preserve_order(
+        [
+            *[str(value).strip() for value in payload.get("review_outputs") or [] if str(value).strip()],
+            *[str(value).strip() for value in review_outputs if str(value).strip()],
+        ]
+    )
+    finished_at = now_iso()
+    state_updates = {
+        "orchestration.p600.supervisor.call_status": "returned",
+        "orchestration.p600.supervisor.status": "done",
+        "orchestration.p600.supervisor.finished_at": finished_at,
+        "orchestration.p600.supervisor.result": "logs/orchestration/p600.supervisor_result.json",
+    }
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+    payload.update(
+        {
+            "bucket": "p600",
+            "status": "done",
+            "completed_slots": completed,
+            "state_keys": {
+                "orchestration.p600.supervisor.call_status": "returned",
+                "orchestration.p600.supervisor.status": "done",
+                "orchestration.p600.supervisor.result": "logs/orchestration/p600.supervisor_result.json",
+                f"slot.{terminal_slot}.status": terminal_status,
+            },
+            "review_outputs": outputs,
+            "next_bucket": None,
+            "finished_at": finished_at,
+        }
+    )
+    _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 async def _start_app_server_with_log(client: CodexAppServerClient, *, run_dir: Path, operation: str, item_id: str) -> None:
@@ -7193,6 +11085,12 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
             "gate.image_review": "required",
         },
     )
+    _finalize_p600_supervisor_result(
+        run_dir,
+        completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
+        terminal_slot="p680",
+        terminal_status="awaiting_approval",
+    )
 
 
 def _validate_image_review_ready(run_id: str) -> None:
@@ -7437,6 +11335,88 @@ def _scene_detail_blocked_candidate(run_dir: Path, item: Any) -> dict[str, Any]:
     }
 
 
+async def _refresh_image_prompt_repair_assets_if_required(run_dir: Path) -> None:
+    state = parse_state_file(run_dir / "state.txt")
+    if state.get("review.semantic.image_prompt.repair.asset_refresh_required") != "true":
+        return
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {"review.semantic.image_prompt.repair.asset_refresh.status": "generating"},
+    )
+    await _generate_request_outputs(run_dir=run_dir, kind="asset")
+    _validate_p560_asset_quality(run_dir)
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.semantic.image_prompt.repair.asset_refresh.status": "done",
+            "review.semantic.image_prompt.repair.asset_refresh_required": "false",
+            "review.semantic.image_prompt.repair.asset_refresh.finished_at": now_iso(),
+        },
+    )
+
+
+async def _prepare_image_prompt_repair_revision_for_rereview(run_dir: Path) -> None:
+    """Synchronize a repair, refresh changed assets, then bind scene refs again."""
+
+    _synchronize_image_prompt_repair_outputs(run_dir)
+    state = parse_state_file(run_dir / "state.txt")
+    if state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
+        await _refresh_image_prompt_repair_assets_if_required(run_dir)
+        # Asset bytes are part of the immutable scene request revision. Rebuild
+        # the scene snapshot after refresh and before the fresh semantic review.
+        _synchronize_image_prompt_repair_outputs(run_dir)
+    _prepare_image_prompt_request_revision_for_review(run_dir)
+
+
+async def _generate_scene_outputs_after_p650_preflight(
+    job_id: str,
+    *,
+    run_id: str,
+    run_dir: Path,
+) -> None:
+    """Validate, submit, and hand off one immutable scene request revision."""
+
+    # Prompt edits and request rematerialization use this same lock.  Keeping
+    # the final p650 validation, provider submission, and p680 handoff in one
+    # critical section closes the validate-then-edit race.
+    async with _serialized_run_write(run_dir, "scene_request_revision"):
+        try:
+            # This is the final p660 preflight: the reviewed provider prompt
+            # bytes, reference hashes, semantic reports, and frozen revision
+            # must still be the same revision that p650 approved.
+            _validate_p650_run(run_id)
+        except RuntimeError as exc:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.stage": "p650_gate_failed_before_scene_generation",
+                    "slot.p660.status": "pending",
+                    "slot.p660.note": "blocked before scene image generation by p650 revision validation",
+                    "slot.p680.status": "pending",
+                    "review.image.status": "pending",
+                    "review.semantic.create_scene_media_generated": "false",
+                    "image_generation.status": "not_started",
+                    "image_generation.started": "false",
+                    "image_generation.generated_count": "0",
+                    "image_generation.blocked_by": "p650_revision_gate",
+                },
+            )
+            raise RuntimeError(f"scene image generation blocked by p650 gate: {exc}") from exc
+        await _set_create_job(job_id, {"message": "シーン画像を生成中"})
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "runtime.stage": "scene_images_generating",
+                "slot.p660.status": "in_progress",
+                "slot.p660.note": "scene image generation started after image-prompt semantic gate",
+            },
+        )
+        # The outer revision lock is already held.  Calling the locked wrapper
+        # here would deadlock because asyncio locks are not re-entrant.
+        await _generate_request_outputs_unlocked(run_dir=run_dir, kind="scene")
+        _mark_image_generation_review_ready(run_id)
+
+
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
     semantic_failures: list[str] = []
@@ -7512,32 +11492,52 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     if failure:
         semantic_failures.append(failure)
         failed_semantic_stages.add("image_prompt")
-    await _set_create_job(job_id, {"message": "シーン画像を生成中"})
-    await _generate_request_outputs(run_dir=run_dir, kind="scene")
     if semantic_failures:
+        failed_stage_label = "+".join(sorted(failed_semantic_stages)) or "unknown"
+        invalidated_by = f"semantic.{failed_stage_label}.failed"
+        _invalidate_p600_supervisor_result(run_dir, invalidated_by=invalidated_by)
         failure_updates = {
-            "runtime.stage": "semantic_review_failed_after_media_generation",
-            "slot.p660.status": "done",
-            "slot.p660.note": "scene images generated; semantic gate still failed",
-            "slot.p670.status": "skipped",
-            "slot.p670.note": "scene image semantic QA removed; upstream semantic QA failed",
+            "runtime.stage": "semantic_review_failed_before_scene_generation",
+            "review.image_prompt.request_freeze.status": "draft",
+            "review.image_prompt.request_freeze.invalidated_by": invalidated_by,
+            "review.image_prompt.request_freeze.invalidated_at": now_iso(),
+            "orchestration.p600.supervisor.status": "invalidated",
+            "orchestration.p600.supervisor.invalidated_by": invalidated_by,
+            "slot.p650.status": "pending",
+            "slot.p650.note": "semantic review must pass before the scene request revision can be handed to p660",
+            "slot.p660.status": "pending",
+            "slot.p660.note": "blocked before scene image generation by semantic review failure",
+            "slot.p670.status": "pending",
+            "slot.p670.note": "waiting for semantic QA before scene image generation",
             "slot.p680.status": "pending",
-            "review.image.status": "needs_semantic_review",
-            "review.semantic.create_media_generated": "true",
+            "slot.p680.note": "frontend image review is not ready because semantic QA blocked scene generation",
+            "review.image.status": "pending",
+            "review.semantic.create_media_generated": "false",
+            "review.semantic.create_scene_media_generated": "false",
             "review.semantic.create_failure_count": str(len(semantic_failures)),
             "review.semantic.create_failures": " | ".join(semantic_failures)[:2000],
+            "image_generation.status": "not_started",
+            "image_generation.started": "false",
+            "image_generation.generated_count": "0",
+            "image_generation.blocked_by": "semantic_review",
         }
         for stage in sorted(failed_semantic_stages):
             slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
             if slot:
                 failure_updates[f"slot.{slot}.status"] = "failed"
-                failure_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} review failed; media generated but p680 is blocked"
-        append_state_snapshot(
-            run_dir / "state.txt",
-            failure_updates,
+                failure_updates[f"slot.{slot}.note"] = (
+                    f"contextless semantic {stage} review failed; p660 is blocked"
+                )
+        append_state_snapshot(run_dir / "state.txt", failure_updates)
+        raise RuntimeError(
+            "semantic review failed before scene image generation: "
+            + " | ".join(semantic_failures)
         )
-        raise RuntimeError("semantic review failed after media generation: " + " | ".join(semantic_failures))
-    _mark_image_generation_review_ready(run_id)
+    await _generate_scene_outputs_after_p650_preflight(
+        job_id,
+        run_id=run_id,
+        run_dir=run_dir,
+    )
     return asset_quality_passed
 
 
@@ -7620,22 +11620,24 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                 append_state_snapshot(
                     run_dir / "state.txt",
                     {
-                        f"review.semantic.{stage}.partial_media_allowed": "true",
+                        f"review.semantic.{stage}.partial_media_allowed": "false",
                         f"review.semantic.{stage}.blocked_image_items": ", ".join(blocked_ids),
                         f"review.semantic.{stage}.blocked_image_item_count": str(len(blocked_ids)),
-                        "runtime.stage": "semantic_review_transport_partial_media",
+                        f"review.semantic.{stage}.localization.status": "localized_to_image_items",
+                        f"review.semantic.{stage}.localization.blocked_image_items": ", ".join(blocked_ids),
+                        "runtime.stage": "semantic_review_transport_failed_before_scene_generation",
                     },
                 )
                 write_app_server_debug_log(
                     run_dir=run_dir,
                     operation="semantic_review",
-                    status="transport_partial_media_allowed",
+                    status="transport_localized_but_scene_generation_blocked",
                     item_id=job_id,
                     request={"stage": stage},
                     response={
                         "transportErrorKind": transport_kind,
                         "blockedImageItems": blocked_ids,
-                        "note": "semantic transport failure is localized to image request items; continuing media generation for unblocked scene items",
+                        "note": "semantic transport failure is localized, but p660 remains blocked until every semantic gate passes",
                     },
                     error=f"{type(exc).__name__}: {exc}",
                 )
@@ -7712,18 +11714,18 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             blocked_ids = sorted(blocked_item_ids)
             state_updates.update(
                 {
-                    f"review.semantic.{stage}.partial_media_allowed": "true",
+                    f"review.semantic.{stage}.partial_media_allowed": "false",
                     f"review.semantic.{stage}.blocked_image_items": ", ".join(blocked_ids),
                     f"review.semantic.{stage}.blocked_image_item_count": str(len(blocked_ids)),
                     f"review.semantic.{stage}.localization.status": "localized_to_image_items",
                     f"review.semantic.{stage}.localization.blocked_image_items": ", ".join(blocked_ids),
-                    "runtime.stage": "semantic_review_semantic_partial_media",
+                    "runtime.stage": "semantic_review_failed_before_scene_generation",
                     "slot.p660.status": "pending",
-                    "slot.p660.note": f"scene images can continue except {stage} blocked items",
+                    "slot.p660.note": f"all scene images are blocked until {stage} semantic review passes",
                     "slot.p670.status": "pending",
-                    "slot.p670.note": "waiting for scene image generation to finish",
+                    "slot.p670.note": "waiting for semantic QA before scene image generation",
                     "slot.p680.status": "pending",
-                    "slot.p680.note": "frontend image review will show blocked scene items from semantic QA",
+                    "slot.p680.note": "frontend image review is not ready because semantic QA blocked scene generation",
                     "review.image.status": "pending",
                 }
             )
@@ -7731,13 +11733,13 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             write_app_server_debug_log(
                 run_dir=run_dir,
                 operation="semantic_review",
-                status="semantic_partial_media_allowed",
+                status="semantic_localized_but_scene_generation_blocked",
                 item_id=job_id,
                 request={"stage": stage},
                 response={
                     "blockedImageItems": blocked_ids,
                     "semanticFailureContext": semantic_failure_context,
-                    "note": "semantic failure is localized to image request items; continuing media generation for unblocked scene items",
+                    "note": "semantic failure is localized, but p660 remains blocked until every semantic gate passes",
                 },
                 error=message,
             )
@@ -7780,9 +11782,15 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
 
 async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_attempts: int | None = None) -> None:
     attempts = max(1, max_attempts or semantic_review_max_attempts())
+    if stage == "image_prompt":
+        # The semantic pack must review the exact provider-ready snapshot.
+        # Freeze is validation/state only; it must not mutate a reviewed source.
+        _prepare_image_prompt_request_revision_for_review(run_dir)
     reusable_result = _reusable_passed_semantic_review(run_dir, stage)
     if reusable_result is not None:
         _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
+        if stage == "image_prompt":
+            _mark_image_prompt_request_freeze_done(run_dir)
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="semantic_review",
@@ -7831,6 +11839,8 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 run_dir / "state.txt",
                 semantic_loop_state_updates(stage, status="passed", attempt=attempt, max_attempts=attempts, error_count=0),
             )
+            if stage == "image_prompt":
+                _mark_image_prompt_request_freeze_done(run_dir)
             return
         if attempt >= attempts:
             failure_updates = semantic_loop_state_updates(
@@ -7933,6 +11943,8 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                     },
                     error=f"TimeoutError: semantic producer repair no-progress timeout after {_semantic_repair_no_progress_timeout_seconds():.0f}s",
                 )
+                if stage == "image_prompt":
+                    await _prepare_image_prompt_repair_revision_for_rereview(run_dir)
                 continue
             _record_semantic_repair_hard_timeout(
                 run_dir,
@@ -7970,6 +11982,8 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
             raise CodexAppServerTransportError(
                 f"{stage} semantic producer repair timed out after no observable progress"
             ) from exc
+        if stage == "image_prompt":
+            await _prepare_image_prompt_repair_revision_for_rereview(run_dir)
     if last_result is not None and not last_result.passed:
         raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(last_result.errors))
 
@@ -8320,7 +12334,6 @@ async def _await_semantic_operation_with_progress_watchdog(
 ):
     task = asyncio.create_task(awaitable)
     last_fingerprint = fingerprint()
-    last_progress_at = time.monotonic()
     started_at = time.monotonic()
     append_state_snapshot(
         run_dir / "state.txt",
@@ -8331,6 +12344,10 @@ async def _await_semantic_operation_with_progress_watchdog(
             f"review.semantic.{stage}.watchdog.started_at": now_iso(),
         },
     )
+    # Synchronous audit writes can be slow on a nearly full filesystem.  The
+    # watchdog starts after its own bookkeeping so that observer overhead is
+    # never mistaken for producer inactivity.
+    last_progress_at = time.monotonic()
     try:
         while True:
             done, _ = await asyncio.wait({task}, timeout=SEMANTIC_TURN_ARTIFACT_POLL_SECONDS)
@@ -8348,7 +12365,6 @@ async def _await_semantic_operation_with_progress_watchdog(
             current_fingerprint = fingerprint()
             if current_fingerprint != last_fingerprint:
                 last_fingerprint = current_fingerprint
-                last_progress_at = time.monotonic()
                 append_state_snapshot(
                     run_dir / "state.txt",
                     {
@@ -8358,6 +12374,7 @@ async def _await_semantic_operation_with_progress_watchdog(
                         f"review.semantic.{stage}.watchdog.fingerprint": _json_hash(current_fingerprint),
                     },
                 )
+                last_progress_at = time.monotonic()
             if time.monotonic() - last_progress_at >= timeout_seconds:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -8373,7 +12390,12 @@ async def _await_semantic_operation_with_progress_watchdog(
                 )
                 raise asyncio.TimeoutError
             if pending_state is not None:
-                append_state_snapshot(run_dir / "state.txt", pending_state(time.monotonic() - started_at))
+                bookkeeping_started_at = time.monotonic()
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    pending_state(time.monotonic() - started_at),
+                )
+                last_progress_at += time.monotonic() - bookkeeping_started_at
     except Exception:
         if not task.done():
             task.cancel()
@@ -8461,6 +12483,13 @@ def _record_semantic_repair_hard_timeout(
             f"review.semantic.{stage}.repair.report": relpaths["report"].as_posix(),
             f"review.semantic.{stage}.repair.activity_marker": activity_relpath.as_posix(),
             f"review.semantic.{stage}.repair.pending.status": "no_progress_timeout",
+            f"review.semantic.{stage}.repair.pending.report_status": _semantic_repair_report_status(
+                report_path
+            ),
+            f"review.semantic.{stage}.repair.pending.report": relpaths["report"].as_posix(),
+            f"review.semantic.{stage}.repair.pending.activity_marker": activity_relpath.as_posix(),
+            f"review.semantic.{stage}.repair.pending.no_progress_timeout_seconds": f"{timeout_seconds:.0f}",
+            f"review.semantic.{stage}.repair.pending.updated_at": now_iso(),
             "runtime.stage": "app_server_transport_failed",
             "runtime.app_server.transport.status": "failed",
             "runtime.app_server.transport.error_kind": "timeout",
@@ -9243,6 +13272,65 @@ async def _run_image_prompt_sharded_semantic_review_once(
         findings.extend(f"{shard_id}: {error}" for error in result_item.get("errors") or [])
         findings.extend(f"{shard_id}: {finding}" for finding in result_item.get("findings") or [])
         reason_keys.extend(str(key) for key in result_item.get("reason_keys") or [])
+    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    if deterministic_errors:
+        deterministic_details = _deterministic_image_prompt_hard_findings(run_dir)
+        canonical_entry_tokens = [
+            _canonical_deterministic_image_prompt_selector(entry_id)
+            for entry_id in entry_ids
+        ]
+        canonical_entry_tokens_are_unique = (
+            len(set(canonical_entry_tokens)) == len(canonical_entry_tokens)
+        )
+        canonical_entry_by_token = {
+            token: entry_id
+            for token, entry_id in zip(canonical_entry_tokens, entry_ids)
+        }
+        detailed_blocked_entries = _dedupe_preserve_order(
+            canonical_entry_by_token[
+                _canonical_deterministic_image_prompt_selector(detail["selector"])
+            ]
+            for detail in deterministic_details
+            if _canonical_deterministic_image_prompt_selector(detail["selector"])
+            in canonical_entry_by_token
+        )
+        # Stale/malformed/empty-scope reports do not provide trustworthy
+        # selector detail, so retain the safe run-wide fallback for those
+        # failures.  A current report with concrete findings blocks only the
+        # exact canonical entries named by the deterministic reviewer.
+        deterministic_details_are_complete = (
+            canonical_entry_tokens_are_unique
+            and _deterministic_image_prompt_hard_finding_details_are_complete(
+                run_dir,
+                deterministic_details,
+                entry_ids,
+            )
+        )
+        blocked_entries = _dedupe_preserve_order(
+            [
+                *blocked_entries,
+                *(
+                    detailed_blocked_entries
+                    if deterministic_details_are_complete
+                    else entry_ids
+                ),
+            ]
+        )
+        if deterministic_details:
+            for detail in deterministic_details:
+                canonical_selector = canonical_entry_by_token.get(
+                    _canonical_deterministic_image_prompt_selector(detail["selector"]),
+                    detail["selector"],
+                ) if canonical_entry_tokens_are_unique else detail["selector"]
+                findings.append(
+                    "deterministic_story_review: "
+                    f"{canonical_selector} [{detail['code']}]: {detail['message']}"
+                )
+                reason_keys.append(detail["code"])
+        findings.extend(
+            f"deterministic_story_review: {error}" for error in deterministic_errors
+        )
+        reason_keys.append("deterministic_image_prompt_story_review_failed")
     if blocked_entries and not reason_keys:
         reason_keys.append("image_prompt_shard_failed")
     transport_failures = [
@@ -9420,8 +13508,12 @@ def _write_image_prompt_scene_shard_artifacts(
                 "",
                 "Review every cut entry and the scene_composite entry together as one scene-local gate.",
                 "Judge api_prompt_payload.prompt only as the provider prompt; design/debug fields are review evidence and must not be required verbatim in the provider prompt.",
+                "Do not map upstream keys one-to-one into the provider prompt. For each cut explicitly judge include / omit / add / replace: keep only cut-local drawable facts, omit future motion/internal metadata/unneeded references, add visible behavior or period detail needed for imageability, and replace abstract or contradictory wording without changing the story event.",
                 "Require only drawable information needed by each cut, correct subject/reference/location dependencies, one first-frame moment, reveal and temporal boundaries, and meaningful visual differences across cuts.",
-                "Fail if internal field names or motion-only instructions leak into the provider prompt, required drawable evidence is absent, references are semantically wrong, or the cuts fail to visualize the scene obligations.",
+                "Fail if a positive must-show/current-state fact is also forbidden by not_yet/constraints, if internal field names or scaffold prose leak into the provider prompt, required drawable evidence is absent, references are semantically wrong, or the cuts fail to visualize the scene obligations.",
+                "When story_time is non-empty, require period-consistent clothing, hair, architecture, everyday objects, materials, and technology; reject missing grounding or mixed-era details.",
+                "Require dependencies/references for visibly important characters, objects, and locations, but do not pull offscreen, merely mentioned, future, or scene-wide subjects into every cut.",
+                "Reject production residue such as 画面上の状態差として確定する, 次区間へ渡す, 後続場面へ観客を運ぶ, 視覚証拠:, malformed/truncated prose, and unjustified exact or near-duplicate prompts across distinct cuts.",
                 "Do not require every optional prompt fragment in every cut. Omitted conditional fragments are correct when their drawable dependency is absent.",
                 "Do not fail solely because generated image/video/audio files do not exist yet.",
                 "",
@@ -9431,7 +13523,7 @@ def _write_image_prompt_scene_shard_artifacts(
                 "blocked_entries: [...]",
                 "findings: [...]",
                 "failed_selectors: [...]",
-                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|cut_prompt_requires_reinforcement|api_prompt_internal_field_leak|api_prompt_drawable_dependency_missing|...]",
+                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|image_prompt_temporal_polarity_conflict|image_prompt_period_mismatch|api_prompt_design_meta_leak|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|cut_prompt_requires_reinforcement|api_prompt_internal_field_leak|api_prompt_drawable_dependency_missing|...]",
                 "notes: [...]",
                 "",
                 f"Run dir: `{run_dir.resolve()}`",
@@ -11633,6 +15725,26 @@ async def api_narration_items(run_id: str) -> dict[str, Any]:
     }
 
 
+@router.get("/api/image-gen/video-items")
+async def api_video_items(run_id: str) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id, ROOT)
+    try:
+        _manifest_path, _manifest_original, manifest_data = _read_manifest_data(
+            run_dir
+        )
+        items = _manifest_video_items(run_dir, manifest_data)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "run": {"id": run_id, "path": f"output/{run_id}"},
+        "items": items,
+        "references": [
+            reference_to_api(option) for option in list_reference_options(run_dir)
+        ],
+        "progress": read_run_progress(run_dir),
+    }
+
+
 @router.get("/api/image-gen/progress")
 async def api_progress(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
@@ -11787,41 +15899,140 @@ async def api_insert_cut(req: InsertCutRequest) -> dict[str, Any]:
     }
 
 
-@router.post("/api/image-gen/video-prompts/create")
-async def api_create_video_prompts(req: VideoPromptCreateRequest) -> dict[str, Any]:
-    run_dir = safe_run_dir(req.run_id, ROOT)
+async def _create_video_prompts_locked(
+    req: VideoPromptCreateRequest,
+    *,
+    run_dir: Path,
+) -> dict[str, Any]:
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
+            _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+            effective_items = _effective_video_materialization_items(run_dir, req.items)
+            missing_targets = [
+                item.item_id
+                for item in effective_items
+                if _video_target_by_item_id(manifest_data, item.item_id) is None
+            ]
+            if missing_targets:
+                raise ValueError(
+                    "video manifest targets not found: " + ", ".join(missing_targets)
+                )
+            if req.approve_for_generation:
+                for item in effective_items:
+                    target = _video_target_by_item_id(manifest_data, item.item_id)
+                    if target is None:
+                        continue
+                    target_generation = _dict_value(
+                        _dict_value(target.get("cut")).get("video_generation")
+                    )
+                    _assert_video_auxiliary_references_supported(
+                        tool=item.video_tool
+                        or str(target_generation.get("tool") or "kling_3_0"),
+                        references=item.video_references,
+                    )
             review_path = _write_frontend_review_draft(
                 run_id=req.run_id,
                 run_dir=run_dir,
                 kind="video",
                 note=req.note,
-                items=req.items,
+                items=effective_items,
                 state_status="saved_for_video_prompt",
+                strict_video_refs=req.approve_for_generation,
             )
-            design_path = _write_video_prompt_design(run_dir=run_dir, review_path=review_path, items=req.items)
-            manifest_update = _update_manifest_video_generation(run_dir, req.items)
-            request_path = _write_video_generation_requests(run_dir, req.items, replace_all=req.replace_all)
+            design_path = _write_video_prompt_design(
+                run_dir=run_dir,
+                review_path=review_path,
+                items=effective_items,
+            )
+            manifest_update = _update_manifest_video_generation(run_dir, effective_items)
+            request_path = _write_video_generation_requests(
+                run_dir,
+                effective_items,
+                replace_all=req.replace_all,
+            )
+            approval_updates = _video_prompt_approval_updates(
+                run_dir,
+                effective_items,
+                approved=False,
+            )
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
                     "status": "P830",
-                    "runtime.stage": "video_prompts_ready_for_review",
+                    "runtime.stage": (
+                        "video_prompts_ready_for_semantic_review"
+                        if req.approve_for_generation
+                        else "video_prompts_ready_for_review"
+                    ),
                     "slot.p810.status": "done",
                     "slot.p810.note": "frontend image review saved before video prompt creation",
-                    "slot.p820.status": "done",
-                    "slot.p820.note": "video prompts created from frontend settings",
+                    "slot.p820.status": "pending",
+                    "slot.p820.note": (
+                        "materialized video prompts await contextless semantic review"
+                        if req.approve_for_generation
+                        else "video prompts created; semantic review has not run"
+                    ),
                     "slot.p830.status": "awaiting_approval",
-                    "slot.p830.note": "video generation requests await human review",
-                    "stage.video_generation.status": "awaiting_approval",
+                    "slot.p830.note": "video generation requests await semantic review and per-item approval",
+                    "stage.video_generation.status": "pending",
                     "review.video_prompt.status": "pending",
                     "gate.video_prompt_review": "required",
                     "artifact.video_generation_requests": str(request_path.resolve()),
                     "review.frontend.video_prompt.design": design_path.relative_to(run_dir).as_posix(),
+                    **approval_updates,
                 },
             )
-    except (FileNotFoundError, ValueError) as exc:
+        if req.approve_for_generation:
+            await _run_video_prompt_semantic_review_before_approval(
+                run_dir=run_dir,
+            )
+            async with _serialized_run_write(run_dir, "run_artifacts"):
+                _assert_video_materialization_current_for_approval(
+                    run_dir,
+                    effective_items,
+                )
+                approval_updates = _video_prompt_approval_updates(
+                    run_dir,
+                    effective_items,
+                    approved=True,
+                )
+                stage_approval_complete = _video_prompt_stage_approval_complete(
+                    run_dir,
+                    effective_items,
+                    approval_updates=approval_updates,
+                )
+                review_status = (
+                    "approved_for_generation"
+                    if stage_approval_complete
+                    else "partially_approved_for_generation"
+                )
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "runtime.stage": "video_prompt_items_approved_for_generation",
+                        "slot.p820.status": "done",
+                        "slot.p820.note": "contextless video-motion semantic review passed for the exact materialized payload",
+                        "slot.p830.status": (
+                            "done"
+                            if stage_approval_complete
+                            else "awaiting_approval"
+                        ),
+                        "slot.p830.note": (
+                            "all materialized provider requests approved"
+                            if stage_approval_complete
+                            else "selected provider requests approved; remaining items still require approval"
+                        ),
+                        "stage.video_generation.status": review_status,
+                        "review.video_prompt.status": review_status,
+                        "gate.video_prompt_review": (
+                            "approved"
+                            if stage_approval_complete
+                            else "per_item_approval"
+                        ),
+                        **approval_updates,
+                    },
+                )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "runId": req.run_id,
@@ -11831,8 +16042,22 @@ async def api_create_video_prompts(req: VideoPromptCreateRequest) -> dict[str, A
         "videoRequestsPath": request_path.relative_to(run_dir).as_posix(),
         "updated": manifest_update["updated"],
         "missing": manifest_update["missing"],
+        "durationSecondsByItem": {
+            item.item_id: item.video_duration_seconds for item in effective_items
+        },
+        "approvedForGeneration": req.approve_for_generation,
         "progress": read_run_progress(run_dir),
     }
+
+
+@router.post("/api/image-gen/video-prompts/create")
+async def api_create_video_prompts(req: VideoPromptCreateRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(req.run_id, ROOT)
+    # The semantic report is written to one canonical run-level artifact.  Keep
+    # materialization, review, and approval in the same revision transaction so
+    # another request cannot replace the manifest while the report is running.
+    async with _serialized_run_write(run_dir, "video_prompt_review_revision"):
+        return await _create_video_prompts_locked(req, run_dir=run_dir)
 
 
 @router.get("/api/image-gen/prompt-settings")
@@ -12429,8 +16654,10 @@ async def api_video_generate(req: VideoGenerateRequest) -> dict[str, Any]:
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             _require_narration_ready_for_video(run_dir)
+            item = _materialized_video_generate_item(run_dir=run_dir, request=item)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _validate_video_request_reference_paths(run_dir, item)
     return await _generate_video_candidates(run_dir, item)
 
 
@@ -12442,9 +16669,15 @@ async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, An
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             _require_narration_ready_for_video(run_dir)
+            items = [
+                _materialized_video_generate_item(run_dir=run_dir, request=item)
+                for item in req.items
+            ]
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    total_candidates = sum(item.candidate_count for item in req.items)
+    for item in items:
+        _validate_video_request_reference_paths(run_dir, item)
+    total_candidates = sum(item.candidate_count for item in items)
     if total_candidates > 96:
         raise HTTPException(status_code=400, detail="bulk video generation is limited to 96 total candidates")
     semaphore = asyncio.Semaphore(req.concurrency)
@@ -12453,9 +16686,9 @@ async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, An
         async with semaphore:
             return await _generate_video_candidates(run_dir, item)
 
-    results = await asyncio.gather(*(guarded(item) for item in req.items), return_exceptions=True)
+    results = await asyncio.gather(*(guarded(item) for item in items), return_exceptions=True)
     payload = []
-    for item, result in zip(req.items, results, strict=False):
+    for item, result in zip(items, results, strict=False):
         if isinstance(result, Exception):
             payload.append({"itemId": item.item_id, "error": str(result), "candidates": []})
         else:
@@ -13620,13 +17853,14 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
                         append_state_snapshot(
                             run_dir / "state.txt",
                             {
-                                "runtime.stage": "prompt_recompiled_awaiting_image_generation",
+                                "runtime.stage": "prompt_recompiled_awaiting_semantic_review",
                                 "review.frontend.prompt_recompile.status": "done",
                                 "review.frontend.prompt_recompile.items": ", ".join(v2_revisions),
                                 "review.semantic.image_prompt.status": "pending",
                                 "review.image.status": "pending",
-                                "slot.p650.status": "done",
-                                "slot.p650.note": "compiled-v2 scene requests rematerialized after frontend visual plan revision",
+                                "review.image_prompt.request_freeze.status": "draft",
+                                "slot.p650.status": "pending",
+                                "slot.p650.note": "compiled-v2 draft rematerialized; semantic image-prompt review must pass before freeze",
                                 "slot.p660.status": "pending",
                                 "slot.p670.status": "pending",
                                 "slot.p680.status": "pending",

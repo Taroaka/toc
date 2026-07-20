@@ -283,6 +283,9 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
     missing_contact_sheet_entries: list[str] = []
     missing_sampled_frame_entries: list[str] = []
     failed_selectors: list[str] = []
+    blocking_quality_issue_entries: list[str] = []
+    blocking_quality_issue_codes: list[str] = []
+    blocking_quality_issue_count = 0
     for index, entry in enumerate(entries, start=1):
         entry_id = str(entry.get("id") or entry.get("selector") or f"entry_{index:03d}")
         if _truthy(entry.get("semantic_contract_missing")) or _truthy(entry.get("motion_contract_missing")):
@@ -292,6 +295,18 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
             missing_contact_sheet_entries.append(entry_id)
         if _truthy(entry.get("sampled_frames_missing")):
             missing_sampled_frame_entries.append(entry_id)
+        blocking_issues = _blocking_quality_issues(entry)
+        if blocking_issues:
+            blocking_quality_issue_entries.append(entry_id)
+            failed_selectors.append(entry_id)
+            blocking_quality_issue_count += len(blocking_issues)
+            blocking_quality_issue_codes.extend(
+                (
+                    str(issue.get("code") or "").strip()
+                    or "video_motion_blocking_quality_issue"
+                )
+                for issue in blocking_issues
+            )
     return {
         "missing_semantic_contract_count": len(missing_contract_entries),
         "missing_semantic_contract_entries": missing_contract_entries,
@@ -299,8 +314,55 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
         "missing_contact_sheet_entries": missing_contact_sheet_entries,
         "missing_sampled_frame_count": len(missing_sampled_frame_entries),
         "missing_sampled_frame_entries": missing_sampled_frame_entries,
+        "blocking_quality_issue_count": blocking_quality_issue_count,
+        "blocking_quality_issue_entries": blocking_quality_issue_entries,
+        "blocking_quality_issue_codes": sorted(
+            set(blocking_quality_issue_codes)
+        ),
         "failed_selectors": sorted(set(failed_selectors)),
     }
+
+
+def _blocking_quality_issues(entry: dict[str, object]) -> list[dict[str, object]]:
+    provider_payload = entry.get("provider_prompt_payload")
+    video_prompt_ir = (
+        provider_payload.get("video_prompt_ir")
+        if isinstance(provider_payload, dict)
+        else None
+    )
+    sources = [
+        entry.get("quality_issues"),
+        (
+            provider_payload.get("quality_issues")
+            if isinstance(provider_payload, dict)
+            else None
+        ),
+        (
+            video_prompt_ir.get("quality_issues")
+            if isinstance(video_prompt_ir, dict)
+            else None
+        ),
+    ]
+    issues: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for source in sources:
+        if not isinstance(source, list):
+            continue
+        for raw_issue in source:
+            if not isinstance(raw_issue, dict) or raw_issue.get("blocking") is not True:
+                continue
+            issue = {str(key): value for key, value in raw_issue.items()}
+            fingerprint = json.dumps(
+                issue,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            issues.append(issue)
+    return issues
 
 
 def _truthy(value: object) -> bool:
@@ -321,7 +383,13 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
     common = ["story.md", "script.md", "video_manifest.md"]
     by_stage = {
         "asset_plan": ["asset_inventory.md", "asset_plan.md"],
-        "image_prompt": ["asset_inventory.md", "asset_plan.md", "image_generation_requests.md", "image_prompt_story_review.md"],
+        "image_prompt": [
+            "asset_inventory.md",
+            "asset_plan.md",
+            "image_generation_requests.md",
+            "image_generation_request_snapshot.json",
+            "image_prompt_story_review.md",
+        ],
         "narration": ["narration_text_review.md", "logs/review/narration_text_quality.md"],
         "video_motion": ["video_generation_requests.md"],
     }
@@ -377,6 +445,12 @@ def render_report_template(*, stage: str, run_dir: Path, scope_path: Path, colle
 
 
 def _stage_specific_review_instructions(stage: str) -> list[str]:
+    scene_time_of_day_instructions = [
+        "Treat each scene-level `time_of_day` as an open string daypart (for example 朝, 昼, 夕方, 夜, 夜明け前, or 真夜中), separate from the story's historical `story_metadata.time` / `script_metadata.time` / `video_metadata.time`.",
+        "Use `time_of_day_contract_declared` and `time_of_day_status` from each review entry. The required contract is declared only by metadata marker `scene_time_of_day_contract: required_v1`; a scene key by itself does not declare it. Fail missing or blank values only when declared; do not fail an undeclared legacy omission solely for lacking this newer key. Always fail `invalid_type` because the authored value must be a string.",
+        "When valid, fail if the daypart contradicts causal scene order, changes between projections without an authored transition, or cannot support concrete sky brightness, natural/artificial light, shadow, and color-temperature choices.",
+        "Use reason keys such as scene_time_of_day_missing, scene_time_of_day_invalid_type, scene_time_of_day_continuity_mismatch, or scene_time_of_day_not_visualizable.",
+    ]
     if stage == "research":
         return [
             "Treat `research.md` as the run-local provisional baseline; judge whether it is internally sufficient for story authoring.",
@@ -388,15 +462,55 @@ def _stage_specific_review_instructions(stage: str) -> list[str]:
     if stage == "story":
         return [
             "Treat approved `research.md` as immutable upstream baseline and review the complete story-to-scene allocation before any cut is authored.",
-            "Check timeline, characters and motivations, conflict escalation/resolution, important-event coverage, distinct scene responsibility, internal research_refs, and duration-aware scene allocation.",
-            "Fail if story order contradicts research, character state changes without cause, every scene repeats the same conflict or turn, important events are unassigned, internal refs do not resolve, or scenes are too generic/duplicative to split into cuts.",
+            "Treat scene `time_of_day` as an open string daypart, separate from historical `story_metadata.time`. The required contract is declared only by `story_metadata.scene_time_of_day_contract: required_v1`. Read the aggregate story entry's `time_of_day_contract_declared` and each `scene_time_of_day_statuses[].status`; do not look for a top-level per-scene `time_of_day_status` in this entry.",
+            "When the contract is declared, fail a scene_time_of_day_statuses item whose status is missing, blank, or invalid_type. Do not fail an undeclared legacy story solely for this newer key.",
+            "When valid, require causal daypart progression and a visualizable basis for sky brightness, natural/artificial light, shadow, and color temperature without changing historical clothing, architecture, materials, or technology.",
+            "Check timeline, characters and motivations, conflict escalation/resolution, important-event coverage, distinct scene responsibility, internal research_refs, historical time context, and duration-aware scene allocation.",
+            "For `historical_time_context`, require `story_metadata.time` to be a string. Existing classics, folklore, legends, and adaptations must use a concrete `〇〇時代` value supported by the run-local research/story context; user-created original stories may use an empty string.",
+            "Fail if story order contradicts research, character state changes without cause, a current-contract scene lacks a valid time_of_day or its daypart progression contradicts the events, every scene repeats the same conflict or turn, important events are unassigned, internal refs do not resolve, a non-original story lacks its historical time, or scenes are too generic/duplicative to split into cuts.",
             "Do not impose a fixed scene count. Judge semantic coverage against target_duration_seconds and the story's own meaningful scene responsibilities.",
             "Do not browse or validate external URLs, editions, translations, rights, or factual fidelity. External source authenticity is outside this gate.",
-            "Use reason keys such as story_baseline_mismatch, story_timeline_mismatch, story_character_continuity_mismatch, story_conflict_progression_weak, story_event_unassigned, story_scene_allocation_generic, story_scene_duplicate_responsibility, or internal_reference_unresolved.",
+            "Use reason keys such as story_baseline_mismatch, story_timeline_mismatch, story_character_continuity_mismatch, story_conflict_progression_weak, story_historical_time_missing, scene_time_of_day_missing, scene_time_of_day_invalid_type, scene_time_of_day_continuity_mismatch, story_event_unassigned, story_scene_allocation_generic, story_scene_duplicate_responsibility, or internal_reference_unresolved.",
+        ]
+    if stage in {"scene_set", "scene_detail"}:
+        return scene_time_of_day_instructions
+    if stage == "image_prompt":
+        return [
+            "Treat api_prompt_payload.prompt as a candidate provider prompt and first_frame_visual_plan / source contracts as review evidence; do not assume every upstream key belongs in the final prompt.",
+            "For every cut make an explicit include / omit / add / replace judgment: include cut-local drawable facts, omit future motion/internal metadata/unneeded references, add visible behavior or period detail needed for imageability, and replace abstract or contradictory wording without changing the story event.",
+            "Fail positive/negative polarity conflicts, especially when a must-show/current-state person, object, location, or state is also listed under not_yet or constraints.",
+            "When story_time is non-empty, require period-consistent clothing, hair, architecture, everyday objects, materials, and technology; fail missing or contradictory historical grounding.",
+            "Use time_of_day_contract_declared and time_of_day_status to distinguish current-contract omissions from undeclared legacy data. The contract is declared only by `video_metadata.scene_time_of_day_contract: required_v1`, not by a scene key alone. Fail missing/blank only when declared, always fail invalid_type, and do not reject a legacy omission solely for this newer key.",
+            "When time_of_day is valid, require the provider prompt and drawable dependencies to preserve that exact scene daypart through sky brightness, natural-light direction/intensity, shadows, color temperature, and artificial lighting. Judge this separately from story_time and do not let either field overwrite the other.",
+            "Use first_frame_visual_plan_status to fail canonical_missing, canonical_empty, or canonical_invalid_type for image_api_prompt_v2. Do not accept a synthesized legacy plan as evidence for a malformed or absent canonical v2 plan.",
+            "Require every visibly important character/object/location to have the correct dependency and reference context. Do not require offscreen, merely mentioned, or future subjects, and reject scene-wide references copied into cuts where they are not visible.",
+            "Fail Japanese scaffold residue or production meta such as 画面上の状態差として確定する, 次区間へ渡す, 後続場面へ観客を運ぶ, 視覚証拠:, or malformed/truncated prose.",
+            "Compare all cuts in the scene composite. Exact or near-duplicate prompts pass only when an explicit reuse contract justifies them; otherwise each anti_redundancy_key and visual role must create a meaningful visible difference.",
+            "Use reason keys such as image_prompt_temporal_polarity_conflict, image_prompt_period_mismatch, image_prompt_time_of_day_mismatch, api_prompt_drawable_dependency_missing, semantic_reference_mismatch, api_prompt_design_meta_leak, or scene_cut_prompt_too_similar.",
+        ]
+    if stage == "video_motion":
+        return [
+            "Treat provider_prompt_payload.prompt and provider_prompt_payload.negative_prompt as the exact reviewed provider text. Read projection_review_contract and video_prompt_ir as the trace back to canonical story, scene, cut, frame-boundary, and provider inputs; do not approve raw motion_prompt prose independently of that compiled payload.",
+            "Fail immediately when provider_prompt_payload.quality_issues or video_prompt_ir.quality_issues contains any item with blocking=true. Repair the canonical motion fields and recompile; never approve by deleting the diagnostic or editing compiled prose.",
+            "Pass only when the clip departs naturally from the approved first-frame visible state, has one primary motion, and reaches the declared end_state, handoff_state, or last-frame boundary without inventing an intervening cut, fade, dissolve, or different shot.",
+            "Require the primary motion to name a concrete visible subject and one observable action. Require the end state to say who or what stops where and in which physical pose, position, or object state. Reject unresolved alternatives such as または, もしくは, あるいは, or or.",
+            "Fail when subject, environment, emotion, and camera instructions compete. For Kling, require a maximum of two camera operations and one continuous shot; camera wording hidden in another fragment still counts toward that limit.",
+            "Environment and emotion must add independent visible information rather than restating the primary motion. Compare every cut in the scene and reject exact or near-duplicate primary motions or end states unless an explicit reuse contract justifies them.",
+            "Use source_event_contract and review-only dependencies to fail motion that crosses its assigned event or reveal boundary, adds a new character or important object, exposes withheld information, or advances into a later cut even when the prose is visually plausible.",
+            "Require the primary motion to visibly perform the source causal action assigned to this cut; naming a reaction, atmosphere, or generic change without enacting that cause must fail.",
+            "The start state must remain strictly before the primary motion and must not pre-consume or already complete that action in the first frame.",
+            "For adjacent cuts in the same location, compare the previous end state with the next start state and fail any unexplained reset of pose, blocking, object position, light, or progress.",
+            "Track prop possession causally across cuts: a prop must be visibly acquired before any later possession state, and the sequence must not jump from absent or untouched to already held.",
+            "When historical time or scene time_of_day is present, require continuity of clothing, hair, architecture, everyday objects, materials, technology, sky brightness, natural/artificial light, shadow, and color temperature. Do not turn continuity metadata into an unauthored time-lapse or lighting transition.",
+            "Require every active provider-projected group in projection_review_contract to have one matching non-empty included fragment rendered in the exact provider prompt. Reject missing, duplicated, shadowed-source, untraced, or contradictory fragments and any internal IDs, paths, hashes, design key labels, image prompt, or narration prose leaking into provider text.",
+            "Validate every reference role against ordered references and the visible use described in continuity. Reject missing, reordered, duplicated, path-leaking, or semantically mismatched reference-role bindings.",
+            "Fail if negative constraints, provider_request_binding, duration, quality, aspect ratio, first/last frame, ordered references, reference-content hashes, model, backend, or execution options are absent, stale, contradicted by the entry, or approved for a channel the selected provider adapter does not transmit.",
+            "Use reason keys such as video_prompt_start_boundary_mismatch, video_prompt_multiple_primary_motions, video_prompt_unresolved_alternative, video_prompt_abstract_primary_motion, video_prompt_abstract_end_state, video_prompt_duplicate_secondary_motion, video_prompt_cross_cut_motion_duplicate, video_prompt_reference_role_mismatch, video_prompt_camera_conflict, video_prompt_end_boundary_mismatch, video_prompt_event_boundary_violation, video_prompt_invented_subject, video_prompt_source_causal_action_missing, video_prompt_start_preconsumes_primary_motion, video_prompt_adjacent_cut_state_reset, video_prompt_prop_possession_jump, video_prompt_period_continuity_mismatch, video_prompt_time_of_day_mismatch, video_prompt_projection_trace_mismatch, or video_prompt_provider_binding_stale.",
         ]
     if stage != "cut_blueprint":
         return []
     return [
+        *scene_time_of_day_instructions,
         "For `cut_blueprint` failures, each blocked finding must include a concrete producer-facing repair example.",
         "The example should say what to add, remove, or strengthen in the affected cut contract / viewer contract / first-frame visual plan / downstream prompt requirements.",
         "Use cut_context_packet and cut_context_packet_diagnostics as repair input when present: if a packet diagnostic reports missing roles, visual proof, event beat, reveal boundary, or previous/next delta, state which packet field and source contract field should be reinforced.",
@@ -452,7 +566,7 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             f"Write the final report to `{report_path}` and replace the pending template.",
             "",
             "Judge whether each entry preserves the intended story/source meaning and is usable by the next downstream stage.",
-            "Check subject identity, location, object/setpiece visibility, timeline, reveal order, continuity, narration alignment, and output-media suitability when those fields exist.",
+            "Check subject identity, location, object/setpiece visibility, timeline, scene time-of-day continuity, reveal order, continuity, narration alignment, and output-media suitability when those fields exist.",
             "For planning stages (`research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
             "Flag round-robin references, always-on story objects in unrelated entries, mismatched location/character/object references, missing semantic contracts, and outputs that do not support the contract.",
             "For entries whose review_scope is `scene_composite`, this is a gate, not advice: judge the scene as a whole across its split cuts.",
@@ -476,7 +590,7 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
                 if stage in FOUNDATION_SEMANTIC_CRITERIA
                 else []
             ),
-            "reason_keys: [research_baseline_too_thin|research_timeline_incoherent|research_character_model_incomplete|research_conflict_unresolved_for_story|story_baseline_mismatch|story_timeline_mismatch|story_character_continuity_mismatch|story_conflict_progression_weak|story_event_unassigned|story_scene_allocation_generic|story_scene_duplicate_responsibility|internal_reference_unresolved|semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
+            "reason_keys: [research_baseline_too_thin|research_timeline_incoherent|research_character_model_incomplete|research_conflict_unresolved_for_story|story_baseline_mismatch|story_timeline_mismatch|story_character_continuity_mismatch|story_conflict_progression_weak|story_event_unassigned|story_scene_allocation_generic|story_scene_duplicate_responsibility|internal_reference_unresolved|semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|scene_time_of_day_missing|scene_time_of_day_invalid_type|scene_time_of_day_continuity_mismatch|image_prompt_time_of_day_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
             "notes: [...]",
             "",
             f"Run dir: `{run_dir.resolve()}`",

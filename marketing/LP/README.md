@@ -1,30 +1,58 @@
-# LP Directory Guide
+# ToC Public Site / LP Guide
 
-`marketing/LP/` は、`にわかのAI` のリスト獲得・相談導線用LPを管理する場所。
+更新日: 2026-07-19
 
-## 方針
+`marketing/LP/` は、既存 ToC 制作フロントとは分離して公開する marketing site と persona-specific LP の正本を置く。
 
-- YouTube はリスト集客の原液。
-- LP はセールスページというより、YouTube概要欄から受ける `中間導線`。
-- 初期LPの目的は、視聴者を3つに分けること。
-  - 制作ノートを受け取りたい人
-  - 改善提案・次に見たい物語を送りたい人
-  - AI動画制作システムについて相談したい人
-- セールスは LP 内で完結させず、フォーム、DM、個別相談へ分離する。
+## Site job
 
-## LP Design Rule
+訪問者に ToC の内部実装を説明することではなく、動画を速く簡単に作れる変化を見せ、次のどちらかへ進んでもらう。
 
-LP は説明資料ではなく、セグメント分岐ページとして扱う。
+- 副業の最初の1本を作る
+- 自分のブランド動画を設計する
 
-- ファーストビューは起承転結で始めず、まず `何ができるか` の結論を出す。
-- コピーの主語は商品ではなく、訪問者のやりたいことにする。
-- CTA は1つの売り込みではなく、相手が自分で選べる3分岐にする。
-- 詳細な仕組み、制作工程、思想は、CTA の後ろに置く。
-- 相談導線は強く押さず、`自分の企画でも試せるか知りたい` 人が進める形にする。
+## Information architecture
+
+```text
+/
+├── /for-side-business
+├── /for-personal-brand
+├── /examples
+├── /how-it-works
+├── /contact
+├── /privacy
+└── /thanks
+```
+
+- common home: brand, organic traffic, comparison, persona selection
+- `/for-side-business`: side-business campaign landing page
+- `/for-personal-brand`: personal-brand campaign landing page
+- `/examples`: proof library; mythology is one example category
+- `/how-it-works`: mechanism and human judgment
+- `/contact`: native form
+
+## Design rules
+
+- Hero is the promise, not a company introduction
+- Show `one-line idea -> completed video timeline` before the detailed workflow
+- Lead with visitor outcome, then product value, then mechanism
+- Keep side-business and personal-brand copy separate
+- Use one signature motion, `Idea-to-Video Line`; keep other motion restrained
+- Respect mobile, keyboard focus, reduced motion, readable contrast, and fast loading
+- Do not use generic purple AI gradients, mythic ornaments, dashboard-first heroes, or unverified claims
+
+## Conversion rules
+
+- common CTA: `自分なら何を作れるか見る`
+- side-business CTA: `副業の最初の1本を作る`
+- personal-brand CTA: `自分のブランド動画を設計する`
+- collect the video idea before long profile fields
+- carry the idea and persona into the native form
+- use a dedicated thank-you page and conversion event
+- do not use Notion or Google Forms as the canonical public route
 
 ## Files
 
-- `niwakanoai-lp.md`
-  - Notion / 静的ページに貼れるLP本文。
-- `lead-form-schema.md`
-  - Googleフォーム等で使うリスト獲得フォーム設計。
+- `personas.md`: side-business / personal-brand persona, message, objection, proof contract
+- `toc-marketing-site.md`: common site and persona LP copy / section contract
+- `lead-form-schema.md`: native form, validation, event, and data contract

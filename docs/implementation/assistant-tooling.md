@@ -99,11 +99,12 @@ scripts/ai/install-codex-skills.sh
 
 ### Marketing scoped guidance
 
-この repo の marketing 領域は `marketing/SNS/` のみを対象にし、**通常の ToC 制作スキル群とは分離**して扱う。
+この repo の marketing 領域は public site、persona-specific LP、digital acquisition、SNS、lead / conversion analysis を対象にし、**通常の ToC 制作スキル群とは分離**して扱う。
 
 - 対象範囲:
   - `marketing/` 配下の作業
-  - 特に `marketing/SNS/` の確認・設計・更新
+  - `marketing/LP/` の公開サイト、LP、native form の確認・設計・更新
+  - `marketing/SNS/` の配信、広告導線、反応分析の確認・設計・更新
 - 対象外:
   - `docs/story-creation.md`
   - `docs/script-creation.md`
@@ -112,12 +113,12 @@ scripts/ai/install-codex-skills.sh
 
 Codex 側では vendor skills を repo 全体の default skill set としては登録しない。
 代わりに、repo-local skill `.codex/skills/marketing-skills-router/` を入口にし、
-必要なときだけ `marketing/README.md` と `marketing/SNS/` を読む。
+必要なときだけ `marketing/README.md` と該当する `marketing/LP/` / `marketing/SNS/` を読む。
 
 ルール:
 
 - `marketing/` を触っていない限り、この scoped guidance は参照しない
-- marketing 作業でも、まず `marketing/README.md` と `marketing/SNS/` の正本を読む
+- marketing 作業では、まず `marketing/README.md` を読み、その routing に従って `marketing/LP/` または `marketing/SNS/` の該当正本だけを読む
 - story/script/video 系タスクでは絶対に呼ばない
 
 Codex の durable rules は長い都度プロンプトではなく、`AGENTS.md` または scoped skill に寄せる。

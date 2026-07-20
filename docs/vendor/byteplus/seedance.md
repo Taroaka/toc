@@ -22,14 +22,25 @@ video_generation:
 
 ### 参照画像（キャラ/アイテム一貫性）
 
-この実装では **`image_generation.references[]`** を Seedance の `reference_image` として送る（`role: "reference_image"`）。
+この実装では **`video_generation.references[]`** を Seedance の `reference_image` として送る（`role: "reference_image"`）。画像生成用 `image_generation.references[]` を動画へ暗黙転用せず、動画reviewで選ばれたordered listだけを送る。
 
 ```yaml
-image_generation:
-  references:
-    - "assets/characters/protagonist_refstrip.png"
-    - "assets/objects/tamagushi.png"
+render_units:
+  - unit_id: "1"
+    video_input_contract:
+      input_mode: "reference_images"
+    video_generation:
+      tool: "seedance"
+      references:
+        - "assets/scenes/scene01_cut01.png"
+        - "assets/storyboards/scene01_storyboard.png"
 ```
+
+`first_frame` / `last_frame` を使うframe-boundary modeと、`references[]` を使うmultimodal-reference modeは相互排他である。reference modeではframe fieldsを空にし、reference対応I2V modelを選ぶ。開始画像をstrictなfirst frameとして固定する必要がある場合はreferencesを併用しない。
+
+Seedance 1.0 の duration は2–12秒、reference-image-to-videoの参照画像は1–4枚である。ToCはこの上限をprovider capabilityとして、storyboard unit分割、manifest検証、materialization、approval、server/CLI実行の全箇所で共通適用する。共通の60秒上限だけでSeedance requestを承認してはならない。
+
+現在のadapterにはseparate negative fieldがない。compilerはSeedanceの追加禁止をpositive promptの`constraints`へinlineし、`negative_prompt`は空文字としてhash・reviewする。
 
 ## 必要な環境変数（例）
 
@@ -48,9 +59,14 @@ image_generation:
   - 有効化: `--ark-generate-audio`（または `ARK_EXTRA_JSON` で上書き）
 - 上級者向け:
   - `--ark-extra-json` / `ARK_EXTRA_JSON` でリクエスト payload をマージして拡張パラメータを渡せる
+  - `model` / `content` / `resolution` / `ratio` / `duration` などreview済みfieldの上書きは拒否する
 
 ## 実装メモ
 
 - ローカル画像は `data:image/<fmt>;base64,...` にエンコードして送る（File API upload は使っていない）。
   - 画像サイズが大きいとリクエストが重くなるため注意。
 
+## 公式資料
+
+- [BytePlus ModelArk video generation API / model capability table](https://docs.byteplus.com/api/docs/ModelArk/2298881)
+- [Seedance video input mode API reference](https://docs.byteplus.com/en/docs/modelark/1520757)

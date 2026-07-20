@@ -1,7 +1,7 @@
 # 動画マニフェスト: テンプレート（改善版）
 
-`docs/video-generation.md` の出力スキーマに準拠した作業テンプレートです。
-改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `scene_event` → `scene_cut_coverage_plan` → `cut_contract.source_event_contract` → `first_frame_visual_plan` → `drawable_prompt_ir` → `api_prompt_payload.prompt` / `narration` / `video_generation.motion_prompt` のつながりを明示します。
+`docs/video-generation.md` の出力スキーマに準拠した作業テンプレートです。動画 prompt の projection / compiler 契約は [`docs/implementation/video-prompting.md`](../docs/implementation/video-prompting.md) を参照してください。
+改善版では、scene を映画的な劇的単位として扱い、`scene_intent` → `scene_event` → `scene_cut_coverage_plan` → `cut_contract.source_event_contract` → `first_frame_visual_plan` → `drawable_prompt_ir` → image / video `api_prompt_payload.prompt` / `narration` のつながりを明示します。
 このテンプレートは skeleton 作成にも使うため、image/video authoring prompt には TODO を含むことがある。ただし `audio.narration.text` / `audio.narration.tts_text` には TODO を入れず、未記入は空文字 + `authoring_status` で表す。`manifest_phase: production` へ昇格する時点では TODO / TBD / pending を残さない。
 
 - 出力先: `output/videos/<topic>_<timestamp>_manifest.md`
@@ -15,6 +15,12 @@ manifest_phase: "skeleton"
 # === メタ情報 ===
 video_metadata:
   topic: "<topic>"
+  # script_metadata.scene_time_of_day_contract の exact one-way projection。
+  scene_time_of_day_contract: "required_v1"
+  # script_metadata.scene_time_of_day_visual_basis_contract の exact one-way projection。
+  scene_time_of_day_visual_basis_contract: "required_v1"
+  time: "江戸時代"  # script_metadata.timeのexact one-way projection。ユーザー創作の空文字なら時代fragmentを追加しない
+  ending_mode: "<script_metadata.ending_mode>"  # p700/p720用のexact one-way projection。空文字を許容
   source_story: "output/<topic>_<timestamp>/story.md"
   source_script: "output/<topic>_<timestamp>/script.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
@@ -78,11 +84,12 @@ promotion_requirements:
   all_cut_contracts_complete: true
   all_image_prompts_approved: true
   all_narration_text_finalized_or_silent: true
-  all_video_motion_prompts_complete: true
+  all_video_motion_designs_complete: true
+  all_video_api_prompt_payloads_materialized: true
 
 image_request_materialization:
   prompt_policy_version: "image_api_prompt_v2"
-  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  compiler_version: "conditional_drawable_prompt_compiler_v3"
   review_projection: "image_generation_requests.md"
   review_prompt_fence: "api_prompt"
   execution_snapshot: "image_generation_request_snapshot.json"
@@ -94,6 +101,40 @@ image_request_materialization:
   unique_destination_owner_per_snapshot: true
   reject_cross_revision_output: true
   legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
+
+video_request_materialization:
+  # frontend/server・CLI・storyboardはいずれもmanifest payloadとreview artifactを先に保存する。
+  # materialize直後はpending。CLIは未承認itemを自動承認せず、provider実行時にexact per-item bindingを要求する。
+  # reveal / next-frame boundary の authoring key は location_segments[].beat_overrides.<function>.obligation_overrides.<obligation_id> だけで受け付ける。
+  # compiler v3 は reveal allowlist の最大8件・motion/end-stateへの接地・must_not_addとの非交差を検証する。
+  # separate negative_prompt には正のallowlist文・許可要素名を複写せず、allowed_reveal_info_idsもprovider proseへ出さない。
+  prompt_policy_version: "video_api_prompt_v1"
+  compiler_version: "conditional_video_prompt_compiler_v3"
+  projection_registry_version: "video_prompt_projection_registry_v3"
+  review_projection: "video_generation_requests.md"
+  review_prompt_fence: "video_prompt"
+  negative_prompt_fence: "negative_prompt"
+  approval_request_flag: "approve_for_generation"
+  per_item_approval_state: "review.video_prompt.item.<item_id>"
+  approval_identity_bindings: [request_section_sha256, prompt_sha256, source_digest]
+  approval_audit_metadata: [approved_by, approved_at]
+  provider_prompt_sources:
+    - "scenes[].cuts[].video_generation.api_prompt_payload.prompt"
+    - "scenes[].render_units[].video_generation.api_prompt_payload.prompt"
+  persist_payload_before_provider_call: true
+  reject_unmaterialized: true
+  reject_prompt_hash_drift: true
+  reject_source_digest_drift: true
+  reject_setting_or_reference_drift: true
+  bind_negative_prompt: true
+  bind_provider_execution_options: true
+  bind_materialized_reference_content_sha256: true
+  bind_ordered_reference_roles: true
+  reject_blocking_quality_issues: true
+  reject_pending_or_stale_per_item_approval: true
+  cli_auto_approval: false
+  reject_reserved_provider_extra_overrides: true
+  legacy_compatibility: "prompt_authoring_source / motion_prompt は fallback / read-only projection。compiled payload がある場合の送信正本にしない"
 
 subagent_trace:
   - subagent_id: "image-prompt-judgment-001"
@@ -159,12 +200,12 @@ assets:
   #       - "封印が呼吸するように発光する"
 
   location_bible:
-    - location_id: "village_at_dawn"
+    - location_id: "village"
       reference_images: []
       reference_variants: []
       fixed_prompts:
-        - "夜明けの木造家屋、湿った土の道、低い朝霧"
-      review_aliases: ["夜明けの村"]
+        - "木造家屋と湿った土の道の固定配置"
+      review_aliases: ["木造の村"]
       continuity_notes:
         - "土の道の方向と木造家屋の配置を維持する"
   # - location_id: "sea_temple"
@@ -208,6 +249,31 @@ canonical_event_coverage_matrix:
 # === シーン別素材 ===
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
+    # script.md の同一 scene から一方向 projection する open string。新規 artifact では非空必須。
+    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
+    # 同一 scene の cut image にだけ適用し、reusable asset へは時間帯 variant を明示した場合を除いて付与しない。
+    time_of_day: "夜明け"
+    # script.md からの exact projection。review-only で、第二の時間帯 authoring root にしない。
+    time_of_day_visual_basis: "光源、空/窓外の明るさ、影、色温度を夜明けに整合させる根拠"
+    # sequence の場合も各 cut は担当 event beat の一場所だけを参照する。
+    location_mode: "single|sequence"
+    location_sequence: ["森の入口"]
+    # script.md の場所別segmentを exact projection。各cutは primary event beat と同じ1 itemだけを使う。
+    location_segments:
+      - location: "森の入口"
+        responsibility: "この場所で成立させる出来事"
+        primary_subject: "主被写体の人物名"
+        visible_action: "一枚で読める具体的状態"
+        visible_reaction: "別主体の具体的反応"
+        required_visual_evidence: ["具体物"]
+        required_roles: ["protagonist"]
+        motion_brief: "一つの観察可能な動作"
+        motion_end_state: "物理的終了状態"
+        primary_subject_by_function: {}
+        beat_overrides: {}
+        # reveal / boundary の3 keyを使う場合は beat_overrides.<function>.obligation_overrides.<obligation_id> の
+        # exact entry に allowed_new_reveal_elements / allowed_reveal_info_ids /
+        # use_next_cut_first_frame_as_last_frame を置く。segment / function rootには置かない。
     timestamp: "00:00-00:24"
     importance: "medium"
     target_duration_seconds: 24
@@ -412,6 +478,7 @@ scenes:
             source_required_visual_evidence: []
             event_facts_to_preserve: []
             event_facts_not_to_invent: []
+            # exact obligation overrideから解決したreview用projection。IDはprovider proseへ出さない。
             allowed_reveal_info_ids: []
             forbidden_reveal_info_ids: []
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
@@ -464,7 +531,7 @@ scenes:
           continuity_contract:
             start_state: {}
             end_state: {}
-            carry_forward_to_next_cut: []
+            carry_forward_to_next_cut: ["主人公の顔、髪、衣装、体格を変えない", "村の道と木造家屋の配置を変えない", "村の出口へ向く画面方向を反転させない", "夜明けの光源方向を変えない"]
             continuity_risks: []
           cut_handoff:
             receives_from_previous:
@@ -477,13 +544,15 @@ scenes:
               anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
               visible_or_audible_form: ""
               expected_next_cut_selector: ""
+              # upstream exact obligation の boundary flag を解決したread-only projection。
+              binds_video_last_frame_to_next_first_frame: false
           first_frame_contract:
             imageable: true
             source_event_beat_id: "scene1_event_setup"
             event_time_position: "before_trigger"
             event_fact_visible_in_still: ""
             not_yet_happened_in_still: []
-            first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+            first_frame_brief: "主人公が湿った土の道に立ち、村の出口を見ている状態"
             visible_start_state:
               character_state: ""
               prop_state: ""
@@ -502,11 +571,18 @@ scenes:
             source_event_beat_id: "scene1_event_setup"
             starts_from_first_frame: true
             must_not_advance_to_event_beat_ids: []
-            motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
-            start_from_visible_state: ""
-            end_state: "次 cut へ渡す最後の状態"
+            # p800 provider prompt の canonical source。p600 image prompt authoring では参照しない。
+            motion_brief: "主人公が視線を道の先へ定め、右足へわずかに重心を移す"
+            subject_motion: "主人公の視線と重心だけが村の出口へ向く"
+            camera_motion: "胸の高さを保って緩やかに寄る"
+            environment_motion: "朝霧が低く流れ、道端の草だけが小さく揺れる"
+            emotional_change: "静かな日常から旅立ちへの決意が表情に現れる"
+            start_from_visible_state: "主人公が湿った土の道に立ち、村の出口を見ている状態"
+            end_state: "主人公の視線と体の向きが村の出口へ定まる"
             end_frame_brief: ""
-            must_not_add: []
+            # exact obligation overrideから解決する。非空時は最大8件で、各要素をmotion_briefまたはend_stateへ明示する。
+            allowed_new_reveal_elements: []
+            must_not_add: ["新しい人物", "旅立った後の出来事", "画面内テキスト"]
           narration_contract:
             schema_version: "narration_contract_v2"
             speakable_or_silent: true
@@ -586,14 +662,20 @@ scenes:
               source_projection: "first_frame_visual_plan_v1"
               compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
               prompt_policy_version: "image_api_prompt_v2"
-              compiler_version: "conditional_drawable_prompt_compiler_v1"
+              compiler_version: "conditional_drawable_prompt_compiler_v3"
               drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
-              always_required_groups: ["style", "current_moment", "primary_subject", "composition", "constraints"]
+              prompt_projection_registry_version: "prompt_projection_registry_v2"
+              # 新しい設計keyは required|conditional|none をregistryへ登録し、review観点とtestを同時追加する。
+              always_required_groups: ["style", "current_moment", "constraints"]
               conditional_groups:
+                story_time: "video_metadata.time が非空の場合だけ。衣装・髪型・建築・生活道具・素材・技術水準の時代整合を要求する"
+                time_of_day: "scene.time_of_day が非空の場合だけ。空の明るさ・自然光/人工光・影・色温度の時間帯整合を要求する"
                 references: "resolved references が1件以上ある場合だけ"
+                primary_subject: "subject_binding.primary_subject.name|label に描画可能な値がある場合だけ"
                 characters: "asset_dependency.character_ids_required が1件以上ある場合だけ"
                 objects: "asset_dependency.object_ids_required が1件以上ある場合だけ"
                 location: "asset_dependency.location_ids_required が1件以上ある場合だけ"
+                composition: "subject priority、shot size、camera angle/height のいずれかに描画可能な値がある場合だけ"
                 light_material: "明示された非定型の描画値がある場合だけ"
                 current_state_delta: "sequential progression の明示された描画値がある場合だけ"
               prompt_requirements: []
@@ -609,10 +691,19 @@ scenes:
               role: "setup|fact|emotion|contrast|aftertaste|silent"
               must_not_caption_visible_content: true
             p800_video:
-              motion_requirements: []
-              start_state: ""
-              last_frame_or_end_state: ""
-              must_not_add: []
+              canonical_source: "cut_contract.first_frame_contract + motion_contract + continuity_contract"
+              prompt_projection_registry_version: "video_prompt_projection_registry_v3"
+              prompt_policy_version: "video_api_prompt_v1"
+              compiler_version: "conditional_video_prompt_compiler_v3"
+              group_order: ["start_state", "primary_motion", "camera_motion", "environment_motion", "emotional_change", "end_state", "continuity", "constraints"]
+              motion_requirements: ["1 clip 1 intent", "first frame から自然に開始する", "単一の連続 shot"]
+              start_state: "主人公が湿った土の道に立ち、村の出口を見ている状態"
+              last_frame_or_end_state: "主人公の視線と体の向きが村の出口へ定まる"
+              must_not_add: ["新しい人物", "旅立った後の出来事", "画面内テキスト"]
+              blocking_quality_issue_codes: ["video_motion_generated_fallback", "video_motion_unresolved_alternative", "video_motion_abstract_primary", "video_motion_abstract_end_state", "video_motion_duplicate_environment", "video_motion_duplicate_emotion"]
+              provider_prompt_path: "video_generation.api_prompt_payload.prompt"
+              review_projection: "video_generation_requests.md#video_prompt"
+              stale_gate: "saved prompt/hash/source_digest/settings と current design が不一致なら再 materialize"
             carries_to_next_cut: []
             carries_to_next_scene: []
           event_context_for_cut:
@@ -639,9 +730,9 @@ scenes:
           source_event_contract: "<cut_contract.source_event_contract>"
           anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
           visual_beat: "画として何が見えるか"
-          first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
+          first_frame_brief: "主人公が湿った土の道に立ち、村の出口を見ている状態"
           static_first_frame_rule: "<cut_contract.first_frame_contract.static_first_frame_rule>"
-          motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
+          motion_brief: "主人公が視線を道の先へ定め、右足へわずかに重心を移す"  # cut_contract.motion_contract の legacy alias
           must_show:
             - "image prompt / motion / narration のどこかで必ず見せる"
           must_avoid:
@@ -657,7 +748,7 @@ scenes:
           character_variant_ids: []
           object_ids: []
           object_variant_ids: []
-          location_ids: ["village_at_dawn"]
+          location_ids: ["village"]
           location_variant_ids: []
           references: []
           applied_request_ids: []
@@ -705,16 +796,22 @@ scenes:
               foreground: "霧に濡れた土の道"
               midground: "立ち止まる主人公"
               background: "木造家屋と遠い山の輪郭"
+              subject_priority_order: ["道の先を見つめる主人公"]
+            scene_material_pack:
+              # scenes[].time_of_day からの read-only projection。ここを独立 authoring しない。
+              time_of_day: "夜明け"
             prompt_rendering_policy:
               render_only_drawable_information: true
               do_not_render_design_meta: true
               do_not_render_future_motion_as_action: true
           api_prompt_payload:
             policy_version: "image_api_prompt_v2"
-            compiler_version: "conditional_drawable_prompt_compiler_v1"
+            compiler_version: "conditional_drawable_prompt_compiler_v3"
             prompt: |-
               [全体 / 不変条件]
               実写映画調、自然な映画照明、実物セットとして見える質感。
+              物語の時代背景は江戸時代。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。
+              このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。
 
               [シーン]
               画面には、主人公はまだ歩き出していない。
@@ -740,12 +837,18 @@ scenes:
               dependencies:
                 character_ids: ["protagonist"]
                 object_ids: []
-                location_ids: ["village_at_dawn"]
+                location_ids: ["village"]
                 references: []
-                required_groups: ["style", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
+                story_time: "江戸時代"
+                time_of_day: "夜明け"
+                required_groups: ["style", "story_time", "time_of_day", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
               included_fragments:
                 - group: "style"
                   text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+                - group: "story_time"
+                  text: "物語の時代背景は江戸時代。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。"
+                - group: "time_of_day"
+                  text: "このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。"
                 - group: "current_moment"
                   text: "画面には、主人公はまだ歩き出していない。"
                 - group: "primary_subject"
@@ -787,7 +890,7 @@ scenes:
               tool: "codex_builtin_image"
               character_ids: ["protagonist"]
               object_ids: []
-              location_ids: ["village_at_dawn"]
+              location_ids: ["village"]
               api_prompt_payload_ref: "scenes[0].cuts[0].image_generation.api_prompt_payload"
               prompt: ""  # image_api_prompt_v1 legacy read-only projection
               output: "assets/scenes/scene1_cut1_base.png"
@@ -795,22 +898,136 @@ scenes:
         video_generation:
           tool: "kling_3_0"
           duration_seconds: 8
+          quality: "1080p"
+          aspect_ratio: "9:16"
           input_image: "assets/scenes/scene1_cut1_base.png"
+          first_frame: "assets/scenes/scene1_cut1_base.png"
+          # boundary projection がtrueの場合だけ、同一locationの次cutで承認済みのfirst-frame imageへexact bindingする。
+          last_frame: ""
           input_asset_id: "scene1_cut1_base"
           first_frame_asset_id: ""
           last_frame_asset_id: ""
+          references: []
           reference_asset_ids: []
           direction_notes: []
           continuity_notes: []
           applied_request_ids: []
-          motion_prompt: |
-            cut_function: <cut_contract.cut_function>
-            camera: 静止画の構図を保ち、ゆっくり奥へ進む。過剰なズームはしない。
-            subject_motion: 主人公はまだ大きく動かず、視線とわずかな体重移動だけで次の行動を予感させる。
-            environment_motion: 朝霧が低く流れ、草が小さく揺れる。
-            emotional_change: 静かな日常から、物語が始まる前の期待へ移る。
-            end_state: 主人公の視線が村の奥へ残り、次 cut へ進む方向が明確になる。
-            avoid: 新キャラ追加、重要道具の追加、reveal早出し、画面内テキスト、過剰ズーム、アニメ調。
+          # frontend / legacy自由文のfallback。canonical cut_contract が同groupの値を持つ場合はそちらを優先する。
+          prompt_authoring_source: "主人公が道の先へ視線を定めて重心をわずかに移す。カメラは胸の高さから緩やかに寄り、朝霧だけが低く流れる。"
+          # 新規artifactでは api_prompt_payload.prompt のread-only compatibility projection。
+          motion_prompt: "<exact api_prompt_payload.prompt>"
+          # providerへ渡すmotion textはpromptだけ。key / ID / path / hash / review traceは本文へ出さない。
+          api_prompt_payload:
+            policy_version: "video_api_prompt_v1"
+            compiler_version: "conditional_video_prompt_compiler_v3"
+            projection_registry_version: "video_prompt_projection_registry_v3"
+            provider: "kling_3_0"
+            mode: "image_to_video"
+            provider_policy:
+              one_clip_one_intent: true
+              max_camera_instructions: 2
+              single_continuous_shot: true
+              first_last_frame_boundary: false
+            # prompt文字列だけでなく、providerへ渡す設定・frame・参照bytes・modelもcompiler identityへ束縛する。
+            provider_request_binding:
+              duration_seconds: 8
+              quality: "1080p"
+              aspect_ratio: "9:16"
+              first_frame: "assets/scenes/scene1_cut1_base.png"
+              last_frame: ""  # video_generation.last_frameと同じexact bound value
+              references: []
+              reference_roles: []
+              execution_options:
+                backend: "kling"
+                model: "kling-3.0"
+                extra_payload: {}
+                reference_content_sha256:
+                  assets/scenes/scene1_cut1_base.png: "<sha256-of-reference-bytes>"
+            prompt: |-
+              [開始状態]
+              入力画像に写る人物、構図、物の位置、光を開始状態として保つ
+              主人公が湿った土の道に立ち、村の出口を見ている状態
+              主人公はまだ歩き出していない
+              夜明けの村で主人公が湿った土の道の先を見つめている
+
+              [主動作]
+              主人公が視線を道の先へ定め、右足へわずかに重心を移す。
+
+              [カメラ]
+              胸の高さを保って緩やかに寄る。
+
+              [環境の動き]
+              朝霧が低く流れ、道端の草だけが小さく揺れる。
+
+              [感情の変化]
+              静かな日常から旅立ちへの決意が表情に現れる。
+
+              [終了状態]
+              主人公の視線と体の向きが村の出口へ定まる
+
+              [維持条件]
+              江戸時代の衣装、髪型、建築、生活道具、素材、技術水準を変えない
+              夜明けの空の明るさ、自然光と人工光、影、色温度を変えない
+              主人公の顔、髪、衣装、体格を変えない
+              村の道と木造家屋の配置を変えない
+              村の出口へ向く画面方向を反転させない
+              夜明けの光源方向を変えない
+              顔、髪、衣装、体格、重要な小道具、画面内の位置関係、光源方向を一貫させる
+
+              [禁止]
+              追加しないものは、新しい人物、旅立った後の出来事、画面内テキスト
+              開始画像にない人物、重要な小道具、建築、物語上のrevealを新しく出さない
+              主動作は一つに絞り、単一の連続ショットとして見せる。急なcamera回転や視点ジャンプを行わず、フェードしない、暗転しない、ディゾルブしない、別ショットへ切り替えない
+              画面内テキスト、字幕、ロゴ、ウォーターマーク、顔や手指の崩れ、不自然な四肢を出さない
+            # separate modeでは、positive promptの「新しく現れてよいもの」と許可要素名をここへ含めない。
+            negative_prompt: "追加しないものは、新しい人物、旅立った後の出来事、画面内テキスト。 / 開始画像にない人物、重要な小道具、建築、物語上のrevealを新しく出さない。 / 主動作は一つに絞り、単一の連続ショットとして見せる。急なcamera回転や視点ジャンプを行わず、フェードしない、暗転しない、ディゾルブしない、別ショットへ切り替えない。 / 画面内テキスト、字幕、ロゴ、ウォーターマーク、顔や手指の崩れ、不自然な四肢を出さない。"
+            source_digest: "<sha256-of-normalized-video-compilation-source>"
+            sha256: "<sha256-of-exact-provider-prompt>"
+            quality_issues: []  # blocking issueがあればapproval/provider実行へ進めない
+            included_fragments: &video_prompt_fragments
+              - group: "start_state"
+                text: "入力画像に写る人物、構図、物の位置、光を開始状態として保つ\n主人公が湿った土の道に立ち、村の出口を見ている状態\n主人公はまだ歩き出していない\n夜明けの村で主人公が湿った土の道の先を見つめている"
+              - group: "primary_motion"
+                text: "主人公が視線を道の先へ定め、右足へわずかに重心を移す。"
+              - group: "camera_motion"
+                text: "胸の高さを保って緩やかに寄る。"
+              - group: "environment_motion"
+                text: "朝霧が低く流れ、道端の草だけが小さく揺れる。"
+              - group: "emotional_change"
+                text: "静かな日常から旅立ちへの決意が表情に現れる。"
+              - group: "end_state"
+                text: "主人公の視線と体の向きが村の出口へ定まる"
+              - group: "continuity"
+                text: "江戸時代の衣装、髪型、建築、生活道具、素材、技術水準を変えない\n夜明けの空の明るさ、自然光と人工光、影、色温度を変えない\n主人公の顔、髪、衣装、体格を変えない\n村の道と木造家屋の配置を変えない\n村の出口へ向く画面方向を反転させない\n夜明けの光源方向を変えない\n顔、髪、衣装、体格、重要な小道具、画面内の位置関係、光源方向を一貫させる"
+              - group: "constraints"
+                text: "追加しないものは、新しい人物、旅立った後の出来事、画面内テキスト\n開始画像にない人物、重要な小道具、建築、物語上のrevealを新しく出さない\n主動作は一つに絞り、単一の連続ショットとして見せる。急なcamera回転や視点ジャンプを行わず、フェードしない、暗転しない、ディゾルブしない、別ショットへ切り替えない\n画面内テキスト、字幕、ロゴ、ウォーターマーク、顔や手指の崩れ、不自然な四肢を出さない"
+            omitted_groups: []
+            projection_review_contract:
+              registry_version: "video_prompt_projection_registry_v3"
+              group_order: ["start_state", "primary_motion", "camera_motion", "environment_motion", "emotional_change", "end_state", "continuity", "constraints"]
+              groups: {}  # compilerがsource_key/value traceをmaterializeする。手入力しない。
+              active_rules: []  # compiler output
+              inactive_rules: []  # compiler output
+              excluded: []  # review-only / must_not_surface rules
+              review_only_sources: []  # exact source_key/valueをdigest/reviewerに保持し、provider proseへ出さない
+              shadowed_sources: []  # canonical sourceにより抑止したlegacy/free-text source
+              provider: "kling_3_0"
+              mode: "image_to_video"
+            video_prompt_ir:
+              schema_version: "video_prompt_ir_v2"
+              provider: "kling_3_0"
+              mode: "image_to_video"
+              dependencies:
+                story_time: "江戸時代"  # video_metadata.timeのexact binding。独立authoringしない
+                time_of_day: "夜明け"
+                has_first_frame: true
+                has_last_frame: false
+                duration_seconds: 8
+                reference_roles: []
+                required_groups: ["start_state", "primary_motion", "camera_motion", "environment_motion", "emotional_change", "end_state", "continuity", "constraints"]
+              included_fragments: *video_prompt_fragments
+              omitted_groups: []
+              quality_issues: []
           output: "assets/scenes/scene1_cut1_video.mp4"
 
         audio:
@@ -898,6 +1115,53 @@ scenes:
             source: "assets/audio/bgm_intro.mp3"
             volume: 0.3
           sfx: []
+
+    # Optional render-unit schema（この1-cut例では未使用）。有効化したsceneでは最終video clipの正本になる。
+    # active cutをcanonical順でexactly once被覆し、unit durationはsource cut duration合計にする。
+    # 複数cutではcompilerが先頭first-frame境界、末尾end-state、全cutのcontinuity/prohibitionを合成する。
+    # 個別cut actionは連結せず、unit全体を代表する一つのprimary motionをunit-level contract/sourceへ書く。
+    # source cutのallowed_new_reveal_elementsは自動合成しない。unit-levelの明示的なreveal authorizationがなければ拒否する。
+    # render_units:
+    #   - unit_id: 1
+    #     source_cut_ids: [1, 2]
+    #     cut_contract:  # optional explicit override; derived effective contractが不足groupを補完
+    #       motion_contract:
+    #         motion_brief: "<unit全体を代表する一つの主動作>"
+    #     # Seedance storyboard reference modeを使う場合だけ宣言する。
+    #     # first_frame/last_frameとは併用せず、required_referencesとreference_rolesの順序をapproval後も固定する。
+    #     # video_input_contract:
+    #     #   schema_version: "render_unit_video_input_v1"
+    #     #   input_mode: "reference_images"
+    #     #   required_references: ["<first source full-frame>", "<storyboard>"]
+    #     #   reference_roles:
+    #     #     - {image_index: 1, role: "start_state_visual_anchor"}
+    #     #     - {image_index: 2, role: "ordered_storyboard_sequence_guide"}
+    #     video_generation:
+    #       tool: "kling_3_0"
+    #       duration_seconds: "<cut1 + cut2 duration; max 60>"
+    #       first_frame: "<first source cut start frame>"
+    #       last_frame: "<optional unit arrival frame>"
+    #       references: []
+    #       prompt_authoring_source: "<unit-level fallback>"
+    #       api_prompt_payload:
+    #         provider_request_binding:
+    #           duration_seconds: "<cut1 + cut2 duration>"
+    #           quality: "1080p"
+    #           aspect_ratio: "9:16"
+    #           first_frame: "<first source cut start frame>"
+    #           last_frame: "<optional unit arrival frame>"
+    #           references: []
+    #           reference_roles: []  # reference modeではsibling video_input_contractの同値をcompilerが保存する
+    #           execution_options:
+    #             backend: "kling"
+    #             model: "kling-3.0"
+    #             extra_payload: {}
+    #             reference_content_sha256: {}
+    #         prompt: "<exact compiled unit prompt>"
+    #         negative_prompt: "<exact compiled unit negative prompt>"
+    #         source_digest: "<ordered source_cut_ids/source contractsを含む>"
+    #         sha256: "<sha256-of-exact-prompt>"
+    #       output: "assets/scenes/scene1_unit1_video.mp4"
 
 # === 最終出力 ===
 final_output:

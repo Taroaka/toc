@@ -84,6 +84,45 @@ def _groups(payload: dict) -> set[str]:
 
 
 class TestImagePromptCompiler(unittest.TestCase):
+    def test_manifest_story_time_is_attached_to_scene_compilation_inputs(self) -> None:
+        module = _load_generate_assets_module()
+        metadata, scenes = module.parse_manifest_yaml(
+            """
+video_metadata:
+  topic: 桃太郎
+  time: 室町時代
+scenes:
+  - scene_id: 1
+    time_of_day: 夕方
+    image_generation:
+      tool: codex_builtin_image
+      prompt: 門前に立つ旅人
+      output: assets/scenes/scene01.png
+"""
+        )
+
+        self.assertEqual(metadata["time"], "室町時代")
+        self.assertEqual(scenes[0].story_time, "室町時代")
+        self.assertEqual(scenes[0].scene_time_of_day, "夕方")
+
+    def test_minimal_manifest_parser_keeps_scene_time_over_nested_visual_plan_copy(self) -> None:
+        module = _load_generate_assets_module()
+        _metadata, scenes = module._parse_manifest_yaml_minimal(
+            """
+scenes:
+  - scene_id: 1
+    time_of_day: 夜
+    image_generation:
+      first_frame_visual_plan:
+        scene_material_pack:
+          time_of_day: 朝
+      tool: codex_builtin_image
+      output: assets/scenes/scene01.png
+"""
+        )
+
+        self.assertEqual(scenes[0].scene_time_of_day, "夜")
+
     def test_environment_only_cut_omits_character_object_and_reference_sections(self) -> None:
         payload = compile_image_api_prompt_v2(
             first_frame_visual_plan=_environment_plan(),
@@ -91,6 +130,8 @@ class TestImagePromptCompiler(unittest.TestCase):
         )
 
         self.assertEqual(payload["policy_version"], IMAGE_API_PROMPT_POLICY_VERSION)
+        self.assertIn("画面内の主被写体は、半分開いた珊瑚門", payload["prompt"])
+        self.assertNotIn("観客が最初に読む", payload["prompt"])
         self.assertEqual(
             payload["drawable_prompt_ir"]["schema_version"],
             DRAWABLE_PROMPT_IR_SCHEMA_VERSION,
@@ -120,6 +161,91 @@ class TestImagePromptCompiler(unittest.TestCase):
         self.assertNotIn("location_opaque_id", payload["prompt"])
         self.assertIn("半分開いた珊瑚門", payload["prompt"])
         self.assertIn("発光する回廊", payload["prompt"])
+
+    def test_story_time_is_rendered_as_a_historical_visual_constraint(self) -> None:
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="江戸時代",
+        )
+
+        self.assertEqual(
+            payload["drawable_prompt_ir"]["dependencies"]["story_time"],
+            "江戸時代",
+        )
+        self.assertIn("物語の時代背景は江戸時代", payload["prompt"])
+        self.assertIn("衣装、髪型、建築、生活道具、素材、技術水準", payload["prompt"])
+
+    def test_empty_story_time_does_not_add_an_era_placeholder(self) -> None:
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="",
+        )
+        legacy_compatible = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+        )
+
+        self.assertNotIn("物語の時代背景", payload["prompt"])
+        self.assertNotIn("〇〇時代", payload["prompt"])
+        self.assertNotIn("story_time", payload["drawable_prompt_ir"]["dependencies"])
+        self.assertNotIn("story_time", payload["drawable_prompt_ir"]["omitted_groups"])
+        self.assertEqual(payload["source_digest"], legacy_compatible["source_digest"])
+
+    def test_scene_time_of_day_is_rendered_as_a_light_and_sky_constraint(self) -> None:
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="江戸時代",
+            scene_time_of_day="夕方",
+        )
+
+        dependencies = payload["drawable_prompt_ir"]["dependencies"]
+        self.assertEqual(dependencies["story_time"], "江戸時代")
+        self.assertEqual(dependencies["time_of_day"], "夕方")
+        self.assertIn("story_time", dependencies["required_groups"])
+        self.assertIn("time_of_day", dependencies["required_groups"])
+        self.assertIn("物語の時代背景は江戸時代", payload["prompt"])
+        self.assertIn("このシーンの時間帯は夕方", payload["prompt"])
+        self.assertIn("空の明るさ、自然光と人工光、影、色温度", payload["prompt"])
+
+    def test_open_string_time_contracts_preserve_exact_trimmed_values_and_digest(self) -> None:
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="  Victorian era  ",
+            scene_time_of_day="  blue hour / night  ",
+        )
+        punctuation_variant = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="Victorian era",
+            scene_time_of_day="blue hour / night。",
+        )
+
+        dependencies = payload["drawable_prompt_ir"]["dependencies"]
+        self.assertEqual(dependencies["story_time"], "Victorian era")
+        self.assertEqual(dependencies["time_of_day"], "blue hour / night")
+        self.assertIn("物語の時代背景はVictorian era", payload["prompt"])
+        self.assertIn("このシーンの時間帯はblue hour / night", payload["prompt"])
+        self.assertNotEqual(payload["source_digest"], punctuation_variant["source_digest"])
+
+    def test_empty_scene_time_of_day_does_not_add_a_placeholder(self) -> None:
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            scene_time_of_day="",
+        )
+        legacy_compatible = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+        )
+
+        self.assertNotIn("このシーンの時間帯", payload["prompt"])
+        self.assertNotIn("time_of_day", payload["drawable_prompt_ir"]["dependencies"])
+        self.assertNotIn("time_of_day", payload["drawable_prompt_ir"]["omitted_groups"])
+        self.assertEqual(payload["source_digest"], legacy_compatible["source_digest"])
 
     def test_character_cut_includes_only_explicit_character_state(self) -> None:
         plan = _environment_plan()
@@ -151,6 +277,144 @@ class TestImagePromptCompiler(unittest.TestCase):
         self.assertIn("閉じた扉の細い光", payload["prompt"])
         self.assertNotIn("protagonist_fullbody", payload["prompt"])
         self.assertNotIn("小道具への接触状態", payload["prompt"])
+
+    def test_character_state_bindings_render_each_visible_person_by_name(self) -> None:
+        plan = _environment_plan()
+        plan["temporal_boundary"]["event_fact_visible_in_still"] = (
+            "王子が階段の上から、質素な服へ戻った若い女性を見ている"
+        )
+        plan["character_state_gate"] = {
+            "pose": "二人が階段上で離れて立っている",
+            "character_states": [
+                {
+                    "character_id": "prince_fullbody",
+                    "character_name": "王子",
+                    "appearance_continuity": {
+                        "costume_state": "濃紺の宮廷礼装",
+                        "forbidden_costume_states": ["現代のスーツ"],
+                    },
+                },
+                {
+                    "character_id": "heroine_after_midnight",
+                    "character_name": "若い女性",
+                    "appearance_continuity": {
+                        "costume_state": "魔法が解けた後の質素な衣装",
+                        "forbidden_costume_states": ["舞踏会ドレス"],
+                    },
+                },
+            ],
+        }
+
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            character_ids=["prince_fullbody", "heroine_after_midnight"],
+        )
+        reversed_payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            character_ids=["heroine_after_midnight", "prince_fullbody"],
+        )
+
+        self.assertIn(
+            "王子の衣装は、濃紺の宮廷礼装を維持し、現代のスーツには変えない。",
+            payload["prompt"],
+        )
+        self.assertIn(
+            "若い女性の衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスには変えない。",
+            payload["prompt"],
+        )
+        self.assertNotIn("prince_fullbody", payload["prompt"])
+        self.assertNotIn("heroine_after_midnight", payload["prompt"])
+        self.assertEqual(payload["prompt"], reversed_payload["prompt"])
+
+    def test_character_state_binding_must_target_a_visible_character(self) -> None:
+        plan = _environment_plan()
+        plan["character_state_gate"] = {
+            "character_states": [
+                {
+                    "character_id": "unbound_character",
+                    "character_name": "画面外の人物",
+                    "appearance_continuity": {"costume_state": "赤い外套"},
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "drawable_prompt_character_state_binding_unbound",
+        ):
+            compile_image_api_prompt_v2(
+                first_frame_visual_plan=plan,
+                character_ids=["visible_character"],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "drawable_prompt_character_state_binding_unbound",
+        ):
+            compile_image_api_prompt_v2(
+                first_frame_visual_plan=plan,
+                character_ids=[],
+            )
+
+    def test_character_state_binding_must_match_reference_identity(self) -> None:
+        plan = _environment_plan()
+        plan["reference_binding"]["character_references"] = [
+            {
+                "target_character_id": "prince_fullbody",
+                "target_character_name": "王子",
+                "target_identity_name": "王子",
+            }
+        ]
+        plan["character_state_gate"] = {
+            "character_states": [
+                {
+                    "character_id": "prince_fullbody",
+                    "character_name": "シンデレラ",
+                    "appearance_continuity": {"costume_state": "宮廷礼装"},
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "drawable_prompt_character_state_binding_identity_mismatch",
+        ):
+            compile_image_api_prompt_v2(
+                first_frame_visual_plan=plan,
+                character_ids=["prince_fullbody"],
+            )
+
+    def test_character_state_binding_rejects_invalid_or_conflicting_states(self) -> None:
+        cases = (
+            (
+                {"costume_state": "宮廷礼装", "forbidden_costume_states": [{}]},
+                "drawable_prompt_forbidden_costume_state_invalid",
+            ),
+            (
+                {
+                    "costume_state": "宮廷礼装",
+                    "forbidden_costume_states": ["宮廷礼装"],
+                },
+                "drawable_prompt_character_appearance_state_conflict",
+            ),
+        )
+        for appearance, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                plan = _environment_plan()
+                plan["character_state_gate"] = {
+                    "character_states": [
+                        {
+                            "character_id": "visible_character",
+                            "character_name": "若い女性",
+                            "appearance_continuity": appearance,
+                        }
+                    ]
+                }
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    compile_image_api_prompt_v2(
+                        first_frame_visual_plan=plan,
+                        character_ids=["visible_character"],
+                    )
 
     def test_object_cut_uses_drawable_object_name_without_character_filler(self) -> None:
         plan = _environment_plan()
@@ -225,6 +489,7 @@ class TestImagePromptCompiler(unittest.TestCase):
         payload = compile_image_api_prompt_v2(
             first_frame_visual_plan=_environment_plan(),
             location_ids=["undersea_corridor"],
+            scene_time_of_day="夕方",
             reference_images=[
                 "assets/locations/undersea_corridor.png",
                 "assets/styles/live_action.png",
@@ -234,8 +499,69 @@ class TestImagePromptCompiler(unittest.TestCase):
         self.assertIn("references", _groups(payload))
         self.assertIn("[参照画像]", payload["prompt"])
         self.assertIn("場所参照画像1", payload["prompt"])
+        self.assertIn("空間構造、固定素材の同一性", payload["prompt"])
+        self.assertIn("光と色温度はこのシーンの時間帯を優先", payload["prompt"])
+        self.assertNotIn("空間構造、素材、光の同一性", payload["prompt"])
         self.assertNotIn("assets/", payload["prompt"])
         self.assertNotIn("undersea_corridor", payload["prompt"])
+
+        legacy_without_daypart = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["undersea_corridor"],
+            reference_images=["assets/locations/undersea_corridor.png"],
+        )
+        self.assertNotIn(
+            "光と色温度はこのシーンの時間帯を優先",
+            legacy_without_daypart["prompt"],
+        )
+
+    def test_character_reference_instruction_names_the_bound_subject(self) -> None:
+        plan = _environment_plan()
+        plan["reference_binding"]["character_references"] = [
+            {
+                "path": "assets/characters/cinderella.png",
+                "target_character_id": "cinderella",
+                "target_character_name": "シンデレラ",
+                "role_in_frame": "primary_subject",
+            }
+        ]
+
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            reference_images=["assets/characters/cinderella.png"],
+        )
+
+        self.assertIn("人物参照画像1（シンデレラ）", payload["prompt"])
+        self.assertNotIn("assets/characters", payload["prompt"])
+
+    def test_scene_time_of_day_rejects_conflicting_positive_material_light(self) -> None:
+        plan = _environment_plan()
+        plan["scene_material_pack"] = {
+            "light_source": "低い自然光",
+            "dominant_materials": [
+                "薄暗い屋内、朝夕どちらにも寄りすぎない低い自然光"
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "drawable_prompt_time_of_day_conflict"):
+            compile_image_api_prompt_v2(
+                first_frame_visual_plan=plan,
+                scene_time_of_day="朝",
+            )
+
+    def test_negative_opposing_light_marker_does_not_trigger_time_conflict(self) -> None:
+        plan = _environment_plan()
+        plan["scene_material_pack"] = {
+            "light_source": "月光",
+            "dominant_materials": ["深夜の門前、朝日なし、昼光なし"],
+        }
+
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            scene_time_of_day="深夜",
+        )
+
+        self.assertIn("深夜", payload["prompt"])
 
     def test_sequential_delta_renders_only_current_visible_state(self) -> None:
         plan = _environment_plan()
@@ -358,8 +684,20 @@ class TestImagePromptCompiler(unittest.TestCase):
             first_frame_visual_plan=_environment_plan(),
             location_ids=["another_location_id"],
         )
+        changed_story_time = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            story_time="江戸時代",
+        )
+        changed_scene_time_of_day = compile_image_api_prompt_v2(
+            first_frame_visual_plan=_environment_plan(),
+            location_ids=["location_opaque_id"],
+            scene_time_of_day="夜",
+        )
         self.assertEqual(first["source_digest"], reordered["source_digest"])
         self.assertNotEqual(first["source_digest"], changed_dependency["source_digest"])
+        self.assertNotEqual(first["source_digest"], changed_story_time["source_digest"])
+        self.assertNotEqual(first["source_digest"], changed_scene_time_of_day["source_digest"])
 
     def test_missing_current_moment_is_rejected(self) -> None:
         plan = _environment_plan()
@@ -368,6 +706,77 @@ class TestImagePromptCompiler(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "drawable_prompt_current_moment_missing"):
             compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+
+    def test_unresolved_visual_alternative_is_rejected_before_provider_prompt(self) -> None:
+        plan = _environment_plan()
+        plan["temporal_boundary"]["event_fact_visible_in_still"] = (
+            "若い女性の手元または表情に緊張が見える"
+        )
+
+        with self.assertRaisesRegex(ValueError, "drawable_prompt_unresolved_alternative"):
+            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+
+    def test_abstract_design_placeholder_is_rejected_before_provider_prompt(self) -> None:
+        plan = _environment_plan()
+        plan["temporal_boundary"]["event_fact_visible_in_still"] = (
+            "変化の証拠が画面内に残る"
+        )
+
+        with self.assertRaisesRegex(ValueError, "drawable_prompt_abstract_placeholder"):
+            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+
+    def test_scene_sequence_overview_is_rejected_before_provider_prompt(self) -> None:
+        cases = (
+            (
+                "current_moment",
+                "→",
+                lambda plan, value: plan["temporal_boundary"].__setitem__(
+                    "event_fact_visible_in_still", value
+                ),
+                {},
+            ),
+            (
+                "character_pose",
+                "⇒",
+                lambda plan, value: plan["character_state_gate"].__setitem__(
+                    "pose", value
+                ),
+                {"character_ids": ["hero"]},
+            ),
+            (
+                "foreground",
+                "->",
+                lambda plan, value: plan["spatial_composition"].__setitem__(
+                    "foreground", value
+                ),
+                {"location_ids": ["location_opaque_id"]},
+            ),
+            (
+                "state_delta",
+                "=>",
+                lambda plan, value: plan["scene_state_progression"].update(
+                    {
+                        "progression_mode": "sequential_state_progression",
+                        "state_visible_in_first_frame": "炉の前に立っている",
+                        "visible_state_delta_from_previous_cut": value,
+                    }
+                ),
+                {},
+            ),
+        )
+        for label, arrow, inject, kwargs in cases:
+            with self.subTest(label=label, arrow=arrow):
+                plan = _environment_plan()
+                sequence = f"炉を掃除する {arrow} 籠を置かれる {arrow} 一人だけ残される"
+                inject(plan, sequence)
+
+                with self.assertRaisesRegex(
+                    ValueError, "drawable_prompt_sequential_overview"
+                ):
+                    compile_image_api_prompt_v2(
+                        first_frame_visual_plan=plan,
+                        **kwargs,
+                    )
 
     def test_minimal_cut_omits_unprovided_subject_and_composition_without_filler(self) -> None:
         plan = {
@@ -388,6 +797,31 @@ class TestImagePromptCompiler(unittest.TestCase):
         self.assertNotIn("composition", payload["drawable_prompt_ir"]["dependencies"]["required_groups"])
         self.assertNotIn("観客が最初に読む主被写体", payload["prompt"])
         self.assertNotIn("最初に読める構図", payload["prompt"])
+
+    def test_not_yet_constraints_keep_drawable_name_but_drop_ids_and_review_metadata(self) -> None:
+        plan = {
+            "temporal_boundary": {
+                "event_fact_visible_in_still": "灰の台所の閉じた扉に朝の光が細く差している",
+                "not_yet_happened_in_still": [
+                    "ガラスの靴",
+                    "future_artifact_id",
+                    "source_event_contract.forbidden_reveal_info_ids",
+                ],
+            }
+        }
+
+        payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+
+        self.assertIn("まだ描かないものは、ガラスの靴。", payload["prompt"])
+        self.assertNotIn("future_artifact_id", payload["prompt"])
+        self.assertNotIn("source_event_contract", payload["prompt"])
+        constraints = next(
+            fragment["text"]
+            for fragment in payload["drawable_prompt_ir"]["included_fragments"]
+            if fragment["group"] == "constraints"
+        )
+        self.assertIn("ガラスの靴", constraints)
+        self.assertNotIn("future_artifact_id", constraints)
 
     def test_declared_dependency_without_concrete_drawable_state_is_rejected(self) -> None:
         plan = {

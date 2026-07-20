@@ -13,70 +13,20 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from toc.image_prompt_projection_registry import (
+    DRAWABLE_PROMPT_GROUP_ORDER,
+    normalize_drawable_prompt_text,
+    render_projection_value_marker,
+)
+
 
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
-IMAGE_PROMPT_COMPILER_VERSION = "conditional_drawable_prompt_compiler_v1"
+IMAGE_PROMPT_COMPILER_VERSION = "conditional_drawable_prompt_compiler_v3"
 DRAWABLE_PROMPT_IR_SCHEMA_VERSION = "drawable_prompt_ir_v1"
 
-FRAGMENT_GROUP_ORDER = (
-    "style",
-    "references",
-    "current_moment",
-    "primary_subject",
-    "characters",
-    "objects",
-    "location",
-    "composition",
-    "light_material",
-    "current_state_delta",
-    "constraints",
-)
+FRAGMENT_GROUP_ORDER = DRAWABLE_PROMPT_GROUP_ORDER
 
-_INTERNAL_META_RE = re.compile(
-    r"(?:first_frame_visual_plan|cut_contract|scene_event|source_event_contract|"
-    r"event_context_for_cut|validation_gates|source_event_beat_id|event_time_position|"
-    r"what_happens|visible_action|motion_brief|debug_prompt_source|api_prompt_payload|"
-    r"drawable_prompt_ir|dependencies|included_fragments|omitted_groups|required_groups|compiler_version|"
-    r"shot_design_contract|cut_location_frame_plan|cut_visual_delta|blocking_and_interaction|"
-    r"scene_state_progression_plan|cut_state_progression|"
-    r"\bscene\d+(?:\.\d+)?(?:[_-](?:cut|event)[A-Za-z0-9_.-]*)?\b)",
-    re.IGNORECASE,
-)
 _OPAQUE_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
-_WHITESPACE_RE = re.compile(r"\s+")
-_ABSTRACT_STORY_RE = re.compile(
-    r"場面の核|観客理解|因果の証明|価値変化|場所の圧力|場のルール|主人公の制限"
-)
-
-_GENERIC_TEXT_MARKERS = (
-    "この項目は、他の具体描写",
-    "scene固有の自然な光源",
-    "人物と小道具の形が読める方向",
-    "場所固有の床、壁、衣服、小道具の質感",
-    "映画的だが場所に固有の光質",
-    "場所の空気感が読める",
-    "足元の床または地面の質感",
-    "背景の壁、床、空、建築の質感",
-    "参照画像とcutの時点に合う",
-    "参照画像とcut時点に合う",
-    "主要な出来事の証拠へ向く",
-    "このcutの圧力や選択が読める表情",
-    "scene内の現在の感情状態",
-    "行為が始まる直前または途中だと読める手の位置",
-    "次に動き出せる足元の重心",
-    "主要な小道具、足元、手元などの近景証拠",
-    "主要人物の姿勢、表情、視線",
-    "場所が読める建築、床、壁、空気感",
-    "動き出す方向に余白",
-    "主役と物語上の証拠",
-    "approved_story_evidence",
-    "primary_visible_object",
-    "primary_visible_zone",
-    "TODO",
-    "TBD",
-    "placeholder",
-)
-
 
 @dataclass(frozen=True)
 class DrawablePromptFragment:
@@ -93,16 +43,23 @@ class DrawablePromptDependencies:
     object_ids: tuple[str, ...]
     location_ids: tuple[str, ...]
     references: tuple[str, ...]
+    story_time: str
+    time_of_day: str
     required_groups: tuple[str, ...]
 
-    def as_dict(self) -> dict[str, list[str]]:
-        return {
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "character_ids": list(self.character_ids),
             "object_ids": list(self.object_ids),
             "location_ids": list(self.location_ids),
             "references": list(self.references),
             "required_groups": list(self.required_groups),
         }
+        if self.story_time:
+            payload["story_time"] = self.story_time
+        if self.time_of_day:
+            payload["time_of_day"] = self.time_of_day
+        return payload
 
 
 @dataclass(frozen=True)
@@ -128,6 +85,8 @@ def compile_image_api_prompt_v2(
     object_ids: Iterable[str] = (),
     location_ids: Iterable[str] = (),
     reference_images: Iterable[str] = (),
+    story_time: str = "",
+    scene_time_of_day: str = "",
     review_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return an ``image_api_prompt_v2`` payload from drawable plan fields only."""
@@ -136,12 +95,16 @@ def compile_image_api_prompt_v2(
     objects = _dedupe_strings(object_ids)
     locations = _dedupe_strings(location_ids)
     references = _dedupe_strings(reference_images)
+    normalized_story_time = _normalize_contract_string(story_time)
+    normalized_scene_time_of_day = _normalize_contract_string(scene_time_of_day)
     ir = build_drawable_prompt_ir(
         first_frame_visual_plan=first_frame_visual_plan,
         character_ids=characters,
         object_ids=objects,
         location_ids=locations,
         reference_images=references,
+        story_time=normalized_story_time,
+        scene_time_of_day=normalized_scene_time_of_day,
     )
     prompt = render_drawable_prompt(ir)
     reference_text = "\n".join(
@@ -156,6 +119,8 @@ def compile_image_api_prompt_v2(
             object_ids=objects,
             location_ids=locations,
             reference_images=references,
+            story_time=normalized_story_time,
+            scene_time_of_day=normalized_scene_time_of_day,
         ),
         "prompt": prompt,
         "negative_prompt": "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト",
@@ -177,15 +142,22 @@ def _source_digest(
     object_ids: tuple[str, ...],
     location_ids: tuple[str, ...],
     reference_images: tuple[str, ...],
+    story_time: str,
+    scene_time_of_day: str,
 ) -> str:
+    dependencies: dict[str, Any] = {
+        "character_ids": list(character_ids),
+        "object_ids": list(object_ids),
+        "location_ids": list(location_ids),
+        "reference_images": list(reference_images),
+    }
+    if story_time:
+        dependencies["story_time"] = story_time
+    if scene_time_of_day:
+        dependencies["time_of_day"] = scene_time_of_day
     source = {
         "first_frame_visual_plan": dict(first_frame_visual_plan),
-        "dependencies": {
-            "character_ids": list(character_ids),
-            "object_ids": list(object_ids),
-            "location_ids": list(location_ids),
-            "reference_images": list(reference_images),
-        },
+        "dependencies": dependencies,
     }
     canonical = json.dumps(
         source,
@@ -203,6 +175,8 @@ def build_drawable_prompt_ir(
     object_ids: Iterable[str] = (),
     location_ids: Iterable[str] = (),
     reference_images: Iterable[str] = (),
+    story_time: str = "",
+    scene_time_of_day: str = "",
 ) -> DrawablePromptIR:
     """Extract only the groups that this image can actually draw."""
 
@@ -211,6 +185,8 @@ def build_drawable_prompt_ir(
     objects = _dedupe_strings(object_ids)
     locations = _dedupe_strings(location_ids)
     references = _dedupe_strings(reference_images)
+    normalized_story_time = _normalize_contract_string(story_time)
+    normalized_scene_time_of_day = _normalize_contract_string(scene_time_of_day)
 
     temporal = _mapping(plan.get("temporal_boundary"))
     subjects = _mapping(plan.get("subject_binding"))
@@ -234,14 +210,44 @@ def build_drawable_prompt_ir(
 
     fragments: list[DrawablePromptFragment] = []
     _append_fragment(fragments, "style", "実写映画調、自然な映画照明、実物セットとして見える質感。")
+    if normalized_story_time:
+        _append_fragment(
+            fragments,
+            "story_time",
+            f"{render_projection_value_marker('story_time', _sentence_body(normalized_story_time))}。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。",
+        )
+    if normalized_scene_time_of_day:
+        _append_fragment(
+            fragments,
+            "time_of_day",
+            f"{render_projection_value_marker('time_of_day', _sentence_body(normalized_scene_time_of_day))}。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。",
+        )
 
-    reference_text = _reference_fragment(references)
+    reference_text = _reference_fragment(
+        references,
+        plan=plan,
+        time_of_day=normalized_scene_time_of_day,
+    )
     _append_fragment(fragments, "references", reference_text)
     current_moment_lines = [f"画面には、{_sentence_body(current_moment)}。"]
+    structural_evidence = {
+        value
+        for value in (
+            primary_subject,
+            *(
+                _clean_drawable_text(composition.get(key))
+                for key in ("foreground", "midground", "background")
+            ),
+        )
+        if value
+    }
+    if _clean_drawable_text(material.get("light_source") or material.get("light_direction")):
+        structural_evidence.update({"光", "照明", "自然光", "人工光"})
     remaining_evidence = [
         value
         for value in visual_evidence
         if value not in current_moment and current_moment not in value
+        and value not in structural_evidence
     ]
     if remaining_evidence:
         current_moment_lines.append(
@@ -252,11 +258,11 @@ def build_drawable_prompt_ir(
         _append_fragment(
             fragments,
             "primary_subject",
-            f"観客が最初に読む主被写体は、{_sentence_body(primary_subject)}。",
+            f"画面内の主被写体は、{_sentence_body(primary_subject)}。",
         )
 
+    character_text = _character_fragment(plan, characters)
     if characters:
-        character_text = _character_fragment(plan)
         if not character_text:
             raise ValueError("drawable_prompt_character_state_missing")
         _append_fragment(fragments, "characters", character_text)
@@ -272,7 +278,14 @@ def build_drawable_prompt_ir(
         _append_fragment(fragments, "location", location_text)
 
     _append_fragment(fragments, "composition", _composition_fragment(composition))
-    _append_fragment(fragments, "light_material", _light_material_fragment(material))
+    _append_fragment(
+        fragments,
+        "light_material",
+        _light_material_fragment(
+            material,
+            scene_time_of_day=normalized_scene_time_of_day,
+        ),
+    )
     _append_fragment(fragments, "current_state_delta", _current_state_delta_fragment(progression))
 
     not_yet = [
@@ -296,6 +309,7 @@ def build_drawable_prompt_ir(
                 DrawablePromptFragment(group=fragment.group, text=sanitized_text)
             )
     fragments = sanitized_fragments
+    _validate_positive_drawable_fragments(fragments)
 
     included_groups = {fragment.group for fragment in fragments}
     required_groups = [
@@ -306,9 +320,20 @@ def build_drawable_prompt_ir(
         object_ids=objects,
         location_ids=locations,
         references=references,
+        story_time=normalized_story_time,
+        time_of_day=normalized_scene_time_of_day,
         required_groups=tuple(required_groups),
     )
-    omitted = tuple(group for group in FRAGMENT_GROUP_ORDER if group not in included_groups)
+    conditional_groups = {
+        "story_time": normalized_story_time,
+        "time_of_day": normalized_scene_time_of_day,
+    }
+    omitted = tuple(
+        group
+        for group in FRAGMENT_GROUP_ORDER
+        if group not in included_groups
+        and (group not in conditional_groups or bool(conditional_groups[group]))
+    )
     return DrawablePromptIR(
         dependencies=dependencies,
         included_fragments=tuple(fragments),
@@ -321,7 +346,12 @@ def render_drawable_prompt(ir: DrawablePromptIR) -> str:
     sections: list[str] = []
 
     if by_group.get("style"):
-        sections.append("[全体 / 不変条件]\n" + by_group["style"])
+        style_lines = [by_group["style"]]
+        if by_group.get("story_time"):
+            style_lines.append(by_group["story_time"])
+        if by_group.get("time_of_day"):
+            style_lines.append(by_group["time_of_day"])
+        sections.append("[全体 / 不変条件]\n" + "\n".join(style_lines))
     if by_group.get("references"):
         sections.append("[参照画像]\n" + by_group["references"])
 
@@ -345,8 +375,15 @@ def render_drawable_prompt(ir: DrawablePromptIR) -> str:
     return "\n\n".join(sections).strip()
 
 
-def _character_fragment(plan: Mapping[str, Any]) -> str:
+def _character_fragment(
+    plan: Mapping[str, Any], character_ids: tuple[str, ...]
+) -> str:
     state = _mapping(plan.get("character_state_gate"))
+    lines = _bound_character_state_lines(
+        state,
+        character_ids,
+        reference_binding=_mapping(plan.get("reference_binding")),
+    )
     labels = (
         ("衣装", "costume_state"),
         ("姿勢", "pose"),
@@ -356,12 +393,104 @@ def _character_fragment(plan: Mapping[str, Any]) -> str:
         ("足元", "foot_position"),
         ("身体の状態", "physical_state"),
     )
-    lines = []
     for label, key in labels:
+        if key == "costume_state" and lines:
+            # A named per-character binding is more precise than the legacy
+            # unscoped scalar, especially when two or more people share a cut.
+            continue
         value = _clean_drawable_text(state.get(key))
         if value:
             lines.append(f"{label}は、{_sentence_body(value)}。")
     return "\n".join(_dedupe_strings(lines))
+
+
+def _bound_character_state_lines(
+    state: Mapping[str, Any],
+    character_ids: tuple[str, ...],
+    *,
+    reference_binding: Mapping[str, Any],
+) -> list[str]:
+    raw_bindings = state.get("character_states")
+    if raw_bindings is None:
+        return []
+    if not isinstance(raw_bindings, (list, tuple)):
+        raise ValueError("drawable_prompt_character_state_bindings_require_sequence")
+
+    visible_ids = set(character_ids)
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    canonical_name_by_id: dict[str, str] = {}
+    for raw_reference in _list(reference_binding.get("character_references")):
+        if not isinstance(raw_reference, Mapping):
+            continue
+        reference_id = str(
+            raw_reference.get("target_character_id") or ""
+        ).strip()
+        canonical_name = _clean_drawable_text(
+            raw_reference.get("target_identity_name")
+            or raw_reference.get("target_character_name")
+        )
+        if reference_id and canonical_name:
+            canonical_name_by_id[reference_id] = canonical_name
+    lines: list[str] = []
+    for raw_binding in raw_bindings:
+        if not isinstance(raw_binding, Mapping):
+            raise ValueError("drawable_prompt_character_state_binding_invalid")
+        if not isinstance(raw_binding.get("character_id"), str):
+            raise ValueError("drawable_prompt_character_state_binding_invalid")
+        character_id = raw_binding["character_id"].strip()
+        if not character_id or character_id not in visible_ids:
+            raise ValueError("drawable_prompt_character_state_binding_unbound")
+        if character_id in seen_ids:
+            raise ValueError("drawable_prompt_character_state_binding_duplicate")
+        seen_ids.add(character_id)
+
+        if not isinstance(raw_binding.get("character_name"), str):
+            raise ValueError("drawable_prompt_character_state_binding_invalid")
+        character_name = _clean_drawable_text(raw_binding.get("character_name"))
+        if character_name in seen_names:
+            raise ValueError("drawable_prompt_character_state_binding_identity_conflict")
+        seen_names.add(character_name)
+        canonical_name = canonical_name_by_id.get(character_id)
+        if canonical_name and canonical_name != character_name:
+            raise ValueError(
+                "drawable_prompt_character_state_binding_identity_mismatch"
+            )
+
+        raw_appearance = raw_binding.get("appearance_continuity")
+        if not isinstance(raw_appearance, Mapping):
+            raise ValueError("drawable_prompt_character_appearance_state_missing")
+        appearance = raw_appearance
+        if not isinstance(appearance.get("costume_state"), str):
+            raise ValueError("drawable_prompt_character_appearance_state_invalid")
+        costume_state = _clean_drawable_text(appearance.get("costume_state"))
+        raw_forbidden = appearance.get("forbidden_costume_states", [])
+        if not isinstance(raw_forbidden, (list, tuple)):
+            raise ValueError(
+                "drawable_prompt_forbidden_costume_states_require_sequence"
+            )
+        forbidden_states = [
+            _clean_drawable_text(item) for item in raw_forbidden
+        ]
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in raw_forbidden
+        ) or any(not value for value in forbidden_states):
+            raise ValueError("drawable_prompt_forbidden_costume_state_invalid")
+        if not character_name or not costume_state:
+            raise ValueError("drawable_prompt_character_appearance_state_missing")
+        if costume_state in forbidden_states:
+            raise ValueError("drawable_prompt_character_appearance_state_conflict")
+
+        line = f"{character_name}の衣装は、{_sentence_body(costume_state)}を維持し"
+        if forbidden_states:
+            line += "、" + "、".join(
+                f"{_sentence_body(value)}には変えない" for value in forbidden_states
+            )
+        else:
+            line += "続ける"
+        lines.append(line + "。")
+    return lines
 
 
 def _object_fragment(
@@ -417,7 +546,15 @@ def _composition_fragment(composition: Mapping[str, Any]) -> str:
     return "\n".join(_dedupe_strings(lines))
 
 
-def _light_material_fragment(material: Mapping[str, Any]) -> str:
+def _light_material_fragment(
+    material: Mapping[str, Any],
+    *,
+    scene_time_of_day: str = "",
+) -> str:
+    _validate_material_time_of_day(
+        material,
+        scene_time_of_day=scene_time_of_day,
+    )
     lines: list[str] = []
     light_source = _clean_drawable_text(material.get("light_source"))
     light_direction = _clean_drawable_text(material.get("light_direction"))
@@ -453,7 +590,23 @@ def _current_state_delta_fragment(progression: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _reference_fragment(references: tuple[str, ...]) -> str:
+def _reference_fragment(
+    references: tuple[str, ...],
+    *,
+    plan: Mapping[str, Any] | None = None,
+    time_of_day: str = "",
+) -> str:
+    binding = _mapping(_mapping(plan).get("reference_binding"))
+    character_names_by_path: dict[str, str] = {}
+    for item in _list(binding.get("character_references")):
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or item.get("reference") or "").strip()
+        name = _clean_drawable_text(
+            item.get("target_character_name") or item.get("character_name")
+        )
+        if path and name:
+            character_names_by_path[path.replace("\\", "/")] = name
     counters: dict[str, int] = {"character": 0, "object": 0, "location": 0, "style": 0, "generic": 0}
     lines: list[str] = []
     for reference in references:
@@ -463,16 +616,104 @@ def _reference_fragment(references: tuple[str, ...]) -> str:
         elif "/objects/" in f"/{normalized}":
             kind, label, preserved = "object", "小道具参照画像", "形状、素材、縮尺の同一性"
         elif "/locations/" in f"/{normalized}":
-            kind, label, preserved = "location", "場所参照画像", "空間構造、素材、光の同一性"
+            kind, label, preserved = "location", "場所参照画像", "空間構造、固定素材の同一性"
         elif "/styles/" in f"/{normalized}":
             kind, label, preserved = "style", "スタイル参照画像", "実写の質感と色調"
         else:
             kind, label, preserved = "generic", "参照画像", "写っている対象の同一性"
         counters[kind] += 1
+        subject_suffix = ""
+        if kind == "character":
+            character_name = character_names_by_path.get(reference.replace("\\", "/"), "")
+            if character_name:
+                subject_suffix = f"（{character_name}）"
         lines.append(
-            f"{label}{counters[kind]}は{preserved}だけを保ち、構図と状態はこの画像の描写に合わせる。"
+            f"{label}{counters[kind]}{subject_suffix}は{preserved}だけを保ち、構図と状態はこの画像の描写に合わせる。"
+            + (
+                "光と色温度はこのシーンの時間帯を優先する。"
+                if kind == "location" and time_of_day
+                else ""
+            )
         )
     return "\n".join(lines)
+
+
+def _validate_material_time_of_day(
+    material: Mapping[str, Any],
+    *,
+    scene_time_of_day: str,
+) -> None:
+    """Reject explicit positive light markers that oppose the canonical daypart."""
+
+    daypart = str(scene_time_of_day or "").strip()
+    if not daypart:
+        return
+    if "真夜中" in daypart or "深夜" in daypart or daypart == "夜":
+        opposing = ("朝日", "真昼", "昼光", "日中", "夕日")
+    elif "夕" in daypart or "日没" in daypart:
+        opposing = ("朝日", "真昼", "昼光", "真夜中", "深夜")
+    elif "昼" in daypart or "日中" in daypart:
+        opposing = ("朝日", "夕方", "日没", "夜", "真夜中", "深夜", "月光")
+    elif "朝" in daypart:
+        opposing = ("朝夕", "夕方", "夕刻", "夕日", "日没", "夜", "真夜中", "深夜", "月光")
+    else:
+        return
+    probe = json.dumps(dict(material), ensure_ascii=False, sort_keys=True)
+    for marker in opposing:
+        sanitized = re.sub(
+            rf"{re.escape(marker)}(?:は|を)?(?:なし|入れない|出さない|使わない)",
+            "",
+            probe,
+        )
+        if marker in sanitized:
+            raise ValueError(
+                f"drawable_prompt_time_of_day_conflict:{daypart}:{marker}"
+            )
+
+
+def _validate_positive_drawable_fragments(
+    fragments: Iterable[DrawablePromptFragment],
+) -> None:
+    positive_groups = {
+        "current_moment",
+        "primary_subject",
+        "characters",
+        "objects",
+        "location",
+        "composition",
+        "light_material",
+        "current_state_delta",
+    }
+    text = "\n".join(
+        fragment.text for fragment in fragments if fragment.group in positive_groups
+    )
+    alternative = re.search(r"(?:または|もしくは|いずれか|\bor\b)", text, re.IGNORECASE)
+    if alternative:
+        context = text[max(0, alternative.start() - 40) : alternative.end() + 40]
+        raise ValueError(
+            f"drawable_prompt_unresolved_alternative:{alternative.group(0)}:{context}"
+        )
+    sequential_overview = re.search(r"(?:→|⇒|->|=>)", text)
+    if sequential_overview:
+        context = text[
+            max(0, sequential_overview.start() - 40) : sequential_overview.end() + 40
+        ]
+        raise ValueError(
+            "drawable_prompt_sequential_overview:"
+            f"{sequential_overview.group(0)}:{context}"
+        )
+    abstract_markers = (
+        "変化点",
+        "変化の証拠",
+        "空間の締めつけ",
+        "人物の制約",
+        "sceneの前提",
+        "次cut",
+        "内面の変化",
+    )
+    for marker in abstract_markers:
+        if marker in text:
+            raise ValueError(f"drawable_prompt_abstract_placeholder:{marker}")
 
 
 def _visual_evidence_values(plan: Mapping[str, Any]) -> tuple[str, ...]:
@@ -500,22 +741,13 @@ def _append_fragment(
 
 
 def _clean_drawable_text(value: Any) -> str:
-    text = _WHITESPACE_RE.sub(" ", str(value or "")).strip(" 、。:：/\n\t")
-    if not text:
-        return ""
-    if _INTERNAL_META_RE.search(text):
-        return ""
-    if _ABSTRACT_STORY_RE.search(text):
-        return ""
-    if any(marker.lower() in text.lower() for marker in _GENERIC_TEXT_MARKERS):
-        return ""
-    text = text.replace("このcut", "この画像").replace("この cut", "この画像")
-    text = text.replace("scene固有", "場面固有").replace("scene内", "場面内")
-    if re.search(r"(?:前|次|後続)\s*(?:cut|scene)", text, re.IGNORECASE):
-        return ""
-    if _OPAQUE_IDENTIFIER_RE.fullmatch(text):
-        return ""
-    return text.strip(" 、。:：/\n\t")
+    return normalize_drawable_prompt_text(value)
+
+
+def _normalize_contract_string(value: Any) -> str:
+    """Trim only the boundary of an authored open-string contract value."""
+
+    return str(value or "").strip()
 
 
 def _strip_dependency_ids(text: str, dependency_ids: Iterable[str]) -> str:

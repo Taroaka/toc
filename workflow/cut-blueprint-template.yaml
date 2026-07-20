@@ -57,6 +57,16 @@ source_scene:
         immediate_consequence: ""
         emotional_pressure: ""
         required_visual_evidence: []
+        primary_subject: ""
+        required_roles: []
+        visible_character_state:
+          posture: ""
+          gaze: ""
+          expression: ""
+          hands: ""
+          feet: ""
+        motion_brief: ""
+        motion_end_state: ""
       - beat_id: "scene1_event_pressure"
         beat_function: "pressure"
         what_happens: ""
@@ -65,6 +75,16 @@ source_scene:
         immediate_consequence: ""
         emotional_pressure: ""
         required_visual_evidence: []
+        primary_subject: ""
+        required_roles: []
+        visible_character_state:
+          posture: ""
+          gaze: ""
+          expression: ""
+          hands: ""
+          feet: ""
+        motion_brief: ""
+        motion_end_state: ""
       - beat_id: "scene1_event_turn"
         beat_function: "turn"
         what_happens: ""
@@ -73,6 +93,16 @@ source_scene:
         immediate_consequence: ""
         emotional_pressure: ""
         required_visual_evidence: []
+        primary_subject: ""
+        required_roles: []
+        visible_character_state:
+          posture: ""
+          gaze: ""
+          expression: ""
+          hands: ""
+          feet: ""
+        motion_brief: ""
+        motion_end_state: ""
       - beat_id: "scene1_event_payoff"
         beat_function: "payoff"
         what_happens: ""
@@ -81,6 +111,16 @@ source_scene:
         immediate_consequence: ""
         emotional_pressure: ""
         required_visual_evidence: []
+        primary_subject: ""
+        required_roles: []
+        visible_character_state:
+          posture: ""
+          gaze: ""
+          expression: ""
+          hands: ""
+          feet: ""
+        motion_brief: ""
+        motion_end_state: ""
     turning_event:
       source_event_beat_id: "scene1_event_turn"
       causal_turn_ref: "scene_intent.causal_turn"
@@ -397,7 +437,7 @@ cuts:
           source_projection: "first_frame_visual_plan_v1"
           compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
           prompt_policy_version: "image_api_prompt_v2"
-          compiler_version: "conditional_drawable_prompt_compiler_v1"
+          compiler_version: "conditional_drawable_prompt_compiler_v3"
           drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
           always_required_groups:
             - "style"

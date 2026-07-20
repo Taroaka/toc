@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from toc.http import HttpError, request_bytes, request_json
+from toc.http import request_json
+from toc.providers.media_download import request_public_media_bytes
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -45,6 +46,34 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+_PROTECTED_VIDEO_EXTRA_KEYS = {
+    "prompt",
+    "negative_prompt",
+    "model",
+    "model_name",
+    "duration",
+    "duration_seconds",
+    "aspect_ratio",
+    "resolution",
+    "image",
+    "image_tail",
+    "first_frame_image",
+    "last_frame_image",
+    "input",
+}
+
+
+def _validate_video_extra_payload(extra_payload: dict[str, Any] | None) -> None:
+    if not extra_payload:
+        return
+    conflicts = sorted(_PROTECTED_VIDEO_EXTRA_KEYS.intersection(extra_payload))
+    if conflicts:
+        raise ValueError(
+            "video extra_payload cannot override protected reviewed fields: "
+            + ", ".join(conflicts)
+        )
 
 
 def _lookup_path(data: Any, path: str) -> Any:
@@ -239,6 +268,7 @@ class KlingClient:
         model: str | None = None,
         extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _validate_video_extra_payload(extra_payload)
         payload_format = (self.config.payload_format or "official_task").strip().lower()
         if payload_format in {"legacy", "flat"}:
             payload: dict[str, Any] = {
@@ -522,9 +552,6 @@ class KlingClient:
         raise ValueError(f"Video URL value has unsupported type: {type(value).__name__}")
 
     def download_to_file(self, *, uri: str, out_path: Path, timeout_seconds: float = 600.0) -> None:
+        data = request_public_media_bytes(url=uri, timeout_seconds=timeout_seconds)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            data = request_bytes(url=uri, method="GET", headers=self._headers(), timeout_seconds=timeout_seconds)
-        except HttpError:
-            data = request_bytes(url=uri, method="GET", headers=None, timeout_seconds=timeout_seconds)
         out_path.write_bytes(data)

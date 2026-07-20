@@ -57,6 +57,8 @@ STORY = """# Story
 ```yaml
 story_metadata:
   target_duration_seconds: 600
+  time: "室町時代"
+  scene_time_of_day_contract: required_v1
 story_structure:
   protagonist: {name: "桃太郎", role: "主人公"}
   journey:
@@ -69,6 +71,7 @@ story_decomposition:
 script:
   scenes:
     - scene_id: 1
+      time_of_day: 朝
       phase: opening
       purpose: "誕生と村の期待を置く"
       conflict: "まだ役割を持たない"
@@ -78,6 +81,7 @@ script:
       grounding_note: "E01を起点にする"
       research_refs: ["research.story_materials.chronological_events[E01]"]
     - scene_id: 2
+      time_of_day: 昼
       phase: ordeal
       purpose: "仲間と鬼ヶ島へ渡る"
       conflict: "荒波と鬼の守り"
@@ -87,6 +91,7 @@ script:
       grounding_note: "E02を使う"
       research_refs: ["research.story_materials.chronological_events[E02]"]
     - scene_id: 3
+      time_of_day: 夕方
       phase: ending
       purpose: "帰還で物語を閉じる"
       conflict: "勝利を村へどう返すか"
@@ -136,12 +141,37 @@ class TestSemanticPackFoundation(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in entries], ["story:foundation"])
         foundation = entries[0]
         self.assertEqual(foundation["target_duration_seconds"], 600)
+        self.assertEqual(foundation["story_time"], "室町時代")
+        self.assertTrue(foundation["time_of_day_contract_declared"])
+        self.assertEqual(
+            [item["status"] for item in foundation["scene_time_of_day_statuses"]],
+            ["valid", "valid", "valid"],
+        )
+        self.assertEqual(
+            [scene["time_of_day"] for scene in foundation["scenes"]],
+            ["朝", "昼", "夕方"],
+        )
         self.assertEqual(len(foundation["scenes"]), 3)
         self.assertEqual(
             [item["event_id"] for item in foundation["research_baseline"]["chronological_events"]],
             ["E01", "E02", "E03"],
         )
         self.assertEqual(foundation["scenes"][1]["research_refs"], ["research.story_materials.chronological_events[E02]"])
+
+    def test_legacy_story_scene_dayparts_do_not_declare_required_contract_without_marker(self) -> None:
+        legacy_story = STORY.replace("  scene_time_of_day_contract: required_v1\n", "", 1)
+        with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "research.md").write_text(RESEARCH, encoding="utf-8")
+            (run_dir / "story.md").write_text(legacy_story, encoding="utf-8")
+
+            foundation = collect_entries("story", run_dir)[0]
+
+        self.assertFalse(foundation["time_of_day_contract_declared"])
+        self.assertEqual(
+            [item["status"] for item in foundation["scene_time_of_day_statuses"]],
+            ["valid", "valid", "valid"],
+        )
 
     def test_foundation_pack_scope_and_prompt_are_auditable_and_internal_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
@@ -165,6 +195,10 @@ class TestSemanticPackFoundation(unittest.TestCase):
                 self.assertIn("timeline", prompt)
                 self.assertIn("characters", prompt)
                 self.assertIn("conflict", prompt)
+                if stage == "story":
+                    self.assertIn("time_of_day_contract_declared", prompt)
+                    self.assertIn("scene_time_of_day_missing", prompt)
+                    self.assertIn("sky brightness", prompt)
                 self.assertIn("MUST edit exactly one file", prompt)
                 self.assertIn("Do not return the verdict only in chat", prompt)
                 for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]:

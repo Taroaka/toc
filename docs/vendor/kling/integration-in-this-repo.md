@@ -6,7 +6,12 @@
 
 - Provider 実装: `toc/providers/kling.py`
 - 生成フロー: `scripts/generate-assets-from-manifest.py`
-- 単体 CLI（疎通用）: `scripts/generate-kling-video.py`
+- 単体 CLI（dry-run 疎通用）: `scripts/generate-kling-video.py`
+
+`scripts/generate-kling-video.py` はリクエスト形状を確認する `--dry-run` 専用です。
+実生成は、設計書からコンパイルされレビュー・承認された manifest request を使う
+`scripts/generate-assets-from-manifest.py` 経由に限定します。生のプロンプトを単体 CLI から
+provider へ送信する経路はありません。
 
 ## manifest の tool 名
 

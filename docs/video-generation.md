@@ -9,6 +9,9 @@
 ### 関連ドキュメント
 
 - `docs/orchestration-and-ops.md`（全体制御・品質保証・配信/改善ループ）
+- [`docs/implementation/video-prompting.md`](implementation/video-prompting.md)（動画設計から provider prompt への projection / compiler 契約）
+- [`workflow/playbooks/video-generation/kling.md`](../workflow/playbooks/video-generation/kling.md)（Kling 固有の prompt policy）
+- [`docs/data-contracts.md`](data-contracts.md)（manifest / materialized payload のデータ契約）
 
 ### 位置づけ
 
@@ -20,7 +23,8 @@
 ### 入力
 
 - `output/<topic>_<timestamp>/story.md` - 物語スクリプト
-- シーンごとの視覚・音声指示
+- `output/<topic>_<timestamp>/script.md` - scene / cut の意味と narration 正本
+- `output/<topic>_<timestamp>/video_manifest.md` - scene / cut / provider 実行設計の正本
 
 ### 出力
 
@@ -179,39 +183,83 @@ Step 3: 品質確認
 
 ### 2.2.0 Scene-to-Clip 接続原則
 
-動画生成では、scene/cut の設計を motion prompt まで保つ。
-高品質な still があっても、motion prompt が cut の役割を理解していなければ、clip は「絵が動いただけ」になりやすい。
+動画生成では、scene/cut の canonical design と provider prompt を分離する。高品質な still があっても、motion が cut の役割を満たさなければ、clip は「絵が動いただけ」になりやすい。一方、`cut_function` や event ID をそのまま provider へ渡しても映像指示にはならない。
 
 原則:
 
-- p400 の `cut_blueprint.cut_function` を p800 の `motion_prompt` に反映する。
-  - `setup`: 空間を読ませる穏やかなカメラ。
-  - `pressure`: 距離、遮蔽物、視線、環境音で緊張を上げる。
-  - `threshold`: 手、足、扉、蓋、境界など「一歩手前」を動かす。
-  - `turn`: 新しい情報が見えるが、過剰に説明しない。
-  - `payoff`: 観客が待っていた視覚報酬を見せる。
-  - `reaction`: 変化が人物の表情/姿勢/沈黙に残る。
-  - `handoff`: 次 cut / scene へ向かう視線、音、方向、物を残す。
+- p400 の `cut_contract` は、物語上の責務、event / reveal 境界、開始状態、主動作、終了状態、continuity を保持する正本である
+- p800 は [`video prompt projection registry`](implementation/video-prompting.md) で必要情報を `start_state`, `primary_motion`, `camera_motion`, `environment_motion`, `emotional_change`, `end_state`, `continuity`, `constraints` へ分類する
+- `compile_video_api_prompt_v1` が active fragment だけを自然文化し、provider 送信正本 `video_generation.api_prompt_payload.prompt` を生成する
+- `cut_function`, `target_beat`, event / reveal ID は review 根拠として使い、provider prompt 本文へ出さない
 - p600 still は action を完了させず、p800 motion が始まる余白を残す。
 - `motion_brief` は p800 専用入力であり、p600 image prompt authoring では参照しない。p600 は `first_frame_brief` までを使い、動画開始後の動きは知らない前提で still を作る。
 - p800 motion は p600 still に無い人物・重要道具・新しい reveal を勝手に追加しない。
 - narration は motion の説明書ではない。映像で読めることを重複説明しすぎない。
-- first/last frame を使う場合は、scene の空間方向と人物状態が破綻しないようにする。
+- first frame は開始境界、last frame は到達境界として扱い、単一の連続 shot の途中で fade / cut / 別 shot 化しない
+- `video_metadata.time` と `scene.time_of_day` は動画中に描き直す指示ではなく、時代、衣装、建築、光、影、色温度を変えない continuity として投影する
 
-motion prompt の最小構造:
+#### Function / obligation 単位の具体化
 
-```yaml
-video_generation:
-  motion_prompt: |
-    cut_function: <setup|pressure|threshold|turn|payoff|reaction|handoff>
-    camera: <静止画から自然に始まるカメラ移動>
-    subject_motion: <人物/物の最小動作>
-    environment_motion: <光/風/水/群衆/煙など>
-    emotional_change: <動きで読ませる変化>
-    end_state: <次cutへつなぐ最後の状態>
-    avoid: <新キャラ追加、reveal早出し、過剰ズーム、文字>
+同じ `location_segment` が複数の event beat または複数 cut を担う場合、scene 設計は完成 prompt を複製せず、次の3段階で差分を持つ。
+
+```text
+location_segments[].primary_subject_by_function
+  -> beat_overrides.<setup|pressure|turn|payoff>
+  -> obligation_overrides.<obligation_id>
+  -> cut first-frame / motion contract
+  -> provider prompt compiler
 ```
 
+- `primary_subject_by_function` は beat function ごとの主被写体を確定する。未指定なら segment の `primary_subject` を継承する
+- `beat_overrides.<function>` はその場所・function の canonical event beat を具体化する。同じ function の全 cut へ無条件に prompt prose を複写しない
+- `obligation_overrides.<obligation_id>` は一つの cut 責務だけに適用する最も狭い差分であり、`primary_subject / visible_action / visible_reaction / required_visual_evidence / required_roles / visible_character_state / motion_brief / motion_end_state / motion_attention_target / environment_motion / emotional_change / retain_carried_character_subjects / allowed_new_reveal_elements / allowed_reveal_info_ids / use_next_cut_first_frame_as_last_frame` を必要なものだけ上書きする
+- `retain_carried_character_subjects` は既定 `true`。`false` は前 cut から自動 carry された人物を今回の subject/reference set に残さない指定であり、current cut の `required_roles` や明示 evidence を落とす指定ではない
+- 解決優先順位は `obligation override -> beat override -> function別subject / segment既定 -> scene既定`。空 map は継承であり、空文字による削除ではない
+
+reveal / boundary の3 key は exact `obligation_id` entry だけに置き、同じ function の sibling cut へ広げない。
+
+- `allowed_new_reveal_elements[]`: 開始画像にないが、この主動作で新しく現れてよい具体的な人物状態・小道具・舞台要素。最大8件、非空・一意、`motion_brief` または `motion_end_state` に明示し、`must_not_add` と交差させない
+- `allowed_reveal_info_ids[]`: canonical reveal inventory のうち、この cut だけで解禁する情報 ID。source-event / narration review へ投影し、provider prose へは出さない
+- `use_next_cut_first_frame_as_last_frame`: 同じ場所の次 cut が存在し、current end state と許可済み reveal が next first-frame contract に一致する場合だけ `true`。current `last_frame` を次 cut の承認済み first-frame image に exact binding する
+
+`use_next_cut_first_frame_as_last_frame` は allowlist の代用ではない。開始画像から新要素が現れるなら `allowed_new_reveal_elements`、新しい物語情報を開示するなら `allowed_reveal_info_ids` を同じ obligation で明示する。次 cut 不在、cross-location、end/start state 不一致、未承認 next frame は materialization を拒否する。
+
+画像側は action の完了や future motion を描かず、解決済みの主体、可視 action/reaction、evidence、role、character state から first frame を一枚だけ作る。動画側はその承認済み first frame から、解決済み `motion_brief` を一つの `primary_motion`、`motion_end_state` を `end_state`、`environment_motion` / `emotional_change` を対応する補助 fragment へ投影する。`motion_attention_target` は人物の視線・手・身体動作が向く画面内対象として具体化し、内部 key 名として本文へ出さない。
+
+function 名、obligation ID、override map、未採用候補は review / digest に残してよいが provider prose へ出さない。location override は許可せず、cut は一つの segment、一つの場所、一つの primary subject、一つの可視主動作に確定する。別場所混入、actor inversion、抽象 placeholder、未解決 alternative は materialization 前に拒否する。
+
+video compiler は `allowed_new_reveal_elements` を positive prompt の `constraints` fragment に明示し、許可要素以外の新規追加を禁止する。separate negative channel では positive allowlist 文と許可要素名を `negative_prompt` に複写せず、「承認済み要素以外」の禁止だけを残す。Seedance の inline mode は保存 `negative_prompt` を空にし、allowlist と残余禁止を positive constraints に保持する。
+
+canonical motion design の最小構造:
+
+```yaml
+cut_contract:
+  first_frame_contract:
+    visible_start_state: {}
+    first_frame_brief: "<承認済み still で見える開始状態>"
+  motion_contract:
+    motion_brief: "<1 clip が担う一つの主動作>"
+    motion_attention_target: "<視線・手・身体動作が向く画面内の一対象>"
+    camera_motion: "<主動作と競合しない camera。Kling は最大2指示>"
+    environment_motion: "<開始画面に存在する小さな環境変化>"
+    emotional_change: "<表情・姿勢・視線で読める変化>"
+    end_state: "<可視終了状態または handoff>"
+    allowed_new_reveal_elements: []
+    must_not_add: []
+  continuity_contract:
+    carry_forward_to_next_cut: []
+  source_event_contract:
+    allowed_reveal_info_ids: []
+  cut_handoff:
+    delivers_to_next:
+      binds_video_last_frame_to_next_first_frame: false
+
+video_generation:
+  first_frame: "<current cut approved first-frame image>"
+  last_frame: ""  # boundary=true のときだけ next cut approved first-frame image
+```
+
+frontend/server、CLI、scene storyboard のどの経路でも、生成前に compiler output と hash を manifest / review artifact へ materialize する。materialize は approval ではない。生成 API は保存済み `prompt` / `negative_prompt` / `sha256` / `source_digest` / `provider_request_binding` と per-item approval identity を照合し、未 materialize、pending、または stale な request を拒否する。
 
 ### 2.2.1 Human Review Change-Request Loop
 
@@ -248,6 +296,10 @@ human_review:
 - ただし scene に `render_units[]` がある場合、最終 render の動画クリップ単位は render unit で表す
   - cut は story / image / audio の正本のまま残す
   - render unit は `source_cut_ids[]` で複数 cut の narration を 1 本の動画に束ねられる
+  - `source_cut_ids[]` は canonical cut 順を保ち、active cut を scene 内で exactly once 被覆する。重複・欠落・deleted cut 参照は禁止する
+  - unit duration は source cut duration の合計と一致させ、provider 上限（現在 60 秒）を超える場合は unit を分割する
+  - 1 cut unit は source contract を exact 継承する。複数 cut unit は先頭の first-frame 境界、末尾の end-state、全 cut の continuity / prohibition を effective contract とし、個別 cut の主動作は連結しない
+  - 複数 cut unit の一つの primary motion は unit-level `cut_contract.motion_contract` または `prompt_authoring_source` に明示する
 
 ### 2.2.2 Script と Manifest の参照優先順位
 
@@ -262,9 +314,11 @@ human_review:
 
 既定の読み順:
 
-1. `video_manifest.md` で実行契約を読む
-2. `script.md` で scene/cut の意味を読む
-3. narration は補助参照として読む
+1. `video_manifest.md` の canonical `cut_contract` と first / last frame、provider 設定を読む
+2. 必要な意味境界を `script.md` で確認する
+3. registry / compiler で `video_generation.api_prompt_payload` を materialize する
+4. review 後の provider 実行は保存済み `api_prompt_payload.prompt` だけを読む
+5. narration は補助参照に留め、provider motion prompt へ複製しない
 
 重要:
 
@@ -332,7 +386,9 @@ stage 1 の原則:
 stage 2 の原則:
 
 - 今までどおり `video_manifest.md` ベース
-- 今回は cut stage の設計は変えない
+- canonical cut design は provider prompt と分離し、`api_prompt_payload` へ一方向 compile する
+- `video_generation_requests.md` は exact compiled prompt と policy / compiler / source digest / prompt hash / settings を見せる review projection とする
+- provider 実行は review Markdown を再解釈せず、保存済み payload と current design / settings の一致を gate にする
 - cut stage 側でも human review が gate の場合は、次にどのレビューが必要かを完了報告に含める
 
 ### 2.3 一貫性を保つ手法
@@ -392,29 +448,49 @@ style_guide:
 
 ### 2.4 プロンプトエンジニアリング原則
 
-#### 構造化プロンプトテンプレート
+#### Projection / compiler を正規入口にする
 
-```
-[主題] + [スタイル] + [環境] + [照明] + [カメラ] + [動き]
+provider prompt を手書きの固定ブロックとして管理しない。canonical design を [`toc/video_prompt_projection_registry.py`](../toc/video_prompt_projection_registry.py) で分類し、`compile_video_api_prompt_v1` で active fragment だけを compile する。
 
-例:
-"A young woman with oval face and short black hair,
-wearing blue denim jacket,
-standing in a modern coffee shop,
-soft natural lighting from large windows,
-medium shot,
-slowly turning her head to the right"
+```text
+cut_contract + frames + temporal continuity + provider settings
+  -> projection registry
+  -> video_prompt_ir / projection_review_contract
+  -> api_prompt_payload.prompt
 ```
+
+`api_prompt_payload.prompt` は exact provider-facing text、`sha256` はその文字列の hash、`source_digest` は canonical design と exact negative prompt、duration / quality / aspect ratio、first / last / ordered references、provider model / execution options を含む compilation source の hash である。materializer が読める参照画像は file bytes hash も `provider_request_binding.execution_options.reference_content_sha256` に含める。prompt hash が同じでも review-only の event 境界や provider request が変われば source digest は変わり得る。
+
+projection registry v3 は `must_not_surface / review_only` source の exact value を `projection_review_contract.review_only_sources[]` に残す。daypart visual basis、scene route / segments、cut responsibility、event / reveal 境界、image / narration prose、reference path は semantic reviewer と `source_digest` には含めるが、provider prompt 本文へは出さない。
+
+identity は、編集可能な canonical design / `prompt_authoring_source`（authoring）、compiler version + `source_digest`（compiler）、保存済み prompt / negative prompt / `provider_request_binding`（persisted provider request）に分ける。`motion_prompt` を保存済み prompt から authoring input へ逆流させない。
+
+frontend/server、CLI、scene storyboard は同じ compiler output を manifest と `video_generation_requests.md` へ保存する。materialize 直後は item ごとに `pending` である。frontend/server approval workflow は current semantic review 後の明示的な `approve_for_generation` でだけ approval を保存し、CLI の materialize-only / 通常実行は未承認 item を自動承認しない。CLI / server の実行は `status=approved` と `request_section_sha256` / prompt `sha256` / `source_digest` の exact binding を必須にする。`approved_by` / `approved_at` は監査情報であり request identity ではない。
+
+provider adapter が表現できない承認済み入力を黙って捨てない。現在の Kling adapter は first / last frame のみを画像入力として扱い、auxiliary `references[]` は拒否する。Seedance の frame-boundary mode と multimodal-reference mode も混在させない。複数画像が必要な scene storyboard は、先頭 cut の full-frame image と storyboard を ordered references とする `reference_to_video` requestへ materializeし、reference対応modelを選ぶ。
+
+storyboard render unit の `video_input_contract.reference_roles[]` は `required_references[]` と同数・同順に保つ。`image_index` は1起点の連番・一意とし、image 1 を `start_state_visual_anchor`、image 2 を `ordered_storyboard_sequence_guide` に束縛する。この配列は compiler、`provider_request_binding.reference_roles`、IR、`source_digest`、server/CLI execution まで保持・照合し、provider prose には role 指示だけを出して path / ID / hash を出さない。
+
+画像promptの `image_generation.references[]` は first frameを作るための入力に限定する。動画providerへ渡す参照は `video_generation.references[]` の明示値だけであり、両者を暗黙に混ぜない。
+
+duration / reference count はprovider・model・input mode別capabilityで検査する。Seedance 1.0 reference-image modeは2–12秒、1–4参照であり、storyboard groupingからprovider dispatchまで同一上限を使う。
+
+review artifact は positive prompt を `video_prompt` fence、negative prompt を `negative_prompt` fence に exact 保存する。section metadata の `negative_prompt_sha256` と、heading・metadata・両 fence を含む `request_section_sha256` を照合する。
+
+compiler v3 の `quality_issues[]` に `blocking: true` が一件でもあれば、semantic review / approval / provider execution を止める。対象 code は `video_motion_generated_fallback`、`video_motion_unresolved_alternative`、`video_motion_abstract_primary`、`video_motion_abstract_end_state`、`video_motion_duplicate_environment`、`video_motion_duplicate_emotion`。compiled prompt を直接直さず、canonical motion field を具体化して再 materialize する。
 
 #### プロンプト設計のDo/Don't
 
 | Do | Don't |
 |----|-------|
-| 具体的な特徴を列挙 | 曖昧な形容詞（beautiful, nice） |
-| 固定フレーズを繰り返す | 同義語で言い換える |
-| 参照画像と組み合わせる | テキストのみに依存 |
-| カメラワークを明示 | カメラを暗示に任せる |
-| ネガティブプロンプト活用 | 禁止事項を書かない |
+| canonical `motion_contract` に一つの主動作を書く | 自由文へ複数 event を連結する |
+| first frame の可視状態から動かす | 参照にない人物・重要物・reveal を追加する |
+| camera を主動作と両立させる | camera 指示を連続切替する |
+| end state / last frame を到達境界にする | fade / cut で別 shot へ逃がす |
+| continuity と高リスク制約だけを投影する | story key、ID、path、narration を本文へ出す |
+| 上流設計を修正して再 materialize する | compiled prompt だけを直接修正する |
+
+詳細な registry、8 groups、3 axes、payload / stale gate は [`docs/implementation/video-prompting.md`](implementation/video-prompting.md) を正本とする。
 
 ### 2.5 音声・BGM・効果音との同期設計
 
@@ -614,7 +690,8 @@ ffmpeg -i input.mp4 \
 
 3. 素材生成
    ├→ 参照画像生成（シーンごと）
-   ├→ Image-to-Video変換
+   ├→ video prompt payload / review request の materialize
+   ├→ hash・design digest・provider設定を照合して Image-to-Video変換
    └→ 音声生成（ナレーション、BGM、SFX）
 
 4. ポストプロダクション
@@ -645,7 +722,10 @@ Step A: シーン静止画の生成・選定
   - 各シーンで複数生成 → 1枚選定
 
 Step B: Image-to-Video クリップ生成
-  - シーン単位で動画クリップ化
+  - cut / render unit の canonical design を compile
+  - api_prompt_payload と video_generation_requests.md を materialize
+  - target ごとの exact request section / prompt hash / source digest を明示的に承認
+  - review 済み payload の negative prompt / settings / frames / references / provider execution options まで照合して動画クリップ化
 
 Step C: ナレーション生成
   - 各シーンの台詞をTTS化
@@ -685,6 +765,7 @@ video_gate:
 # === メタ情報 ===
 video_metadata:
   topic: "string"
+  time: "<story / script metadata からの歴史的時代 projection>"
   source_story: "output/<topic>_<timestamp>/story.md"
   created_at: "ISO8601"
   duration_seconds: 60
@@ -710,6 +791,7 @@ assets:
 # === シーン別素材 ===
 scenes:
   - scene_id: 1
+    time_of_day: "夜明け"
     timestamp: "00:00-00:10"
 
     image_generation:
@@ -722,8 +804,63 @@ scenes:
     video_generation:
       tool: "kling_3_0 | kling_3_0_omni | seedance"
       input_image: "assets/scenes/scene1_base.png"
-      motion_prompt: "camera slowly zooms in"
+      prompt_authoring_source: "<frontend / legacy free-text fallback。canonical cut_contract が優先>"
+      motion_prompt: "<api_prompt_payload.prompt の read-only compatibility projection>"
+      api_prompt_payload:
+        policy_version: "video_api_prompt_v1"
+        compiler_version: "conditional_video_prompt_compiler_v3"
+        projection_registry_version: "video_prompt_projection_registry_v3"
+        provider: "kling_3_0"
+        mode: "image_to_video"
+        provider_request_binding:
+          duration_seconds: 10
+          quality: "1080p"
+          aspect_ratio: "16:9"
+          first_frame: "assets/scenes/scene1_base.png"
+          last_frame: ""
+          references: []
+          reference_roles: []
+          execution_options:
+            backend: "kling"
+            model: "kling-3.0"
+            extra_payload: {}
+            reference_content_sha256:
+              assets/scenes/scene1_base.png: "<sha256-of-reference-bytes>"
+        prompt: "<exact provider-facing motion prompt>"
+        negative_prompt: "<exact compiled high-risk constraints>"
+        source_digest: "<sha256-of-normalized-compilation-source>"
+        sha256: "<sha256-of-exact-prompt>"
+        quality_issues: []
+        video_prompt_ir: {}
+        projection_review_contract: {}
       output: "assets/scenes/scene1_video.mp4"
+
+    # optional: cuts[] がある scene でだけ使う。存在時は最終 video clip の正本。
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        # compiler が先頭/末尾境界と全 source cut の continuity を合成し、
+        # explicit unit contract を同 group の優先値として重ねる。
+        cut_contract:
+          motion_contract:
+            motion_brief: "<unit 全体を代表する一つの primary motion>"
+        video_generation:
+          tool: "kling_3_0"
+          duration_seconds: "<cut1 + cut2 duration>"
+          first_frame: "<first source cut start frame>"
+          last_frame: "<optional unit arrival frame>"
+          references: []
+          prompt_authoring_source: "<unit-level fallback; individual cut actionsを連結しない>"
+          api_prompt_payload:
+            policy_version: "video_api_prompt_v1"
+            compiler_version: "conditional_video_prompt_compiler_v3"
+            projection_registry_version: "video_prompt_projection_registry_v3"
+            provider_request_binding: {}
+            prompt: "<exact compiled unit motion prompt>"
+            negative_prompt: "<exact compiled high-risk constraints>"
+            source_digest: "<includes ordered source_cut_ids and source contracts>"
+            sha256: "<sha256-of-exact-prompt>"
+          output: "assets/scenes/scene1_unit1.mp4"
 
     audio:
       narration:

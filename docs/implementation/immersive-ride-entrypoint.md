@@ -82,10 +82,10 @@ run root:
   - first-last-frame-to-video
   - 8秒/clip
   - scene画像の **manifest順** をつないでclipを作る（scene_id の連番を前提にしない）
-  - シームレス性を上げるため、best-effort で以下を併用する
+  - シームレス性を上げるため、以下を review 前に設計へ固定して併用する
     - `last_frame` 制約（`--enable-last-frame`）
     - ネガティブプロンプトでフェード/カット系を抑制（`--video-negative-prompt`）
-    - 直前clip終盤のフレームを次clipの first frame に使う chaining（`--chain-first-frame-from-prev-video`）
+    - 直前clip終盤のフレームを次clipの first frame に使う場合は、前clip生成後にchain frameを保存し、次clipを再materialize・再review・再approveする二段階workflowにする。`--chain-first-frame-from-prev-video` によるprovider実行中の動的差し替えはexact approvalと両立しないため禁止
 - 音声:
   - ElevenLabs（voice/model は運用で確定）
   - cutは映像単位、narration spanは文章・演技単位。互換上`audio.narration.output`をcutへanchorしてよいが、spanは複数cutをまたげる

@@ -288,6 +288,71 @@ def test_visual_only_change_stales_semantic_input_without_changing_text_identity
     assert changed_pack["semantic_review_input_hash"] != original_pack["semantic_review_input_hash"]
 
 
+def test_semantic_pack_carries_same_key_projection_contract_as_authoring() -> None:
+    data = _manifest()
+    data["video_metadata"] = {
+        "time": "17世紀末フランス・ルイ14世時代",
+        "ending_mode": "happy",
+    }
+    scene = data["scenes"][1]
+    scene["time_of_day"] = "朝"
+    narration_contract = scene["cuts"][0]["cut_contract"]["narration_contract"]
+    narration_contract["story_role"] = {
+        "voice_function": "emotion",
+        "must_cover": ["約束への思い"],
+        "must_not_reveal": ["扉の先の人物"],
+    }
+
+    pack = build_narration_semantic_review_pack(data)
+    packed_cut = pack["scenes"][0]["cuts"][0]
+    projection = packed_cut["narration_prompt_projection"]
+
+    assert projection["registry_version"] == "narration_prompt_projection_registry_v1"
+    assert "約束への思い" in json.dumps(projection["buckets"]["required_content"], ensure_ascii=False)
+    assert "古い印を手に取る" in json.dumps(projection["buckets"]["do_not_caption"], ensure_ascii=False)
+    assert "扉の先の人物" in json.dumps(projection["buckets"]["reveal_constraints"], ensure_ascii=False)
+    catalog = {item["source_key"]: item for item in pack["narration_prompt_projection_registry"]}
+    assert catalog["cut.cut_contract.motion_contract.motion_brief"]["review_visibility"] == "review_only"
+    assert catalog["cut.image_generation.prompt"]["spoken_projection"] == "must_not_surface"
+    assert "image_generation" in packed_cut
+    assert "image_generation" not in json.dumps(projection, ensure_ascii=False)
+    assert pack["schema_version"] == "narration_semantic_review_input_v2"
+
+
+def test_projection_value_change_stales_semantic_input_hash() -> None:
+    original = _manifest()
+    original["scenes"][1]["time_of_day"] = "朝"
+    changed = deepcopy(original)
+    changed["scenes"][1]["time_of_day"] = "夜"
+
+    original_pack = build_narration_semantic_review_pack(original)
+    changed_pack = build_narration_semantic_review_pack(changed)
+
+    assert changed_pack["semantic_review_input_hash"] != original_pack["semantic_review_input_hash"]
+
+
+def test_production_scale_pack_drops_irrelevant_raw_contract_bulk() -> None:
+    data = _manifest()
+    scene = data["scenes"][1]
+    base_cut = deepcopy(scene["cuts"][0])
+    marker = "IRRELEVANT_RAW_BULK_" + ("x" * 20_000)
+    cuts = []
+    for cut_id in range(1, 51):
+        cut = deepcopy(base_cut)
+        cut["cut_id"] = cut_id
+        cut["cut_contract"]["debug_full_scene_snapshot"] = marker
+        cut["image_generation"]["prompt_contract"] = {"debug": marker}
+        cut["audio"]["narration"]["text"] = f"語り{cut_id}。"
+        cut["audio"]["narration"]["tts_text"] = f"かたり {cut_id}。"
+        cuts.append(cut)
+    scene["cuts"] = cuts
+
+    serialized = json.dumps(build_narration_semantic_review_pack(data), ensure_ascii=False)
+
+    assert marker not in serialized
+    assert len(serialized) < 750_000
+
+
 def test_cutless_scene_offset_change_stales_semantic_input_hash() -> None:
     original = _manifest()
     original["scenes"].append(

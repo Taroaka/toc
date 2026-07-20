@@ -13,10 +13,10 @@
 - 動画生成
   - 本 repo は、調査・物語・台本・画像/動画/音声生成・最終レンダリングまでの動画生成フローを扱う。
   - 正本: `docs/video-generation.md`
-- マーケティング（SNS 限定）
-  - 本 repo で扱う marketing は、SNS 内の配信設計、投稿運用、反応分析、改善ループに限定する。
-  - 広義の marketing（広告運用、LP、CRM、オフライン施策）は対象外とする。
-  - 正本: `docs/orchestration-and-ops.md`
+- マーケティング（public site / LP / digital acquisition / SNS）
+  - 本 repo では、ToC の公開サイト、ペルソナ別 LP、デジタル広告導線、SNS 配信、リード獲得、反応分析、改善ループを扱う。
+  - 第一対象は個人で、`副業を始めたい人` と `個人ブランドを構築したい人` を別ペルソナとして扱う。
+  - 正本: `marketing/README.md`
 
 ## Entrypoints
 
@@ -53,8 +53,9 @@ p500/p600 の Codex built-in image generation は 1 枚あたりの既定 timeou
 - 物語化: `docs/story-creation.md`
 - 台本: `docs/script-creation.md`
 - 動画生成: `docs/video-generation.md`
+- 動画 prompt の設計投影・compiler・実行 gate: `docs/implementation/video-prompting.md`
 - Web UI / brand design: `server/web/docs/brand-design/README.md`
-- marketing/SNS: `marketing/README.md`
+- marketing / public site / LP / SNS: `marketing/README.md`
 - 運用/QA: `docs/orchestration-and-ops.md`
 - エージェント運用: `docs/implementation/assistant-tooling.md`
 - 役割定義: `docs/implementation/agent-roles-and-prompts.md`
@@ -167,7 +168,7 @@ scripts/ai/session-bootstrap.sh
 | narration | `docs/implementation/video-integration.md` | `workflow/playbooks/script/` |
 | asset | `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
 | scene_implementation | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
-| video_generation | `docs/video-generation.md` | `workflow/playbooks/video-generation/` |
+| video_generation | `docs/video-generation.md` `docs/implementation/video-prompting.md` | `workflow/playbooks/video-generation/` |
 | render | `docs/implementation/video-integration.md` | `workflow/playbooks/video-generation/` |
 | qa | `docs/orchestration-and-ops.md` | `workflow/playbooks/video-generation/` |
 
@@ -208,7 +209,7 @@ multi-agent が使える環境では、コンテキストを fork しない audi
 - `state.txt` を置き換えない。append-only を維持する。
 - hybridization は人間承認必須。自動承認しない。
 - `run_report.md` は手書きしない。`eval_report.json` から生成する。
-- marketing 関連の参照先は `marketing/SNS/` に限定する。通常の story / script / image / video generation と混ぜない。
+- marketing 関連の参照先は `marketing/` に限定し、`marketing/README.md` を入口に public site / LP / SNS の該当正本だけを読む。通常の story / script / image / video generation と混ぜない。
 - root guide に長い説明を戻さない。詳細は正本へ移す。
 - `AGENTS.md` / `CLAUDE.md` を更新したら次を通す。
 

@@ -32,6 +32,7 @@ def collect_entries(
     resolved_run_dir = Path(run_dir)
     source_path, data = _load_scene_source(resolved_run_dir, manifest)
     scenes = _extract_scenes(data)
+    time_of_day_contract_declared = _time_of_day_contract_declared(data, scenes)
 
     if stage in {"scene_set", "scene_detail"}:
         canonical_event_coverage_matrix = _dict_value(data.get("canonical_event_coverage_matrix"))
@@ -42,6 +43,7 @@ def collect_entries(
                 scene_index=index,
                 source_path=source_path,
                 canonical_event_coverage_matrix=canonical_event_coverage_matrix,
+                time_of_day_contract_declared=time_of_day_contract_declared,
             )
             for index, scene in enumerate(scenes)
         ]
@@ -54,6 +56,7 @@ def collect_entries(
             cut_index=cut_index,
             scene_cuts=[item for item in _list_value(scene.get("cuts")) if isinstance(item, dict)],
             source_path=source_path,
+            time_of_day_contract_declared=time_of_day_contract_declared,
         )
         for scene_index, scene in enumerate(scenes)
         for cut_index, cut in enumerate(_list_value(scene.get("cuts")))
@@ -98,6 +101,7 @@ def _scene_entry(
     scene_index: int,
     source_path: str,
     canonical_event_coverage_matrix: dict[str, Any] | None = None,
+    time_of_day_contract_declared: bool = False,
 ) -> dict[str, Any]:
     scene_id = _text(scene.get("scene_id"), default=str(scene_index + 1))
     cuts = _list_value(scene.get("cuts"))
@@ -116,6 +120,8 @@ def _scene_entry(
         "source_section": f"scenes[{scene_index}]",
         "source_json_pointer": f"/scenes/{scene_index}",
         "scene_id": scene_id,
+        "time_of_day_contract_declared": time_of_day_contract_declared,
+        **_time_of_day_review_fields(scene),
         "phase": scene.get("phase"),
         "importance": scene.get("importance"),
         "summary": _scene_summary(scene),
@@ -152,6 +158,7 @@ def _cut_entry(
     cut_index: int,
     scene_cuts: list[dict[str, Any]],
     source_path: str,
+    time_of_day_contract_declared: bool = False,
 ) -> dict[str, Any]:
     scene_id = _text(scene.get("scene_id"), default=str(scene_index + 1))
     cut_id = _text(cut.get("cut_id"), default=f"{cut_index + 1:02d}")
@@ -185,6 +192,8 @@ def _cut_entry(
             "source_json_pointer": f"/scenes/{scene_index}/cuts/{cut_index}",
             "scene_id": scene_id,
             "cut_id": cut_id,
+            "time_of_day_contract_declared": time_of_day_contract_declared,
+            **_time_of_day_review_fields(scene),
             "summary": _text(
                 blueprint.get("target_beat")
                 or scene_contract.get("target_beat")
@@ -398,6 +407,38 @@ def _text(value: Any, *, default: str = "") -> str:
         return default
     text = str(value).strip()
     return text if text else default
+
+
+def _time_of_day_contract_declared(data: dict[str, Any], scenes: list[dict[str, Any]]) -> bool:
+    del scenes
+    metadata_candidates = (
+        data.get("story_metadata"),
+        data.get("script_metadata"),
+        data.get("video_metadata"),
+    )
+    return any(
+        isinstance(metadata, dict)
+        and _text(metadata.get("scene_time_of_day_contract")) == "required_v1"
+        for metadata in metadata_candidates
+    )
+
+
+def _time_of_day_review_fields(scene: dict[str, Any]) -> dict[str, Any]:
+    if "time_of_day" not in scene:
+        return {"time_of_day_status": "missing"}
+    raw = scene.get("time_of_day")
+    if not isinstance(raw, str):
+        return {
+            "time_of_day_status": "invalid_type",
+            "time_of_day_raw": raw,
+        }
+    value = raw.strip()
+    if not value:
+        return {"time_of_day_status": "blank"}
+    return {
+        "time_of_day": value,
+        "time_of_day_status": "valid",
+    }
 
 
 def _without_empty_values(entry: dict[str, Any]) -> dict[str, Any]:

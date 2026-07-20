@@ -5,6 +5,12 @@
 
 ## 原則
 
+- 設計keyの採否は `toc/narration_prompt_projection_registry.py` を正本にし、詳細は
+  `docs/implementation/narration-prompting.md` に従う。新keyはrunnerへ直接足さず、registryへ
+  `authoring_relevance` / `spoken_projection` / transform / review観点を登録する。
+- authoring promptとp720 semantic reviewは同じprojection contractを使う。semantic criticだけが音声・映像距離の
+  判定用 `review_only` visual contextを追加で読む。背景情報を自動的に読み上げず、`must_not_surface`の内部ID、
+  reveal制約、visible fact、provider promptを本文へ流さない。
 - `audio.narration.tts_text` は ElevenLabs v3 に送る final string として扱う。
 - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する。`TODO:` などのメタ情報は書かない。
 - 未記入の narration は `text` / `tts_text` に placeholder を置かず、空文字 + `authoring_status: missing` で表す。

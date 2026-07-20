@@ -111,6 +111,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if not args.dry_run:
+        raise SystemExit(
+            "Direct provider submission is disabled; use the approved manifest request path "
+            "through scripts/generate-assets-from-manifest.py."
+        )
+
     input_image = Path(args.input_image) if args.input_image else None
     if input_image and not input_image.exists():
         raise SystemExit(f"Input image not found: {input_image}")

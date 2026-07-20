@@ -1,5 +1,7 @@
 # YouTube チャンネル設計と初期設定
 
+> Status: legacy test-channel branding. `にわかのAI` と神話・民話中心の brand は初期実験であり、現行の ToC product positioning ではない。現行方針は `marketing/README.md` と `strategy.md` を使う。
+
 最終更新: 2026-04-26
 用途: チャンネル開設前後に、ブランド方針・見せ方・初期設定を揃えるための基準書。
 

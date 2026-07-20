@@ -8,6 +8,8 @@
 
 scene_outline_metadata:
   topic: "<topic>"
+  # story_metadata.scene_time_of_day_contract の read-only projection。
+  scene_time_of_day_contract: "required_v1"
   source_research: "output/<topic>_<timestamp>/research.md"
   source_story: "output/<topic>_<timestamp>/story.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
@@ -121,6 +123,42 @@ scene_decision_log:
 
 scenes:
   - scene_id: 1
+    # story.md の同一 scene からの read-only projection。open string で、新規 artifact では非空必須。
+    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
+    # 例: 朝、昼、夕方、夜、夜明け前、真夜中。ここで再 authoring せず、visual_world.setting へも重複保持しない。
+    time_of_day: "朝"
+    location_mode: "single|sequence"
+    location_sequence: ["始まりの場所"]
+    # sequenceでは各場所を一度ずつ覆い、cutはprimary event beatに対応する1 itemだけを使う。
+    location_segments:
+      - location: "始まりの場所"
+        responsibility: "この場所で成立させる出来事"
+        primary_subject: "主被写体の人物名"
+        # optional。setup|pressure|turn|payoff ごとに主被写体を切り替える場合だけ埋める。
+        primary_subject_by_function: {}
+        # optional。key は setup|pressure|turn|payoff。
+        # 各 function は beat 固有値を持て、さらに obligation_overrides.<obligation_id> で
+        # cut 責務だけを上書きできる。未使用時は空 map のままにする。
+        # obligation override の許可 key:
+        # primary_subject / visible_action / visible_reaction / required_visual_evidence /
+        # required_roles / visible_character_state / motion_brief / motion_end_state /
+        # motion_attention_target / environment_motion / emotional_change /
+        # retain_carried_character_subjects / allowed_new_reveal_elements /
+        # allowed_reveal_info_ids / use_next_cut_first_frame_as_last_frame
+        # 最後の3 keyは exact obligation entry 専用。segment / function rootへ置かない。
+        beat_overrides: {}
+        visible_action: "一枚で読める具体的状態"
+        visible_reaction: "別主体の具体的反応"
+        required_visual_evidence: ["具体物"]
+        required_roles: ["protagonist"]
+        visible_character_state:
+          posture: "静止画で読める姿勢"
+          gaze: "一つに確定した視線先"
+          expression: "顔に見える反応"
+          hands: "手の具体的な位置"
+          feet: "足先と重心の具体的な位置"
+        motion_brief: "一つの観察可能な動作"
+        motion_end_state: "物理的終了状態"
     scene_name: "<短いscene名>"
     importance: "low|medium|high|critical"
     target_duration_seconds: 24
@@ -400,7 +438,7 @@ scenes:
     visual_world:
       setting:
         location: "具体的な場所またはセット"
-        time_of_day: "朝|昼|夕方|夜|不明"
+        # 時間帯は scenes[].time_of_day を参照する。この setting 内では独立 authoring しない。
         weather: "天候/空気"
         environment: "場所の質感、音、密度"
       spatial_plan:

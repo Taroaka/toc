@@ -273,6 +273,78 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
 
+    def test_image_prompt_repair_edits_visual_plan_then_recompiles_derived_requests(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "image_prompt", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "image_prompt",
+                round_number=1,
+                max_attempts=2,
+                errors=("positive and negative prompt instructions conflict",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+            self.assertIn("first_frame_visual_plan", prompt)
+            self.assertIn("include / omit / add / replace", prompt)
+            self.assertIn("Do not hand-edit `api_prompt_payload.prompt`", prompt)
+            self.assertIn("image_generation_requests.md", prompt)
+            self.assertIn("image_generation_request_snapshot.json", prompt)
+            self.assertIn("orchestrator", prompt)
+            self.assertIn("scene.time_of_day", prompt)
+            self.assertIn("sky brightness", prompt)
+            self.assertIn("shadows", prompt)
+            self.assertIn("artificial lighting", prompt)
+            self.assertIn("separately from `video_metadata.time`", prompt)
+            self.assertIn("time_of_day_contract_declared", prompt)
+            self.assertIn("time_of_day_status", prompt)
+            self.assertIn("undeclared legacy artifact", prompt)
+
+    def test_video_motion_repair_edits_canonical_motion_and_reference_roles_then_recompiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "video_motion", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "video_motion",
+                round_number=1,
+                max_attempts=2,
+                errors=("video motion is abstract and duplicates another cut",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+            self.assertIn("Video Motion Repair Boundary", prompt)
+            self.assertIn("cut_contract.motion_contract", prompt)
+            self.assertIn("continuity_contract", prompt)
+            self.assertIn("video_input_contract.reference_roles", prompt)
+            self.assertIn("include / omit / add / replace", prompt)
+            self.assertIn("Do not hand-edit `api_prompt_payload.prompt`", prompt)
+            self.assertIn("video_generation_requests.md", prompt)
+            self.assertIn("recompile", prompt)
+
+    def test_scene_stage_repairs_keep_daypart_separate_from_historical_time(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            for stage in ("scene_set", "scene_detail", "cut_blueprint"):
+                write_generic_pack(run_dir, stage, status="failed")
+                paths = write_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                    max_attempts=2,
+                    errors=("scene daypart mismatch",),
+                )
+                prompt = paths["prompt"].read_text(encoding="utf-8")
+                self.assertIn("Scene Time-of-Day Repair Boundary", prompt)
+                self.assertIn("time_of_day_contract_declared", prompt)
+                self.assertIn("time_of_day_status", prompt)
+                self.assertIn("script_metadata.time", prompt)
+                self.assertIn("sky brightness", prompt)
+                self.assertIn("artificial light", prompt)
+
     def test_foundation_repair_prompt_requires_structured_round_trip(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)
@@ -291,6 +363,26 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("fenced YAML", prompt)
             self.assertIn("load_structured_document", prompt)
             self.assertIn("Do not delegate", prompt)
+
+    def test_story_repair_restores_scene_daypart_at_the_story_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            (run_dir / "story.md").write_text("# Story\n\n```yaml\nstory_metadata:\n  time: ''\nscript:\n  scenes: []\n```\n", encoding="utf-8")
+            write_generic_pack(run_dir, "story", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "story",
+                round_number=1,
+                max_attempts=2,
+                errors=("scene_time_of_day_missing",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+            self.assertIn("story scene `time_of_day`", prompt)
+            self.assertIn("open, non-empty string", prompt)
+            self.assertIn("do not infer it from location or image-prompt prose", prompt)
+            self.assertIn("historical `story_metadata.time`", prompt)
 
     def test_semantic_repair_defaults_to_two_review_attempts(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):

@@ -2135,6 +2135,102 @@ scenes:
 
 
 class TestVerifyPipeline(unittest.TestCase):
+    def test_scene_time_of_day_contract_requires_nonempty_values_when_declared(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_verify_scene_time_contract_") as td:
+            run_dir = Path(td)
+            story = yaml.safe_load(_good_story_yaml("桃太郎").removeprefix("```yaml\n").removesuffix("```\n"))
+            story["story_metadata"] = {
+                "time": "",
+                "scene_time_of_day_contract": "required_v1",
+            }
+            story["script"]["scenes"][0]["time_of_day"] = ""
+            for scene in story["script"]["scenes"][1:]:
+                scene["time_of_day"] = "朝"
+            (run_dir / "story.md").write_text(
+                "```yaml\n" + yaml.safe_dump(story, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+
+            story_stage, _ = VERIFY_MODULE.check_story(run_dir, "fast")
+            story_checks = {check["id"]: check for check in story_stage["checks"]}
+
+            self.assertFalse(story_checks["story.scene_time_of_day"]["passed"])
+            self.assertIn("1", story_stage["details"]["missing_time_of_day_scene_ids"])
+
+            script = {
+                "script_metadata": {
+                    "time": "",
+                    "scene_time_of_day_contract": "required_v1",
+                },
+                "scenes": [
+                    {"scene_id": 1, "time_of_day": "夜", "phase": "opening", "cuts": []},
+                    {"scene_id": 2, "time_of_day": "   ", "phase": "ending", "cuts": []},
+                ],
+            }
+            (run_dir / "script.md").write_text(
+                "```yaml\n" + yaml.safe_dump(script, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+
+            script_stage, _ = VERIFY_MODULE.check_script_single(run_dir, "fast")
+            script_checks = {check["id"]: check for check in script_stage["checks"]}
+
+            self.assertFalse(script_checks["script.scene_time_of_day"]["passed"])
+            self.assertIn("2", script_checks["script.scene_time_of_day"]["message"])
+
+            manifest = {
+                "manifest_phase": "production",
+                "video_metadata": {
+                    "topic": "桃太郎",
+                    "time": "",
+                    "scene_time_of_day_contract": "required_v1",
+                },
+                "scenes": [
+                    {"scene_id": 1, "time_of_day": "朝", "cuts": []},
+                    {"scene_id": 2, "time_of_day": "", "cuts": []},
+                ],
+            }
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\n" + yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+
+            manifest_stage, _ = VERIFY_MODULE.shared_check_manifest_single(run_dir, "fast", "toc-run")
+            manifest_checks = {check["id"]: check for check in manifest_stage["checks"]}
+
+            self.assertFalse(manifest_checks["manifest.scene_time_of_day"]["passed"])
+            self.assertIn("2", manifest_checks["manifest.scene_time_of_day"]["message"])
+
+    def test_scene_time_of_day_contract_keeps_legacy_artifacts_with_only_historical_time_compatible(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_verify_legacy_scene_time_") as td:
+            run_dir = Path(td)
+            legacy_story = yaml.safe_load(
+                _good_story_yaml("桃太郎").removeprefix("```yaml\n").removesuffix("```\n")
+            )
+            legacy_story["story_metadata"] = {"time": "室町時代"}
+            (run_dir / "story.md").write_text(
+                "```yaml\n"
+                + yaml.safe_dump(legacy_story, allow_unicode=True, sort_keys=False)
+                + "```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                "```yaml\nscript_metadata:\n  time: 室町時代\nscenes:\n  - scene_id: 1\n    phase: opening\n    cuts: []\n```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\nmanifest_phase: production\nvideo_metadata:\n  topic: 桃太郎\n  time: 室町時代\nscenes:\n  - scene_id: 1\n    cuts: []\n```\n",
+                encoding="utf-8",
+            )
+
+            story_stage, _ = VERIFY_MODULE.check_story(run_dir, "fast")
+            script_stage, _ = VERIFY_MODULE.check_script_single(run_dir, "fast")
+            manifest_stage, _ = VERIFY_MODULE.shared_check_manifest_single(run_dir, "fast", "toc-run")
+
+            self.assertNotIn("story.scene_time_of_day", {check["id"] for check in story_stage["checks"]})
+            self.assertNotIn("script.scene_time_of_day", {check["id"] for check in script_stage["checks"]})
+            self.assertNotIn("manifest.scene_time_of_day", {check["id"] for check in manifest_stage["checks"]})
+
     def test_final_video_duration_uses_eighty_percent_lower_bound_without_layer_addition(self) -> None:
         cases = ((239.7, False), (240.0, True), (450.0, True))
 

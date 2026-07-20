@@ -1,5 +1,7 @@
 # コンテンツカレンダー
 
+> Status: legacy mythology test calendar. 現行の ToC product content mix ではなく、浦島太郎以降の物語実験候補としてのみ参照する。現行の pillar は `strategy.md` を使う。
+
 最終更新: 2026-04-26
 
 ---

@@ -25,6 +25,10 @@ from toc.immersive_manifest import (
     normalize_dotted_id,
     story_scene_ids,
 )
+from toc.narration_prompt_projection_registry import (
+    NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION,
+    build_narration_prompt_projection,
+)
 
 
 def now_iso() -> str:
@@ -68,7 +72,7 @@ def _active_manifest_cuts(scene: dict) -> list[dict]:
     ]
 
 
-def _load_scene_ids(manifest_path: Path) -> list[dict]:
+def _load_manifest_data(manifest_path: Path) -> dict:
     if yaml is None:
         raise SystemExit("PyYAML is required. Install with: pip install pyyaml")
     md = manifest_path.read_text(encoding="utf-8")
@@ -79,7 +83,26 @@ def _load_scene_ids(manifest_path: Path) -> list[dict]:
     raw_scenes = data.get("scenes") or []
     if not isinstance(raw_scenes, list):
         raise SystemExit("Manifest YAML scenes must be a list.")
-    return [scene for scene in raw_scenes if isinstance(scene, dict)]
+    data["scenes"] = [scene for scene in raw_scenes if isinstance(scene, dict)]
+    script_path = manifest_path.parent / "script.md"
+    if script_path.exists():
+        script_yaml = extract_yaml_block(script_path.read_text(encoding="utf-8"))
+        script_data = yaml.safe_load(script_yaml) or {}
+        if not isinstance(script_data, dict):
+            raise SystemExit("Script YAML must be a mapping at the root.")
+        script_metadata = script_data.get("script_metadata")
+        if isinstance(script_metadata, dict):
+            # script.md is the language/design source of truth; the manifest is
+            # only the runtime source for cut inventory, prompts, and duration.
+            data["script_metadata"] = script_metadata
+            ending_mode = str(script_metadata.get("ending_mode") or "").strip()
+            if ending_mode:
+                video_metadata = data.get("video_metadata")
+                if not isinstance(video_metadata, dict):
+                    video_metadata = {}
+                    data["video_metadata"] = video_metadata
+                video_metadata["ending_mode"] = ending_mode
+    return data
 
 
 def _parse_scene_ids(scene_ids_csv: str | None) -> list[str] | None:
@@ -266,12 +289,77 @@ def _nested_mapping(node: dict, *keys: str) -> dict:
     return current if isinstance(current, dict) else {}
 
 
-def _prompt_text(manifest_scenes: list[dict], targets: list[str]) -> str:
+_PROJECTION_BUCKET_LABELS = {
+    "background_context": "背景文脈（自動的に読み上げない）",
+    "required_content": "このcutで満たす内容・役割",
+    "conditional_candidates": "条件付き候補（必要な場合だけ語る）",
+    "preferred_additions": "優先して追加する価値",
+    "reveal_constraints": "言ってはいけないこと・reveal制約",
+    "do_not_caption": "画面の見たままなので原則言い直さない",
+    "delivery_constraints": "尺・間・発音の制約",
+}
+_PROJECTION_SOURCE_LABELS = {
+    "manifest.video_metadata.time": "物語の時代背景",
+    "manifest.video_metadata.ending_mode": "結末の型",
+    "scene.time_of_day": "このシーンの時間帯",
+}
+
+
+def _projection_value_text(value: object) -> str:
+    if isinstance(value, list):
+        return " / ".join(str(item) for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{key}={item}" for key, item in value.items() if str(item).strip()
+        )
+    return str(value).strip()
+
+
+def _append_projection(
+    lines: list[str],
+    *,
+    manifest: dict,
+    scene: dict,
+    cut: dict,
+    scopes: tuple[str, ...],
+    indent: str = "  ",
+) -> None:
+    projection = build_narration_prompt_projection(
+        manifest=manifest,
+        scene=scene,
+        cut=cut,
+        scopes=scopes,
+        include_inactive=False,
+        include_excluded=False,
+    )
+    if not any(projection["buckets"].values()):
+        return
+    lines.append(f"{indent}- design-key projection:")
+    for bucket, label in _PROJECTION_BUCKET_LABELS.items():
+        items = projection["buckets"][bucket]
+        if not items:
+            continue
+        lines.append(f"{indent}  - {label}:")
+        for item in items:
+            value = _projection_value_text(item.get("value"))
+            source_label = _PROJECTION_SOURCE_LABELS.get(item["source_key"], item["source_key"])
+            lines.append(
+                f"{indent}    - {source_label}: {value} "
+                f"[spoken_projection={item['spoken_projection']}; transform={item['transform']}]"
+            )
+
+
+def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
+    manifest_scenes = manifest_data.get("scenes") if isinstance(manifest_data.get("scenes"), list) else []
     target_ids = set(targets)
     lines = [
         "# p700 Full-run Audio Story Authoring Prompt",
         "",
         "あなたは Audio Story Director 兼 single-writer です。cut別の短文を先に量産せず、全編の声を一つの物語として設計してください。",
+        "",
+        f"設計keyの採否は `{NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION}` に従います。値を一律に読み上げず、背景・必須内容・条件付き候補・追加価値・reveal制約・画面重複禁止・deliveryへ投影してから原稿化してください。",
+        "新しい設計keyをナレーション判断に使う場合は、生成promptへ直接追加せず、先にprojection registryへ用途とreview観点を登録してください。",
+        "`spoken_projection=must_not_surface` の値は境界判断にだけ使い、内部IDや原文を読み上げ本文へ出してはいけません。",
         "",
         "## Authoring order（順序を変えない）",
         "",
@@ -303,6 +391,16 @@ def _prompt_text(manifest_scenes: list[dict], targets: list[str]) -> str:
         "## Canonical scene/cut inventory",
         "",
     ]
+    _append_projection(
+        lines,
+        manifest=manifest_data,
+        scene={},
+        cut={},
+        scopes=("manifest",),
+        indent="",
+    )
+    if lines[-1] != "":
+        lines.append("")
     for scene in manifest_scenes:
         if not isinstance(scene, dict) or is_non_renderable_manifest_node(scene):
             continue
@@ -312,6 +410,14 @@ def _prompt_text(manifest_scenes: list[dict], targets: list[str]) -> str:
         scene_summary = str(scene.get("scene_summary") or scene.get("story_visual") or "").strip()
         lines.append(f"### scene{scene_id}: {scene_summary or '(summary missing)'}")
         lines.append("")
+        _append_projection(
+            lines,
+            manifest=manifest_data,
+            scene=scene,
+            cut={},
+            scopes=("scene",),
+            indent="",
+        )
         for cut in _active_manifest_cuts(scene):
             cut_id = _normalized_id(cut.get("cut_id"))
             assert cut_id is not None
@@ -360,6 +466,13 @@ def _prompt_text(manifest_scenes: list[dict], targets: list[str]) -> str:
                     ]
                 )
             lines.extend(entry_lines)
+            _append_projection(
+                lines,
+                manifest=manifest_data,
+                scene=scene,
+                cut=cut,
+                scopes=("cut",),
+            )
         lines.append("")
     lines.extend(
         [
@@ -391,7 +504,8 @@ def main() -> None:
     if not manifest_path.exists():
         raise SystemExit(f"Manifest not found: {manifest_path}")
 
-    manifest_scenes = _load_scene_ids(manifest_path)
+    manifest_data = _load_manifest_data(manifest_path)
+    manifest_scenes = manifest_data["scenes"]
     available_story_scene_ids = {
         normalized
         for scene_id in story_scene_ids(manifest_scenes)
@@ -448,7 +562,7 @@ def main() -> None:
                 encoding="utf-8",
             )
     (scratch_dir / "authoring_prompt.md").write_text(
-        _prompt_text(manifest_scenes, full_run_scene_ids),
+        _prompt_text(manifest_data, full_run_scene_ids),
         encoding="utf-8",
     )
 

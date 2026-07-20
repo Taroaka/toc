@@ -8,6 +8,9 @@ scene 単体 run でも、p400 の cinematic scene contract → p600 `first_fram
 manifest_phase: "skeleton"
 video_metadata:
   topic: "<topic>"
+  # script_metadata.scene_time_of_day_contract の exact one-way projection。
+  scene_time_of_day_contract: "required_v1"
+  time: "<script_metadata.time>"  # story -> script からの一方向projection。scene の時間帯ではない
   source_run: "output/<topic>_<timestamp>/"
   source_scene_script: "output/<topic>_<timestamp>/scenes/sceneXX/script.md"
   created_at: "<ISO8601>"
@@ -60,9 +63,17 @@ narration_workflow:
     approved_by: ""
     note: ""
 
+promotion_requirements:
+  no_todo_or_tbd: true
+  all_cut_contracts_complete: true
+  all_image_prompts_approved: true
+  all_narration_text_finalized_or_silent: true
+  all_video_motion_designs_complete: true
+  all_video_api_prompt_payloads_materialized: true
+
 image_request_materialization:
   prompt_policy_version: "image_api_prompt_v2"
-  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  compiler_version: "conditional_drawable_prompt_compiler_v3"
   review_projection: "image_generation_requests.md"
   review_prompt_fence: "api_prompt"
   execution_snapshot: "image_generation_request_snapshot.json"
@@ -74,6 +85,40 @@ image_request_materialization:
   unique_destination_owner_per_snapshot: true
   reject_cross_revision_output: true
   legacy_v1_compatibility: "image_generation.prompt は read-only。v2 failure 時に暗黙 fallback しない"
+
+video_request_materialization:
+  # frontend/server・CLI・storyboardはいずれもmanifest payloadとreview artifactを先に保存する。
+  # materialize直後はpending。CLIは未承認itemを自動承認せず、provider実行時にexact per-item bindingを要求する。
+  # reveal / next-frame boundary の authoring key は location_segments[].beat_overrides.<function>.obligation_overrides.<obligation_id> だけで受け付ける。
+  # compiler v3 は reveal allowlist の最大8件・motion/end-stateへの接地・must_not_addとの非交差を検証する。
+  # separate negative_prompt には正のallowlist文・許可要素名を複写せず、allowed_reveal_info_idsもprovider proseへ出さない。
+  prompt_policy_version: "video_api_prompt_v1"
+  compiler_version: "conditional_video_prompt_compiler_v3"
+  projection_registry_version: "video_prompt_projection_registry_v3"
+  review_projection: "video_generation_requests.md"
+  review_prompt_fence: "video_prompt"
+  negative_prompt_fence: "negative_prompt"
+  approval_request_flag: "approve_for_generation"
+  per_item_approval_state: "review.video_prompt.item.<item_id>"
+  approval_identity_bindings: [request_section_sha256, prompt_sha256, source_digest]
+  approval_audit_metadata: [approved_by, approved_at]
+  provider_prompt_sources:
+    - "scenes[].cuts[].video_generation.api_prompt_payload.prompt"
+    - "scenes[].render_units[].video_generation.api_prompt_payload.prompt"
+  persist_payload_before_provider_call: true
+  bind_negative_prompt: true
+  bind_provider_execution_options: true
+  bind_materialized_reference_content_sha256: true
+  bind_ordered_reference_roles: true
+  reject_blocking_quality_issues: true
+  reject_unmaterialized: true
+  reject_prompt_hash_drift: true
+  reject_source_digest_drift: true
+  reject_setting_or_reference_drift: true
+  reject_pending_or_stale_per_item_approval: true
+  cli_auto_approval: false
+  reject_reserved_provider_extra_overrides: true
+  legacy_compatibility: "prompt_authoring_source / motion_prompt は fallback / read-only projection。compiled payload がある場合の送信正本にしない"
 
 assets:
   character_bible:
@@ -93,11 +138,11 @@ assets:
       - "アニメ/漫画/イラスト調"
   object_bible: []
   location_bible:
-    - location_id: "village_at_dawn"
+    - location_id: "village"
       reference_images: []
       reference_variants: []
       fixed_prompts:
-        - "夜明けの木造家屋、湿った土の道、低い朝霧"
+        - "木造家屋と湿った土の道の固定配置"
 
 human_change_requests: []
 
@@ -127,6 +172,28 @@ canonical_event_coverage_matrix:
 
 scenes:
   - scene_id: 1
+    # source scene script から一方向 projection する open string。新規 artifact では非空必須。
+    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
+    # 同一 scene の cut image にだけ適用し、reusable asset へは時間帯 variant を明示した場合を除いて付与しない。
+    time_of_day: "夜明け"
+    # source scene scriptからのexact projection。各cutはprimary event beatと同じ一場所だけを使う。
+    location_mode: "single|sequence"
+    location_sequence: ["森の入口"]
+    location_segments:
+      - location: "森の入口"
+        responsibility: "この場所で成立させる出来事"
+        primary_subject: "主被写体の人物名"
+        visible_action: "一枚で読める具体的状態"
+        visible_reaction: "別主体の具体的反応"
+        required_visual_evidence: ["具体物"]
+        required_roles: ["protagonist"]
+        motion_brief: "一つの観察可能な動作"
+        motion_end_state: "物理的終了状態"
+        primary_subject_by_function: {}
+        beat_overrides: {}
+        # reveal / boundary の3 keyを使う場合は beat_overrides.<function>.obligation_overrides.<obligation_id> の
+        # exact entry に allowed_new_reveal_elements / allowed_reveal_info_ids /
+        # use_next_cut_first_frame_as_last_frame を置く。segment / function rootには置かない。
     timestamp: "00:00-00:30"
     importance: "medium"
     target_duration_seconds: 30
@@ -313,6 +380,7 @@ scenes:
             source_required_visual_evidence: []
             event_facts_to_preserve: []
             event_facts_not_to_invent: []
+            # exact obligation overrideから解決したreview用projection。IDはprovider proseへ出さない。
             allowed_reveal_info_ids: []
             forbidden_reveal_info_ids: []
           cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
@@ -378,6 +446,8 @@ scenes:
               anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
               visible_or_audible_form: ""
               expected_next_cut_selector: ""
+              # upstream exact obligation の boundary flag を解決したread-only projection。
+              binds_video_last_frame_to_next_first_frame: false
           first_frame_contract:
             imageable: true
             source_event_beat_id: "scene1_event_setup"
@@ -407,6 +477,8 @@ scenes:
             start_from_visible_state: ""
             end_state: "次 cut へ渡す最後の状態"
             end_frame_brief: ""
+            # exact obligation overrideから解決する。非空時は最大8件で、各要素をmotion_briefまたはend_stateへ明示する。
+            allowed_new_reveal_elements: []
             must_not_add: []
           narration_contract:
             schema_version: "narration_contract_v2"
@@ -484,14 +556,20 @@ scenes:
               source_projection: "first_frame_visual_plan_v1"
               compiler_flow: "first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload"
               prompt_policy_version: "image_api_prompt_v2"
-              compiler_version: "conditional_drawable_prompt_compiler_v1"
+              compiler_version: "conditional_drawable_prompt_compiler_v3"
               drawable_prompt_ir_schema_version: "drawable_prompt_ir_v1"
-              always_required_groups: ["style", "current_moment", "primary_subject", "composition", "constraints"]
+              prompt_projection_registry_version: "prompt_projection_registry_v2"
+              # 新しい設計keyは required|conditional|none をregistryへ登録し、review観点とtestを同時追加する。
+              always_required_groups: ["style", "current_moment", "constraints"]
               conditional_groups:
+                story_time: "video_metadata.time が非空の場合だけ。衣装・髪型・建築・生活道具・素材・技術水準の時代整合を要求する"
+                time_of_day: "scene.time_of_day が非空の場合だけ。空の明るさ・自然光/人工光・影・色温度の時間帯整合を要求する"
                 references: "resolved references が1件以上ある場合だけ"
+                primary_subject: "subject_binding.primary_subject.name|label に描画可能な値がある場合だけ"
                 characters: "asset_dependency.character_ids_required が1件以上ある場合だけ"
                 objects: "asset_dependency.object_ids_required が1件以上ある場合だけ"
                 location: "asset_dependency.location_ids_required が1件以上ある場合だけ"
+                composition: "subject priority、shot size、camera angle/height のいずれかに描画可能な値がある場合だけ"
                 light_material: "明示された非定型の描画値がある場合だけ"
                 current_state_delta: "sequential progression の明示された描画値がある場合だけ"
               prompt_requirements: []
@@ -507,10 +585,13 @@ scenes:
               role: "setup|fact|emotion|contrast|aftertaste|silent"
               must_not_caption_visible_content: true
             p800_video:
+              prompt_projection_registry_version: "video_prompt_projection_registry_v3"
+              compiler_version: "conditional_video_prompt_compiler_v3"
               motion_requirements: []
               start_state: ""
               last_frame_or_end_state: ""
               must_not_add: []
+              blocking_quality_issue_codes: ["video_motion_generated_fallback", "video_motion_unresolved_alternative", "video_motion_abstract_primary", "video_motion_abstract_end_state", "video_motion_duplicate_environment", "video_motion_duplicate_emotion"]
             carries_to_next_cut: []
             carries_to_next_scene: []
           event_context_for_cut:
@@ -556,7 +637,7 @@ scenes:
           character_variant_ids: []
           object_ids: []
           object_variant_ids: []
-          location_ids: ["village_at_dawn"]
+          location_ids: ["village"]
           location_variant_ids: []
           references: []
           applied_request_ids: []
@@ -600,16 +681,22 @@ scenes:
               foreground: "霧に濡れた土の道"
               midground: "立ち止まる主人公"
               background: "木造家屋と遠い山の輪郭"
+              subject_priority_order: ["道の先を見つめる主人公"]
+            scene_material_pack:
+              # scenes[].time_of_day からの read-only projection。ここを独立 authoring しない。
+              time_of_day: "夜明け"
             prompt_rendering_policy:
               render_only_drawable_information: true
               do_not_render_design_meta: true
               do_not_render_future_motion_as_action: true
           api_prompt_payload:
             policy_version: "image_api_prompt_v2"
-            compiler_version: "conditional_drawable_prompt_compiler_v1"
+            compiler_version: "conditional_drawable_prompt_compiler_v3"
             prompt: |-
               [全体 / 不変条件]
               実写映画調、自然な映画照明、実物セットとして見える質感。
+              物語の時代背景は<script_metadata.time>。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。
+              このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。
 
               [シーン]
               画面には、主人公はまだ歩き出していない。
@@ -635,12 +722,18 @@ scenes:
               dependencies:
                 character_ids: ["protagonist"]
                 object_ids: []
-                location_ids: ["village_at_dawn"]
+                location_ids: ["village"]
                 references: []
-                required_groups: ["style", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
+                story_time: "<script_metadata.time>"
+                time_of_day: "夜明け"
+                required_groups: ["style", "story_time", "time_of_day", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
               included_fragments:
                 - group: "style"
                   text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+                - group: "story_time"
+                  text: "物語の時代背景は<script_metadata.time>。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。"
+                - group: "time_of_day"
+                  text: "このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。"
                 - group: "current_moment"
                   text: "画面には、主人公はまだ歩き出していない。"
                 - group: "primary_subject"
@@ -666,19 +759,93 @@ scenes:
         video_generation:
           tool: "kling_3_0"
           duration_seconds: 10
+          quality: "1080p"
+          aspect_ratio: "9:16"
           input_image: "assets/scenes/scene1_cut1_base.png"
+          first_frame: "assets/scenes/scene1_cut1_base.png"
+          # boundary projection がtrueの場合だけ、同一locationの次cutで承認済みのfirst-frame imageへexact bindingする。
+          last_frame: ""
           input_asset_id: "scene1_cut1_base"
           first_frame_asset_id: ""
           last_frame_asset_id: ""
+          references: []
           reference_asset_ids: []
-          motion_prompt: |
-            cut_function: <cut_contract.cut_function>
-            camera: TODO
-            subject_motion: TODO
-            environment_motion: TODO
-            emotional_change: TODO
-            end_state: TODO
-            avoid: 新キャラ追加、重要道具の追加、reveal早出し、画面内テキスト、過剰なズーム。
+          direction_notes: []
+          continuity_notes: []
+          applied_request_ids: []
+          # UI / legacy自由文のfallback。canonical cut_contract が同groupの値を持つ場合はそちらを優先する。
+          prompt_authoring_source: "主人公が道の先へ視線を定め、重心をわずかに移す。"
+          # 新規artifactでは api_prompt_payload.prompt のread-only compatibility projection。
+          motion_prompt: "<exact api_prompt_payload.prompt>"
+          # provider送信の唯一の正本。手入力せずcompile_video_api_prompt_v1でmaterializeする。
+          api_prompt_payload:
+            policy_version: "video_api_prompt_v1"
+            compiler_version: "conditional_video_prompt_compiler_v3"
+            projection_registry_version: "video_prompt_projection_registry_v3"
+            provider: "kling_3_0"
+            mode: "image_to_video"
+            provider_policy:
+              one_clip_one_intent: true
+              max_camera_instructions: 2
+              single_continuous_shot: true
+              first_last_frame_boundary: false
+            # prompt文字列だけでなく、providerへ渡す設定・frame・参照bytes・modelもcompiler identityへ束縛する。
+            provider_request_binding:
+              duration_seconds: 10
+              quality: "1080p"
+              aspect_ratio: "9:16"
+              first_frame: "assets/scenes/scene1_cut1_base.png"
+              last_frame: ""  # video_generation.last_frameと同じexact bound value
+              references: []
+              reference_roles: []
+              execution_options:
+                backend: "kling"
+                model: "kling-3.0"
+                extra_payload: {}
+                reference_content_sha256:
+                  assets/scenes/scene1_cut1_base.png: "<sha256-of-reference-bytes>"
+            prompt: "<8 groupsから生成したexact provider-facing motion prompt>"
+            # separate modeでは、positive promptの「新しく現れてよいもの」と許可要素名をここへ含めない。
+            negative_prompt: "<compiled high-risk constraints>"
+            source_digest: "<sha256-of-normalized-video-compilation-source>"
+            sha256: "<sha256-of-exact-provider-prompt>"
+            quality_issues: []  # blocking issueがあればapproval/provider実行へ進めない
+            included_fragments:
+              - group: "start_state"
+                text: "<approved first-frame visible state>"
+              - group: "primary_motion"
+                text: "<one visible motion intent>"
+              - group: "continuity"
+                text: "<人物・空間・時代・時間帯の維持条件>"
+              - group: "constraints"
+                text: "<新規人物・重要物・reveal・別shot化の禁止>"
+            omitted_groups: ["camera_motion", "environment_motion", "emotional_change", "end_state"]
+            projection_review_contract:
+              registry_version: "video_prompt_projection_registry_v3"
+              group_order: ["start_state", "primary_motion", "camera_motion", "environment_motion", "emotional_change", "end_state", "continuity", "constraints"]
+              groups: {}
+              active_rules: []
+              inactive_rules: []
+              excluded: []
+              review_only_sources: []  # exact source_key/valueをdigest/reviewerに保持し、provider proseへ出さない
+              shadowed_sources: []
+              provider: "kling_3_0"
+              mode: "image_to_video"
+            video_prompt_ir:
+              schema_version: "video_prompt_ir_v2"
+              provider: "kling_3_0"
+              mode: "image_to_video"
+              dependencies:
+                story_time: "<script_metadata.time>"
+                time_of_day: "夜明け"
+                has_first_frame: true
+                has_last_frame: false
+                duration_seconds: 10
+                reference_roles: []
+                required_groups: ["start_state", "primary_motion", "continuity", "constraints"]
+              included_fragments: []
+              omitted_groups: ["camera_motion", "environment_motion", "emotional_change", "end_state"]
+              quality_issues: []
           output: "assets/scenes/scene1_cut1_video.mp4"
         audio:
           narration:
@@ -727,6 +894,53 @@ scenes:
               human_review_reason: ""
             output: "assets/audio/scene1_cut1_narration.mp3"
             normalize_to_scene_duration: false
+
+    # Optional render-unit schema（この1-cut例では未使用）。有効化したsceneでは最終video clipの正本になる。
+    # active cutをcanonical順でexactly once被覆し、unit durationはsource cut duration合計にする。
+    # 複数cutではcompilerが先頭first-frame境界、末尾end-state、全cutのcontinuity/prohibitionを合成する。
+    # 個別cut actionは連結せず、unit全体を代表する一つのprimary motionをunit-level contract/sourceへ書く。
+    # source cutのallowed_new_reveal_elementsは自動合成しない。unit-levelの明示的なreveal authorizationがなければ拒否する。
+    # render_units:
+    #   - unit_id: 1
+    #     source_cut_ids: [1, 2]
+    #     cut_contract:  # optional explicit override; derived effective contractが不足groupを補完
+    #       motion_contract:
+    #         motion_brief: "<unit全体を代表する一つの主動作>"
+    #     # Seedance storyboard reference modeを使う場合だけ宣言する。
+    #     # first_frame/last_frameとは併用せず、required_referencesとreference_rolesの順序をapproval後も固定する。
+    #     # video_input_contract:
+    #     #   schema_version: "render_unit_video_input_v1"
+    #     #   input_mode: "reference_images"
+    #     #   required_references: ["<first source full-frame>", "<storyboard>"]
+    #     #   reference_roles:
+    #     #     - {image_index: 1, role: "start_state_visual_anchor"}
+    #     #     - {image_index: 2, role: "ordered_storyboard_sequence_guide"}
+    #     video_generation:
+    #       tool: "kling_3_0"
+    #       duration_seconds: "<cut1 + cut2 duration; max 60>"
+    #       first_frame: "<first source cut start frame>"
+    #       last_frame: "<optional unit arrival frame>"
+    #       references: []
+    #       prompt_authoring_source: "<unit-level fallback>"
+    #       api_prompt_payload:
+    #         provider_request_binding:
+    #           duration_seconds: "<cut1 + cut2 duration>"
+    #           quality: "1080p"
+    #           aspect_ratio: "9:16"
+    #           first_frame: "<first source cut start frame>"
+    #           last_frame: "<optional unit arrival frame>"
+    #           references: []
+    #           reference_roles: []  # reference modeではsibling video_input_contractの同値をcompilerが保存する
+    #           execution_options:
+    #             backend: "kling"
+    #             model: "kling-3.0"
+    #             extra_payload: {}
+    #             reference_content_sha256: {}
+    #         prompt: "<exact compiled unit prompt>"
+    #         negative_prompt: "<exact compiled unit negative prompt>"
+    #         source_digest: "<ordered source_cut_ids/source contractsを含む>"
+    #         sha256: "<sha256-of-exact-prompt>"
+    #       output: "assets/scenes/scene1_unit1_video.mp4"
 
 final_output:
   video_file: "video.mp4"

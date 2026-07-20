@@ -139,6 +139,7 @@ stages:
   video_generation:
     required_docs:
       - docs/video-generation.md
+      - docs/implementation/video-prompting.md
     required_templates:
       - workflow/video-manifest-template.md
     required_inputs:

@@ -1,372 +1,296 @@
-# Kling 3.0 Prompt Guide
+# Kling 3.0 Video Prompt Policy
 
-このドキュメントは、ToC で `kling_3_0` / `kling_3_0_omni` を使うときの**動画用 prompt の正本**です。  
-汎用原則は `docs/video-generation.md` を参照し、Kling 固有の書き方は本書を優先します。
+ToC で `kling_3_0` / `kling_3_0_omni` を使うときの provider 固有 policy を定義する。動画 prompt の projection / compiler 正本は [`docs/implementation/video-prompting.md`](../../../docs/implementation/video-prompting.md)、動画生成全体は [`docs/video-generation.md`](../../../docs/video-generation.md) を参照する。
+
+本書は canonical story / scene / cut design を置き換えない。Kling に渡す prompt を手書きで別正本化せず、canonical design を共通 compiler へ通した結果に Kling policy を適用する。
 
 ## 適用範囲
 
 - `video_generation.tool: "kling_3_0"`
 - `video_generation.tool: "kling_3_0_omni"`
-- `video_manifest.md` の
-  - `scenes[].video_generation.prompt`
-  - `scenes[].video_generation.motion_prompt`
-  - Kling 向けの negative / continuity 制約
+- `cut_contract.first_frame_contract`
+- `cut_contract.motion_contract`
+- `cut_contract.continuity_contract`
+- `video_generation.prompt_authoring_source`（frontend / legacy fallback）
+- `video_generation.api_prompt_payload.prompt`（exact provider-facing motion text）
+- first / last frame、Kling 向け continuity / constraints
+
+`video_generation.prompt` を新しい正本 field として作らない。legacy `motion_prompt` は読み込み互換として扱えるが、materialized payload がある場合の送信正本は `api_prompt_payload.prompt` である。
+
+現在の ToC Kling adapter は first / last frame だけを画像入力として送る。Kling 3.0 Omni 製品自体の Elements / multi-image 機能と、未実装の local `references[]` 転送を同一視しない。Kling target の auxiliary `references[]` と対応する `video_input_contract.reference_roles[]` は approval / provider 実行前に拒否し、ordered reference role binding が必要なら Seedance を選ぶ。
 
 ## ToC での位置づけ
 
-- `docs/video-generation.md`
-  - 動画生成全般の原則
+- [`docs/video-generation.md`](../../../docs/video-generation.md)
+  - 動画生成全般の stage / quality 原則
+- [`docs/implementation/video-prompting.md`](../../../docs/implementation/video-prompting.md)
+  - registry、compiler、IR、hash、materialization / stale gate
 - 本書
-  - Kling 3.0 向けの prompt 設計
+  - Kling 固有の 1 clip 1 intent、camera、連続 shot、boundary policy
 - `docs/vendor/kling/`
   - API / integration / billing の補助情報
 
-## 参照ルール
+`video_generation.tool` が Kling 系なら、authoring / review agent は汎用正本に加えて本書を読む。Kling 以外の provider へ本書の上限値を無条件適用しない。
 
-- 汎用動画ガイドだけで済ませない
-- `video_generation.tool` が Kling 系なら、prompt を書く agent は `docs/video-generation.md` に加えて**必ず本書を参照**する
-- `seedance` など Kling 以外では、本書を既定参照先にしない
-
-## Tanaka 記事から正式採用した運用ルール
-
-この章は、[tanaka 記事](https://note.com/noz_tanaka/n/n553795d4619a) から ToC の Kling 運用ルールとして**正式採用**したものを固定化する。
-
-- **start frame と cut 1 を同期させる**
-  - `first_frame` と最初の shot の意図・構図・被写体状態を一致させる
-- **cut ごとに prompt を分ける**
-  - 1 本の長文 prompt に全展開を詰め込まない
-- **selection loop を前提にする**
-  - 単発確定ではなく、複数生成して良い cut を採る
-- **shot card を先に切る**
-  - `タイトル / サブジェクト / カメラ / アクション / ボイス` を先に決める
-- **API 運用では 1シーン3秒程度を基本単位にする**
-  - 長い 1 scene を無理に抱え込まず、短い shot の列として組む
-
-## 記事群から正式採用した recurring prompt 術
-
-- **reference 起点で始める**
-  - pure text から始めるより、reference image / element / subject を先に決める
-- **不変条件を毎回 lock する**
-  - 顔、髪、服、持ち物、役割、環境 anchor を毎 shot で繰り返し固定する
-- **カメラは安定寄り**
-  - motion 自体が主題でない限り、カメラを暴れさせない
-- **見た目と motion を分離する**
-  - appearance は reference / subject 側
-  - motion は motion control / video reference / action prompt 側で扱う
-- **lip sync は読みを崩してでも制御する**
-  - 音声品質を優先し、難読漢字はかな表記へ寄せる
-- **speech-heavy では読みをかなに寄せる**
-  - lip sync や音声生成は、自然な漢字表記より読みの安定を優先する
-
-## Kling 向け基本方針
-
-### 1. 1クリップ1意図に絞る
-
-- 1クリップの中心動作は 1 つにする
-- 「人物が振り向く + 爆発 + 群衆が走る + カメラが急上昇」のような多目的 prompt は避ける
-- API 運用では **1シーン3秒程度** を基本単位にし、主動作は `1つの感情変化` か `1つの空間アクション` に寄せる
-
-### 2. 被写体固定と動き指定を分離する
-
-- prompt 本文では「誰が / どこで / どう見えるか」を固定する
-- `motion_prompt` では「何が / どう動くか」を別で書く
-- 同じ情報を両方に重複させすぎない
-- speech-heavy な shot では、読みの難しい固有名詞や漢字表現をそのまま音声へ渡さず、かな表記を別で管理する
-
-### 3. 強い continuity anchor を先に置く
-
-- 同一人物の顔、服、髪型
-- 同一の小道具、乗り物、舞台装置
-- 進行方向、視点、カメラ高さ
-- 光源方向、時間帯、天候
-- 役割や人物関係
-
-Kling は絵作りの雰囲気は拾いやすい一方、anchor が弱いと shot 間で漂流しやすい。  
-scene/cut をまたぐ要素は、毎回同じ語で固定する。
-
-### 4. カメラは「見える変化」に合わせる
-
-- カメラ指示は 1 つか 2 つまで
-- 被写体の感情変化が主役なら、複雑なカメラ演出を足しすぎない
-- 空間体験が主役なら、被写体の細かな演技を詰め込みすぎない
-
-## 推奨 prompt 構造
-
-### shot card の基本要素
-
-Kling では、`prompt` と `motion_prompt` だけでなく、shot ごとの設計メモとして次の 5 要素を持つ。
-
-- `タイトル`
-- `サブジェクト`
-- `カメラ`
-- `アクション`
-- `ボイス`
-
-`video_manifest.md` に field を増やせない場合でも、少なくとも設計段階ではこの 5 要素で分解してから
-`video_generation.prompt` と `video_generation.motion_prompt` に落とし込む。
-
-対応関係:
-
-- `タイトル`
-  - shot の狙いを一行で要約する
-- `サブジェクト`
-  - `video_generation.prompt` の被写体 / 場所 / 見た目へ入る
-- `カメラ`
-  - `video_generation.motion_prompt` のカメラ動作へ入る
-- `アクション`
-  - `video_generation.motion_prompt` の主動作へ入る
-- `ボイス`
-  - セリフ、環境音、BGM、読みの注意点として別管理し、必要なら `notes` や音声設計へ渡す
-
-### shot card の必須化
-
-ToC では、Kling 系 scene を書くときは、少なくとも設計段階では shot card を省略しない。
-
-- `タイトル` がない shot は、狙いが曖昧な可能性が高い
-- `サブジェクト` が弱い shot は、見た目 anchor が不足しやすい
-- `カメラ` がない shot は、motion_prompt が抽象化しやすい
-- `アクション` が多すぎる shot は、3秒単位の設計を崩しやすい
-- `ボイス` が未整理の shot は、後段の narration / lip sync / ambient 設計で破綻しやすい
-
-### `video_generation.prompt` / `motion_prompt`
-
-`video_generation.prompt`:
+## Canonical Design と Provider Prompt の境界
 
 ```text
-[被写体 / 主題]
-[場所 / 時間 / 天候]
-[画作り / 質感 / 光]
-[固定したい見た目]
-[このショットで見せたい状態]
+cut_contract + first/last frame + continuity + settings
+  -> video_prompt_projection_registry_v3
+  -> compile_video_api_prompt_v1
+  -> video_api_prompt_v1
+  -> Kling API
 ```
 
-`video_generation.motion_prompt`:
+- `cut_function`、`target_beat`、event / reveal ID は設計・review 用で、Kling prompt 本文へ出さない
+- image prompt と narration / TTS prose を motion 指示として複製しない
+- daypart basis、scene route / segments、cut responsibility、event / reveal 境界、reference path の exact value は `review_only_sources` と `source_digest` に残すが、Kling prompt 本文へ出さない
+- `prompt_authoring_source` は自由入力の候補であり、canonical `motion_contract` と競合するときは canonical 値を優先する
+- provider へ渡す prompt を直したい場合は upstream design を直し、再 compile / 再 materialize する
+
+## Kling の必須 Policy
+
+### 1 clip 1 intent
+
+- 1 clip の中心動作は一つにする
+- 主動作は `1つの感情変化` または `1つの空間アクション` に寄せる
+- 「振り向く、走る、爆発する、群衆が現れる」のような event 列を一つの clip に詰めない
+- `その後` / `続いて` / `次に` で第二の大動作が必要なら cut を分ける
+
+3秒前後の shot は authoring 時の分割目安であり、実際に送る duration は target の materialized `duration_seconds` を正とする。duration を伸ばすために intent を追加しない。
+
+### Camera は最大2指示
+
+- camera 指示は 1 つ、必要でも互換性のある 2 つまで
+- 例: `胸の高さを保つ + 緩やかに寄る`
+- 主動作が感情変化なら camera を安定させる
+- 空間移動が主動作なら細かな人物演技を重ねすぎない
+- 急旋回、複数方向への連続 pan / tilt / crane、視点 jump を避ける
+
+### Single continuous shot
+
+- clip 内で fade、暗転、dissolve、montage、別 shot への切替を行わない
+- camera transition を編集点の代わりに使わない
+- prompt が複数 shot を必要とするなら canonical cut / render unit を分ける
+
+### First / last boundary
+
+- first frame は departure boundary
+  - 人物、構図、物の位置、光を開始状態として保つ
+  - 参照にない人物、重要物、建築、reveal を追加しない
+- last frame は arrival boundary
+  - 一つの自然な運動で到達する
+  - last frame を別 shot として挿入しない
+  - fade / cut で到達を偽装しない
+
+`beat_overrides.<function>.obligation_overrides.<obligation_id>.use_next_cut_first_frame_as_last_frame: true` を使う場合、次 cut が存在し、同じ location にあり、current `motion_end_state` と許可済み reveal が next first-frame contract と一致していなければならない。next image は approved/current であることを検証し、materializer はその path と bytes hash を current Kling request の exact `last_frame` binding に含める。境界 flag だけで新しい reveal を許可してはならない。
+
+## Canonical Motion Authoring
+
+Kling 用 shot card の `タイトル / サブジェクト / カメラ / アクション / ボイス` は、次の canonical 契約へ落とす。
+
+| shot card | canonical target | provider への扱い |
+|---|---|---|
+| タイトル | `viewer_contract` / review note | review-only。本文へ出さない |
+| サブジェクト | first / last frame / visible start state | 開始状態と continuity へ必要分だけ投影。auxiliary reference は現在の adapter では禁止 |
+| カメラ | `motion_contract.camera_motion` | `camera_motion` group。最大2指示 |
+| アクション | `motion_contract.motion_brief` | `primary_motion` group。一つだけ |
+| ボイス | narration / audio contract | motion prompt へ複製しない |
+
+推奨 canonical 例:
+
+```yaml
+cut_contract:
+  first_frame_contract:
+    first_frame_brief: "侍が雨上がりの石畳で、まだ振り向く前に息を整えている"
+    visible_start_state:
+      character_state: "短い黒髪、紺の外套、左頬の細い傷"
+      prop_state: "刀は同じ鞘に収まっている"
+      spatial_state: "侍は路地の奥へ背を向けて立つ"
+  motion_contract:
+    motion_brief: "侍が息を整え、ゆっくり一度だけ振り向く"
+    camera_motion: "胸の高さを保って緩やかに寄る"
+    environment_motion: "軒先から雨粒が落ち、薄い霧だけが流れる"
+    emotional_change: "警戒から決意へ視線が定まる"
+    end_state: "侍の横顔と視線が路地の奥へ定まる"
+    must_not_add: ["新しい人物", "抜刀", "別の場所"]
+  continuity_contract:
+    carry_forward_to_next_cut:
+      - "顔、傷、髪、紺の外套を変えない"
+      - "刀の鞘と路地の奥行きを変えない"
+      - "雨上がりの反射と光源方向を変えない"
+
+video_generation:
+  tool: "kling_3_0"
+  first_frame: "assets/scenes/example_start.png"
+  last_frame: ""
+  duration_seconds: 5
+  prompt_authoring_source: "侍が一度だけ振り向く。胸の高さから緩やかに寄り、雨上がりの路地を保つ。"
+```
+
+`prompt_authoring_source` は自然文の fallback とする。`cut_function:`、`target_beat:`、`source_event_beat_id:` のような internal label を入れた自由文を provider prompt の原稿として扱わない。
+
+## Compiled Provider Prompt
+
+compiler は active な 8 groups だけを固定順で自然文化する。次は出力イメージであり、実行時の exact string は materialized `api_prompt_payload.prompt` を読む。
 
 ```text
+[開始状態]
+入力画像に写る人物、構図、物の位置、光を開始状態として保つ
+侍が雨上がりの石畳で、まだ振り向く前に息を整えている
+
 [主動作]
-[カメラ動作]
-[速度 / リズム]
-[連続性制約]
+侍が息を整え、ゆっくり一度だけ振り向く。
+
+[カメラ]
+胸の高さを保って緩やかに寄る。
+
+[環境の動き]
+軒先から雨粒が落ち、薄い霧だけが流れる。
+
+[感情の変化]
+警戒から決意へ視線が定まる。
+
+[終了状態]
+侍の横顔と視線が路地の奥へ定まる
+
+[維持条件]
+顔、傷、髪、紺の外套を変えない
+刀の鞘と路地の奥行きを変えない
+雨上がりの反射と光源方向を変えない
+
+[禁止]
+追加しないものは、新しい人物、抜刀、別の場所
+主動作は一つに絞り、単一の連続ショットとして見せる。急なcamera回転や視点ジャンプを行わず、別ショットへ切り替えない
 ```
 
-### shot card から prompt へ落とす例
+provider prompt 例に raw key / ID / path / hash / narration / image prompt を混ぜない。実 path、hash、projection trace は payload metadata に残す。
 
-```text
-タイトル:
-雨上がりの決意
+compiler v3 が返す `quality_issues[]` は syntax warning ではなく blocking review input である。`video_motion_generated_fallback`、`video_motion_unresolved_alternative`、`video_motion_abstract_primary`、`video_motion_abstract_end_state`、`video_motion_duplicate_environment`、`video_motion_duplicate_emotion` が一件でもあれば、Kling 実行へ進めず canonical motion field を具体化して再 compile する。
 
-サブジェクト:
-短い黒髪で紺の外套を着た若い侍。雨上がりの石畳の路地。夜明け前の青灰色の空気。左頬の細い傷。同じ刀の鞘。
+## Temporal Continuity
 
-カメラ:
-胸の高さから緩やかに寄る。回転なし。
+- `video_metadata.time` は歴史的時代を変えないための continuity
+- `scene.time_of_day` は空の明るさ、自然光 / 人工光、影、色温度を変えないための continuity
+- どちらも clip 内で再描画するイベントではない
+- `夜明け` だからといって日の出の time-lapse を足さない
+- 歴史的時代から衣装替え、建築変化、技術変化を足さない
 
-アクション:
-侍が息を整えた後、ゆっくり振り向く。
+時間の変化そのものが story event なら、metadata の上書きではなく canonical motion / end state として設計する。
 
-ボイス:
-無言。雨音のみ。BGMなし。
-```
+## Appearance / Motion / Voice の分離
 
-```text
-video_generation.prompt:
-実写、シネマティック。短い黒髪で紺の外套を着た若い侍が、雨上がりの石畳の路地に立つ。夜明け前の青灰色の空気、濡れた地面の反射、左頬の細い傷、同じ刀の鞘、静かな緊張感。
+- appearance
+  - first frame
+  - character / object / location reference
+  - asset bible
+- motion
+  - `motion_contract` と必要な video reference
+- voice
+  - narration / dialogue / lip-sync contract
 
-video_generation.motion_prompt:
-侍が息を整えた後、ゆっくり振り向く。カメラは胸の高さから滑らかに寄る。回転なし。顔、傷、衣装、鞘の位置を維持し、背景の路地の奥行きと雨上がりの反射を保つ。
-```
+同じ人物や舞台を pure text だけで再現しようとせず、reference-first を基本にする。speech-heavy shot の読みは audio contract 側で管理し、難読漢字や固有名詞は必要に応じてかなへ寄せる。音声文字列を video motion prompt へ貼り付けない。
 
-## 書き方の実務ルール
+## Negative / Constraints
 
-### `video_generation.prompt`
+禁止事項は高リスクなものに絞る。
 
-入れる:
+- 開始画像にない人物、重要物、建築、reveal
+- 顔崩れ、手指崩れ、不自然な四肢
+- 画面内テキスト、字幕、ロゴ、ウォーターマーク
+- 急な camera 回転、視点 jump
+- fade、暗転、dissolve、別 shot 化
 
-- 主役被写体
-- 場所と時間帯
-- 実写感、質感、照明
-- 顔や衣装などの固定条件
-- 持ち物、役割、環境 anchor
-- その瞬間の感情または状態
+禁止文を増やして intent がぼやける場合は、prompt を長くする前に shot の責務を切り直す。
 
-入れすぎない:
+開始画像にない要素を主動作で出す必要がある場合だけ、exact obligation entry に次を置く。
 
-- 長い因果説明
-- 1クリップ内での過剰な展開
-- 編集指示（カット、フェード、モンタージュ）
+- `allowed_new_reveal_elements[]`: 最大8件の具体的な画面要素。すべて `motion_brief` または `motion_end_state` に現れ、`must_not_add` と交差しないこと
+- `allowed_reveal_info_ids[]`: canonical reveal inventory に存在する、この cut だけの内部情報 ID。Kling prompt には出さないこと
 
-良い方向:
+compiler は positive `constraints` に許可要素を列挙し、その要素以外の追加を禁止する。Kling の separate `negative_prompt` には正の allowlist 文と許可要素名を複写せず、「承認済み要素以外」の禁止だけを残す。positive allowlist と negative prohibition の両方に同じ要素名が入る request は矛盾として拒否する。
 
-- 「濡れた石畳の路地、夜明け前、冷たい青灰色の空気」
-- 「同じ紺の外套、短い黒髪、頬の傷、金の装飾が入った鞘」
+## Materialization / Execution
 
-避ける方向:
+frontend、CLI、scene storyboard の全経路で、provider call の前に `compile_video_api_prompt_v1` の結果を target の `video_generation.api_prompt_payload` へ保存する。
 
-- 「すごく映画的で美しくて感動的」
-- 「最初はAして、そのあとBして、最後にCとDが起きる」
+保存対象:
 
-### `video_generation.motion_prompt`
+- `policy_version: video_api_prompt_v1`
+- `compiler_version: conditional_video_prompt_compiler_v3`
+- `projection_registry_version: video_prompt_projection_registry_v3`
+- exact `prompt` / `negative_prompt`
+- `source_digest` / prompt `sha256`
+- `video_prompt_ir`（`video_prompt_ir_v2`）/ `projection_review_contract`（exact `review_only_sources[].value` を含む）
+- `quality_issues[]`（Kling 実行可能 target は空配列）
+- tool / duration / quality / aspect ratio / first / last（`references` は空であること）
 
-入れる:
-
-- 被写体の主動作
-- カメラ 1 種類
-- 動きの速度
-- 何を維持したいか
-- 3秒前後の shot で完結する変化
-
-例:
-
-- `主人公がゆっくり振り向く。カメラは肩越しの高さを維持したまま緩やかに寄る。顔立ちと衣装を崩さず、背景の路地の奥行きを保つ。`
-- `ボートが前進する。カメラは一人称の高さで安定し、水平線を保つ。揺れは微小、進行方向はぶらさない。`
-
-避ける:
-
-- カメラの連続切替
-- 急激な回転
-- 被写体、背景、光源が同時に大きく変わる指定
+`video_generation_requests.md` は同じ exact prompt と metadata を見せる review projection である。生成 API は materialized payload を provider request に使い、current design の再 compile 結果と prompt hash / source digest / settings を照合する。未 materialize、obsolete version、hash mismatch、design / setting / reference drift は再 materialize まで拒否する。
 
 ## Selection Loop
 
-Kling は「一発で決める」より、「複数候補から良い cut を選ぶ」方が安定する。
+Kling は単発確定ではなく、同じ materialized request から複数候補を生成して選ぶ。
 
-- 同一 shot を複数回生成する
-- 比較観点を先に決める
-  - 顔の一貫性
-  - 構図の安定
-  - 主動作の自然さ
-  - 光や空間の continuity
-  - ボイス / 音の破綻有無
-- 修正は無限に継ぎ足さず、必要なら
-  - shot を切り直す
-  - start frame を更新する
-  - shot card を再定義する
+比較観点:
 
-「prompt をさらに長くする」より、「shot の責務を切り直す」方を優先する。
+- 顔、衣装、小道具の continuity
+- first frame からの自然な開始
+- 主動作が一つに読めるか
+- camera が主動作を邪魔していないか
+- end state / last frame への到達
+- 光、時間帯、空間方向の continuity
+- 別 shot 化、fade、視点 jump の有無
 
-## Text-to-Video と Image-to-Video の違い
+候補が揃わない場合は prompt の禁止文を無限に継ぎ足さず、canonical motion、start frame、last boundary、shot 分割を見直して再 materialize する。
+
+## Text-to-Video / Image-to-Video
 
 ### Text-to-Video
 
-向いているケース:
+向いている用途:
 
 - 導入の establishing shot
-- 単発の情景カット
-- 参照画像がまだない探索段階
+- 単発の情景 cut
+- reference がまだない探索
 
-コツ:
-
-- 空間、光、主動作を短くまとめる
-- 同一キャラ再現が必要なら、参照なし T2V を多用しない
+同一人物の再現が必要な本番 cut で参照なし T2V を多用しない。
 
 ### Image-to-Video
 
-向いているケース:
+向いている用途:
 
-- キャラクター一貫性が必要
-- object bible / scene anchor がある
-- 前後フレーム continuity を優先したい
+- character / object / location continuity が必要
+- first frame で構図と見た目を承認済み
+- first / last boundary を固定したい
 
-コツ:
+motion はその静止画から起こせる変化に限定し、参照元にない要素を増やさない。
 
-- 静止画で構図と見た目を確定してから motion を足す
-- `motion_prompt` は「その静止画をどう動かすか」に限定する
-- 参照元にない要素を突然増やしすぎない
-
-### reference-first の原則
-
-Kling 系では、pure text だけで同一人物や同一舞台を維持しようとしない。
-
-- 人物:
-  - reference image
-  - subject / element
-  - character bible
-- 小道具 / 建物:
-  - object reference
-  - recurring environment anchor
-- motion:
-  - video reference
-  - motion control
-
-appearance と motion を別レイヤで扱う方が安定する。
-
-## Voice / Lip Sync
-
-speech-heavy な shot では、映像 prompt と同じくらい読みの管理が重要。
-
-- 音声品質を優先する
-- 難読漢字、固有名詞、崩れやすい読みはかな表記へ寄せる
-- quoted line が必要な workflow では、セリフ文字列を別管理する
-- 「見た目の自然さ」と「読み上げの正確さ」が衝突する場合、lip sync では後者を優先する
-
-## Negative / 禁止事項の扱い
-
-Kling では禁止事項の書きすぎも不安定要因になるため、**本当に事故りやすいものだけ**を書く。
-
-優先度が高い禁止:
-
-- 画面内テキスト、ロゴ、透かし
-- 顔崩れ、指崩れ、不自然な四肢
-- 急なカメラ回転、視点ジャンプ
-- フェード、暗転、別ショット化
-
-例:
+## 悪い例
 
 ```text
-画面内テキストなし。ロゴなし。顔と衣装の一貫性を維持。不自然な手指や余分な四肢なし。急回転、フェード、ショット切替なし。
-```
-
-## ToC 向けテンプレート
-
-### Character-centric shot
-
-```text
-video_generation.prompt:
-実写、シネマティック。短い黒髪で紺の外套を着た若い侍が、雨上がりの石畳の路地に立つ。夜明け前の青灰色の空気、濡れた地面の反射、左頬の細い傷、同じ刀の鞘、静かな緊張感。
-
-video_generation.motion_prompt:
-侍が息を整えた後、ゆっくり振り向く。カメラは胸の高さから滑らかに寄る。顔、傷、衣装、鞘の位置を維持し、背景の路地の奥行きと雨上がりの反射を保つ。
-```
-
-### Environment-centric shot
-
-```text
-video_generation.prompt:
-実写、シネマティック。雲海の上に浮かぶ回廊状の庭園、朝の柔らかな逆光、白い石柱、金箔の反射、水面の薄い霧、静かな神域の空気。
-
-video_generation.motion_prompt:
-カメラは一人称の高さで前進する。水平線と中央の導線を維持し、速度は一定、揺れは最小。光の向きと空間の連続性を崩さない。
-```
-
-## 悪い例と改善
-
-### 悪い例
-
-```text
-主人公が走って振り向いて泣いて敵が現れて爆発してカメラが急上昇して最後に街全体が見える。映画みたいで超かっこいい。
+cut_function: payoff
+target_beat: hero_event_07
+主人公が走って振り向いて泣き、敵が現れて爆発する。その後カメラが急上昇し、フェードして街全体へ切り替わる。
 ```
 
 問題:
 
-- 主動作が多すぎる
-- 被写体固定情報がない
-- カメラ変化が多すぎる
-- 感情語が抽象的
+- internal label / ID が provider text に漏れている
+- 主動作が複数ある
+- camera と編集点が多い
+- 一つの連続 shot ではない
+- event / reveal 境界を越える
 
-### 改善例
-
-```text
-video_generation.prompt:
-実写、シネマティック。煤けた地下通路を走る若い女性、濡れた黒いコート、額に張りつく前髪、非常灯だけが赤く明滅する。逃走直後の緊張で息が荒い。
-
-video_generation.motion_prompt:
-女性が走りを緩め、背後を振り向く。カメラは背中側から一定距離で追い、最後に肩越しで横顔を捉える。顔とコートを崩さず、通路の赤い非常灯を保つ。
-```
+改善時は provider 文だけを書き換えず、canonical cut を複数 intent に分ける。
 
 ## Agent 向け運用
 
-- `Director` は下流で Kling を使う想定が明示されている場合、story の scene 設計で `1 clip = 1 intention` を崩さない
-- `Scriptwriter` / `Immersive Scriptwriter` は `video_generation.tool` が Kling 系なら、本書に沿って `タイトル / サブジェクト / カメラ / アクション / ボイス` を先に整理し、その後 `prompt` と `motion_prompt` に分離する
-- `docs/video-generation.md` と本書が衝突する場合、Kling prompt の書き方については本書を優先し、全体運用原則は `docs/video-generation.md` を優先する
+- Director / Scriptwriter は story 設計で 1 clip 1 intent を壊さない
+- p800 authoring agent は `cut_contract` を正本とし、Kling policy を満たす motion fields を設計する
+- compiler / request materializer だけが `api_prompt_payload.prompt` を確定する
+- semantic reviewer は `projection_review_contract` と `video_prompt_ir` を使い、event / reveal 境界と provider prompt の両方を確認する
+- provider executor は editable draft を再解釈せず、materialized payload の一致 gate を通す
 
----------
+## 採用元メモ
+
+[tanaka 記事](https://note.com/noz_tanaka/n/n553795d4619a) から、start frame と最初の shot の同期、cut 単位の分割、selection loop、shot card、短い shot を基本単位にする考え方を採用している。本 repo ではこれらを上記 canonical projection / materialization 契約へ統合する。

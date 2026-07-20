@@ -79,6 +79,22 @@ type ImageRequestItem = {
   generationStatus: string | null;
   existingImage: string | null;
   candidates?: Candidate[];
+  sceneId?: string | null;
+  isRenderUnit?: boolean;
+  sourceCutIds?: string[];
+  videoPrompt?: string;
+  videoOutput?: string | null;
+  selectedVideoPath?: string | null;
+  videoExists?: boolean;
+  videoDurationSeconds?: number | null;
+  configuredVideoDurationSeconds?: number;
+  videoTool?: string;
+  videoQuality?: string;
+  videoAspectRatio?: string;
+  videoInputMode?: string;
+  videoFirstReference?: string;
+  videoLastReference?: string;
+  videoReferences?: string[];
 };
 
 type ReferenceOption = {
@@ -96,6 +112,20 @@ type Candidate = {
   mtimeMs?: number;
 };
 
+const VIDEO_DRAFT_FIELDS = [
+  'videoDraftPrompt',
+  'videoQuality',
+  'videoAspectRatio',
+  'videoDurationSec',
+  'videoFirstReferencePath',
+  'videoLastReferencePath',
+  'videoReferencePaths',
+  'videoTool',
+] as const;
+
+type VideoDraftField = (typeof VIDEO_DRAFT_FIELDS)[number];
+const VIDEO_DRAFT_FIELD_SET = new Set<string>(VIDEO_DRAFT_FIELDS);
+
 type EditableItem = ImageRequestItem & {
   draftPrompt: string;
   selectedReferences: ReferenceOption[];
@@ -107,6 +137,7 @@ type EditableItem = ImageRequestItem & {
   promptGenerating?: boolean;
   videoCandidates: Candidate[];
   videoGenerating: boolean;
+  videoDirtyFields: VideoDraftField[];
   videoDraftPrompt: string;
   videoQuality: string;
   videoAspectRatio: string;
@@ -629,10 +660,14 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       available: false,
     });
     const narration = narrationById?.get(item.id);
-    const sceneKey = inferSceneKey(item.id, narration?.sceneId);
+    const sceneKey = inferSceneKey(item.id, narration?.sceneId || item.sceneId);
     const narrationMinDuration = Math.max(1, Math.ceil(narration?.narrationDurationSeconds || 0));
-    const configuredVideoDuration = Math.max(narration?.configuredVideoDurationSeconds || 8, narrationMinDuration);
-    const videoPrompt = narration?.videoPrompt?.trim() || defaultVideoPrompt(item);
+    const configuredVideoDuration = Math.max(
+      narration?.configuredVideoDurationSeconds || item.configuredVideoDurationSeconds || 8,
+      narrationMinDuration,
+    );
+    const videoPrompt = narration?.videoPrompt?.trim() || item.videoPrompt?.trim() || defaultVideoPrompt(item);
+    const referenceImageMode = item.videoInputMode === 'reference_images';
     return {
       ...item,
       draftPrompt: item.prompt,
@@ -643,14 +678,19 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       promptGenerating: false,
       videoCandidates: [],
       videoGenerating: false,
+      videoDirtyFields: [],
       videoDraftPrompt: videoPrompt,
-      videoQuality: narration?.videoQuality || '1080p',
-      videoAspectRatio: narration?.videoAspectRatio || '16:9',
+      videoQuality: narration?.videoQuality || item.videoQuality || '1080p',
+      videoAspectRatio: narration?.videoAspectRatio || item.videoAspectRatio || '16:9',
       videoDurationSec: configuredVideoDuration,
-      videoFirstReferencePath: narration?.videoFirstReference || item.existingImage || selectedReferences[0]?.path || null,
-      videoLastReferencePath: narration?.videoLastReference || null,
-      videoReferencePaths: narration?.videoReferences?.length ? narration.videoReferences : selectedReferences.map((ref) => ref.path),
-      videoTool: narration?.videoTool || 'kling_3_0',
+      videoFirstReferencePath: referenceImageMode
+        ? null
+        : narration?.videoFirstReference || item.videoFirstReference || item.existingImage || selectedReferences[0]?.path || null,
+      videoLastReferencePath: narration?.videoLastReference || item.videoLastReference || null,
+      videoReferencePaths: narration?.videoReferences?.length
+        ? narration.videoReferences
+        : item.videoReferences?.length ? item.videoReferences : selectedReferences.map((ref) => ref.path),
+      videoTool: narration?.videoTool || item.videoTool || 'kling_3_0',
       sceneKey,
       sceneLabel: sceneLabelFromKey(sceneKey),
       narrationText: narration?.narrationText || '',
@@ -679,9 +719,9 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       narrationDurationSec: narration?.narrationDurationSeconds ?? null,
       narrationExists: Boolean(narration?.narrationExists),
       narrationGenerating: false,
-      renderVideoPath: narration?.selectedVideoPath || narration?.videoOutput || null,
-      renderVideoExists: Boolean(narration?.videoExists),
-      renderVideoDurationSec: configuredVideoDuration,
+      renderVideoPath: narration?.selectedVideoPath || narration?.videoOutput || item.selectedVideoPath || item.videoOutput || null,
+      renderVideoExists: Boolean(narration?.videoExists || item.videoExists),
+      renderVideoDurationSec: item.videoDurationSeconds || configuredVideoDuration,
       renderNarrationPath: narration?.narrationOutput || null,
       renderNarrationOffsetSec: narration?.renderNarrationOffsetSeconds ?? 0,
     };
@@ -742,6 +782,41 @@ function mergeLoadedItemsWithInflight(prev: EditableItem[], next: EditableItem[]
   const carryOver = prev.filter(
     (item) => !nextIds.has(item.id) && (item.generating || item.promptGenerating || item.videoGenerating || item.narrationGenerating || item.narrationDirty || item.narrationSaving || item.narrationApproving),
   );
+  return carryOver.length ? [...merged, ...carryOver] : merged;
+}
+
+function mergeLoadedVideoItemsWithLocalState(prev: EditableItem[], next: EditableItem[]): EditableItem[] {
+  const previousById = new Map(prev.map((item) => [item.id, item]));
+  const merged = next.map((item) => {
+    const previous = previousById.get(item.id);
+    if (!previous) return item;
+    const candidateState = mergedCandidateState(previous, item.candidates, item.selectedCandidatePath);
+    const dirtyFields = new Set(previous.videoDirtyFields);
+    const localSelectedVideoPath = previous.renderVideoPath && previous.videoCandidates.some(
+      (candidate) => candidate.path === previous.renderVideoPath,
+    )
+      ? previous.renderVideoPath
+      : null;
+    return {
+      ...item,
+      ...candidateState,
+      videoCandidates: previous.videoCandidates,
+      videoGenerating: previous.videoGenerating,
+      videoDirtyFields: previous.videoDirtyFields,
+      videoDraftPrompt: dirtyFields.has('videoDraftPrompt') ? previous.videoDraftPrompt : item.videoDraftPrompt,
+      videoQuality: dirtyFields.has('videoQuality') ? previous.videoQuality : item.videoQuality,
+      videoAspectRatio: dirtyFields.has('videoAspectRatio') ? previous.videoAspectRatio : item.videoAspectRatio,
+      videoDurationSec: dirtyFields.has('videoDurationSec') ? previous.videoDurationSec : item.videoDurationSec,
+      videoFirstReferencePath: dirtyFields.has('videoFirstReferencePath') ? previous.videoFirstReferencePath : item.videoFirstReferencePath,
+      videoLastReferencePath: dirtyFields.has('videoLastReferencePath') ? previous.videoLastReferencePath : item.videoLastReferencePath,
+      videoReferencePaths: dirtyFields.has('videoReferencePaths') ? previous.videoReferencePaths : item.videoReferencePaths,
+      videoTool: dirtyFields.has('videoTool') ? previous.videoTool : item.videoTool,
+      renderVideoPath: localSelectedVideoPath ?? item.renderVideoPath,
+      renderVideoExists: localSelectedVideoPath ? previous.renderVideoExists : item.renderVideoExists,
+    };
+  });
+  const nextIds = new Set(next.map((item) => item.id));
+  const carryOver = prev.filter((item) => !nextIds.has(item.id) && item.videoGenerating);
   return carryOver.length ? [...merged, ...carryOver] : merged;
 }
 
@@ -1168,6 +1243,7 @@ function existingAssetItems(refs: ReferenceOption[]): EditableItem[] {
         promptGenerating: false,
         videoCandidates: [],
         videoGenerating: false,
+        videoDirtyFields: [],
         videoDraftPrompt: defaultVideoPrompt({
           id: ref.label,
           kind: 'asset',
@@ -1339,6 +1415,7 @@ type SceneVideoPanelProps = {
 };
 
 function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoReady, videoCandidateCount, onPatchItem, onGenerateVideo }: SceneVideoPanelProps) {
+  const referenceImageMode = item.videoInputMode === 'reference_images';
   const options = useMemo(() => videoReferenceOptions(item, references), [item, references]);
   const byPath = useMemo(() => new Map(options.map((option) => [option.path, option])), [options]);
   const firstReference = item.videoFirstReferencePath ? byPath.get(item.videoFirstReferencePath) ?? null : null;
@@ -1411,6 +1488,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
           <Select
             label="tool"
             value={item.videoTool}
+            disabled={referenceImageMode}
             onChange={(event) => onPatchItem(item.id, { videoTool: event.target.value })}
           >
             <MenuItem value="kling_3_0">Kling 3.0</MenuItem>
@@ -1438,6 +1516,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
         <Autocomplete
           options={options}
           value={firstReference}
+          disabled={referenceImageMode}
           getOptionLabel={(option) => option.label}
           isOptionEqualToValue={(a, b) => a.path === b.path}
           onChange={(_, value) => onPatchItem(item.id, { videoFirstReferencePath: value?.path ?? null })}
@@ -1447,11 +1526,12 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
               <span>{option.label}</span>
             </Box>
           )}
-          renderInput={(params) => <TextField {...params} label="first reference" size="small" />}
+          renderInput={(params) => <TextField {...params} label={referenceImageMode ? 'reference mode（first frameなし）' : 'first reference'} size="small" />}
         />
         <Autocomplete
           options={options}
           value={lastReference}
+          disabled={referenceImageMode}
           getOptionLabel={(option) => option.label}
           isOptionEqualToValue={(a, b) => a.path === b.path}
           onChange={(_, value) => onPatchItem(item.id, { videoLastReferencePath: value?.path ?? null })}
@@ -2199,6 +2279,7 @@ function App() {
   const [activeImageCutId, setActiveImageCutId] = useState('');
   const [activeVideoSceneKey, setActiveVideoSceneKey] = useState('');
   const [items, setItems] = useState<EditableItem[]>([]);
+  const [videoTargetItems, setVideoTargetItems] = useState<EditableItem[]>([]);
   const [references, setReferences] = useState<ReferenceOption[]>([]);
   const [runProgress, setRunProgress] = useState<RunProgress | null>(null);
   const [busy, setBusy] = useState(false);
@@ -2302,7 +2383,8 @@ function App() {
   }, [assetFilter, items, references, viewKind, workspaceMode]);
   const videoSceneGroups = useMemo(() => {
     const groups = new Map<string, { key: string; label: string; items: EditableItem[] }>();
-    for (const item of visibleItems) {
+    const sourceItems = workspaceMode === 'video' ? videoTargetItems : visibleItems;
+    for (const item of sourceItems) {
       const key = item.sceneKey || 'scene';
       const existing = groups.get(key);
       if (existing) {
@@ -2312,7 +2394,7 @@ function App() {
       }
     }
     return Array.from(groups.values());
-  }, [visibleItems]);
+  }, [videoTargetItems, visibleItems, workspaceMode]);
   const imageSceneGroups = useMemo(() => {
     if (workspaceMode !== 'image' || viewKind !== 'scene') return [];
     const groups = new Map<string, { key: string; label: string; items: EditableItem[] }>();
@@ -2413,7 +2495,9 @@ function App() {
     || narrationMutationActive
     || fullNarrationListening
     || items.some((item) => item.narrationGenerating || item.narrationSaving || item.narrationApproving);
-  const videoGenerationActive = videoPromptBusy || items.some((item) => item.videoGenerating);
+  const videoGenerationActive = videoPromptBusy
+    || items.some((item) => item.videoGenerating)
+    || videoTargetItems.some((item) => item.videoGenerating);
   const generationInFlight = imageGenerationActive || narrationGenerationActive || videoGenerationActive || renderBusy;
   const backgroundGenerationLabel = useMemo(() => {
     if (workspaceMode !== 'image' && imageGenerationActive) return '画像生成が別画面で進行中';
@@ -2446,6 +2530,15 @@ function App() {
   const ensureItemsInState = useCallback((targetItems: EditableItem[]) => {
     if (!targetItems.length) return;
     setItems((prev) => {
+      const existingIds = new Set(prev.map((item) => item.id));
+      const additions = targetItems.filter((item) => !existingIds.has(item.id));
+      return additions.length ? [...prev, ...additions] : prev;
+    });
+  }, []);
+
+  const ensureVideoItemsInState = useCallback((targetItems: EditableItem[]) => {
+    if (!targetItems.length) return;
+    setVideoTargetItems((prev) => {
       const existingIds = new Set(prev.map((item) => item.id));
       const additions = targetItems.filter((item) => !existingIds.has(item.id));
       return additions.length ? [...prev, ...additions] : prev;
@@ -2531,6 +2624,20 @@ function App() {
     }
   }, []);
 
+  const loadVideoTargets = useCallback(async (targetRunId: string) => {
+    const data = await jsonFetch<{
+      items: ImageRequestItem[];
+      references: ReferenceOption[];
+      progress: RunProgress;
+    }>(`/api/image-gen/video-items?run_id=${encodeURIComponent(targetRunId)}`);
+    if (runIdRef.current !== targetRunId) return [];
+    const loadedItems = toEditableItems(data.items, data.references);
+    setVideoTargetItems((prev) => mergeLoadedVideoItemsWithLocalState(prev, loadedItems));
+    setReferences(data.references);
+    setRunProgress(data.progress);
+    return loadedItems;
+  }, []);
+
   useEffect(() => {
     loadRuns()
       .catch((error) => console.error(error));
@@ -2548,6 +2655,7 @@ function App() {
     setNarrationAudioSetHash('');
     setNarrationReviewFindings([]);
     setNarrationReviewReport('');
+    setVideoTargetItems([]);
   }, [runId]);
 
   useEffect(() => {
@@ -2559,6 +2667,11 @@ function App() {
     if (!runId) return;
     void loadRunRequests(runId, requestKind);
   }, [loadRunRequests, requestKind, runId]);
+
+  useEffect(() => {
+    if (!runId || workspaceMode !== 'video' || videoPromptBusy) return;
+    void loadVideoTargets(runId).catch((error) => console.error(error));
+  }, [loadVideoTargets, runId, videoPromptBusy, workspaceMode]);
 
   const refreshCurrentRun = useCallback(async () => {
     if (!runId || busy) return;
@@ -2666,6 +2779,22 @@ function App() {
 
   const patchItem = useCallback((itemId: string, patch: Partial<EditableItem>) => {
     setItems((prev) => prev.map((item) => (item.id === itemId ? { ...item, ...patch } : item)));
+  }, []);
+
+  const patchVideoItem = useCallback((itemId: string, patch: Partial<EditableItem>) => {
+    setVideoTargetItems((prev) => prev.map((item) => (
+      item.id === itemId ? { ...item, ...patch } : item
+    )));
+  }, []);
+
+  const patchVideoDraftItem = useCallback((itemId: string, patch: Partial<EditableItem>) => {
+    const changedFields = Object.keys(patch).filter((field): field is VideoDraftField => VIDEO_DRAFT_FIELD_SET.has(field));
+    setVideoTargetItems((prev) => prev.map((item) => {
+      if (item.id !== itemId) return item;
+      const dirtyFields = new Set(item.videoDirtyFields);
+      changedFields.forEach((field) => dirtyFields.add(field));
+      return { ...item, ...patch, videoDirtyFields: Array.from(dirtyFields) };
+    }));
   }, []);
 
   const applyBulkGenerationJob = useCallback((
@@ -3122,9 +3251,9 @@ function App() {
     video_prompt: item.videoDraftPrompt,
     video_quality: item.videoQuality,
     video_aspect_ratio: item.videoAspectRatio,
-    video_duration_seconds: item.videoDurationSec,
-    video_first_reference: item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
-    video_last_reference: item.videoLastReferencePath,
+    video_duration_seconds: Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
+    video_first_reference: item.videoInputMode === 'reference_images' ? '' : item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+    video_last_reference: item.videoLastReferencePath ?? '',
     video_references: item.videoReferencePaths,
     video_tool: item.videoTool,
     narration_text: item.narrationText,
@@ -3140,6 +3269,7 @@ function App() {
   const saveCurrentReview = useCallback(async () => {
     if (!runId) return;
     const reviewKind = workspaceMode === 'image' ? viewKind : workspaceMode;
+    const reviewItems = workspaceMode === 'video' ? videoTargetItems : visibleItems;
     setReviewSaveBusy(true);
     setReviewSaveStatus('保存中');
     try {
@@ -3150,7 +3280,7 @@ function App() {
           run_id: runId,
           kind: reviewKind,
           note: 'frontend temporary save',
-          items: buildReviewItems(visibleItems),
+          items: buildReviewItems(reviewItems),
         }),
       });
       if (data.progress) setRunProgress(data.progress);
@@ -3161,7 +3291,22 @@ function App() {
     } finally {
       setReviewSaveBusy(false);
     }
-  }, [buildReviewItems, runId, viewKind, visibleItems, workspaceMode]);
+  }, [buildReviewItems, runId, videoTargetItems, viewKind, visibleItems, workspaceMode]);
+
+  const materializeVideoPrompts = useCallback(async (targetItems: EditableItem[]) => {
+    if (!runId || !targetItems.length) return;
+    await jsonFetch<{ status: string }>('/api/image-gen/video-prompts/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_id: runId,
+        note: 'frontend video generation materialization',
+        items: buildReviewItems(targetItems),
+        replace_all: false,
+        approve_for_generation: true,
+      }),
+    });
+  }, [buildReviewItems, runId]);
 
   const applyWorkspaceMode = useCallback((nextMode: WorkspaceMode) => {
     setWorkspaceMode(nextMode);
@@ -3194,18 +3339,15 @@ function App() {
       return;
     }
     setVideoPromptStatus(null);
-    const shouldLoadSceneRequests = viewKind !== 'scene' || !items.some(isSceneCutItem);
     applyWorkspaceMode('video');
-    if (shouldLoadSceneRequests) {
-      await loadRunRequests(runId, 'scene');
-    }
+    await loadVideoTargets(runId);
     setConfirmVideoPromptOpen(true);
-  }, [applyWorkspaceMode, items, loadRunRequests, narrationReadyForVideo, runId, viewKind]);
+  }, [applyWorkspaceMode, loadVideoTargets, narrationReadyForVideo, runId]);
 
   const buildVideoGenerateItem = useCallback((item: EditableItem, count = videoCandidateCount): VideoGenerateItemPayload => ({
     item_id: item.id,
     prompt: item.videoDraftPrompt,
-    first_reference: item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+    first_reference: item.videoInputMode === 'reference_images' ? '' : item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
     last_reference: item.videoLastReferencePath,
     references: item.videoReferencePaths,
     quality: item.videoQuality,
@@ -3231,19 +3373,19 @@ function App() {
       setVideoPromptStatus('動画生成には全編音声承認が必要です');
       return;
     }
-    ensureItemsInState([item]);
+    ensureVideoItemsInState([item]);
     setActiveItemId(item.id);
     setVideoPromptBusy(true);
     setVideoPromptStatus(`動画生成中 ${item.id}`);
     setVideoBulkTotal(1);
     setVideoBulkCompletedCount(0);
     setVideoBulkFailedCount(0);
-    patchItem(item.id, { videoGenerating: true, videoCandidates: [] });
-    await saveCurrentReview();
+    patchVideoItem(item.id, { videoGenerating: true, videoCandidates: [] });
     try {
+      await materializeVideoPrompts([item]);
       const data = await generateVideoRequest(item);
       const firstVideoPath = data.candidates.find((candidate) => candidate.path)?.path ?? item.renderVideoPath;
-      patchItem(item.id, {
+      patchVideoItem(item.id, {
         videoCandidates: data.candidates,
         videoDurationSec: data.durationSeconds ?? item.videoDurationSec,
         renderVideoDurationSec: data.durationSeconds ?? item.renderVideoDurationSec,
@@ -3256,14 +3398,14 @@ function App() {
       setVideoPromptStatus(ok ? `${item.id} 動画生成完了` : `${item.id} 動画生成失敗`);
     } catch (error) {
       console.error(error);
-      patchItem(item.id, { videoCandidates: [{ index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) }] });
+      patchVideoItem(item.id, { videoCandidates: [{ index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) }] });
       setVideoBulkFailedCount(1);
       setVideoPromptStatus(`${item.id} 動画生成失敗`);
     } finally {
-      patchItem(item.id, { videoGenerating: false });
+      patchVideoItem(item.id, { videoGenerating: false });
       setVideoPromptBusy(false);
     }
-  }, [ensureItemsInState, generateVideoRequest, narrationReadyForVideo, patchItem, runId, saveCurrentReview]);
+  }, [ensureVideoItemsInState, generateVideoRequest, materializeVideoPrompts, narrationReadyForVideo, patchVideoItem, runId]);
 
   const generateVideoItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId || !targetItems.length) return;
@@ -3271,7 +3413,7 @@ function App() {
       setVideoPromptStatus('動画生成には全編音声承認が必要です');
       return;
     }
-    ensureItemsInState(targetItems);
+    ensureVideoItemsInState(targetItems);
     const targetIds = new Set(targetItems.map((item) => item.id));
     const concurrency = Math.min(2, Math.max(targetItems.length, 1));
     setVideoPromptBusy(true);
@@ -3279,8 +3421,7 @@ function App() {
     setVideoBulkTotal(targetItems.length);
     setVideoBulkCompletedCount(0);
     setVideoBulkFailedCount(0);
-    setItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, videoGenerating: true, videoCandidates: [] } : item)));
-    await saveCurrentReview();
+    setVideoTargetItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, videoGenerating: true, videoCandidates: [] } : item)));
 
     let completed = 0;
     let failed = 0;
@@ -3294,7 +3435,7 @@ function App() {
         const ok = data.candidates.some((candidate) => candidate.path);
         if (ok) completed += 1;
         else failed += 1;
-        setItems((prev) =>
+        setVideoTargetItems((prev) =>
           prev.map((prevItem) =>
             prevItem.id === item.id
               ? {
@@ -3311,7 +3452,7 @@ function App() {
         );
       } catch (error) {
         failed += 1;
-        setItems((prev) =>
+        setVideoTargetItems((prev) =>
           prev.map((prevItem) =>
             prevItem.id === item.id
               ? {
@@ -3331,12 +3472,23 @@ function App() {
     };
 
     try {
+      await materializeVideoPrompts(targetItems);
       await Promise.all(Array.from({ length: concurrency }, () => runNext()));
       setVideoPromptStatus(`動画生成完了 ${completed}/${targetItems.length}`);
+    } catch (error) {
+      console.error(error);
+      const message = candidateErrorMessage(error);
+      setVideoTargetItems((prev) => prev.map((item) => (
+        targetIds.has(item.id)
+          ? { ...item, videoGenerating: false, videoCandidates: [{ index: 1, status: 'failed', path: null, error: message }] }
+          : item
+      )));
+      setVideoBulkFailedCount(targetItems.length);
+      setVideoPromptStatus('動画プロンプト確定に失敗');
     } finally {
       setVideoPromptBusy(false);
     }
-  }, [ensureItemsInState, generateVideoRequest, narrationReadyForVideo, runId, saveCurrentReview]);
+  }, [ensureVideoItemsInState, generateVideoRequest, materializeVideoPrompts, narrationReadyForVideo, runId]);
 
   const generateAllVideos = useCallback(async () => {
     if (!narrationReadyForVideo) {
@@ -3344,11 +3496,10 @@ function App() {
       setConfirmVideoPromptOpen(false);
       return;
     }
-    const sceneItems = items.filter(isSceneCutItem);
-    if (!sceneItems.length) return;
+    if (!videoTargetItems.length) return;
     setConfirmVideoPromptOpen(false);
-    await generateVideoItems(sceneItems);
-  }, [generateVideoItems, items, narrationReadyForVideo]);
+    await generateVideoItems(videoTargetItems);
+  }, [generateVideoItems, narrationReadyForVideo, videoTargetItems]);
 
   const createNarrationDrafts = useCallback(async (replace = false) => {
     if (!runId) return;
@@ -4016,6 +4167,7 @@ function App() {
       promptGenerating: true,
       videoCandidates: [],
       videoGenerating: false,
+      videoDirtyFields: [],
       videoDraftPrompt: '',
       videoQuality: '1080p',
       videoAspectRatio: '16:9',
@@ -4593,7 +4745,7 @@ function App() {
                         <Tab key={group.key} value={group.key} label={`${group.label} / ${group.items.length}`} />
                       ))}
                     </Tabs>
-                    <Chip size="small" color="primary" label={`${videoDisplayItems.length}/${visibleItems.length} cut`} />
+                    <Chip size="small" color="primary" label={`${videoDisplayItems.length}/${videoTargetItems.length} 動画target`} />
                   </Box>
                 )}
                 {!busy && !items.length && (
@@ -4655,7 +4807,7 @@ function App() {
                     videoGenerationBusy={videoPromptBusy}
                     videoReady={narrationReadyForVideo}
                     videoCandidateCount={videoCandidateCount}
-                    onPatchItem={patchItem}
+                    onPatchItem={patchVideoDraftItem}
                     onGenerateVideo={generateVideoForCut}
                   />
                 ))}
@@ -4683,7 +4835,7 @@ function App() {
               {workspaceMode === 'image' && addAssetBusy && <Chip size="small" color="primary" label="アセット作成中" />}
               {workspaceMode === 'image' && addAssetError && <Chip size="small" color="error" label={addAssetError} />}
               {workspaceMode === 'image' && downloadError && <Chip size="small" color="error" label={downloadError} />}
-              {workspaceMode === 'video' && videoPromptBusy && <Chip size="small" color="primary" label={`動画生成中 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal || visibleItems.length}`} />}
+              {workspaceMode === 'video' && videoPromptBusy && <Chip size="small" color="primary" label={`動画生成中 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal || videoTargetItems.length}`} />}
               {workspaceMode === 'video' && !videoPromptBusy && videoBulkTotal > 0 && <Chip size="small" label={`動画生成完了 ${videoBulkCompletedCount + videoBulkFailedCount}/${videoBulkTotal}`} />}
               {workspaceMode === 'video' && videoBulkFailedCount > 0 && <Chip size="small" color="error" label={`動画失敗 ${videoBulkFailedCount}`} />}
               {workspaceMode === 'video' && !narrationReadyForVideo && <Chip size="small" color="warning" label={`音声承認待ち ${narrationAudioReadyCount}/${sceneCutItems.length}`} />}
@@ -4709,7 +4861,12 @@ function App() {
             </Stack>
             <Stack direction="row" spacing={1}>
               {workspaceMode !== 'narration' && (
-                <Button variant="outlined" startIcon={<SaveIcon />} onClick={saveCurrentReview} disabled={!visibleItems.length || reviewSaveBusy}>
+                <Button
+                  variant="outlined"
+                  startIcon={<SaveIcon />}
+                  onClick={saveCurrentReview}
+                  disabled={!(workspaceMode === 'video' ? videoTargetItems.length : visibleItems.length) || reviewSaveBusy}
+                >
                   一時保存
                 </Button>
               )}

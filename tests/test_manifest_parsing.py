@@ -192,6 +192,10 @@ assets:
   character_bible:
     - character_id: "hero"
       fixed_prompts: ["hero base"]
+      review_aliases: ["勇者"]
+      appearance_continuity:
+        costume_state: "travel clothes"
+        forbidden_costume_states: ["court dress"]
       reference_variants:
         - variant_id: "hero_day"
           reference_images:
@@ -199,6 +203,9 @@ assets:
             - "assets/characters/hero_day_side.png"
           fixed_prompts:
             - "day outfit"
+          appearance_continuity:
+            costume_state: "day outfit"
+            forbidden_costume_states: ["night cloak"]
     - character_id: "villain"
       reference_images: ["assets/characters/villain.png"]
       fixed_prompts: ["villain base"]
@@ -221,6 +228,12 @@ scenes:
       prompt: "story"
       output: "assets/scenes/scene10.png"
       references: []
+      first_frame_visual_plan:
+        schema_version: "first_frame_visual_plan_v1"
+        temporal_boundary:
+          event_fact_visible_in_still: "hero stands beside villain"
+        character_state_gate:
+          pose: "two people stand apart"
 ```
 """
 
@@ -232,9 +245,89 @@ scenes:
             guides.character_bible[0].reference_variants[0].reference_images,
             ["assets/characters/hero_day_front.png", "assets/characters/hero_day_side.png"],
         )
+        self.assertEqual(
+            guides.character_bible[0].appearance_continuity,
+            {
+                "costume_state": "travel clothes",
+                "forbidden_costume_states": ["court dress"],
+            },
+        )
+        self.assertEqual(
+            guides.character_bible[0].reference_variants[0].appearance_continuity,
+            {
+                "costume_state": "day outfit",
+                "forbidden_costume_states": ["night cloak"],
+            },
+        )
         self.assertEqual(guides.object_bible[0].reference_variants[0].variant_id, "amulet_glowing")
         self.assertEqual(scenes[0].image_character_variant_ids, ["hero_day"])
         self.assertEqual(scenes[0].image_object_variant_ids, ["amulet_glowing"])
+        self.assertEqual(
+            scenes[0].image_first_frame_visual_plan["character_state_gate"][
+                "character_states"
+            ],
+            [
+                {
+                    "character_id": "hero",
+                    "character_name": "勇者",
+                    "appearance_continuity": {
+                        "costume_state": "day outfit",
+                        "forbidden_costume_states": ["night cloak"],
+                    },
+                }
+            ],
+        )
+
+    def test_parse_manifest_projects_appearance_only_for_characters_bound_to_scene(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        mod = _load_generate_assets_module(repo_root)
+
+        md = """# Manifest
+
+```yaml
+assets:
+  character_bible:
+    - character_id: "hero"
+      review_aliases: ["勇者"]
+      appearance_continuity:
+        costume_state: "travel clothes"
+        forbidden_costume_states: ["court dress"]
+    - character_id: "villain"
+      review_aliases: ["悪役"]
+      appearance_continuity:
+        costume_state: "black armor"
+        forbidden_costume_states: ["travel clothes"]
+
+scenes:
+  - scene_id: 10
+    image_generation:
+      character_ids: ["hero"]
+      prompt: "story"
+      output: "assets/scenes/scene10.png"
+      first_frame_visual_plan:
+        schema_version: "first_frame_visual_plan_v1"
+        temporal_boundary:
+          event_fact_visible_in_still: "hero waits alone"
+```
+"""
+
+        _, _, scenes = mod.parse_manifest_yaml_full(mod.extract_yaml_block(md))
+
+        self.assertEqual(
+            scenes[0].image_first_frame_visual_plan["character_state_gate"][
+                "character_states"
+            ],
+            [
+                {
+                    "character_id": "hero",
+                    "character_name": "勇者",
+                    "appearance_continuity": {
+                        "costume_state": "travel clothes",
+                        "forbidden_costume_states": ["court dress"],
+                    },
+                }
+            ],
+        )
 
     def test_parse_manifest_supports_character_physical_scale_and_relative_rules(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

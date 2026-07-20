@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from toc.http import request_bytes, request_json
+from toc.http import request_json
+from toc.providers.media_download import request_public_media_bytes
+from toc.video_provider_capabilities import resolve_video_provider_capabilities
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -74,6 +76,28 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+_PROTECTED_VIDEO_EXTRA_KEYS = {
+    "model",
+    "content",
+    "resolution",
+    "ratio",
+    "duration",
+    "watermark",
+    "generate_audio",
+}
+
+
+def _validate_video_extra_payload(extra_payload: dict[str, Any] | None) -> None:
+    if not extra_payload:
+        return
+    conflicts = sorted(_PROTECTED_VIDEO_EXTRA_KEYS.intersection(extra_payload))
+    if conflicts:
+        raise ValueError(
+            "video extra_payload cannot override protected reviewed fields: "
+            + ", ".join(conflicts)
+        )
 
 
 @dataclass(frozen=True)
@@ -194,7 +218,7 @@ class SeedanceClient:
         return str(url)
 
     def download_to_file(self, *, url: str, out_path: Path, timeout_seconds: float = 600.0) -> None:
-        data = request_bytes(url=url, method="GET", headers=self._headers(), timeout_seconds=timeout_seconds)
+        data = request_public_media_bytes(url=url, timeout_seconds=timeout_seconds)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(data)
 
@@ -213,6 +237,49 @@ class SeedanceClient:
         watermark: bool = False,
         extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _validate_video_extra_payload(extra_payload)
+        references = [path for path in reference_images or [] if path is not None]
+        if references and (input_image is not None or last_frame_image is not None):
+            raise ValueError(
+                "Seedance frame-boundary and multimodal reference modes are mutually exclusive"
+            )
+        if last_frame_image is not None and input_image is None:
+            raise ValueError("Seedance last_frame requires first_frame")
+        input_mode = (
+            "reference_images"
+            if references
+            else "image_to_video"
+            if input_image is not None
+            else "text_to_video"
+        )
+        capabilities = resolve_video_provider_capabilities(
+            tool="seedance",
+            model=model,
+            input_mode=input_mode,
+        )
+        if not capabilities.supported:
+            raise ValueError(capabilities.unsupported_reason)
+        duration = int(duration_seconds)
+        if not (
+            capabilities.duration_min_seconds
+            <= duration
+            <= capabilities.duration_max_seconds
+        ):
+            raise ValueError(
+                "Seedance duration is outside the reviewed capability range: "
+                f"{duration}s (expected {capabilities.duration_min_seconds}-"
+                f"{capabilities.duration_max_seconds}s)"
+            )
+        if not (
+            capabilities.reference_images_min
+            <= len(references)
+            <= capabilities.reference_images_max
+        ):
+            raise ValueError(
+                "Seedance reference image count is outside the reviewed capability range: "
+                f"{len(references)} (expected {capabilities.reference_images_min}-"
+                f"{capabilities.reference_images_max})"
+            )
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
 
         if input_image is not None:
@@ -232,7 +299,7 @@ class SeedanceClient:
                 }
             )
 
-        for ref in reference_images or []:
+        for ref in references:
             content.append(
                 {
                     "type": "image_url",
@@ -246,7 +313,7 @@ class SeedanceClient:
             "content": content,
             "resolution": resolution,
             "ratio": ratio,
-            "duration": int(duration_seconds),
+            "duration": duration,
             "watermark": bool(watermark),
             "generate_audio": bool(generate_audio),
         }

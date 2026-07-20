@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import sys
@@ -56,6 +57,7 @@ from server.image_gen_app import (
     _validate_p650_run,
 )
 from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
+from toc.video_provider_capabilities import resolve_video_provider_capabilities
 from toc.harness import load_structured_document
 from toc.semantic_review_loop import semantic_repair_relpaths
 from toc.runtime_locks import FileLockUnavailable
@@ -69,6 +71,10 @@ from toc.image_request_snapshot import (
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 MP4_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+REVIEWABLE_VIDEO_PROMPT = (
+    "action: 主人公が画面奥へ一歩進み、右足を床につけて止まる。\n"
+    "camera: slow dolly forward"
+)
 
 
 def load_headless_create_module():
@@ -299,44 +305,79 @@ scenes:
 ## scene10_cut1
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene10_cut1.png`
 - references:
   - `主人公`: `assets/characters/hero.png`
 
-```text
+```api_prompt
 実写映画風の横長16:9カット。主人公が物語の転換点に立つ。
 ```
 
 ## scene10_cut2
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene10_cut2.png`
 - references:
   - `主人公`: `assets/characters/hero.png`
 
-```text
+```api_prompt
 実写映画風の横長16:9カット。主人公が次の行動へ踏み出す瞬間を具体的に描く。
 ```
 
 ## scene10_cut3
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene10_cut3.png`
 - references:
   - `主人公`: `assets/characters/hero.png`
 
-```text
+```api_prompt
 実写映画風の横長16:9カット。主人公が場面の出口へ向かい、次のsceneへつながる余韻を具体的に描く。
 ```
 """,
         encoding="utf-8",
     )
+    fixture_prompts = {
+        "scene10_cut1": "実写映画風の横長16:9カット。主人公が物語の転換点に立つ。",
+        "scene10_cut2": "実写映画風の横長16:9カット。主人公が次の行動へ踏み出す瞬間を具体的に描く。",
+        "scene10_cut3": "実写映画風の横長16:9カット。主人公が場面の出口へ向かい、次のsceneへつながる余韻を具体的に描く。",
+    }
+    scene_snapshot = materialize_request_snapshot(
+        run_dir,
+        kind="scene",
+        items=[
+            {
+                "item_id": item_id,
+                "destination": f"assets/scenes/scene10_cut{index}.png",
+                "prompt": prompt,
+                "prompt_policy_version": "image_api_prompt_v1",
+                "compiler_version": "test_fixture_v1",
+                "source_digest": hashlib.sha256(f"{item_id}:fixture".encode()).hexdigest(),
+                "references": ["assets/characters/hero.png"],
+            }
+            for index, (item_id, prompt) in enumerate(fixture_prompts.items(), start=1)
+        ],
+        source_artifact="image_generation_requests.md",
+    )
+    write_request_snapshot_atomic(
+        run_dir / "image_generation_request_snapshot.json",
+        scene_snapshot,
+        run_dir=run_dir,
+    )
+    with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+        state_file.write(
+            "review.image_prompt.request_freeze.status=frozen\n"
+            f"review.image_prompt.request_freeze.request_revision={scene_snapshot.request_revision}\n"
+        )
     (run_dir / "p000_index.md").write_text(
         "# Run Index\n\np650 まで到達した実作業済み run の索引です。現在位置、生成済み成果物、次に必要な確認を十分な本文量で記録します。asset request と scene image request が存在することを確認済みです。\n",
         encoding="utf-8",
@@ -374,6 +415,41 @@ scenes:
     for stage in ("research", "story", "scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
         write_semantic_review_artifacts(run_dir, stage, entry_count=3 if stage == "image_prompt" else 1)
     return run_dir
+
+
+def refresh_scene_request_snapshot_fixture(run_dir: Path) -> None:
+    """Re-freeze a deliberately edited request fixture before reading it."""
+
+    request_path = run_dir / "image_generation_requests.md"
+    items = image_gen.parse_request_markdown(
+        request_path.read_text(encoding="utf-8"),
+        kind="scene",
+        run_dir=run_dir,
+    )
+    snapshot = materialize_request_snapshot(
+        run_dir,
+        kind="scene",
+        items=[
+            {
+                "item_id": item.id,
+                "destination": item.output,
+                "prompt": item.prompt,
+                "prompt_policy_version": item.prompt_policy_version,
+                "compiler_version": "test_fixture_refresh_v1",
+                "source_digest": hashlib.sha256(
+                    f"{item.id}:{item.prompt}".encode()
+                ).hexdigest(),
+                "references": list(item.references),
+            }
+            for item in items
+        ],
+        source_artifact="image_generation_requests.md",
+    )
+    write_request_snapshot_atomic(
+        run_dir / "image_generation_request_snapshot.json",
+        snapshot,
+        run_dir=run_dir,
+    )
 
 
 def write_valid_p680_artifacts(root: Path, run_id: str) -> Path:
@@ -458,6 +534,16 @@ def mark_manifest_narration_ready(run_dir: Path, *, silent: set[str] | None = No
 
 
 class ImageGenParserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.video_semantic_review_patcher = patch(
+            "server.image_gen_app._run_video_prompt_semantic_review_before_approval",
+            new_callable=AsyncMock,
+        )
+        self.video_semantic_review_mock = self.video_semantic_review_patcher.start()
+
+    def tearDown(self) -> None:
+        self.video_semantic_review_patcher.stop()
+
     def test_sanitize_run_title_matches_toc_run_folder_rules(self) -> None:
         self.assertEqual(image_gen.sanitize_run_title("桃 太郎/鬼ヶ島!"), "桃_太郎_鬼_島")
         self.assertEqual(image_gen.sanitize_run_title("   "), "topic")
@@ -585,14 +671,67 @@ class ImageGenParserTests(unittest.TestCase):
             with patch("server.image_gen_app.ROOT", root):
                 _validate_p650_run("桃太郎_20260509_1200")
 
+    def test_validate_p650_run_requires_frozen_scene_request_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            (run_dir / "image_generation_request_snapshot.json").unlink()
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "image_generation_request_snapshot.json"):
+                    _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_p650_run_rejects_draft_freeze_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+                state_file.write("review.image_prompt.request_freeze.status=draft\n")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "request freeze is not frozen"):
+                    _validate_p650_run("桃太郎_20260509_1200")
+
     def test_validate_materialized_p650_run_allows_no_generated_assets_or_downstream_semantic_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            frozen_scene_snapshot = load_request_snapshot(
+                run_dir / "image_generation_request_snapshot.json",
+                run_dir=run_dir,
+            )
             shutil.rmtree(run_dir / "assets")
+            deferred_scene_snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    {
+                        "item_id": item.item_id,
+                        "destination": item.destination,
+                        "prompt": item.prompt,
+                        "prompt_policy_version": item.prompt_policy_version,
+                        "compiler_version": item.compiler_version,
+                        "source_digest": item.source_digest,
+                        "references": [reference.path for reference in item.references],
+                    }
+                    for item in frozen_scene_snapshot.items
+                ],
+                source_artifact="image_generation_requests.md",
+                defer_missing_references=True,
+            )
+            write_request_snapshot_atomic(
+                run_dir / "image_generation_request_snapshot.json",
+                deferred_scene_snapshot,
+                run_dir=run_dir,
+            )
             shutil.rmtree(run_dir / "logs" / "review")
             write_semantic_review_artifacts(run_dir, "research")
             write_semantic_review_artifacts(run_dir, "story")
+            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+                state_file.write(
+                    "slot.p650.status=pending\n"
+                    "review.image_prompt.request_freeze.status=draft\n"
+                )
 
             with patch("server.image_gen_app.ROOT", root):
                 _validate_materialized_p650_run("桃太郎_20260509_1200")
@@ -648,17 +787,17 @@ class ImageGenParserTests(unittest.TestCase):
             (run_dir / "image_generation_requests.md").write_text(text.split("## scene10_cut2", 1)[0], encoding="utf-8")
 
             with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "missing scene cut requests"):
+                with self.assertRaisesRegex(ImageRequestSnapshotError, "source_artifact_sha256 mismatch"):
                     _validate_p650_run("桃太郎_20260509_1200")
 
     def test_validate_p650_run_rejects_placeholder_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
-            (run_dir / "state.txt").write_text(
-                "runtime.scaffold.content_status=placeholder\nslot.p120.status=pending\n",
-                encoding="utf-8",
-            )
+            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+                state_file.write(
+                    "runtime.scaffold.content_status=placeholder\nslot.p120.status=pending\n"
+                )
 
             with patch("server.image_gen_app.ROOT", root):
                 with self.assertRaisesRegex(RuntimeError, "placeholder|pending"):
@@ -841,7 +980,7 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertIsNone(image_gen_app._semantic_report_text_from_transcript(transcript, "research"))
 
-    def test_validate_frontend_create_run_rejects_missing_scene_output_field(self) -> None:
+    def test_validate_frontend_create_run_rejects_post_freeze_request_markdown_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
@@ -849,7 +988,7 @@ class ImageGenParserTests(unittest.TestCase):
             (run_dir / "image_generation_requests.md").write_text(text.replace("- output: `assets/scenes/scene10_cut1.png`\n", ""), encoding="utf-8")
 
             with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "missing scene cut requests"):
+                with self.assertRaisesRegex(ImageRequestSnapshotError, "source_artifact_sha256 mismatch"):
                     _validate_frontend_create_run("桃太郎_20260509_1200")
 
     def test_validate_frontend_create_run_rejects_invalid_scene_image_bytes(self) -> None:
@@ -871,7 +1010,7 @@ class ImageGenParserTests(unittest.TestCase):
             manifest_text = manifest_path.read_text(encoding="utf-8")
             manifest_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_text)) or {}
             for cut in manifest_data["scenes"][0]["cuts"]:
-                cut["duration_seconds"] = 30
+                cut["duration_seconds"] = 6
             image_gen_app._write_manifest_data(manifest_path, manifest_text, manifest_data)
             write_test_png(run_dir / "assets" / "scenes" / "scene10_cut1.png", (220, 40, 40))
             write_test_png(run_dir / "assets" / "scenes" / "scene10_cut2.png", (40, 220, 40))
@@ -895,28 +1034,1123 @@ class ImageGenParserTests(unittest.TestCase):
 
             data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text((run_dir / "video_manifest.md").read_text(encoding="utf-8")))
             render_units = data["scenes"][0]["render_units"]
-            storyboard = run_dir / "assets" / "storyboards" / "scene10_storyboard.png"
-            storyboard_exists = storyboard.is_file()
+            storyboard_paths = [
+                run_dir / "assets" / "storyboards" / "scene10_unit1_storyboard.png",
+                run_dir / "assets" / "storyboards" / "scene10_unit2_storyboard.png",
+            ]
+            storyboard_exists = all(path.is_file() for path in storyboard_paths)
             request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
             clips_text = (run_dir / "video_clips.txt").read_text(encoding="utf-8")
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            timeline_issues = image_gen_app._render_unit_timeline_issues(data)
 
-        self.assertEqual(result["unitCount"], 1)
+        self.assertEqual(result["unitCount"], 2)
         self.assertTrue(storyboard_exists)
+        self.assertEqual(timeline_issues, [])
         self.assertEqual([cut["cut_id"] for cut in data["scenes"][0]["cuts"]], ["1", "2", "3"])
-        self.assertEqual(render_units[0]["unit_id"], "1")
-        self.assertEqual(render_units[0]["source_cut_ids"], ["1", "2", "3"])
-        self.assertEqual(render_units[0]["video_generation"]["duration_seconds"], 60)
-        self.assertEqual(render_units[0]["storyboard_image"], "assets/storyboards/scene10_storyboard.png")
-        self.assertEqual(render_units[0]["video_generation"]["first_frame"], "assets/storyboards/scene10_storyboard.png")
-        self.assertEqual(render_units[0]["video_generation"]["input_image"], "assets/storyboards/scene10_storyboard.png")
+        self.assertEqual([unit["unit_id"] for unit in render_units], ["1", "2"])
+        self.assertEqual(render_units[0]["source_cut_ids"], ["1", "2"])
+        self.assertEqual(render_units[1]["source_cut_ids"], ["3"])
+        self.assertEqual(render_units[0]["video_generation"]["duration_seconds"], 12)
+        self.assertEqual(render_units[1]["video_generation"]["duration_seconds"], 6)
+        self.assertEqual(render_units[0]["storyboard_image"], "assets/storyboards/scene10_unit1_storyboard.png")
+        self.assertNotIn("first_frame", render_units[0]["video_generation"])
+        self.assertNotIn("input_image", render_units[0]["video_generation"])
+        self.assertEqual(
+            render_units[0]["video_generation"]["references"],
+            [
+                "assets/scenes/scene10_cut1.png",
+                "assets/storyboards/scene10_unit1_storyboard.png",
+            ],
+        )
+        self.assertEqual(
+            render_units[0]["video_input_contract"]["input_mode"],
+            "reference_images",
+        )
+        self.assertEqual(
+            render_units[0]["video_generation"]["api_prompt_payload"]["policy_version"],
+            "video_api_prompt_v1",
+        )
+        self.assertEqual(
+            render_units[0]["video_generation"]["api_prompt_payload"]["mode"],
+            "reference_to_video",
+        )
+        self.assertEqual(
+            render_units[0]["video_generation"]["motion_prompt"],
+            render_units[0]["video_generation"]["api_prompt_payload"]["prompt"],
+        )
         self.assertIn("## scene10_unit1", request_text)
-        self.assertIn("- duration_seconds: `60`", request_text)
-        self.assertIn("- storyboard_image: `assets/storyboards/scene10_storyboard.png`", request_text)
-        self.assertIn("- source_cuts:\n  - `1`\n  - `2`\n  - `3`", request_text)
+        self.assertIn("## scene10_unit2", request_text)
+        self.assertIn("- duration_seconds: `12`", request_text)
+        self.assertIn("- duration_seconds: `6`", request_text)
+        self.assertIn("- prompt_policy_version: `video_api_prompt_v1`", request_text)
+        self.assertIn("- negative_prompt_sha256: `", request_text)
+        self.assertIn("- references_digest: `", request_text)
+        self.assertIn("```video_prompt", request_text)
+        self.assertIn("```negative_prompt", request_text)
+        self.assertIn("一つの連続した映画的な動き", request_text)
+        self.assertNotIn("render_unit:", request_text)
+        self.assertNotIn("cut_motion_order:", request_text)
+        self.assertIn("- storyboard_image: `assets/storyboards/scene10_unit1_storyboard.png`", request_text)
+        self.assertIn("- first_frame: ``", request_text)
+        self.assertIn("Image 1", request_text)
+        self.assertIn("- source_cuts:\n  - `1`\n  - `2`", request_text)
+        self.assertIn("- source_cuts:\n  - `3`", request_text)
         self.assertIn("assets/scenes/scene10/scene10_unit1.mp4", clips_text)
+        self.assertIn("assets/scenes/scene10/scene10_unit2.mp4", clips_text)
         self.assertEqual(state["runtime.create_mode"], "scene_storyboard")
         self.assertEqual(state["review.frontend.storyboard.status"], "ready")
+
+    def test_seedance_reference_only_execution_uses_i2v_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "ARK_SEEDANCE_I2V_MODEL": "seedance-reference-model",
+                "ARK_SEEDANCE_T2V_MODEL": "seedance-text-model",
+            },
+        ):
+            options = image_gen_app._server_video_execution_options(
+                tool="seedance",
+                has_first_frame=False,
+                has_reference_images=True,
+            )
+
+        self.assertEqual(options["model"], "seedance-reference-model")
+
+    def test_video_provider_capabilities_are_model_and_input_mode_bound(self) -> None:
+        default_reference = resolve_video_provider_capabilities(
+            tool="seedance",
+            input_mode="reference_images",
+        )
+        known_reference = resolve_video_provider_capabilities(
+            tool="seedance",
+            model="seedance-1-0-lite-i2v-250428",
+            input_mode="reference_to_video",
+        )
+        unknown_model = resolve_video_provider_capabilities(
+            tool="seedance",
+            model="seedance-2-experimental",
+            input_mode="reference_images",
+        )
+        kling = resolve_video_provider_capabilities(
+            tool="kling_3_0",
+            input_mode="image_to_video",
+        )
+
+        self.assertEqual(
+            (
+                default_reference.duration_min_seconds,
+                default_reference.duration_max_seconds,
+                default_reference.reference_images_min,
+                default_reference.reference_images_max,
+            ),
+            (2, 12, 1, 4),
+        )
+        self.assertEqual(default_reference, known_reference)
+        for alias in (
+            "byteplus_seedance",
+            "bytedance-seedance",
+            "ark_seedance",
+            "seadream_video",
+        ):
+            self.assertEqual(
+                resolve_video_provider_capabilities(
+                    tool=alias,
+                    input_mode="reference_images",
+                ),
+                default_reference,
+            )
+        self.assertFalse(unknown_model.supported)
+        self.assertIn("no reviewed capability contract", unknown_model.unsupported_reason)
+        self.assertEqual(
+            (kling.duration_min_seconds, kling.duration_max_seconds),
+            (1, 60),
+        )
+        self.assertEqual(
+            resolve_video_provider_capabilities(
+                tool="kling-omni",
+                input_mode="image_to_video",
+            ),
+            resolve_video_provider_capabilities(
+                tool="kling_3_0_omni",
+                input_mode="image_to_video",
+            ),
+        )
+        unsupported_issues = image_gen_app._video_provider_capability_issues(
+            label="scene10_unit1",
+            tool="seedance",
+            model="seedance-2-experimental",
+            input_mode="reference_to_video",
+            duration_seconds=8,
+            reference_count=2,
+        )
+        self.assertEqual(len(unsupported_issues), 1)
+        self.assertIn("no reviewed capability contract", unsupported_issues[0])
+
+    def test_storyboard_partition_preserves_order_and_avoids_subminimum_tail(self) -> None:
+        entries = [
+            (f"cut-{index}", str(index), {}, duration)
+            for index, duration in enumerate((6, 6, 1), start=1)
+        ]
+
+        groups = image_gen_app._partition_storyboard_entries(
+            entries,
+            minimum_duration_seconds=2,
+            maximum_duration_seconds=12,
+        )
+
+        self.assertEqual(
+            [[entry[3] for entry in group] for group in groups],
+            [[6], [6, 1]],
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be partitioned"):
+            image_gen_app._partition_storyboard_entries(
+                [("cut-1", "1", {}, 1)],
+                minimum_duration_seconds=2,
+                maximum_duration_seconds=12,
+            )
+
+    def test_seedance_reference_render_unit_over_12_seconds_is_hard_rejected(self) -> None:
+        first_frame = "assets/scenes/scene10_cut1.png"
+        storyboard = "assets/storyboards/scene10_storyboard.png"
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": "10",
+                    "cuts": [{"cut_id": "1", "duration_seconds": 13}],
+                    "render_units": [
+                        {
+                            "unit_id": "1",
+                            "source_cut_ids": ["1"],
+                            "storyboard_image": storyboard,
+                            "video_input_contract": {
+                                "schema_version": "render_unit_video_input_v1",
+                                "input_mode": "reference_images",
+                                "required_references": [first_frame, storyboard],
+                                "reference_roles": [
+                                    {"image_index": 1, "role": "start_state_visual_anchor"},
+                                    {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                                ],
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 13,
+                                "references": [first_frame, storyboard],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"invalid render-unit timeline:.*2-12s",
+        ):
+            image_gen_app._manifest_video_targets(manifest)
+
+    def test_seedance_non_render_unit_over_12_seconds_is_timeline_rejected(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": "10",
+                    "cuts": [
+                        {
+                            "cut_id": "1",
+                            "duration_seconds": 13,
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 13,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"invalid render-unit timeline:.*2-12s",
+        ):
+            image_gen_app._manifest_video_targets(manifest)
+
+    def test_video_target_lookup_resolves_storyboard_render_unit(self) -> None:
+        unit = {
+            "unit_id": "1",
+            "source_cut_ids": ["1"],
+            "video_generation": {
+                "motion_prompt": "scene motion",
+                "duration_seconds": 8,
+            },
+        }
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": "10",
+                    "cuts": [{"cut_id": "1", "duration_seconds": 8}],
+                    "render_units": [unit],
+                }
+            ]
+        }
+
+        target = image_gen_app._video_target_by_item_id(
+            manifest,
+            "scene10_unit1",
+        )
+
+        self.assertIsNotNone(target)
+        self.assertIs(target["cut"], unit)
+        self.assertEqual(target["selector"], "scene10_unit1")
+
+    def test_manifest_video_targets_hard_rejects_invalid_render_unit_ownership(self) -> None:
+        base_manifest = {
+            "scenes": [
+                {
+                    "scene_id": "10",
+                    "cuts": [
+                        {"cut_id": "1", "duration_seconds": 8},
+                        {"cut_id": "2", "duration_seconds": 8},
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": "1",
+                            "source_cut_ids": ["1", "2"],
+                            "video_generation": {"duration_seconds": 16},
+                        }
+                    ],
+                }
+            ]
+        }
+        cases: dict[str, tuple[dict[str, Any], str]] = {}
+
+        missing_sources = json.loads(json.dumps(base_manifest))
+        missing_sources["scenes"][0]["render_units"][0]["source_cut_ids"] = []
+        cases["missing source list"] = (missing_sources, "non-empty list")
+
+        unknown_source = json.loads(json.dumps(base_manifest))
+        unknown_source["scenes"][0]["render_units"][0]["source_cut_ids"] = ["1", "9"]
+        cases["unknown source"] = (unknown_source, "unknown or deleted source cut")
+
+        wrong_order = json.loads(json.dumps(base_manifest))
+        wrong_order["scenes"][0]["render_units"][0]["source_cut_ids"] = ["2", "1"]
+        cases["wrong order"] = (wrong_order, "source-cut order")
+
+        duplicate_owner = json.loads(json.dumps(base_manifest))
+        duplicate_owner["scenes"][0]["render_units"] = [
+            {
+                "unit_id": "1",
+                "source_cut_ids": ["1"],
+                "video_generation": {"duration_seconds": 8},
+            },
+            {
+                "unit_id": "2",
+                "source_cut_ids": ["1", "2"],
+                "video_generation": {"duration_seconds": 16},
+            },
+        ]
+        cases["duplicate owner"] = (duplicate_owner, "owned by both")
+
+        missing_coverage = json.loads(json.dumps(base_manifest))
+        missing_coverage["scenes"][0]["render_units"][0] = {
+            "unit_id": "1",
+            "source_cut_ids": ["1"],
+            "video_generation": {"duration_seconds": 8},
+        }
+        cases["missing coverage"] = (missing_coverage, "active cuts missing")
+
+        deleted_source = json.loads(json.dumps(base_manifest))
+        deleted_source["scenes"][0]["cuts"][1]["status"] = "deleted"
+        cases["deleted source"] = (deleted_source, "unknown or deleted source cut")
+
+        duplicate_cut_id = json.loads(json.dumps(base_manifest))
+        duplicate_cut_id["scenes"][0]["cuts"][1]["cut_id"] = "1"
+        duplicate_cut_id["scenes"][0]["render_units"][0] = {
+            "unit_id": "1",
+            "source_cut_ids": ["1"],
+            "video_generation": {"duration_seconds": 8},
+        }
+        cases["duplicate active cut id"] = (duplicate_cut_id, "duplicate active cut id")
+
+        deleted_unit = json.loads(json.dumps(base_manifest))
+        deleted_unit["scenes"][0]["render_units"][0]["status"] = "deleted"
+        cases["deleted render unit"] = (deleted_unit, "deleted/reference render units")
+
+        for label, (manifest, expected) in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"invalid render-unit timeline:.*{expected}",
+                ):
+                    image_gen_app._manifest_video_targets(manifest)
+
+    def test_invalid_render_unit_ownership_is_rejected_by_video_items_and_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            for cut in manifest["scenes"][0]["cuts"]:
+                cut["duration_seconds"] = 8
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1", "2"],
+                    "video_generation": {"duration_seconds": 16},
+                }
+            ]
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        video_items = client.get(
+                            "/api/image-gen/video-items?run_id=sample_run"
+                        )
+                        materialize = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "items": [
+                                    {
+                                        "item_id": "scene10_unit1",
+                                        "kind": "scene",
+                                        "video_duration_seconds": 16,
+                                    }
+                                ],
+                            },
+                        )
+
+        self.assertEqual(video_items.status_code, 400)
+        self.assertIn("active cuts missing from render_units", video_items.text)
+        self.assertEqual(materialize.status_code, 400)
+        self.assertIn("active cuts missing from render_units", materialize.text)
+
+    def test_create_video_prompts_materializes_storyboard_render_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            storyboard_rel = "assets/storyboards/scene10_storyboard.png"
+            write_test_png(run_dir / storyboard_rel, (80, 100, 120))
+            manifest_path = run_dir / "video_manifest.md"
+            original = manifest_path.read_text(encoding="utf-8")
+            manifest = yaml.safe_load(
+                image_gen_app._extract_manifest_yaml_text(original)
+            )
+            manifest["scenes"][0]["cuts"] = [manifest["scenes"][0]["cuts"][0]]
+            manifest["scenes"][0]["cuts"][0]["duration_seconds"] = 8
+            first_frame_rel = "assets/scenes/scene10_cut1.png"
+            write_test_png(run_dir / first_frame_rel, (120, 80, 40))
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1"],
+                    "storyboard_image": storyboard_rel,
+                    "video_input_contract": {
+                        "schema_version": "render_unit_video_input_v1",
+                        "input_mode": "reference_images",
+                        "required_references": [first_frame_rel, storyboard_rel],
+                        "reference_roles": [
+                            {"image_index": 1, "role": "start_state_visual_anchor"},
+                            {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                        ],
+                    },
+                    "video_generation": {
+                        "tool": "seedance",
+                        "prompt_authoring_source": "場面全体へゆっくり寄る",
+                        "motion_prompt": "compatibility prompt",
+                        "duration_seconds": 8,
+                        "quality": "1080p",
+                        "aspect_ratio": "16:9",
+                        "references": [first_frame_rel, storyboard_rel],
+                        "output": "assets/scenes/scene10/scene10_unit1.mp4",
+                    },
+                }
+            ]
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "replace_all": False,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_unit1",
+                                        "kind": "scene",
+                                        "output": first_frame_rel,
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "",
+                                        "video_references": [first_frame_rel, storyboard_rel],
+                                        "video_duration_seconds": 8,
+                                        "video_quality": "1080p",
+                                        "video_aspect_ratio": "16:9",
+                                        "video_tool": "seedance",
+                                    }
+                                ],
+                            },
+                        )
+
+            updated = yaml.safe_load(
+                image_gen_app._extract_manifest_yaml_text(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            )
+            unit_video = updated["scenes"][0]["render_units"][0][
+                "video_generation"
+            ]
+            request_text = (run_dir / "video_generation_requests.md").read_text(
+                encoding="utf-8"
+            )
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            unit_video["output"],
+            "assets/scenes/scene10/scene10_unit1.mp4",
+        )
+        self.assertIn(
+            "- output: `assets/scenes/scene10/scene10_unit1.mp4`",
+            request_text,
+        )
+        self.assertEqual(
+            unit_video["api_prompt_payload"]["policy_version"],
+            "video_api_prompt_v1",
+        )
+        self.assertEqual(
+            unit_video["api_prompt_payload"]["provider_request_binding"][
+                "reference_roles"
+            ],
+            [
+                {"image_index": 1, "role": "start_state_visual_anchor"},
+                {
+                    "image_index": 2,
+                    "role": "ordered_storyboard_sequence_guide",
+                },
+            ],
+        )
+        self.assertIn(
+            "参照画像1は開始状態の基準",
+            unit_video["api_prompt_payload"]["prompt"],
+        )
+        self.assertEqual(
+            state["review.video_prompt.item.scene10_unit1.status"],
+            "approved",
+        )
+
+    def test_video_items_exposes_render_units_instead_of_ignored_source_cuts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            storyboard_rel = "assets/storyboards/scene10_storyboard.png"
+            write_test_png(run_dir / storyboard_rel, (80, 100, 120))
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            for cut in manifest["scenes"][0]["cuts"]:
+                cut["duration_seconds"] = 4
+            first_frame_rel = "assets/scenes/scene10_cut1.png"
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1", "2", "3"],
+                    "storyboard_image": storyboard_rel,
+                    "video_input_contract": {
+                        "schema_version": "render_unit_video_input_v1",
+                        "input_mode": "reference_images",
+                        "required_references": [first_frame_rel, storyboard_rel],
+                        "reference_roles": [
+                            {"image_index": 1, "role": "start_state_visual_anchor"},
+                            {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                        ],
+                    },
+                    "video_generation": {
+                        "tool": "seedance",
+                        "prompt_authoring_source": "場面全体へゆっくり寄る",
+                        "duration_seconds": 12,
+                        "references": [first_frame_rel, storyboard_rel],
+                        "output": "assets/scenes/scene10/scene10_unit1.mp4",
+                    },
+                }
+            ]
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.get(
+                            "/api/image-gen/video-items?run_id=sample_run"
+                        )
+                        rejected_cut = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                    }
+                                ],
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+        self.assertEqual([item["id"] for item in items], ["scene10_unit1"])
+        self.assertTrue(items[0]["isRenderUnit"])
+        self.assertEqual(items[0]["sourceCutIds"], ["1", "2", "3"])
+        self.assertEqual(items[0]["videoFirstReference"], "")
+        self.assertEqual(items[0]["videoInputMode"], "reference_images")
+        self.assertEqual(items[0]["videoReferences"], [first_frame_rel, storyboard_rel])
+        self.assertEqual(rejected_cut.status_code, 400)
+        self.assertIn("video manifest targets not found", rejected_cut.text)
+
+    def test_render_unit_materialization_rejects_duration_different_from_source_cut_total(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            manifest["scenes"][0]["cuts"] = [manifest["scenes"][0]["cuts"][0]]
+            manifest["scenes"][0]["cuts"][0]["duration_seconds"] = 8
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1"],
+                    "video_generation": {"duration_seconds": 8},
+                }
+            ]
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+            item = image_gen_app.FrontendReviewItem(
+                item_id="scene10_unit1",
+                kind="scene",
+                video_duration_seconds=7,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "must equal source-cut total 8s",
+            ):
+                image_gen_app._effective_video_materialization_items(
+                    run_dir,
+                    [item],
+                )
+
+    def test_render_unit_storyboard_input_contract_rejects_edits_and_preserves_omitted_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            manifest["scenes"][0]["cuts"] = [manifest["scenes"][0]["cuts"][0]]
+            manifest["scenes"][0]["cuts"][0]["duration_seconds"] = 8
+            first_frame = "assets/scenes/scene10_cut1.png"
+            storyboard = "assets/storyboards/scene10_storyboard.png"
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1"],
+                    "storyboard_image": storyboard,
+                    "video_input_contract": {
+                        "schema_version": "render_unit_video_input_v1",
+                        "input_mode": "reference_images",
+                        "required_references": [first_frame, storyboard],
+                        "reference_roles": [
+                            {"image_index": 1, "role": "start_state_visual_anchor"},
+                            {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                        ],
+                    },
+                    "video_generation": {
+                        "tool": "seedance",
+                        "duration_seconds": 8,
+                        "references": [first_frame, storyboard],
+                    },
+                }
+            ]
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+
+            preserved = image_gen_app._effective_video_materialization_items(
+                run_dir,
+                [
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_unit1",
+                        kind="scene",
+                        video_duration_seconds=8,
+                    )
+                ],
+            )[0]
+
+            self.assertEqual(preserved.video_first_reference, "")
+            self.assertEqual(preserved.video_references, [first_frame, storyboard])
+            with self.assertRaisesRegex(ValueError, "must keep first frame empty"):
+                image_gen_app._effective_video_materialization_items(
+                    run_dir,
+                    [
+                        image_gen_app.FrontendReviewItem(
+                            item_id="scene10_unit1",
+                            kind="scene",
+                            video_duration_seconds=8,
+                            video_first_reference="assets/scenes/replacement.png",
+                            video_references=[first_frame, storyboard],
+                        )
+                    ],
+                )
+            with self.assertRaisesRegex(ValueError, "must exactly preserve"):
+                image_gen_app._effective_video_materialization_items(
+                    run_dir,
+                    [
+                        image_gen_app.FrontendReviewItem(
+                            item_id="scene10_unit1",
+                            kind="scene",
+                            video_duration_seconds=8,
+                            video_first_reference="",
+                            video_references=[],
+                        )
+                    ],
+                )
+            for tampered_references in (
+                [storyboard, first_frame],
+                [storyboard],
+            ):
+                with self.subTest(tampered_references=tampered_references):
+                    tampered_manifest = json.loads(json.dumps(manifest))
+                    tampered_unit = tampered_manifest["scenes"][0][
+                        "render_units"
+                    ][0]
+                    tampered_unit["video_input_contract"][
+                        "required_references"
+                    ] = tampered_references
+                    tampered_unit["video_generation"][
+                        "references"
+                    ] = tampered_references
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "ordered first source-cut image and storyboard_image",
+                    ):
+                        image_gen_app._manifest_video_targets(
+                            tampered_manifest
+                        )
+
+            for label, mutate, expected in (
+                (
+                    "missing_roles",
+                    lambda contract: contract.pop("reference_roles"),
+                    "reference_roles count must equal",
+                ),
+                (
+                    "duplicate_index",
+                    lambda contract: contract["reference_roles"][1].update(
+                        {"image_index": 1}
+                    ),
+                    "image_index must be 1-based, consecutive, unique",
+                ),
+                (
+                    "unknown_role",
+                    lambda contract: contract["reference_roles"][1].update(
+                        {"role": "unknown_role"}
+                    ),
+                    "unsupported video reference role",
+                ),
+            ):
+                with self.subTest(reference_role_case=label):
+                    tampered_manifest = json.loads(json.dumps(manifest))
+                    contract = tampered_manifest["scenes"][0]["render_units"][0][
+                        "video_input_contract"
+                    ]
+                    mutate(contract)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        image_gen_app._manifest_video_targets(
+                            tampered_manifest
+                        )
+
+    def test_server_render_unit_visual_plan_prefers_unit_then_first_source_cut(self) -> None:
+        source_plan = {"subject": "first source cut subject"}
+        unit_plan = {"subject": "unit-authored subject"}
+        unit = {
+            "unit_id": "1",
+            "source_cut_ids": ["1"],
+            "video_generation": {"duration_seconds": 8},
+        }
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": "10",
+                    "cuts": [
+                        {
+                            "cut_id": "1",
+                            "duration_seconds": 8,
+                            "image_generation": {
+                                "first_frame_visual_plan": source_plan,
+                            },
+                        }
+                    ],
+                    "render_units": [unit],
+                }
+            ]
+        }
+        target = image_gen_app._video_target_by_item_id(manifest, "scene10_unit1")
+
+        self.assertEqual(
+            image_gen_app._first_frame_visual_plan_for_server_target(target or {}),
+            source_plan,
+        )
+        unit["image_generation"] = {"first_frame_visual_plan": unit_plan}
+        self.assertEqual(
+            image_gen_app._first_frame_visual_plan_for_server_target(target or {}),
+            unit_plan,
+        )
+
+    def test_video_materialization_rejects_canonical_render_timeline_duration_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            cut = manifest["scenes"][0]["cuts"][0]
+            cut["render"] = {"video_duration_seconds": 8}
+            cut["video_generation"] = {"duration_seconds": 8}
+            manifest["narration_workflow"] = {
+                "final_audio_review": {
+                    "status": "approved",
+                    "approved_timeline_hash": image_gen_app._manifest_narration_timeline_hash(
+                        manifest
+                    ),
+                }
+            }
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+
+            with self.assertRaisesRegex(ValueError, "canonical render timeline duration 8s"):
+                image_gen_app._effective_video_materialization_items(
+                    run_dir,
+                    [
+                        image_gen_app.FrontendReviewItem(
+                            item_id="scene10_cut1",
+                            kind="scene",
+                            video_duration_seconds=7,
+                        )
+                    ],
+                )
+            unchanged = image_gen_app._effective_video_materialization_items(
+                run_dir,
+                [
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_cut1",
+                        kind="scene",
+                        video_duration_seconds=8,
+                    )
+                ],
+            )
+            self.assertEqual(unchanged[0].video_duration_seconds, 8)
+
+    def test_unapproved_video_materialization_synchronizes_render_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            item = image_gen_app.FrontendReviewItem(
+                item_id="scene10_cut1",
+                kind="scene",
+                output="assets/scenes/scene10_cut1.png",
+                video_prompt="slow dolly forward",
+                video_duration_seconds=6,
+            )
+
+            effective = image_gen_app._effective_video_materialization_items(run_dir, [item])
+            image_gen_app._update_manifest_video_generation(run_dir, effective)
+            _path, _original, updated = image_gen_app._read_manifest_data(run_dir)
+            cut = updated["scenes"][0]["cuts"][0]
+
+        self.assertEqual(cut["video_generation"]["duration_seconds"], 6)
+        self.assertEqual(cut["render"]["video_duration_seconds"], 6)
+
+    def test_render_unit_partial_merge_removes_source_cut_request_and_revokes_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original, manifest = image_gen_app._read_manifest_data(run_dir)
+            for cut in manifest["scenes"][0]["cuts"]:
+                cut["duration_seconds"] = 4
+            first_frame = "assets/scenes/scene10_cut1.png"
+            storyboard = "assets/storyboards/scene10_storyboard.png"
+            write_test_png(run_dir / first_frame)
+            write_test_png(run_dir / storyboard)
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1", "2", "3"],
+                    "storyboard_image": storyboard,
+                    "video_input_contract": {
+                        "schema_version": "render_unit_video_input_v1",
+                        "input_mode": "reference_images",
+                        "required_references": [first_frame, storyboard],
+                        "reference_roles": [
+                            {"image_index": 1, "role": "start_state_visual_anchor"},
+                            {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                        ],
+                    },
+                    "video_generation": {
+                        "tool": "seedance",
+                        "duration_seconds": 12,
+                        "references": [first_frame, storyboard],
+                    },
+                }
+            ]
+            manifest["scenes"].append(
+                {
+                    "scene_id": "20",
+                    "cuts": [
+                        {
+                            "cut_id": "1",
+                            "duration_seconds": 8,
+                            "image_generation": {
+                                "output": "assets/scenes/scene20_cut1.png"
+                            },
+                        }
+                    ],
+                }
+            )
+            image_gen_app._write_manifest_data(manifest_path, original, manifest)
+            (run_dir / "video_generation_requests.md").write_text(
+                "# Video Generation Requests\n\n"
+                "## scene10_cut1\n\nlegacy source-cut request\n\n"
+                "## scene20_cut1\n\nkeep canonical request\n",
+                encoding="utf-8",
+            )
+            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
+                state_file.write(
+                    "review.video_prompt.item.scene10_cut1.status=approved\n"
+                    "review.video_prompt.item.scene20_cut1.status=approved\n"
+                )
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "replace_all": False,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_unit1",
+                                        "kind": "scene",
+                                        "output": first_frame,
+                                        "video_prompt": "continuous scene motion",
+                                        "video_first_reference": "",
+                                        "video_references": [first_frame, storyboard],
+                                        "video_duration_seconds": 12,
+                                        "video_tool": "seedance",
+                                    }
+                                ],
+                            },
+                        )
+
+            request_text = (run_dir / "video_generation_requests.md").read_text(
+                encoding="utf-8"
+            )
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("## scene10_cut1", request_text)
+        self.assertIn("## scene10_unit1", request_text)
+        self.assertIn("## scene20_cut1", request_text)
+        self.assertEqual(
+            state["review.video_prompt.item.scene10_cut1.status"],
+            "revoked",
+        )
+        self.assertEqual(
+            state["review.video_prompt.item.scene20_cut1.status"],
+            "approved",
+        )
+
+    def test_video_stage_approval_requires_full_canonical_item_coverage_not_replace_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            write_test_png(run_dir / "assets/scenes/scene10_cut1.png")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "replace_all": True,
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                        "video_first_reference": "assets/scenes/scene10_cut1.png",
+                                        "video_duration_seconds": 8,
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                    }
+                                ],
+                            },
+                        )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(state["slot.p830.status"], "awaiting_approval")
+        self.assertEqual(
+            state["review.video_prompt.status"],
+            "partially_approved_for_generation",
+        )
+
+    def test_video_stage_approval_completes_for_full_coverage_with_partial_merge_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            items: list[dict[str, Any]] = []
+            for index in range(1, 4):
+                output = f"assets/scenes/scene10_cut{index}.png"
+                write_test_png(run_dir / output)
+                items.append(
+                    {
+                        "item_id": f"scene10_cut{index}",
+                        "kind": "scene",
+                        "output": output,
+                        "video_first_reference": output,
+                        "video_duration_seconds": 8,
+                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                    }
+                )
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "replace_all": False,
+                                "approve_for_generation": True,
+                                "items": items,
+                            },
+                        )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(state["slot.p830.status"], "done")
+        self.assertEqual(
+            state["review.video_prompt.status"],
+            "approved_for_generation",
+        )
+
+    def test_video_stage_approval_completes_after_sequential_item_approvals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            items: list[dict[str, Any]] = []
+            for index in range(1, 4):
+                output = f"assets/scenes/scene10_cut{index}.png"
+                write_test_png(run_dir / output)
+                items.append(
+                    {
+                        "item_id": f"scene10_cut{index}",
+                        "kind": "scene",
+                        "output": output,
+                        "video_first_reference": output,
+                        "video_duration_seconds": 8,
+                        "video_prompt": (
+                            f"action: 主人公が画面奥へ{index}歩進み、その場で止まる。\n"
+                            "camera: slow dolly forward"
+                        ),
+                    }
+                )
+
+            statuses: list[str] = []
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        for item in items:
+                            response = client.post(
+                                "/api/image-gen/video-prompts/create",
+                                json={
+                                    "run_id": "sample_run",
+                                    "replace_all": False,
+                                    "approve_for_generation": True,
+                                    "items": [item],
+                                },
+                            )
+                            self.assertEqual(response.status_code, 200, response.text)
+                            statuses.append(
+                                image_gen_app.parse_state_file(
+                                    run_dir / "state.txt"
+                                )["slot.p830.status"]
+                            )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            request_text = (run_dir / "video_generation_requests.md").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(statuses, ["awaiting_approval", "awaiting_approval", "done"])
+        self.assertEqual(state["review.video_prompt.status"], "approved_for_generation")
+        for index in range(1, 4):
+            self.assertEqual(
+                state[f"review.video_prompt.item.scene10_cut{index}.status"],
+                "approved",
+            )
+            self.assertIn(f"## scene10_cut{index}", request_text)
+
+    def test_video_stage_reapproval_of_one_changed_item_keeps_other_current_approvals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            items: list[dict[str, Any]] = []
+            for index in range(1, 4):
+                output = f"assets/scenes/scene10_cut{index}.png"
+                write_test_png(run_dir / output)
+                items.append(
+                    {
+                        "item_id": f"scene10_cut{index}",
+                        "kind": "scene",
+                        "output": output,
+                        "video_first_reference": output,
+                        "video_duration_seconds": 8,
+                        "video_prompt": f"cut {index} original motion",
+                    }
+                )
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        initial = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "replace_all": False,
+                                "approve_for_generation": True,
+                                "items": items,
+                            },
+                        )
+                        changed_item = {
+                            **items[2],
+                            "video_prompt": "cut 3 revised motion",
+                        }
+                        revised = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "replace_all": False,
+                                "approve_for_generation": True,
+                                "items": [changed_item],
+                            },
+                        )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertEqual(revised.status_code, 200, revised.text)
+        self.assertEqual(state["slot.p830.status"], "done")
+        self.assertEqual(state["review.video_prompt.status"], "approved_for_generation")
+        for index in range(1, 4):
+            self.assertEqual(
+                state[f"review.video_prompt.item.scene10_cut{index}.status"],
+                "approved",
+            )
 
     def test_create_storyboard_run_endpoint_starts_scene_storyboard_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2279,7 +3513,8 @@ legacy prompt must not be used for v1
                 debug_prompt_source={"first_frame_visual_plan": {"schema_version": "first_frame_visual_plan_v1"}, "send_to_api": False},
             )
 
-            payload = json.loads(log_path.read_text(encoding="utf-8"))
+            log_text = log_path.read_text(encoding="utf-8")
+            payload = json.loads(log_text)
 
         self.assertEqual(payload["prompt"], "[shot / 画角]\nshot_role: insert")
         self.assertEqual(payload["apiPromptPolicyVersion"], "image_api_prompt_v1")
@@ -2636,6 +3871,7 @@ old provider prompt
             object_ids=[],
             location_ids=["kitchen-1"],
             references=["assets/characters/hero-1.png"],
+            scene_time_of_day="夕方",
         )
 
         self.assertEqual(patched["source_grounding"], plan["source_grounding"])
@@ -2645,6 +3881,8 @@ old provider prompt
         self.assertIn("主人公が半分開いた扉へ手を伸ばす", payload["prompt"])
         self.assertEqual(payload["policy_version"], "image_api_prompt_v2")
         self.assertEqual(payload["drawable_prompt_ir"]["dependencies"]["character_ids"], ["hero-1"])
+        self.assertEqual(payload["drawable_prompt_ir"]["dependencies"]["time_of_day"], "夕方")
+        self.assertIn("このシーンの時間帯は夕方", payload["prompt"])
 
     def test_recompile_v2_scene_manifest_updates_plan_and_payload_together(self) -> None:
         plan = {
@@ -2675,6 +3913,7 @@ old provider prompt
             "scenes": [
                 {
                     "scene_id": "10",
+                    "time_of_day": "夜",
                     "cuts": [
                         {
                             "cut_id": "1",
@@ -2712,7 +3951,23 @@ old provider prompt
             "主人公が扉へ手を伸ばす",
         )
         self.assertEqual(image_generation["api_prompt_payload"], compiled["scene10_cut1"])
-        self.assertEqual(image_generation["api_prompt_payload"]["shot_design_contract"], {"status": "approved"})
+        self.assertEqual(
+            image_generation["api_prompt_payload"]["shot_design_contract"]["shot_role"],
+            "character_action",
+        )
+        self.assertNotIn(
+            "status",
+            image_generation["api_prompt_payload"]["shot_design_contract"],
+        )
+        self.assertEqual(
+            image_generation["debug_prompt_source"]["first_frame_visual_plan"],
+            image_generation["first_frame_visual_plan"],
+        )
+        self.assertEqual(
+            image_generation["api_prompt_payload"]["drawable_prompt_ir"]["dependencies"]["time_of_day"],
+            "夜",
+        )
+        self.assertIn("このシーンの時間帯は夜", image_generation["api_prompt_payload"]["prompt"])
 
     def test_reference_options_use_extensionless_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3011,10 +4266,188 @@ scene one
 
 
 class ImageGenApiTests(unittest.TestCase):
+    def test_video_prompt_currentness_rejects_blocking_compiler_quality_issues(self) -> None:
+        item = image_gen_app.FrontendReviewItem(
+            item_id="scene10_cut1",
+            kind="scene",
+        )
+        payload = {
+            "quality_issues": [
+                {
+                    "code": "video_motion_abstract_primary",
+                    "blocking": True,
+                },
+                {
+                    "code": "non_blocking_note",
+                    "blocking": False,
+                },
+                {
+                    "code": "   ",
+                    "blocking": True,
+                },
+            ]
+        }
+        target = {"cut": {"video_generation": {"api_prompt_payload": payload}}}
+
+        self.assertEqual(
+            image_gen_app._blocking_video_prompt_quality_issue_codes(payload),
+            [
+                "video_motion_abstract_primary",
+                "video_motion_blocking_quality_issue",
+            ],
+        )
+
+        with (
+            patch(
+                "server.image_gen_app._read_manifest_data",
+                return_value=(Path("video_manifest.md"), "", {}),
+            ),
+            patch(
+                "server.image_gen_app._compile_frontend_video_prompt_payload",
+                return_value=(target, payload),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"scene10_cut1.*video_motion_abstract_primary.*video_motion_blocking_quality_issue",
+            ):
+                image_gen_app._assert_video_materialization_current_for_approval(
+                    Path("."),
+                    [item],
+                )
+
+    def test_video_generation_endpoints_reject_nested_blocking_quality_issue(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with (
+                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._require_narration_ready_for_video",
+                    return_value={"ready": True},
+                ),
+            ):
+                with TestClient(app) as client:
+                    created = client.post(
+                        "/api/image-gen/video-prompts/create",
+                        json={
+                            "run_id": "sample_run",
+                            "approve_for_generation": True,
+                            "items": [
+                                {
+                                    "item_id": "scene10_cut1",
+                                    "kind": "scene",
+                                    "output": "assets/scenes/scene10_cut1.png",
+                                    "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                    "video_first_reference": "assets/characters/hero.png",
+                                }
+                            ],
+                        },
+                    )
+                    self.assertEqual(created.status_code, 200, created.text)
+
+                    manifest = yaml.safe_load(
+                        image_gen_app._extract_manifest_yaml_text(
+                            (run_dir / "video_manifest.md").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    )
+                    stored_payload = manifest["scenes"][0]["cuts"][0][
+                        "video_generation"
+                    ]["api_prompt_payload"]
+                    blocking_payload = json.loads(json.dumps(stored_payload))
+                    blocking_payload["quality_issues"] = []
+                    blocking_payload.setdefault("video_prompt_ir", {})[
+                        "quality_issues"
+                    ] = [
+                        {
+                            "code": "video_motion_abstract_primary",
+                            "blocking": True,
+                        }
+                    ]
+                    request_item = {
+                        "item_id": "scene10_cut1",
+                        "prompt": REVIEWABLE_VIDEO_PROMPT,
+                        "first_reference": "assets/characters/hero.png",
+                        "candidate_count": 1,
+                    }
+
+                    with (
+                        patch(
+                            "server.image_gen_app._compile_frontend_video_prompt_payload",
+                            return_value=({}, blocking_payload),
+                        ),
+                        patch(
+                            "server.image_gen_app._generate_video_candidates",
+                            new_callable=AsyncMock,
+                        ) as generate,
+                    ):
+                        single = client.post(
+                            "/api/image-gen/video-generate",
+                            json={"run_id": "sample_run", **request_item},
+                        )
+                        bulk = client.post(
+                            "/api/image-gen/video-generate-bulk",
+                            json={
+                                "run_id": "sample_run",
+                                "concurrency": 1,
+                                "items": [request_item],
+                            },
+                        )
+
+                    manifest_path = run_dir / "video_manifest.md"
+                    manifest_text = manifest_path.read_text(encoding="utf-8")
+                    stored_payload["quality_issues"] = []
+                    stored_payload.setdefault("video_prompt_ir", {})[
+                        "quality_issues"
+                    ] = [
+                        {
+                            "code": "video_motion_abstract_end_state",
+                            "blocking": True,
+                        }
+                    ]
+                    image_gen_app._write_manifest_data(
+                        manifest_path,
+                        manifest_text,
+                        manifest,
+                    )
+                    with patch(
+                        "server.image_gen_app._generate_video_candidates",
+                        new_callable=AsyncMock,
+                    ) as persisted_generate:
+                        persisted = client.post(
+                            "/api/image-gen/video-generate",
+                            json={"run_id": "sample_run", **request_item},
+                        )
+
+            self.assertEqual(single.status_code, 409, single.text)
+            self.assertEqual(bulk.status_code, 409, bulk.text)
+            self.assertEqual(persisted.status_code, 409, persisted.text)
+            self.assertIn("scene10_cut1", single.text)
+            self.assertIn("video_motion_abstract_primary", single.text)
+            self.assertIn("scene10_cut1", bulk.text)
+            self.assertIn("video_motion_abstract_primary", bulk.text)
+            self.assertIn("scene10_cut1", persisted.text)
+            self.assertIn("video_motion_abstract_end_state", persisted.text)
+            generate.assert_not_called()
+            persisted_generate.assert_not_called()
+
     def setUp(self) -> None:
         image_gen_app._create_jobs.clear()
+        self.video_semantic_review_patcher = patch(
+            "server.image_gen_app._run_video_prompt_semantic_review_before_approval",
+            new_callable=AsyncMock,
+        )
+        self.video_semantic_review_mock = self.video_semantic_review_patcher.start()
 
     def tearDown(self) -> None:
+        self.video_semantic_review_patcher.stop()
         image_gen_app._create_jobs.clear()
 
     def _poll_create_job(self, client: TestClient, job_id: str) -> dict:
@@ -3581,7 +5014,7 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertIn("slot.p680.status=awaiting_approval", state)
         self.assertIn("review.image.status=pending", state)
 
-    def test_generate_create_images_skips_scene_detail_transport_blocked_scene_only(self) -> None:
+    def test_generate_create_images_blocks_all_scenes_on_scene_detail_transport_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
@@ -3594,18 +5027,20 @@ class ImageGenApiTests(unittest.TestCase):
 ## scene40_cut1
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene40_cut1.png`
 - references:
   - `主人公`: `assets/characters/hero.png`
 
-```text
+```api_prompt
 transport blocked scene should not generate.
 ```
 """,
                 encoding="utf-8",
             )
+            refresh_scene_request_snapshot_fixture(run_dir)
             saved = root / "generated.png"
             saved.write_bytes(PNG_BYTES)
             generated: list[str] = []
@@ -3652,21 +5087,22 @@ transport blocked scene should not generate.
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before scene image generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
             scene40_exists = (run_dir / "assets/scenes/scene40_cut1.png").exists()
 
-        self.assertTrue(scene10_exists)
+        self.assertFalse(scene10_exists)
         self.assertFalse(scene40_exists)
-        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut2", "scene10_cut3"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
-        self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
+        self.assertEqual(generated, ["hero"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "false")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
         self.assertIn("scene40_cut1", state["review.semantic.scene_detail.blocked_image_items"])
 
-    def test_generate_create_images_skips_scene_detail_semantic_blocked_scene_only(self) -> None:
+    def test_generate_create_images_blocks_all_scenes_on_scene_detail_semantic_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
@@ -3679,18 +5115,20 @@ transport blocked scene should not generate.
 ## scene20_cut1
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene20_cut1.png`
 - references:
   - `主人公`: `assets/characters/hero.png`
 
-```text
+```api_prompt
 semantic blocked scene should not generate.
 ```
 """,
                 encoding="utf-8",
             )
+            refresh_scene_request_snapshot_fixture(run_dir)
             saved = root / "generated.png"
             saved.write_bytes(PNG_BYTES)
             generated: list[str] = []
@@ -3747,20 +5185,20 @@ semantic blocked scene should not generate.
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before scene image generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
             scene20_exists = (run_dir / "assets/scenes/scene20_cut1.png").exists()
 
-        self.assertTrue(scene10_exists)
+        self.assertFalse(scene10_exists)
         self.assertFalse(scene20_exists)
-        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut2", "scene10_cut3"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
-        self.assertEqual(state["review.semantic.scene_detail.partial_media_generated"], "true")
+        self.assertEqual(generated, ["hero"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
         self.assertIn("scene20_cut1", state["review.semantic.scene_detail.blocked_image_items"])
-        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "true")
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "false")
 
     def test_api_requests_marks_scene_detail_transport_blocked_items_as_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3775,16 +5213,18 @@ semantic blocked scene should not generate.
 ## scene40_cut1
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene40_cut1.png`
 
-```text
+```api_prompt
 transport blocked scene should show as failed.
 ```
 """,
                 encoding="utf-8",
             )
+            refresh_scene_request_snapshot_fixture(run_dir)
             image_gen_app.append_state_snapshot(
                 run_dir / "state.txt",
                 {
@@ -3818,16 +5258,18 @@ transport blocked scene should show as failed.
 ## scene20_cut1
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
 - execution_lane: `standard`
 - reference_count: `1`
 - output: `assets/scenes/scene20_cut1.png`
 
-```text
+```api_prompt
 semantic blocked scene should show as failed.
 ```
 """,
                 encoding="utf-8",
             )
+            refresh_scene_request_snapshot_fixture(run_dir)
             image_gen_app.append_state_snapshot(
                 run_dir / "state.txt",
                 {
@@ -3854,11 +5296,24 @@ semantic blocked scene should show as failed.
         self.assertIsNone(normal["generationStatus"])
         self.assertEqual(normal["candidates"], [])
 
-    def test_generate_create_images_skips_image_prompt_blocked_cut_only(self) -> None:
+    def test_generate_create_images_blocks_all_scenes_when_image_prompt_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
             run_dir = write_valid_p650_artifacts(root, run_id)
+            supervisor_result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
+            supervisor_result_path.parent.mkdir(parents=True, exist_ok=True)
+            supervisor_result_path.write_text(
+                json.dumps(
+                    {
+                        "bucket": "p600",
+                        "status": "done",
+                        "completed_slots": ["p610", "p620", "p630", "p640", "p650"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             saved = root / "generated.png"
             saved.write_bytes(PNG_BYTES)
             generated: list[str] = []
@@ -3915,27 +5370,50 @@ semantic blocked scene should show as failed.
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before scene image generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            supervisor_result = json.loads(supervisor_result_path.read_text(encoding="utf-8"))
             scene10_cut1_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
             scene10_cut2_exists = (run_dir / "assets/scenes/scene10_cut2.png").exists()
             scene10_cut3_exists = (run_dir / "assets/scenes/scene10_cut3.png").exists()
 
-        self.assertTrue(scene10_cut1_exists)
+        self.assertFalse(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
-        self.assertTrue(scene10_cut3_exists)
-        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut3"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
-        self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "true")
+        self.assertFalse(scene10_cut3_exists)
+        self.assertEqual(generated, ["hero"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
+        self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "false")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
         self.assertIn("scene10_cut2", state["review.semantic.image_prompt.blocked_image_items"])
+        self.assertEqual(state["review.image_prompt.request_freeze.status"], "draft")
+        self.assertEqual(state["review.image_prompt.request_freeze.invalidated_by"], "semantic.image_prompt.failed")
+        self.assertEqual(state["slot.p650.status"], "pending")
+        self.assertEqual(state["orchestration.p600.supervisor.status"], "invalidated")
+        self.assertEqual(state["orchestration.p600.supervisor.invalidated_by"], "semantic.image_prompt.failed")
+        self.assertEqual(supervisor_result["status"], "invalidated")
+        self.assertEqual(supervisor_result["previous_status"], "done")
+        self.assertEqual(supervisor_result["invalidated_by"], "semantic.image_prompt.failed")
 
-    def test_generate_create_images_skips_asset_plan_blocked_source_cut_only(self) -> None:
+    def test_generate_create_images_blocks_all_scenes_when_asset_plan_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
             run_dir = write_valid_p650_artifacts(root, run_id)
+            supervisor_result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
+            supervisor_result_path.parent.mkdir(parents=True, exist_ok=True)
+            supervisor_result_path.write_text(
+                json.dumps(
+                    {
+                        "bucket": "p600",
+                        "status": "done",
+                        "completed_slots": ["p610", "p620", "p630", "p640", "p650"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             (run_dir / "asset_plan.md").write_text(
                 """```yaml
 assets:
@@ -4005,22 +5483,32 @@ assets:
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed after media generation"):
+                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before scene image generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            supervisor_result = json.loads(supervisor_result_path.read_text(encoding="utf-8"))
             scene10_cut1_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
             scene10_cut2_exists = (run_dir / "assets/scenes/scene10_cut2.png").exists()
             scene10_cut3_exists = (run_dir / "assets/scenes/scene10_cut3.png").exists()
 
-        self.assertTrue(scene10_cut1_exists)
+        self.assertFalse(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
-        self.assertTrue(scene10_cut3_exists)
-        self.assertEqual(generated, ["hero", "scene10_cut1", "scene10_cut3"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_after_media_generation")
-        self.assertEqual(state["review.semantic.asset_plan.partial_media_allowed"], "true")
+        self.assertFalse(scene10_cut3_exists)
+        self.assertEqual(generated, ["hero"])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
+        self.assertEqual(state["review.semantic.asset_plan.partial_media_allowed"], "false")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
         self.assertEqual(state["review.semantic.asset_plan.localization.status"], "localized_to_image_items")
         self.assertIn("scene10_cut2", state["review.semantic.asset_plan.blocked_image_items"])
+        self.assertEqual(state["review.image_prompt.request_freeze.status"], "draft")
+        self.assertEqual(state["review.image_prompt.request_freeze.invalidated_by"], "semantic.asset_plan.failed")
+        self.assertEqual(state["slot.p650.status"], "pending")
+        self.assertEqual(state["orchestration.p600.supervisor.status"], "invalidated")
+        self.assertEqual(state["orchestration.p600.supervisor.invalidated_by"], "semantic.asset_plan.failed")
+        self.assertEqual(supervisor_result["status"], "invalidated")
+        self.assertEqual(supervisor_result["previous_status"], "done")
+        self.assertEqual(supervisor_result["invalidated_by"], "semantic.asset_plan.failed")
 
     def test_api_requests_marks_image_prompt_blocked_cut_as_failed_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4287,6 +5775,7 @@ base b prompt
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
                     patch("server.image_gen_app._validate_p560_asset_quality", gate),
                     patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
                     patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
@@ -4314,6 +5803,7 @@ base b prompt
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock(side_effect=RuntimeError("bootstrap asset visual gate failed"))),
                     patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
                     patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
@@ -6762,9 +8252,11 @@ base b prompt
             with (
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
                 patch("server.image_gen_app._validate_p560_asset_quality", fake_validate_p560_asset_quality),
                 patch("server.image_gen_app._repair_bootstrap_asset_prompts", fake_repair_bootstrap_asset_prompts),
                 patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                patch("server.image_gen_app._validate_p650_run"),
             ):
                 result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id="sample_run"))
 
@@ -7242,13 +8734,13 @@ good prompt
                                         "prompt": "updated still prompt",
                                         "references": ["assets/characters/hero.png"],
                                         "selected_candidate_path": "assets/test/image_gen_candidates/scene10_cut1/candidate_01.png",
-                                        "video_prompt": "slow dolly forward",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
                                         "video_quality": "720p",
                                         "video_aspect_ratio": "9:16",
                                         "video_duration_seconds": 6,
                                         "video_first_reference": "assets/scenes/scene10_cut1.png",
                                         "video_last_reference": "assets/characters/hero.png",
-                                        "video_references": ["assets/characters/hero.png"],
+                                        "video_references": [],
                                         "video_tool": "kling_3_0",
                                     }
                                 ],
@@ -7260,14 +8752,43 @@ good prompt
             video_draft_latest_exists = (run_dir / "logs" / "review" / "frontend" / "video_draft_latest.json").exists()
             manifest = yaml.safe_load(image_gen_app._extract_manifest_yaml_text((run_dir / "video_manifest.md").read_text(encoding="utf-8")))
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
+            expected_references_digest = hashlib.sha256(
+                json.dumps(
+                    [],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(video_draft_latest_exists)
         self.assertIn("- quality: `720p`", request_text)
         self.assertIn("- aspect_ratio: `9:16`", request_text)
-        self.assertIn("slow dolly forward", request_text)
+        self.assertIn("- prompt_policy_version: `video_api_prompt_v1`", request_text)
+        self.assertIn(
+            f"- references_digest: `{expected_references_digest}`",
+            request_text,
+        )
+        self.assertNotIn("slow dolly forward", request_text)
+        self.assertIn("slow dolly forward", design_text)
+        self.assertIn("単一の連続ショット", request_text)
+        self.assertNotIn("updated still prompt", request_text)
+        self.assertNotIn("cut_contract:", request_text)
         self.assertIn("prompt_changed: `true`", design_text)
         self.assertEqual(manifest["scenes"][0]["cuts"][0]["video_generation"]["first_frame"], "assets/scenes/scene10_cut1.png")
+        self.assertEqual(
+            manifest["scenes"][0]["cuts"][0]["video_generation"]["api_prompt_payload"]["policy_version"],
+            "video_api_prompt_v1",
+        )
+        self.assertEqual(
+            manifest["scenes"][0]["cuts"][0]["video_generation"]["motion_prompt"],
+            manifest["scenes"][0]["cuts"][0]["video_generation"]["api_prompt_payload"]["prompt"],
+        )
+        self.assertEqual(
+            manifest["scenes"][0]["cuts"][0]["video_generation"]["prompt_authoring_source"],
+            REVIEWABLE_VIDEO_PROMPT,
+        )
         self.assertIn("review.frontend.video.status=saved_for_video_prompt", state)
         self.assertIn("slot.p830.status=awaiting_approval", state)
 
@@ -7304,6 +8825,47 @@ good prompt
         self.assertFalse(video_requests_exists)
         self.assertNotIn("slot.p830.status=awaiting_approval", state)
 
+    def test_create_video_prompts_rejects_unsupported_kling_auxiliary_references_before_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
+            (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(
+                PNG_BYTES
+            )
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                        "video_prompt": "主人公が一歩進む",
+                                        "video_first_reference": "assets/scenes/scene10_cut1.png",
+                                        "video_references": [
+                                            "assets/characters/hero.png"
+                                        ],
+                                        "video_tool": "kling_3_0_omni",
+                                    }
+                                ],
+                            },
+                        )
+
+            state = (run_dir / "state.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("reference image count 1", response.text)
+        self.assertIn("outside the kling_3_0_omni image_to_video limit 0-0", response.text)
+        self.assertNotIn("review.video_prompt.item.scene10_cut1.status=approved", state)
+        self.video_semantic_review_mock.assert_not_awaited()
+
     def test_create_video_prompts_partial_update_preserves_existing_video_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -7311,10 +8873,10 @@ good prompt
             (run_dir / "video_generation_requests.md").write_text(
                 """# Video Generation Requests
 
-## scene20_cut1
+## scene10_cut2
 
 - tool: `kling_3_0`
-- output: `assets/scenes/scene20_cut1_video.mp4`
+- output: `assets/scenes/scene10_cut2_video.mp4`
 
 ```text
 keep existing request
@@ -7337,7 +8899,7 @@ keep existing request
                                         "kind": "scene",
                                         "output": "assets/scenes/scene10_cut1.png",
                                         "prompt": "prompt",
-                                        "video_prompt": "new scene10 request",
+                                        "video_prompt": "主人公へゆっくり寄る",
                                         "video_first_reference": "assets/scenes/scene10_cut1.png",
                                     }
                                 ],
@@ -7347,10 +8909,161 @@ keep existing request
             request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("## scene20_cut1", request_text)
+        self.assertIn("## scene10_cut2", request_text)
         self.assertIn("keep existing request", request_text)
         self.assertIn("## scene10_cut1", request_text)
-        self.assertIn("new scene10 request", request_text)
+        self.assertIn("主人公へゆっくり寄る", request_text)
+
+    def test_create_video_prompts_explicitly_clears_existing_last_frame_without_staling_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original_text, manifest = image_gen_app._read_manifest_data(run_dir)
+            manifest["scenes"][0]["cuts"][0]["video_generation"] = {
+                "last_frame": "assets/characters/hero.png",
+            }
+            image_gen_app._write_manifest_data(manifest_path, original_text, manifest)
+            request_item = {
+                "item_id": "scene10_cut1",
+                "kind": "scene",
+                "output": "assets/scenes/scene10_cut1.png",
+                "video_prompt": "主人公が扉の手前で止まる",
+                "video_first_reference": "assets/scenes/scene10_cut1.png",
+                "video_last_reference": "",
+            }
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={"run_id": "sample_run", "items": [request_item]},
+                        )
+
+            _path, _text, current_manifest = image_gen_app._read_manifest_data(run_dir)
+            video_generation = current_manifest["scenes"][0]["cuts"][0]["video_generation"]
+            _target, recompiled = image_gen_app._compile_frontend_video_prompt_payload(
+                data=current_manifest,
+                item=image_gen_app.FrontendReviewItem(**request_item),
+                run_dir=run_dir,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("last_frame", video_generation)
+        self.assertEqual(video_generation["api_prompt_payload"], recompiled)
+
+    def test_create_video_prompts_does_not_approve_when_video_semantic_review_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
+            (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(PNG_BYTES)
+            self.video_semantic_review_mock.side_effect = ValueError("semantic rejection")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                        "video_prompt": "主人公が扉の手前で止まる",
+                                        "video_first_reference": "assets/scenes/scene10_cut1.png",
+                                    }
+                                ],
+                            },
+                        )
+
+            state = (run_dir / "state.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 400)
+        self.video_semantic_review_mock.assert_awaited_once()
+        self.assertIn("review.video_prompt.item.scene10_cut1.status=pending", state)
+        self.assertNotIn("review.video_prompt.item.scene10_cut1.status=approved", state)
+
+    def test_create_video_prompts_serializes_materialization_review_and_approval_per_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            active_reviews = 0
+            peak_reviews = 0
+
+            async def controlled_semantic_review(*, run_dir: Path) -> None:
+                nonlocal active_reviews, peak_reviews
+                active_reviews += 1
+                peak_reviews = max(peak_reviews, active_reviews)
+                try:
+                    await asyncio.sleep(0.05)
+                finally:
+                    active_reviews -= 1
+
+            self.video_semantic_review_mock.side_effect = controlled_semantic_review
+            request_a = image_gen_app.VideoPromptCreateRequest(
+                run_id="sample_run",
+                approve_for_generation=True,
+                items=[
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_cut1",
+                        kind="scene",
+                        video_prompt="主人公が左へ一歩進む",
+                        video_first_reference="assets/characters/hero.png",
+                    )
+                ],
+            )
+            request_b = image_gen_app.VideoPromptCreateRequest(
+                run_id="sample_run",
+                approve_for_generation=True,
+                items=[
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_cut1",
+                        kind="scene",
+                        video_prompt="主人公が右へ二歩進む",
+                        video_first_reference="assets/characters/hero.png",
+                    )
+                ],
+            )
+
+            async def run_concurrently() -> list[Any]:
+                first = asyncio.create_task(
+                    image_gen_app.api_create_video_prompts(request_a)
+                )
+                await asyncio.sleep(0)
+                second = asyncio.create_task(
+                    image_gen_app.api_create_video_prompts(request_b)
+                )
+                return list(
+                    await asyncio.gather(first, second, return_exceptions=True)
+                )
+
+            with patch("server.image_gen_app.ROOT", root):
+                results = asyncio.run(run_concurrently())
+
+            _path, _text, manifest = image_gen_app._read_manifest_data(run_dir)
+            generation = manifest["scenes"][0]["cuts"][0]["video_generation"]
+            current_binding = image_gen_app._reviewed_video_request_binding(
+                run_dir, "scene10_cut1"
+            )
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            prefix = image_gen_app._video_prompt_approval_state_prefix(
+                "scene10_cut1"
+            )
+
+        self.assertEqual(peak_reviews, 1)
+        self.assertTrue(all(isinstance(result, dict) for result in results), results)
+        self.assertEqual(
+            generation["prompt_authoring_source"], "主人公が右へ二歩進む"
+        )
+        self.assertEqual(
+            state[f"{prefix}.request_section_sha256"],
+            current_binding["request_section_sha256"],
+        )
+        self.assertEqual(state[f"{prefix}.status"], "approved")
 
     def test_create_video_prompts_rejects_markdown_code_fence_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7382,13 +9095,11 @@ keep existing request
         self.assertIn("must not contain markdown code fences", response.text)
         self.assertFalse(video_requests_exists)
 
-    def test_video_generate_calls_provider_and_does_not_update_request_file(self) -> None:
+    def test_video_generate_uses_materialized_provider_prompt_and_does_not_rewrite_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
             mark_manifest_narration_ready(run_dir)
-            (run_dir / "video_generation_requests.md").write_text("keep existing requests\n", encoding="utf-8")
-            manifest_before = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             calls: list[dict[str, Any]] = []
 
             class FakeKlingClient:
@@ -7414,19 +9125,51 @@ keep existing request
                 def download_to_file(self, *, uri: str, out_path: Path, **_kwargs):
                     out_path.write_bytes(MP4_BYTES + uri.encode("utf-8"))
 
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "KLING_API_KEY": "fake-key"}):
+            with patch.dict(
+                os.environ,
+                {
+                    "TOC_SERVER_AUTH_DISABLED": "1",
+                    "KLING_API_KEY": "fake-key",
+                    "VIDEO_NEGATIVE_PROMPT": "UNREVIEWED_NEGATIVE_PROMPT",
+                },
+            ):
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.KlingClient", FakeKlingClient),
                     patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
                 ):
                     with TestClient(app) as client:
+                        materialize_response = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                        "video_quality": "720p",
+                                        "video_aspect_ratio": "9:16",
+                                        "video_duration_seconds": 6,
+                                        "video_tool": "kling_3_0",
+                                    }
+                                ],
+                            },
+                        )
+                        request_before_generate = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
+                        manifest_before_generate = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+                        manifest_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_before_generate))
+                        expected_provider_prompt = manifest_data["scenes"][0]["cuts"][0]["video_generation"]["api_prompt_payload"]["prompt"]
+                        expected_negative_prompt = manifest_data["scenes"][0]["cuts"][0]["video_generation"]["api_prompt_payload"]["negative_prompt"]
                         response = client.post(
                             "/api/image-gen/video-generate",
                             json={
                                 "run_id": "sample_run",
                                 "item_id": "scene10_cut1",
-                                "prompt": "slow dolly forward",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
                                 "first_reference": "assets/characters/hero.png",
                                 "quality": "720p",
                                 "aspect_ratio": "9:16",
@@ -7440,16 +9183,929 @@ keep existing request
             request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
             manifest_after = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             first_candidate_exists = (run_dir / payload["candidates"][0]["path"]).is_file()
+            provider_debug = json.loads(
+                (run_dir / payload["candidates"][0]["debugLog"]).read_text(encoding="utf-8")
+            )
 
+        self.assertEqual(materialize_response.status_code, 200)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(payload["candidates"]), 2)
         self.assertTrue(first_candidate_exists)
-        self.assertEqual(request_text, "keep existing requests\n")
-        self.assertEqual(manifest_after, manifest_before)
+        self.assertEqual(request_text, request_before_generate)
+        self.assertEqual(manifest_after, manifest_before_generate)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0]["prompt"], "slow dolly forward")
+        self.assertEqual(calls[0]["prompt"], expected_provider_prompt)
+        self.assertEqual(calls[0]["negative_prompt"], expected_negative_prompt)
+        self.assertNotEqual(calls[0]["negative_prompt"], "UNREVIEWED_NEGATIVE_PROMPT")
+        self.assertNotIn("slow dolly forward", calls[0]["prompt"])
+        self.assertIn("カメラは被写体へゆっくり寄る", calls[0]["prompt"])
+        self.assertIn("単一の連続ショット", calls[0]["prompt"])
         self.assertEqual(calls[0]["aspect_ratio"], "9:16")
         self.assertEqual(calls[0]["resolution"], "720p")
+        self.assertEqual(provider_debug["prompt"], expected_provider_prompt)
+        self.assertEqual(provider_debug["promptPolicyVersion"], "video_api_prompt_v1")
+        self.assertEqual(
+            provider_debug["promptSha256"],
+            hashlib.sha256(expected_provider_prompt.encode("utf-8")).hexdigest(),
+        )
+
+    def test_video_provider_debug_log_redacts_signed_media_url_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "test" / "candidate.mp4"
+            destination.parent.mkdir(parents=True)
+            request = image_gen_app.VideoGenerateItem(
+                item_id="scene10_cut1",
+                prompt="reviewed prompt",
+                candidate_count=1,
+            )
+
+            log_path = image_gen_app._write_video_generation_debug_log(
+                run_dir=run_dir,
+                item_id=request.item_id,
+                index=1,
+                destination=destination,
+                request=request,
+                provider_result={
+                    "task": {
+                        "video_url": (
+                            "https://signed-cdn.example/clip.mp4"
+                            "?signature=secret&token=private#fragment"
+                        )
+                    }
+                },
+            )
+            log_text = log_path.read_text(encoding="utf-8")
+            payload = json.loads(log_text)
+
+        self.assertEqual(
+            payload["provider"]["task"]["video_url"],
+            "https://signed-cdn.example/clip.mp4",
+        )
+        self.assertNotIn("secret", log_text)
+
+    def test_video_candidate_from_prior_prompt_revision_is_hidden_and_rejected_for_render(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            manifest_path, original_text, manifest = image_gen_app._read_manifest_data(
+                run_dir
+            )
+            manifest["scenes"][0]["cuts"] = [manifest["scenes"][0]["cuts"][0]]
+            image_gen_app._write_manifest_data(
+                manifest_path, original_text, manifest
+            )
+            mark_manifest_narration_ready(run_dir)
+
+            class FakeKlingClient:
+                def __init__(self, _config):
+                    pass
+
+                def start_video_generation(self, **_kwargs):
+                    return {"data": {"id": "task-a"}}
+
+                def extract_operation_id(self, response, **_kwargs):
+                    return response["data"]["id"]
+
+                def poll_operation(self, **_kwargs):
+                    return {
+                        "status": "succeeded",
+                        "data": {
+                            "task_result": {
+                                "videos": [
+                                    {"url": "https://example.test/a.mp4"}
+                                ]
+                            }
+                        },
+                    }
+
+                def is_failed_operation(self, _operation, **_kwargs):
+                    return False
+
+                def extract_video_uri(self, operation, **_kwargs):
+                    return operation["data"]["task_result"]["videos"][0][
+                        "url"
+                    ]
+
+                def download_to_file(self, *, out_path: Path, **_kwargs):
+                    out_path.write_bytes(MP4_BYTES)
+
+            with patch.dict(
+                os.environ,
+                {"TOC_SERVER_AUTH_DISABLED": "1", "KLING_API_KEY": "fake-key"},
+            ):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.KlingClient", FakeKlingClient),
+                    patch(
+                        "server.image_gen_app._require_narration_ready_for_video",
+                        return_value={"ready": True},
+                    ),
+                    patch(
+                        "server.image_gen_app._prepare_render_video_clip",
+                        lambda _run_dir, source, _item: source,
+                    ),
+                    patch(
+                        "server.image_gen_app._prepare_render_narration",
+                        lambda _run_dir, source, _item: source,
+                    ),
+                    patch(
+                        "server.image_gen_app._probe_media_duration_seconds",
+                        lambda _path: None,
+                    ),
+                ):
+                    with TestClient(app) as client:
+                        approved_a = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": "主人公が左へ一歩進む",
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        generated_a = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": "主人公が左へ一歩進む",
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+                        stale_candidate = generated_a.json()["candidates"][0][
+                            "path"
+                        ]
+                        pending_b = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": False,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": "主人公が右へ二歩進む",
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        video_items = client.get(
+                            "/api/image-gen/video-items?run_id=sample_run"
+                        )
+                        _path, _text, current_manifest = (
+                            image_gen_app._read_manifest_data(run_dir)
+                        )
+                        narration_output = current_manifest["scenes"][0]["cuts"][
+                            0
+                        ]["audio"]["narration"]["output"]
+                        render = client.post(
+                            "/api/image-gen/render-inputs/freeze",
+                            json={
+                                "run_id": "sample_run",
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "video_path": stale_candidate,
+                                        "narration_path": narration_output,
+                                        "video_duration_seconds": 8,
+                                    }
+                                ],
+                            },
+                        )
+
+            listed = video_items.json()["items"][0]
+            revision_segment = Path(stale_candidate).parts[-2]
+
+        self.assertEqual(approved_a.status_code, 200)
+        self.assertEqual(generated_a.status_code, 200)
+        self.assertRegex(revision_segment, r"^[0-9a-f]{64}$")
+        self.assertEqual(pending_b.status_code, 200)
+        self.assertEqual(video_items.status_code, 200)
+        self.assertNotEqual(listed["selectedVideoPath"], stale_candidate)
+        self.assertFalse(listed["videoExists"])
+        self.assertEqual(render.status_code, 400)
+        self.assertIn("stale video candidate revision", render.text)
+
+    def test_in_flight_video_candidate_completion_is_marked_stale_after_new_prompt_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            provider_started = threading.Event()
+            provider_release = threading.Event()
+
+            def controlled_generation(
+                *,
+                run_dir: Path,
+                request: image_gen_app.VideoGenerateItem,
+                index: int,
+                destination: Path,
+                **_kwargs: Any,
+            ) -> dict[str, Any]:
+                provider_started.set()
+                self.assertTrue(provider_release.wait(timeout=5))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(MP4_BYTES)
+                return {
+                    "index": index,
+                    "status": "completed",
+                    "path": destination.relative_to(run_dir).as_posix(),
+                    "debugLog": None,
+                    "source": request.tool,
+                }
+
+            request_a = image_gen_app.VideoPromptCreateRequest(
+                run_id="sample_run",
+                approve_for_generation=True,
+                items=[
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_cut1",
+                        kind="scene",
+                        video_prompt="主人公が左へ一歩進む",
+                        video_first_reference="assets/characters/hero.png",
+                    )
+                ],
+            )
+            request_b = image_gen_app.VideoPromptCreateRequest(
+                run_id="sample_run",
+                approve_for_generation=False,
+                items=[
+                    image_gen_app.FrontendReviewItem(
+                        item_id="scene10_cut1",
+                        kind="scene",
+                        video_prompt="主人公が右へ二歩進む",
+                        video_first_reference="assets/characters/hero.png",
+                    )
+                ],
+            )
+
+            async def exercise_stale_completion() -> dict[str, Any]:
+                await image_gen_app.api_create_video_prompts(request_a)
+                materialized = image_gen_app._materialized_video_generate_item(
+                    run_dir=run_dir,
+                    request=image_gen_app.VideoGenerateItem(
+                        item_id="scene10_cut1",
+                        prompt="主人公が左へ一歩進む",
+                        first_reference="assets/characters/hero.png",
+                        candidate_count=1,
+                    ),
+                )
+                generation = asyncio.create_task(
+                    image_gen_app._generate_video_candidates(run_dir, materialized)
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(provider_started.wait, 5)
+                )
+                await image_gen_app.api_create_video_prompts(request_b)
+                provider_release.set()
+                return await generation
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._generate_video_file_blocking",
+                    controlled_generation,
+                ),
+            ):
+                result = asyncio.run(exercise_stale_completion())
+            candidate = result["candidates"][0]
+            listed_candidate = image_gen_app._candidate_video_output_for_item(
+                run_dir, "scene10_cut1"
+            )
+
+        self.assertEqual(candidate["status"], "stale")
+        self.assertIsNone(candidate["path"])
+        self.assertRegex(
+            str(candidate["stalePath"]),
+            r"/scene10_cut1/[0-9a-f]{64}/candidate_01\.mp4$",
+        )
+        self.assertIsNone(listed_candidate)
+
+    def test_video_generate_rejects_exact_but_pending_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app._require_narration_ready_for_video",
+                        return_value={"ready": True},
+                    ),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertFalse(created.json()["approvedForGeneration"])
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("not approved", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_prompt_that_differs_from_materialized_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "output": "assets/scenes/scene10_cut1.png",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": "unreviewed different prompt",
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("materialized video prompt", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_materialized_prompt_after_design_dependency_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        manifest_path = run_dir / "video_manifest.md"
+                        original_text = manifest_path.read_text(encoding="utf-8")
+                        manifest_data = yaml.safe_load(
+                            image_gen_app._extract_manifest_yaml_text(original_text)
+                        )
+                        manifest_data["scenes"][0]["time_of_day"] = "夜"
+                        image_gen_app._write_manifest_data(
+                            manifest_path,
+                            original_text,
+                            manifest_data,
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("materialized video prompt is stale", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_settings_and_reference_drift_after_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                        "video_tool": "seedance",
+                                    }
+                                ],
+                            },
+                        )
+                        manifest_path = run_dir / "video_manifest.md"
+                        original_text = manifest_path.read_text(encoding="utf-8")
+                        manifest_data = yaml.safe_load(
+                            image_gen_app._extract_manifest_yaml_text(original_text)
+                        )
+                        video_generation = manifest_data["scenes"][0]["cuts"][0]["video_generation"]
+                        video_generation["references"] = ["assets/characters/hero.png"]
+                        video_generation["quality"] = "720p"
+                        video_generation["aspect_ratio"] = "9:16"
+                        image_gen_app._write_manifest_data(
+                            manifest_path,
+                            original_text,
+                            manifest_data,
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "references": ["assets/characters/hero.png"],
+                                "quality": "720p",
+                                "aspect_ratio": "9:16",
+                                "tool": "seedance",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("stale", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_provider_model_drift_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "TOC_SERVER_AUTH_DISABLED": "1",
+                    "KLING_VIDEO_MODEL": "reviewed-model",
+                    "KLING_EXTRA_JSON": '{"cfg_scale": 0.4}',
+                },
+            ):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app._require_narration_ready_for_video",
+                        return_value={"ready": True},
+                    ),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        os.environ["KLING_VIDEO_MODEL"] = "unreviewed-model"
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+            manifest = yaml.safe_load(
+                image_gen_app._extract_manifest_yaml_text(
+                    (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+                )
+            )
+            binding = manifest["scenes"][0]["cuts"][0]["video_generation"][
+                "api_prompt_payload"
+            ]["provider_request_binding"]
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(
+            binding["execution_options"]["model"],
+            "reviewed-model",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("stale", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_tampered_saved_provider_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "TOC_SERVER_AUTH_DISABLED": "1",
+                    "KLING_VIDEO_MODEL": "reviewed-model",
+                },
+            ):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app._require_narration_ready_for_video",
+                        return_value={"ready": True},
+                    ),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        manifest_path = run_dir / "video_manifest.md"
+                        original_text = manifest_path.read_text(encoding="utf-8")
+                        manifest_data = yaml.safe_load(
+                            image_gen_app._extract_manifest_yaml_text(original_text)
+                        )
+                        binding = manifest_data["scenes"][0]["cuts"][0][
+                            "video_generation"
+                        ]["api_prompt_payload"]["provider_request_binding"]
+                        binding["execution_options"]["model"] = "tampered-model"
+                        image_gen_app._write_manifest_data(
+                            manifest_path,
+                            original_text,
+                            manifest_data,
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("provider request binding", response.text)
+        generate.assert_not_called()
+
+    def test_video_generate_rejects_reference_content_drift_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app._require_narration_ready_for_video",
+                        return_value={"ready": True},
+                    ),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        write_test_png(
+                            run_dir / "assets" / "characters" / "hero.png",
+                            (1, 2, 3),
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+            manifest = yaml.safe_load(
+                image_gen_app._extract_manifest_yaml_text(
+                    (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+                )
+            )
+            execution_options = manifest["scenes"][0]["cuts"][0][
+                "video_generation"
+            ]["api_prompt_payload"]["provider_request_binding"][
+                "execution_options"
+            ]
+
+        self.assertEqual(created.status_code, 200)
+        self.assertIn("reference_content_sha256", execution_options)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("stale", response.text)
+        generate.assert_not_called()
+
+    def test_kling_provider_uses_materialized_execution_options(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class FakeKlingClient:
+            def __init__(self, _config):
+                pass
+
+            def start_video_generation(self, **kwargs):
+                calls.append(kwargs)
+                return {"data": {"id": "task-1"}}
+
+            def extract_operation_id(self, response, **_kwargs):
+                return response["data"]["id"]
+
+            def poll_operation(self, **_kwargs):
+                return {
+                    "status": "succeeded",
+                    "data": {
+                        "task_result": {
+                            "videos": [{"url": "https://example.test/video.mp4"}]
+                        }
+                    },
+                }
+
+            def is_failed_operation(self, _operation, **_kwargs):
+                return False
+
+            def extract_video_uri(self, operation, **_kwargs):
+                return operation["data"]["task_result"]["videos"][0]["url"]
+
+            def download_to_file(self, *, out_path: Path, **_kwargs):
+                out_path.write_bytes(MP4_BYTES)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "candidate.mp4"
+            request = image_gen_app.VideoGenerateItem(
+                item_id="scene10_cut1",
+                prompt="reviewed prompt",
+                negative_prompt="reviewed negative",
+                provider_execution_options={
+                    "backend": "kling",
+                    "model": "reviewed-model",
+                    "extra_payload": {"cfg_scale": 0.4},
+                },
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {"KLING_VIDEO_MODEL": "unreviewed-model", "KLING_API_KEY": "key"},
+                ),
+                patch("server.image_gen_app.KlingClient", FakeKlingClient),
+            ):
+                image_gen_app._generate_kling_video_file(
+                    request=request,
+                    input_image=None,
+                    last_frame_image=None,
+                    out_path=output,
+                )
+
+        self.assertEqual(calls[0]["model"], "reviewed-model")
+        self.assertEqual(calls[0]["extra_payload"], {"cfg_scale": 0.4})
+
+    def test_video_provider_receives_hash_checked_private_reference_snapshot(self) -> None:
+        captured_input: Path | None = None
+
+        def fake_generate_kling_video_file(
+            *,
+            request: image_gen_app.VideoGenerateItem,
+            input_image: Path | None,
+            last_frame_image: Path | None,
+            out_path: Path,
+        ) -> dict[str, Any]:
+            nonlocal captured_input
+            self.assertIsNotNone(input_image)
+            assert input_image is not None
+            captured_input = input_image
+            self.assertEqual(input_image.read_bytes(), PNG_BYTES)
+            self.assertIsNone(last_frame_image)
+            out_path.write_bytes(MP4_BYTES)
+            return {"provider": "kling", "model": "reviewed-model"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            reference = run_dir / "assets" / "scenes" / "start.png"
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            reference.write_bytes(PNG_BYTES)
+            relative_reference = "assets/scenes/start.png"
+            request = image_gen_app.VideoGenerateItem(
+                item_id="scene10_cut1",
+                prompt="reviewed prompt",
+                first_reference=relative_reference,
+                provider_execution_options={
+                    "backend": "kling",
+                    "model": "reviewed-model",
+                    "reference_content_sha256": {
+                        relative_reference: hashlib.sha256(PNG_BYTES).hexdigest(),
+                    },
+                },
+            )
+            destination = run_dir / "assets" / "video" / "candidate.mp4"
+            with patch(
+                "server.image_gen_app._generate_kling_video_file",
+                side_effect=fake_generate_kling_video_file,
+            ):
+                image_gen_app._generate_video_file_blocking(
+                    run_dir=run_dir,
+                    request=request,
+                    index=1,
+                    destination=destination,
+                    input_image=reference,
+                    last_frame_image=None,
+                    reference_images=[],
+                )
+
+            self.assertIsNotNone(captured_input)
+            assert captured_input is not None
+            self.assertNotEqual(captured_input, reference)
+            self.assertFalse(captured_input.exists())
+            self.assertEqual(destination.read_bytes(), MP4_BYTES)
+
+    def test_video_provider_rejects_reference_bytes_changed_after_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            reference = run_dir / "assets" / "scenes" / "start.png"
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            reference.write_bytes(b"changed-after-materialization")
+            relative_reference = "assets/scenes/start.png"
+            request = image_gen_app.VideoGenerateItem(
+                item_id="scene10_cut1",
+                prompt="reviewed prompt",
+                first_reference=relative_reference,
+                provider_execution_options={
+                    "backend": "kling",
+                    "model": "reviewed-model",
+                    "reference_content_sha256": {
+                        relative_reference: hashlib.sha256(PNG_BYTES).hexdigest(),
+                    },
+                },
+            )
+
+            with (
+                patch("server.image_gen_app._generate_kling_video_file") as generate,
+                self.assertRaisesRegex(ValueError, "changed before provider submission"),
+            ):
+                image_gen_app._generate_video_file_blocking(
+                    run_dir=run_dir,
+                    request=request,
+                    index=1,
+                    destination=run_dir / "candidate.mp4",
+                    input_image=reference,
+                    last_frame_image=None,
+                    reference_images=[],
+                )
+
+            generate.assert_not_called()
+
+    def test_video_generate_rejects_review_artifact_prompt_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            mark_manifest_narration_ready(run_dir)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
+                    patch("server.image_gen_app._generate_video_candidates") as generate,
+                ):
+                    with TestClient(app) as client:
+                        created = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                    }
+                                ],
+                            },
+                        )
+                        request_path = run_dir / "video_generation_requests.md"
+                        request_text = request_path.read_text(encoding="utf-8")
+                        request_path.write_text(
+                            request_text.replace(
+                                "[主動作]",
+                                "[主動作]\n未承認の別動作。",
+                                1,
+                            ),
+                            encoding="utf-8",
+                        )
+                        response = client.post(
+                            "/api/image-gen/video-generate",
+                            json={
+                                "run_id": "sample_run",
+                                "item_id": "scene10_cut1",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
+                                "first_reference": "assets/characters/hero.png",
+                                "candidate_count": 1,
+                            },
+                        )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("review", response.text.lower())
+        generate.assert_not_called()
 
     def test_video_generate_rejects_missing_narration_ready_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7471,7 +10127,7 @@ keep existing request
                             json={
                                 "run_id": "sample_run",
                                 "item_id": "scene10_cut1",
-                                "prompt": "slow dolly forward",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
                                 "first_reference": "assets/characters/hero.png",
                                 "candidate_count": 1,
                             },
@@ -7500,7 +10156,7 @@ keep existing request
                             json={
                                 "run_id": "sample_run",
                                 "item_id": "scene10_cut1",
-                                "prompt": "slow dolly forward",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
                                 "first_reference": "../secrets.png",
                                 "candidate_count": 1,
                             },
@@ -7810,20 +10466,42 @@ scenes:
                     patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
                 ):
                     with TestClient(app) as client:
+                        materialized = client.post(
+                            "/api/image-gen/video-prompts/create",
+                            json={
+                                "run_id": "sample_run",
+                                "approve_for_generation": True,
+                                "items": [
+                                    {
+                                        "item_id": "scene10_cut1",
+                                        "kind": "scene",
+                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
+                                        "video_first_reference": "assets/characters/hero.png",
+                                        "video_duration_seconds": 4,
+                                        "video_tool": "kling_3_0",
+                                    }
+                                ],
+                            },
+                        )
                         response = client.post(
                             "/api/image-gen/video-generate",
                             json={
                                 "run_id": "sample_run",
                                 "item_id": "scene10_cut1",
-                                "prompt": "slow dolly forward",
+                                "prompt": REVIEWABLE_VIDEO_PROMPT,
                                 "first_reference": "assets/characters/hero.png",
-                                "duration_seconds": 4,
+                                "duration_seconds": 10,
                                 "candidate_count": 1,
                             },
                         )
 
             payload = response.json()
 
+        self.assertEqual(materialized.status_code, 200)
+        self.assertEqual(
+            materialized.json()["durationSecondsByItem"]["scene10_cut1"],
+            10,
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["durationSeconds"], 10)
         self.assertEqual(calls[0]["duration_seconds"], 10)
@@ -8122,7 +10800,9 @@ scenes:
         self.assertEqual(updated_image_generation["first_frame_visual_plan"]["scene_material_pack"]["light_source"], "細い朝日")
         self.assertEqual(updated_snapshot.items[0].prompt, updated_image_generation["api_prompt_payload"]["prompt"])
         self.assertNotEqual(updated_snapshot.items[0].prompt, payload["prompt"])
-        self.assertEqual(recompile_state["runtime.stage"], "prompt_recompiled_awaiting_image_generation")
+        self.assertEqual(recompile_state["runtime.stage"], "prompt_recompiled_awaiting_semantic_review")
+        self.assertEqual(recompile_state["review.image_prompt.request_freeze.status"], "draft")
+        self.assertEqual(recompile_state["slot.p650.status"], "pending")
         self.assertEqual(recompile_state["review.semantic.image_prompt.status"], "pending")
         self.assertEqual(recompile_state["slot.p680.status"], "pending")
         self.assertEqual(failed_response.status_code, 400)
@@ -8660,6 +11340,72 @@ location beta
 
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(run_case(Path(tmp)))
+
+    def test_p650_preflight_generation_and_review_handoff_share_revision_lock(self) -> None:
+        async def run_case(run_dir: Path) -> list[str]:
+            order: list[str] = []
+            validation_completed = asyncio.Event()
+            generation_started = asyncio.Event()
+            release_generation = asyncio.Event()
+            prompt_edit_entered = asyncio.Event()
+
+            def fake_validate(run_id: str) -> None:
+                self.assertEqual(run_id, "sample_run")
+                order.append("validate")
+                validation_completed.set()
+
+            async def fake_set_create_job(job_id: str, updates: dict[str, Any]) -> None:
+                self.assertEqual(job_id, "job-1")
+                order.append("job_state")
+                # Give the simulated prompt editor a chance to contend for the
+                # revision lock immediately after the p650 validation.
+                await asyncio.sleep(0.05)
+
+            async def fake_generate_unlocked(*, run_dir: Path, kind: str) -> None:
+                self.assertEqual(kind, "scene")
+                order.append("provider_submission")
+                generation_started.set()
+                self.assertFalse(prompt_edit_entered.is_set())
+                await release_generation.wait()
+
+            def fake_mark_review_ready(run_id: str) -> None:
+                self.assertEqual(run_id, "sample_run")
+                self.assertFalse(prompt_edit_entered.is_set())
+                order.append("review_handoff")
+
+            async def edit_prompt_snapshot() -> None:
+                await validation_completed.wait()
+                async with image_gen_app._serialized_run_write(run_dir, "scene_request_revision"):
+                    order.append("prompt_edit")
+                    prompt_edit_entered.set()
+
+            with (
+                patch("server.image_gen_app._validate_p650_run", fake_validate),
+                patch("server.image_gen_app._set_create_job", fake_set_create_job),
+                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_unlocked),
+                patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_review_ready),
+            ):
+                generation = asyncio.create_task(
+                    image_gen_app._generate_scene_outputs_after_p650_preflight(
+                        "job-1",
+                        run_id="sample_run",
+                        run_dir=run_dir,
+                    )
+                )
+                editor = asyncio.create_task(edit_prompt_snapshot())
+                await asyncio.wait_for(generation_started.wait(), timeout=2)
+                self.assertFalse(prompt_edit_entered.is_set())
+                release_generation.set()
+                await asyncio.gather(generation, editor)
+            return order
+
+        with tempfile.TemporaryDirectory() as tmp:
+            order = asyncio.run(run_case(Path(tmp)))
+
+        self.assertEqual(
+            order,
+            ["validate", "job_state", "provider_submission", "review_handoff", "prompt_edit"],
+        )
 
     def test_image_prompt_shard_passed_status_with_blocked_entries_fails_closed(self) -> None:
         async def fake_turn_until_completed(_client: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:

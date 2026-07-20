@@ -1,6 +1,12 @@
 # Minimal script output template (from docs/script-creation.md)
 script_metadata:
   topic: "string"
+  # story_metadata.scene_time_of_day_contract の exact one-way projection。
+  scene_time_of_day_contract: "required_v1"
+  # story_metadata.scene_time_of_day_visual_basis_contract の exact one-way projection。
+  scene_time_of_day_visual_basis_contract: "required_v1"
+  # story_metadata.time の一方向 projection。歴史的時代であり、scene の時間帯ではない。
+  time: "string"
   source_story: "output/<topic>_<timestamp>/story.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
@@ -311,6 +317,24 @@ timeline:
 
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
+    # story.md の同一 scene から一方向 projection する open string。新規 artifact では非空必須。
+    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
+    time_of_day: "朝"
+    # story.md の同一 scene から exact projection する derived review evidence。
+    time_of_day_visual_basis: "光源、空/窓外の明るさ、影、色温度を朝に整合させる根拠"
+    location_mode: "single|sequence"
+    location_sequence: ["始まりの部屋"]
+    # story.md location.segments の exact one-way projection。review用routeとprovider用cut locationを分離する。
+    location_segments:
+      - location: "始まりの部屋"
+        responsibility: "この場所で成立させる出来事"
+        primary_subject: "主被写体の人物名"
+        visible_action: "一枚で読める具体的状態"
+        visible_reaction: "別主体の具体的反応"
+        required_visual_evidence: ["具体物"]
+        required_roles: ["protagonist"]
+        motion_brief: "一つの観察可能な動作"
+        motion_end_state: "物理的終了状態"
     importance: "low|medium|high|critical"
     target_duration_seconds: 0
     estimated_duration_seconds: 0

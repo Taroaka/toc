@@ -1,44 +1,102 @@
-# Marketing Directory Guide
+# ToC Marketing Guide
 
-`marketing/` 配下は、マーケティング関連の資料を置くディレクトリです。
+更新日: 2026-07-19
+
+`marketing/` は、ToC を必要な個人へ届け、利用開始、継続、収益化またはブランド構築へ接続するための正本を置く。
 
 ## Marketing North Star
 
-この repo のマーケティングは、`にわかのAI` を通じて次を届ける。
+ToC は、個人の動画制作を圧倒的に速く、簡単にする AI 動画制作システムである。
 
-| 誰に | 何を届けるか | 目的 |
-|------|--------------|------|
-| AI動画・生成AI・自動化が好きなアーリーアダプター | 物語名を送るだけで、台本設計から動画生成までAIエージェントが自動で組み立てる仕組み | リスト獲得・問い合わせ |
-| 民話・神話・物語体験が好きな一般視聴者 | 生成AIで世界中のナラティブを再現し、語り継ぐ映像作品 | 視聴維持・登録 |
-| 企業・制作者・メディア運営者 | 人手で生成サービスを操作する制作ではなく、プログラム化された動画生成パイプライン | 受託・ライセンス・導入相談 |
+```text
+速いから試せる。
+簡単だから続けられる。
+続けられるから、副業やブランドへ育てられる。
+```
 
-短く言うと、表の顔は `AIで世界中のナラティブを語り継ぐチャンネル`、裏の価値は `物語名から動画完成までを自動化する制作システム`。
+### Functional promise
 
-## Marketing Funnel Rule
+`動画制作を、圧倒的に速く、簡単に。`
 
-- YouTube は `リスト集客` の主戦場。動画内で売り切らない。
-- YouTube 概要欄は `中間導線`。視聴者を制作ノート、改善提案、相談フォームへ進める場所にする。
-- セールスは YouTube 本体ではなく、LP、フォーム、DM、個別相談で行う。
-- YouTube の長尺動画を `原液` とし、X / Instagram / Shorts / newsletter / LP へ横展開する。
+`圧倒的` は、従来制作と ToC の所要時間、人間の実作業時間、担当工程、完成物を比較できる場合だけ公開コピーに使う。実測前は `動画制作を、もっと速く、もっと簡単に。` とする。
 
-## Seller-First Design Rule
+### Emotional promise
 
-内部設計は `売り手優先` にする。
-つまり、作品、投稿、概要欄、LP、フォームの各接点は、必ずリスト獲得、改善提案、相談、導入検討のどれかへ接続する。
+`作りたいと思った瞬間を、完成まで止めない。`
 
-ただし、表に出るコピーの主語は商品ではない。
-視聴者、制作者、導入候補者が `自分の判断で次へ進んだ` と感じる導線にする。
+### Why ToC
+
+一般的な AI 動画制作では、人間が企画、台本、scene、画像、動画、音声、編集のサービスを行き来する。ToC はこれらを一つの制作フローとして組み立て、人間が目的、品質、公開判断へ集中できるようにする。
+
+神話、民話、物語は ToC の商品テーマではない。制作能力を検証し、長尺ストーリーも作れることを示す proof / example の一カテゴリとして扱う。
+
+## Primary personas
+
+### A. 副業を始めたい個人
+
+- 限られた時間と予算で最初の動画を完成させたい
+- 編集スキル、ツール過多、外注費、継続できない不安が障壁
+- 欲しい結果は、反応を検証できる動画と継続可能な収益の種
+- 感情遷移は `難しそう -> 自分にも作れそう -> まず1本試したい`
+- primary CTA は `副業の最初の1本を作る`
+
+### B. 個人ブランドを構築したい個人
+
+- 知識、経験、思想、世界観を動画として継続発信したい
+- 制作時間、外注の不統一、没個性的な AI 表現、発信停止が障壁
+- 欲しい結果は、一貫した動画資産と `この分野ならこの人` という認知
+- 感情遷移は `形にできない -> 自分らしく作れそう -> 続けられる -> ブランドになる`
+- primary CTA は `自分のブランド動画を設計する`
+
+2 ペルソナを同一の広告や LP へ丸めない。共通サイトでは動画を作った先の目的で分岐させ、広告は専用 LP へ直接送る。
+
+## Affect / intuitive design rule
+
+内部で使う `右脳設計` は、外部向けの脳科学的主張ではない。説明を読む前に visitor が変化を理解し、自分の企画が動き出す可能性を感じるための設計略語である。
 
 | 原則 | 実務ルール |
 |------|------------|
-| 脳よりも視点が先 | 情報量を増やす前に、相手がどの視点で見るかを決める |
-| 論理ではなく1秒で惹きつける | 1つの投稿で全員を狙わず、セグメントごとに入口を分ける |
-| 情報より心 | スペック説明より、驚き、切なさ、応援、改善参加の感情を先に置く |
-| 必然より偶然 | 押し込むCTAではなく、相手が自分で気づいて選んだように見える導線にする |
-| 主語は商品ではない | `AI動画制作システム` ではなく、相手の見たいもの、作りたいもの、試したい未来を主語にする |
-| 起承転結ではなく、まず結 | 冒頭、タイトル、LP hero は結論から出し、背景説明は後ろに回す |
+| 主語は visitor の未来 | agent や provider より、作れる・続けられる・育てられるを先に置く |
+| 説明より変化 | 機能一覧より、一行のテーマが完成動画へ進む様子を見せる |
+| 速さより解放 | 秒数だけでなく、制作の重さから解放される感覚を作る |
+| 簡単さより自己効力感 | `初心者向け` ではなく `自分にも完成させられる` を渡す |
+| CTA は自己決定 | 副業かブランドか、何を作りたいかを visitor が選ぶ |
+| 感情と操作を分ける | 偽の希少性、収益保証、恐怖、誇大な実績を使わない |
 
-## Folder Structure
+## Funnel
+
+```text
+Meta / YouTube / SNS / search
+  -> persona-specific LP or common site
+  -> one-line video idea
+  -> native form / consultation / onboarding
+  -> first video
+  -> continued creation
+  -> side-income validation or brand growth
+```
+
+- Meta 広告は副業向けとブランド構築向けを分ける
+- YouTube は ToC の完成物、制作過程、速さ、簡単さを証明する
+- public site は positioning、比較、proof、conversion の正本
+- フォームはサイト内に実装し、入力した動画テーマを引き継ぐ
+- Notion / Google Forms は canonical route にしない
+
+## Source of truth
+
+- Marketing North Star: this file
+- Public site / LP: `marketing/LP/`
+- Persona / message contract: `marketing/LP/personas.md`
+- SNS distribution: `marketing/SNS/`
+- YouTube channel strategy: `marketing/SNS/YouTube/strategy.md`
+- Repositioning decisions: `.steering/20260718-marketing-site-repositioning/`
+
+Campaign 固有の浦島太郎、民話、神話の upload copy / publish kit は個別 artifact であり、この North Star を上書きしない。
+
+## Scope boundary
+
+marketing guidance は public site、LP、広告導線、SNS配信、リード獲得、反応分析、改善に適用する。通常の ToC research、story、script、image、narration、video generation の制作仕様へ流用しない。
+
+## Directory structure
 
 ```text
 marketing/
@@ -48,22 +106,6 @@ marketing/
 └── SNS/
 ```
 
-## Directories
-
-- `browser-use.md`
-  - `marketing/` 配下で共通利用する browser 操作ガイド。
-  - YouTube Studio や各 SNS 管理画面を `Codex + browser MCP` で扱うときは最初に読む。
-- `LP/`
-  - YouTube 概要欄から遷移させる中間導線の原稿とフォーム設計を置く。
-  - セールス本文ではなく、制作ノート・改善提案・相談の入口として扱う。
-- `SNS/`
-  - SNS 関連の正本を置く。
-  - 現時点の marketing 実務領域は SNS のみとする。
-  - SNS 関連の作業は、まず `marketing/SNS/` を読む。
-
-## Current Rule
-
-- 今は SNS のみを扱う。
-- marketing 実務の正本は `marketing/SNS/` とする。
-- YouTube の北極星は `marketing/SNS/YouTube/strategy.md` とする。
-- browser 操作が必要なときは、SNS 個別ドキュメントに入る前に `browser-use.md` を参照して進める。
+- `LP/`: 独立した公開サイト、共通LP、ペルソナ別LP、native form の正本
+- `SNS/`: public site へ送客し、ToC の価値を proof する各チャネルの正本
+- `browser-use.md`: 管理画面操作が必要な marketing task の共通ガイド

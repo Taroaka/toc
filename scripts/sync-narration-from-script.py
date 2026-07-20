@@ -932,6 +932,16 @@ def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple
     script_scene_map, script_cut_map = build_script_maps(script_data)
     updated = apply_human_change_requests(script_data=script_data, manifest_data=manifest_data)
     skipped = 0
+    script_metadata = _as_dict(script_data.get("script_metadata"))
+    video_metadata = _as_dict(manifest_data.get("video_metadata"))
+    if manifest_data.get("video_metadata") is not video_metadata:
+        manifest_data["video_metadata"] = video_metadata
+    for metadata_key in ("time", "ending_mode", "scene_time_of_day_contract"):
+        value = script_metadata.get(metadata_key)
+        if value is not None and video_metadata.get(metadata_key) != value:
+            video_metadata[metadata_key] = deepcopy(value)
+            updated += 1
+            narration_state_changed = True
     for projection_key in ("audio_story_plan", "narration_spans"):
         projection = deepcopy(script_data.get(projection_key))
         if projection is not None and manifest_data.get(projection_key) != projection:
@@ -948,6 +958,10 @@ def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple
             continue
         script_scene = script_scene_map.get(scene_id)
         if isinstance(script_scene, dict):
+            if "time_of_day" in script_scene and scene.get("time_of_day") != script_scene.get("time_of_day"):
+                scene["time_of_day"] = deepcopy(script_scene.get("time_of_day"))
+                updated += 1
+                narration_state_changed = True
             scene_review = _as_dict(script_scene.get("human_review"))
             if str(scene_review.get("approved_scene_summary") or "").strip():
                 scene["scene_summary"] = str(scene_review.get("approved_scene_summary") or "").strip()

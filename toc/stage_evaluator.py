@@ -11,6 +11,11 @@ from typing import Any
 from toc.cut_context_packet import WARNING_KEY_BY_DIAGNOSTIC, cut_context_packet_issue_map
 from toc.grounding import grounding_validation
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
+from toc.image_prompt_projection_registry import (
+    drawable_projection_rules,
+    projection_trace_issues,
+    registered_drawable_group_order,
+)
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector, normalize_dotted_id
 from toc.review_loop import (
     CUT_BLUEPRINT_GATE_MARKERS,
@@ -283,6 +288,57 @@ def nested_get(data: dict[str, Any], path: list[str], default: Any = None) -> An
             return default
         cur = cur[key]
     return cur
+
+
+def scene_time_of_day_contract_missing(data: dict[str, Any], *, artifact: str) -> list[str] | None:
+    """Return scene ids missing ``time_of_day`` when the new time contract is declared.
+
+    The explicit metadata contract marker is the compatibility gate. Historical
+    ``time`` and optional legacy scene fields remain independent and may exist in
+    older artifacts without activating the new required-field contract.
+    """
+    metadata_key_by_artifact = {
+        "story": "story_metadata",
+        "script": "script_metadata",
+        "manifest": "video_metadata",
+    }
+    metadata_key = metadata_key_by_artifact.get(artifact)
+    if metadata_key is None:
+        raise ValueError(f"Unsupported scene time artifact: {artifact}")
+    metadata = data.get(metadata_key)
+    scenes = (
+        as_list(nested_get(data, ["script", "scenes"], []))
+        if artifact == "story"
+        else as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+    )
+    contract_declared = isinstance(metadata, dict) and "scene_time_of_day_contract" in metadata
+    if not contract_declared:
+        return None
+
+    return [
+        str(scene.get("scene_id") or index) if isinstance(scene, dict) else str(index)
+        for index, scene in enumerate(scenes, start=1)
+        if not isinstance(scene, dict)
+        or not isinstance(scene.get("time_of_day"), str)
+        or not str(scene.get("time_of_day")).strip()
+    ]
+
+
+def scene_time_of_day_contract_marker(data: dict[str, Any], *, artifact: str) -> tuple[bool, bool]:
+    """Return ``(declared, valid)`` for the explicit scene-daypart contract marker."""
+
+    metadata_key_by_artifact = {
+        "story": "story_metadata",
+        "script": "script_metadata",
+        "manifest": "video_metadata",
+    }
+    metadata_key = metadata_key_by_artifact.get(artifact)
+    if metadata_key is None:
+        raise ValueError(f"Unsupported scene time artifact: {artifact}")
+    metadata = data.get(metadata_key)
+    if not isinstance(metadata, dict) or "scene_time_of_day_contract" not in metadata:
+        return False, True
+    return True, metadata.get("scene_time_of_day_contract") == "required_v1"
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -855,23 +911,9 @@ def _has_template_placeholder(text: str) -> bool:
 
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 IMAGE_API_PROMPT_POLICY_VERSION_V2 = "image_api_prompt_v2"
-IMAGE_API_PROMPT_V2_GROUPS = {
-    "style",
-    "references",
-    "current_moment",
-    "primary_subject",
-    "characters",
-    "objects",
-    "location",
-    "composition",
-    "light_material",
-    "current_state_delta",
-    "constraints",
-}
+IMAGE_API_PROMPT_V2_GROUPS = set(registered_drawable_group_order())
 IMAGE_API_PROMPT_V2_BASE_GROUPS = {
-    "style",
-    "current_moment",
-    "constraints",
+    rule.group for rule in drawable_projection_rules() if rule.relevance == "required" and rule.group
 }
 IMAGE_API_PROMPT_FORBIDDEN_GATES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -943,6 +985,8 @@ def _drawable_prompt_v2_dependencies(image_generation: dict[str, Any], ir: dict[
         for value in as_list(dependencies.get("required_groups"))
         if str(value).strip()
     ]
+    for key in ("story_time", "time_of_day"):
+        dependencies[key] = str(dependencies.get(key) or "").strip()
     return dependencies
 
 
@@ -970,7 +1014,13 @@ def _drawable_prompt_v2_fragment_groups(ir: dict[str, Any]) -> tuple[set[str], l
     return groups, empty_groups, unknown_groups
 
 
-def _image_api_prompt_v2_issues(selector: str, image_generation: dict[str, Any]) -> list[str]:
+def _image_api_prompt_v2_issues(
+    selector: str,
+    image_generation: dict[str, Any],
+    *,
+    expected_story_time: str | None = None,
+    expected_time_of_day: str | None = None,
+) -> list[str]:
     if _image_api_prompt_policy(image_generation) != IMAGE_API_PROMPT_POLICY_VERSION_V2:
         return []
     prompt = str(_image_api_prompt_payload(image_generation).get("prompt") or "").strip()
@@ -1004,17 +1054,26 @@ def _image_api_prompt_v2_issues(selector: str, image_generation: dict[str, Any])
     groups, empty_groups, unknown_groups = _drawable_prompt_v2_fragment_groups(ir)
     issues.extend(f"{selector}:api_prompt_v2_included_fragment_empty:{group}" for group in empty_groups)
     issues.extend(f"{selector}:api_prompt_v2_unknown_fragment_group:{group}" for group in sorted(set(unknown_groups)))
-    for fragment in as_list(ir.get("included_fragments")):
-        if not isinstance(fragment, dict):
-            continue
-        group = str(fragment.get("group") or "").strip()
-        text = str(fragment.get("text") or "").strip()
-        if group and text and text not in prompt:
-            issues.append(f"{selector}:api_prompt_v2_fragment_not_rendered:{group}")
+    registry_issues = projection_trace_issues(
+        prompt=prompt,
+        dependencies=dependencies,
+        included_fragments=ir.get("included_fragments"),
+        expected_story_time=expected_story_time,
+        expected_time_of_day=expected_time_of_day,
+        first_frame_visual_plan=(
+            image_generation.get("first_frame_visual_plan")
+            if isinstance(image_generation.get("first_frame_visual_plan"), dict)
+            else {}
+        ),
+    )
+    issues.extend(f"{selector}:{issue.code}" for issue in registry_issues)
+    registry_issue_codes = {issue.code for issue in registry_issues}
 
     required_groups = set(IMAGE_API_PROMPT_V2_BASE_GROUPS)
     required_groups.update(dependencies.get("required_groups") or [])
     dependency_groups = {
+        "story_time": bool(dependencies.get("story_time")),
+        "time_of_day": bool(dependencies.get("time_of_day")),
         "characters": bool(dependencies.get("character_ids")),
         "objects": bool(dependencies.get("object_ids")),
         "location": bool(dependencies.get("location_ids")),
@@ -1022,19 +1081,14 @@ def _image_api_prompt_v2_issues(selector: str, image_generation: dict[str, Any])
     }
     required_groups.update(group for group, required in dependency_groups.items() if required)
     for group in sorted(required_groups):
+        issue_group = {
+            "characters": "character",
+            "objects": "object",
+        }.get(group, group)
+        if f"api_prompt_v2_unneeded_{issue_group}_fragment" in registry_issue_codes:
+            continue
         if group not in groups:
-            issue_group = {
-                "characters": "character",
-                "objects": "object",
-            }.get(group, group)
             issues.append(f"{selector}:api_prompt_v2_missing_{issue_group}_fragment")
-    for group, required in dependency_groups.items():
-        if not required and group in groups and group not in set(dependencies.get("required_groups") or []):
-            issue_group = {
-                "characters": "character",
-                "objects": "object",
-            }.get(group, group)
-            issues.append(f"{selector}:api_prompt_v2_unneeded_{issue_group}_fragment")
     return issues
 
 
@@ -1463,6 +1517,30 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
             f"story.scene_{field}",
             not missing,
             f"all scripted scenes include {field}",
+            kind="rubric",
+        )
+
+    time_contract_declared, time_contract_valid = scene_time_of_day_contract_marker(
+        data, artifact="story"
+    )
+    if time_contract_declared:
+        add_check(
+            checks,
+            "story.scene_time_of_day_contract",
+            time_contract_valid,
+            "story_metadata.scene_time_of_day_contract is required_v1",
+            kind="rubric",
+        )
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="story")
+    if missing_time_of_day is not None:
+        if missing_time_of_day:
+            details["missing_time_of_day_scene_ids"] = ",".join(missing_time_of_day[:20])
+        add_check(
+            checks,
+            "story.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored story scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
             kind="rubric",
         )
 
@@ -3390,6 +3468,27 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
     body_text = flatten_without_keys(data, excluded={"evaluation_contract"}) or text
     _script_text_quality_checks(checks, body_text, data, profile)
     scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+    time_contract_declared, time_contract_valid = scene_time_of_day_contract_marker(
+        data, artifact="script"
+    )
+    if time_contract_declared:
+        add_check(
+            checks,
+            "script.scene_time_of_day_contract",
+            time_contract_valid,
+            "script_metadata.scene_time_of_day_contract is required_v1",
+            kind="rubric",
+        )
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="script")
+    if missing_time_of_day is not None:
+        add_check(
+            checks,
+            "script.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored script scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
     flattened = body_text
     _append_p400_scene_cut_checks(checks, data, scenes)
     if not contract:
@@ -3960,12 +4059,53 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
     scenes = as_list(data.get("scenes"))
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
+    video_metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
+    expected_story_time = str(video_metadata.get("time") or "").strip()
+    prompt_context_by_node_id: dict[int, tuple[str | None, str | None]] = {}
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        expected_time_of_day = str(scene.get("time_of_day") or "").strip()
+        scene_nodes = [
+            cut
+            for cut in as_list(scene.get("cuts"))
+            if isinstance(cut, dict)
+            and str(cut.get("cut_status") or "").strip().lower() != "deleted"
+        ]
+        if not scene_nodes:
+            scene_nodes = [scene]
+        for scene_node in scene_nodes:
+            prompt_context_by_node_id[id(scene_node)] = (
+                expected_story_time,
+                expected_time_of_day,
+            )
     manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
     is_production = manifest_phase == "production"
     experience_value = str(nested_get(data, ["video_metadata", "experience"]) or "").strip().lower()
     strict_cut_contract = profile == "standard" and (flow == "immersive" or experience_value == "cinematic_story")
     add_check(checks, f"{path_label}.scenes", len(scenes) >= 1, f"{path_label} contains scenes", kind="rubric")
     add_check(checks, f"{path_label}.nodes", len(nodes) >= 1, f"{path_label} exposes renderable nodes", kind="rubric")
+    time_contract_declared, time_contract_valid = scene_time_of_day_contract_marker(
+        data, artifact="manifest"
+    )
+    if time_contract_declared:
+        add_check(
+            checks,
+            f"{path_label}.scene_time_of_day_contract",
+            time_contract_valid,
+            "video_metadata.scene_time_of_day_contract is required_v1",
+            kind="rubric",
+        )
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="manifest")
+    if missing_time_of_day is not None:
+        add_check(
+            checks,
+            f"{path_label}.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored manifest scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
 
     if profile == "standard":
         add_check(checks, f"{path_label}.no_todo", not has_todo(body_text), f"{path_label} does not contain TODO/TBD markers", kind="rubric")
@@ -3992,7 +4132,17 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             selector = str(node.get("selector") or node.get("cut_id") or node.get("scene_id") or "node")
             prompt = _image_api_prompt_text(image_generation)
             api_prompt_v1_issues.extend(_image_api_prompt_v1_issues(selector, image_generation))
-            api_prompt_v1_issues.extend(_image_api_prompt_v2_issues(selector, image_generation))
+            node_story_time, node_time_of_day = prompt_context_by_node_id.get(
+                id(node), (expected_story_time, None)
+            )
+            api_prompt_v1_issues.extend(
+                _image_api_prompt_v2_issues(
+                    selector,
+                    image_generation,
+                    expected_story_time=node_story_time,
+                    expected_time_of_day=node_time_of_day,
+                )
+            )
             if any(token in prompt for token in MOTION_LEAK_TOKENS):
                 prompt_motion_leak_issues.append(selector)
 

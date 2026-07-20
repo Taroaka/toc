@@ -120,14 +120,41 @@ def _story_entry(run_dir: Path) -> dict[str, Any]:
     research = _load(run_dir / "research.md")
     story = _load(run_dir / "story.md")
     scenes = [item for item in _list(_dict(story.get("script")).get("scenes")) if isinstance(item, dict)]
-    target_duration = _dict(story.get("story_metadata")).get("target_duration_seconds")
+    story_metadata = _dict(story.get("story_metadata"))
+    target_duration = story_metadata.get("target_duration_seconds")
     if target_duration is None:
         target_duration = _dict(research.get("metadata")).get("target_duration_seconds")
+    time_of_day_contract_declared = (
+        str(story_metadata.get("scene_time_of_day_contract") or "").strip() == "required_v1"
+    )
+    scene_time_of_day_statuses: list[dict[str, Any]] = []
+    for index, scene in enumerate(scenes, start=1):
+        raw_time_of_day = scene.get("time_of_day")
+        if "time_of_day" not in scene:
+            status = "missing"
+        elif not isinstance(raw_time_of_day, str):
+            status = "invalid_type"
+        elif not raw_time_of_day.strip():
+            status = "blank"
+        else:
+            status = "valid"
+        item: dict[str, Any] = {
+            "scene_id": scene.get("scene_id", index),
+            "status": status,
+        }
+        if status == "valid":
+            item["time_of_day"] = raw_time_of_day.strip()
+        elif status == "invalid_type":
+            item["raw_value"] = raw_time_of_day
+        scene_time_of_day_statuses.append(item)
     return {
         "id": "story:foundation",
         "stage": "story",
         "review_scope": "research_to_story_scene_allocation",
         "source_path": "story.md",
+        "story_time": story_metadata.get("time"),
+        "time_of_day_contract_declared": time_of_day_contract_declared,
+        "scene_time_of_day_statuses": scene_time_of_day_statuses,
         "target_duration_seconds": target_duration,
         "research_baseline": _research_core(research),
         "selection": story.get("selection"),

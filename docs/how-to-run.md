@@ -412,7 +412,8 @@ python scripts/review-manifest-stage.py \
 python scripts/review-image-prompt-story-consistency.py \
   --manifest output/momotaro_20260110_1700/video_manifest.md \
   --set-human-review scene02_cut01 \
-  --set-human-review scene02_cut02
+  --set-human-review scene02_cut02 \
+  --human-review-reason "物語上必要な例外として許容"
 
 python scripts/generate-assets-from-manifest.py \
   --manifest output/momotaro_20260110_1700/video_manifest.md \
@@ -478,8 +479,8 @@ python scripts/review-video-stage.py \
   - 承認: `python scripts/toc-state.py approve-hybridization --run-dir output/<topic>_<timestamp> --note "OK"`
 - 画像 prompt review の finding を人間判断で許容する場合は、対象 cut の `human_review_ok` を true にする
   - `human_review_ok: true` は subagent false を解消した意味ではなく、例外許容を記録しただけとみなす
-  - その場合は `human_review_reason` に判断理由も残す
-  - 例: `python scripts/review-image-prompt-story-consistency.py --manifest output/<topic>_<timestamp>/video_manifest.md --set-human-review scene02_cut01`
+  - `--human-review-reason` で `human_review_reason` に判断理由も残す。理由が空なら blocking hard finding は解除されない
+  - 例: `python scripts/review-image-prompt-story-consistency.py --manifest output/<topic>_<timestamp>/video_manifest.md --set-human-review scene02_cut01 --human-review-reason "許容理由"`
 
 ### 各作業で何を書くか
 

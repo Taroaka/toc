@@ -1,139 +1,92 @@
-# 分析KPI設計
+# ToC marketing analytics and KPIs
 
-最終更新: 2026-04-12  
-目的: 感覚ではなく数字で改善する。週15分のレビューで全部わかる。
+更新日: 2026-07-18
 
----
+## 1. Measurement principle
 
-## 1. YouTubeチャンネル KPI
+Views and clicks are diagnostic metrics. The main question is whether the right individual moves from interest to a real video idea, starts a first video, and wants to continue.
 
-### チャンネル全体
+Keep side-business and personal-brand results separate at every step.
 
-| 指標 | 計測場所 | Phase 1目標 | 赤信号（改善要） |
-|------|---------|------------|----------------|
-| チャンネル登録者数 | YouTube Studio > 概要 | 月+50人 | 月+10人未満 |
-| 総視聴時間 | YouTube Studio > 概要 | 月200時間 | 月50時間未満 |
-| 月間インプレッション数 | YouTube Studio > リーチ | 前月比+20% | 横ばい or 減少 |
+## 2. Funnel events
 
-### 動画ごと（1本アップするたびに記録）
+| Stage | Event | Required dimensions |
+|-------|-------|---------------------|
+| acquisition | `view_landing_page` | persona, source, campaign, content |
+| intent | `select_persona` | selected_persona, original_landing_persona |
+| idea | `start_idea_input` | persona, landing_path |
+| idea | `complete_idea_input` | persona, idea_length_bucket |
+| proof | `view_example` | persona, example_type, source_video_id |
+| consideration | `view_how_it_works` | persona, source |
+| lead | `start_lead_form` | persona, source |
+| lead | `generate_lead` | persona, source, reply_preference |
+| activation | `start_first_video` | persona, acquisition_source |
+| activation | `complete_first_video` | persona, format, duration_bucket |
+| retention | `express_second_video_intent` | persona, first_video_type |
 
-| 指標 | 計測場所 | 目標値 | 赤信号 |
-|------|---------|--------|--------|
-| CTR（クリック率） | 動画の詳細 > リーチ | 4%以上 | 2%未満 |
-| 視聴維持率（平均） | 動画の詳細 > エンゲージメント | 45%以上 | 30%未満 |
-| いいね率 | 動画の詳細 > エンゲージメント | 3%以上 | 1%未満 |
-| コメント数 | 動画の詳細 | 再生数の0.5%以上 | ほぼゼロ |
-| 保存数 | 動画の詳細 | 再生数の1%以上 | ほぼゼロ |
+Do not send raw email, name, or video idea to analytics platforms.
 
-### 赤信号が出たときの対応
+## 3. Primary KPIs
 
-| 指標 | 対応 |
-|------|------|
-| CTR 2%未満 | サムネイルのビジュアル刷新 / タイトル変更（動画は差し替え可） |
-| 視聴維持率30%未満 | 冒頭15秒の構成を見直す。「なぜ見るべきか」を最初に言う |
-| コメントゼロ | 説明欄か動画内に質問を入れる（「竜宮城に行けたら何をする？」など） |
-| 登録者が増えない | Shorts投稿を増やす / 他チャンネルへのコメント活動を増やす |
+### Acquisition quality
 
----
+- persona LP -> idea input start rate
+- idea input completion rate
+- lead completion rate
+- qualified lead rate
+- cost per qualified lead when ads begin
 
-## 2. 収益化 KPI
+### Product activation
 
-| 指標 | 計測場所 | Phase 2目標 | Phase 3目標 |
-|------|---------|------------|------------|
-| AdSense 月収 | YouTube Studio > 収益 | ¥3,000〜 | ¥30,000〜 |
-| 説明欄リンク クリック率 | YouTube Studio > リーチ > 外部リンク | 0.5%以上 | 1%以上 |
-| LP からの問い合わせ数 | Googleフォーム / メール | 月1件 | 月5件 |
-| ライセンス契約数 | 自己管理 | 月1件 | 月5件 |
-| 制作代行案件数 | 自己管理 | 月0〜1件 | 月1〜2件 |
+- lead -> first-video start rate
+- first-video completion rate
+- time to first completed video
+- human working time per completed video
+- revision count
 
----
+### Continuation
 
-## 3. システム販売 KPI
+- second-video intent
+- second-video start / completion
+- series continuation for personal-brand users
+- repeated test cycles for side-business users
 
-| 指標 | 計測場所 | 目標 |
-|------|---------|------|
-| LP 訪問者数 | Notionアクセス / Google Analytics | 月100PV以上 |
-| 問い合わせ→成約率 | 自己管理 | 10%以上（10件に1件） |
-| 月次MRR（月次定期収益） | 自己管理 | 6ヶ月後 ¥30,000 / 12ヶ月後 ¥100,000 |
-| LTV（顧客生涯価値） | 自己管理 | 平均 ¥50,000以上 |
+## 4. YouTube diagnostics
 
----
+- impressions and CTR by persona promise
+- first 30-second retention
+- completed-result-first vs process-first retention
+- description / pinned-link CTR
+- LP idea-input rate by source video
+- qualified lead rate by content pillar
 
-## 4. 週次レビュールーティン（毎週月曜 15分）
+Do not select a content strategy only because it generated raw views. Prefer content that produces the intended persona, completed ideas, qualified leads, and first-video starts.
 
-> YouTube Studio を browser 経由で確認したい場合は `../../browser-use.md` を先に参照。
+## 5. Claim metrics
 
-### Step 1: 先週の動画スコアを記録（5分）
+To support `圧倒的に速く、簡単に`, maintain a reproducible evidence table:
 
-YouTube Studio を開いて以下を確認・記録:
+| Field | Meaning |
+|-------|---------|
+| baseline_method | comparison workflow and operator skill |
+| baseline_elapsed_time | start to finished output |
+| toc_elapsed_time | same boundary under ToC |
+| toc_human_working_time | active human time |
+| external_wait_time | generation / provider waiting |
+| output_format | duration, aspect ratio, resolution |
+| revision_count | revisions before accepted output |
+| acceptance_rule | who accepted and by what criteria |
 
-```
-動画タイトル:
-公開日:
-7日間インプレッション数:
-CTR:
-視聴維持率（平均）:
-いいね数:
-コメント数:
-保存数:
-```
+If comparison boundaries differ, do not publish a percentage reduction.
 
-### Step 2: コメントを読む（3分）
+## 6. Initial baselines
 
-先週最も再生された動画のコメントをすべて読む。
-- 視聴者が何に反応しているか
-- 質問や要望がないか
-- 次の動画のヒントがないか
+Do not invent target conversion rates before traffic and offer are stable. Collect the first meaningful sample by persona, document the baseline, then set improvement targets.
 
-### Step 3: LP流入を確認（2分）
+Initial operating questions:
 
-- 説明欄リンクのクリック数（YouTube Studio > コンテンツ > 各動画 > リーチ > 外部リンク）
-- 問い合わせフォームに新着があれば翌日中に返信
-
-### Step 4: 今週の投稿準備（5分）
-
-- 今週土日に投稿する動画のタイトル案を3つ考える
-- サムネイルの構成をメモする
-- 説明文テンプレートに今回の情報を埋める（`upload-checklist.md` 参照）
-
-## 5. browser-use を使う境界
-
-- 向いている: KPI確認、コメント読解、設定漏れの点検、スクリーンショット保存
-- 向いていない: 本番公開の確定、権限変更、支払い、無監督の連続操作
-
----
-
-## 6. KPIトラッキングシート（手書きメモ欄）
-
-月次でここに記録する:
-
-```
-## 2026-04（Month 1）
-登録者数: ___ → ___（+___）
-総視聴時間: ___ 時間
-投稿本数: ___本
-平均CTR: ___%
-平均視聴維持率: ___%
-LP問い合わせ: ___件
-契約数: ___件
-感想・改善点:
-
-## 2026-05（Month 2）
-登録者数: ___ → ___（+___）
-総視聴時間: ___ 時間
-投稿本数: ___本
-平均CTR: ___%
-平均視聴維持率: ___%
-LP問い合わせ: ___件
-契約数: ___件
-感想・改善点:
-```
-
----
-
-## 7. 分析で絶対やってはいけないこと
-
-- 公開後1時間で判断しない（最低72時間は待つ）
-- 再生数だけを見る（CTRと維持率がセット）
-- 比較対象を大手チャンネルにする（同じニッチの小チャンネルと比較する）
-- 改善を複数同時にやる（1回に変えるのは1要素だけ。原因が特定できなくなる）
+- which persona reaches idea input more often?
+- which obstacle predicts qualified use?
+- which proof type causes first-video starts?
+- where does each persona abandon the funnel?
+- does the first completed video create demand for a second?

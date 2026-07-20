@@ -9,6 +9,7 @@ from pathlib import Path
 
 from toc.harness import load_structured_document, parse_state_file
 from toc.narration_revision import narration_text_hash
+from toc.narration_semantic_review import build_narration_semantic_review_pack
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +94,53 @@ scenes:
 
             for path, expected in before.items():
                 self.assertEqual(path.read_bytes(), expected, path.name)
+
+    def test_sync_projects_narration_design_metadata_to_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_sync_narration_metadata_") as td:
+            run_dir = Path(td)
+            script_path = run_dir / "script.md"
+            manifest_path = run_dir / "video_manifest.md"
+            script_path.write_text(
+                """```yaml
+script_metadata:
+  time: "17世紀末フランス・ルイ14世時代"
+  ending_mode: happy
+scenes:
+  - scene_id: 1
+    time_of_day: 朝
+    cuts:
+      - cut_id: 1
+        narration: "願いは消えていません。"
+        tts_text: "ねがいは きえていません。"
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path.write_text(
+                """```yaml
+video_metadata: {}
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        audio:
+          narration: {text: "", tts_text: ""}
+```
+""",
+                encoding="utf-8",
+            )
+
+            self._run_sync(script_path, manifest_path)
+
+            _text, manifest = load_structured_document(manifest_path)
+            self.assertEqual(manifest["video_metadata"]["time"], "17世紀末フランス・ルイ14世時代")
+            self.assertEqual(manifest["video_metadata"]["ending_mode"], "happy")
+            self.assertEqual(manifest["scenes"][0]["time_of_day"], "朝")
+            review_pack = build_narration_semantic_review_pack(manifest)
+            self.assertIn(
+                "happy",
+                str(review_pack["narration_manifest_projection"]["buckets"]["background_context"]),
+            )
 
     def test_sync_prefers_human_review_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_narration_") as td:

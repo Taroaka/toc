@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
@@ -21,6 +22,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, extract_yaml_block, load_structured_document  # noqa: E402
 from toc.immersive_manifest import normalize_dotted_id  # noqa: E402
+from toc.image_prompt_projection_registry import (  # noqa: E402
+    drawable_projection_rules,
+    projection_trace_issues,
+    registered_drawable_group_order,
+)
 from toc.reveal_constraints import (  # noqa: E402
     RevealConstraint,
     build_manifest_cut_order_map,
@@ -43,23 +49,9 @@ IMAGE_API_PROMPT_POLICY_VERSIONS = {
     IMAGE_API_PROMPT_POLICY_VERSION,
     IMAGE_API_PROMPT_POLICY_VERSION_V2,
 }
-IMAGE_API_PROMPT_V2_GROUPS = {
-    "style",
-    "references",
-    "current_moment",
-    "primary_subject",
-    "characters",
-    "objects",
-    "location",
-    "composition",
-    "light_material",
-    "current_state_delta",
-    "constraints",
-}
+IMAGE_API_PROMPT_V2_GROUPS = set(registered_drawable_group_order())
 IMAGE_API_PROMPT_V2_BASE_GROUPS = {
-    "style",
-    "current_moment",
-    "constraints",
+    rule.group for rule in drawable_projection_rules() if rule.relevance == "required" and rule.group
 }
 JP_TOKEN_RE = re.compile(r"[一-龯]{1,8}|[ァ-ヶー]{2,16}")
 
@@ -232,6 +224,35 @@ PROMPT_DESIGN_META_LEAK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"\[cut契約からの可視要件\]|場面の核:|画面上の問い:|観客理解の増分:|因果の証明:|映像で成立させる証拠:|必要な役割:"),
         "prompt leaks cut/review design metadata; use concrete visible subjects, blocking, objects, composition, light, and material instead.",
+    ),
+    (
+        re.compile(r"画面上の状態差として確定(?:する|した)|次区間へ渡す|後続場面へ観客を運ぶ|視覚証拠\s*[:：]"),
+        "prompt leaks scaffold/production transition prose; replace it with only the concrete visible state in this still.",
+    ),
+    (
+        re.compile(
+            r"(?:scene|場面)の結果を次へ渡す|"
+            r"\b(?:setup|pressure|turn|payoff)\s+beat(?=\s|の|[:：—-]|$)|"
+            r"観客が(?:scene|場面)を誤読しないため|"
+            r"(?:scene|場面)理解に必要な|"
+            r"人物を囲む配置|へ具体的に反応する|主要な視覚証拠",
+            re.I,
+        ),
+        "prompt contains producer/reviewer shorthand; replace it with concrete visible posture, distance, traces, exits, light, and materials.",
+    ),
+    (
+        re.compile(
+            r"(?s)(?=.*(?:行動後|直前の動きが終わった|証明を受け止めた))"
+            r"(?=.*(?:行為直前|まだ結果へ到達していない))"
+        ),
+        "prompt mixes a post-action state with a pre-action hand or foot state in the same still.",
+    ),
+    (
+        re.compile(
+            r"(?s)(?=.*(?:終結|証明を受け止めた|肩の緊張がほどけ))"
+            r"(?=.*圧力を受け止めている表情)"
+        ),
+        "prompt mixes a resolved payoff posture with a pressure-state facial expression.",
     ),
 )
 
@@ -545,11 +566,29 @@ def prompt_block_sections(prompt: str) -> dict[str, str]:
 
 
 def prompt_drawable_content(prompt: str) -> str:
-    sections = prompt_block_sections(prompt)
-    if not sections:
+    normalized_aliases = {
+        _normalize_heading_label(alias): canonical
+        for canonical, aliases in PROMPT_BLOCK_ALIASES.items()
+        for alias in aliases
+    }
+    excluded_sections = {"MUST_NOT_INCLUDE", "AVOID"}
+    drawable_lines: list[str] = []
+    found_heading = False
+    exclude_current_section = False
+    for raw_line in (prompt or "").splitlines():
+        bracket_match = re.fullmatch(r"\s*\[(?P<label>.+?)\]\s*", raw_line)
+        if bracket_match:
+            found_heading = True
+            canonical = normalized_aliases.get(
+                _normalize_heading_label(bracket_match.group("label"))
+            )
+            exclude_current_section = canonical in excluded_sections
+            continue
+        if not exclude_current_section:
+            drawable_lines.append(raw_line)
+    if not found_heading:
         return prompt or ""
-    excluded = {"MUST_NOT_INCLUDE", "AVOID"}
-    return "\n".join(body for key, body in sections.items() if key not in excluded)
+    return "\n".join(drawable_lines).strip()
 
 
 def prompt_structural_contract_issues(prompt: str) -> list[Finding]:
@@ -684,6 +723,9 @@ def api_prompt_v2_structural_contract_issues(
     prompt: str,
     *,
     image_generation: dict[str, Any],
+    expected_story_time: str | None = None,
+    expected_time_of_day: str | None = None,
+    expected_time_of_day_present: bool | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     if not prompt.strip():
@@ -745,6 +787,39 @@ def api_prompt_v2_structural_contract_issues(
                     message=f"drawable_prompt_ir dependency `{key}` does not exactly match image_generation.{key}.",
                 )
             )
+    traced_story_time = str(dependencies.get("story_time") or "").strip()
+    dependencies["story_time"] = traced_story_time
+    if expected_story_time is not None and traced_story_time != expected_story_time.strip():
+        findings.append(
+            Finding(
+                code="api_prompt_v2_story_time_dependency_mismatch",
+                message="drawable_prompt_ir dependency `story_time` does not exactly match video_metadata.time.",
+            )
+        )
+    traced_time_of_day = str(dependencies.get("time_of_day") or "").strip()
+    dependencies["time_of_day"] = traced_time_of_day
+    normalized_expected_time_of_day = ""
+    if expected_time_of_day is not None:
+        normalized_expected_time_of_day = expected_time_of_day.strip()
+        source_key_present = (
+            expected_time_of_day_present
+            if expected_time_of_day_present is not None
+            else True
+        )
+        if source_key_present and not normalized_expected_time_of_day:
+            findings.append(
+                Finding(
+                    code="api_prompt_v2_time_of_day_manifest_invalid",
+                    message="scene.time_of_day must be a non-empty string when the key is present.",
+                )
+            )
+        if traced_time_of_day != normalized_expected_time_of_day:
+            findings.append(
+                Finding(
+                    code="api_prompt_v2_time_of_day_dependency_mismatch",
+                    message="drawable_prompt_ir dependency `time_of_day` does not exactly match scene.time_of_day.",
+                )
+            )
     required_groups = {
         str(value).strip()
         for value in _v2_dependency_values(dependencies.get("required_groups"))
@@ -788,15 +863,29 @@ def api_prompt_v2_structural_contract_issues(
                         message=f"included fragment uses unknown group `{group}`.",
                     )
                 )
-            if text and text not in prompt:
-                findings.append(
-                    Finding(
-                        code="api_prompt_v2_fragment_not_rendered",
-                        message=f"included fragment `{group}` is not present in api_prompt_payload.prompt.",
-                    )
-                )
+    registry_issues = projection_trace_issues(
+        prompt=prompt,
+        dependencies=dependencies,
+        included_fragments=raw_fragments,
+        expected_story_time=expected_story_time,
+        expected_time_of_day=expected_time_of_day,
+        first_frame_visual_plan=(
+            image_generation.get("first_frame_visual_plan")
+            if isinstance(image_generation.get("first_frame_visual_plan"), dict)
+            else {}
+        ),
+    )
+    existing_codes = {finding.code for finding in findings}
+    for issue in registry_issues:
+        if issue.code in existing_codes:
+            continue
+        findings.append(Finding(code=issue.code, message=issue.message))
+        existing_codes.add(issue.code)
+    registry_issue_codes = {issue.code for issue in registry_issues}
 
     dependency_groups = {
+        "story_time": bool(traced_story_time),
+        "time_of_day": bool(traced_time_of_day or normalized_expected_time_of_day),
         "characters": bool(dependencies.get("character_ids")),
         "objects": bool(dependencies.get("object_ids")),
         "location": bool(dependencies.get("location_ids")),
@@ -806,25 +895,99 @@ def api_prompt_v2_structural_contract_issues(
     expected_groups.update(group for group, required in dependency_groups.items() if required)
     issue_group_aliases = {"characters": "character", "objects": "object"}
     for group in sorted(expected_groups):
+        issue_group = issue_group_aliases.get(group, group)
+        if f"api_prompt_v2_unneeded_{issue_group}_fragment" in registry_issue_codes:
+            continue
         if group in groups:
             continue
-        issue_group = issue_group_aliases.get(group, group)
         findings.append(
             Finding(
                 code=f"api_prompt_v2_missing_{issue_group}_fragment",
                 message=f"drawable prompt requires a non-empty `{group}` fragment for this cut.",
             )
         )
-    for group, required in dependency_groups.items():
-        if required or group not in groups or group in required_groups:
+    return findings
+
+
+def _normalized_prompt_polarity_text(value: Any) -> str:
+    return re.sub(r"[\s、。,.・「」『』（）()\[\]【】]", "", str(value or "")).lower()
+
+
+def image_prompt_temporal_polarity_issues(image_generation: dict[str, Any]) -> list[Finding]:
+    """Detect positive drawable facts that were projected into `not_yet`.
+
+    This is intentionally a narrow deterministic preflight.  Novel temporal
+    semantics remain the agent reviewer's responsibility, but exact positive /
+    negative copies and "clearly show this visible object" contradictions must
+    never pass as valid compiler input.
+    """
+
+    plan = image_generation.get("first_frame_visual_plan")
+    plan = plan if isinstance(plan, dict) else {}
+    temporal = plan.get("temporal_boundary")
+    temporal = temporal if isinstance(temporal, dict) else {}
+    not_yet = [
+        str(value).strip()
+        for value in temporal.get("not_yet_happened_in_still", []) or []
+        if str(value).strip()
+    ]
+    positive_values = [
+        temporal.get("event_fact_visible_in_still"),
+        temporal.get("first_visible_moment"),
+    ]
+    subject_binding = plan.get("subject_binding")
+    subject_binding = subject_binding if isinstance(subject_binding, dict) else {}
+    primary_subject = subject_binding.get("primary_subject")
+    if isinstance(primary_subject, dict):
+        positive_values.extend((primary_subject.get("name"), primary_subject.get("id")))
+    visual_translation = plan.get("visual_translation")
+    visual_translation = visual_translation if isinstance(visual_translation, dict) else {}
+    for evidence in visual_translation.get("concrete_visible_evidence", []) or []:
+        if isinstance(evidence, dict):
+            positive_values.extend((evidence.get("visible_substitute"), evidence.get("must_be_drawn_as")))
+
+    visible_object_names: list[str] = []
+    object_gate = plan.get("object_visibility_gate")
+    object_gate = object_gate if isinstance(object_gate, dict) else {}
+    for entry in object_gate.get("objects", []) or []:
+        if not isinstance(entry, dict):
             continue
-        issue_group = issue_group_aliases.get(group, group)
-        findings.append(
-            Finding(
-                code=f"api_prompt_v2_unneeded_{issue_group}_fragment",
-                message=f"drawable prompt includes `{group}` even though this cut declares no such dependency.",
+        visibility = str(entry.get("visibility_in_this_cut") or "").strip().lower()
+        if visibility in {"clearly_visible", "visible", "hero_object", "partially_visible"}:
+            name = str(entry.get("object_name") or entry.get("object_id") or "").strip()
+            if name:
+                visible_object_names.append(name)
+                positive_values.append(name)
+
+    normalized_positive = [
+        normalized
+        for value in positive_values
+        if (normalized := _normalized_prompt_polarity_text(value))
+    ]
+    findings: list[Finding] = []
+    for negative in not_yet:
+        normalized_negative = _normalized_prompt_polarity_text(negative)
+        exact_or_contained = any(
+            len(positive) >= 6
+            and (
+                positive == normalized_negative
+                or positive in normalized_negative
+                or (len(normalized_negative) >= 8 and normalized_negative in positive)
             )
+            for positive in normalized_positive
         )
+        visible_object_conflict = any(
+            name in negative
+            and re.search(r"見せ|見え|読め|前景|手元|明確|clearly[_ -]?visible", negative, re.I)
+            for name in visible_object_names
+        )
+        if exact_or_contained or visible_object_conflict:
+            findings.append(
+                Finding(
+                    code="image_prompt_temporal_polarity_conflict",
+                    message=f"positive drawable fact is also declared as not-yet: `{negative}`.",
+                )
+            )
     return findings
 
 
@@ -988,6 +1151,48 @@ def find_alias_hits(text: str, aliases: dict[str, set[str]]) -> dict[str, set[st
         if matched:
             hits[asset_id] = matched
     return hits
+
+
+def disambiguate_declared_variant_alias_hits(
+    hits: dict[str, set[str]],
+    *,
+    declared_ids: set[str],
+    aliases: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    """Drop generic aliases already covered by a declared, more-specific variant.
+
+    Character state variants commonly share an identity token: a prompt that
+    says ``シンデレラ`` while declaring ``変身後のシンデレラ`` must not be
+    interpreted as an additional, undeclared base-character dependency.  A
+    genuinely distinct alias (for example ``王子``) remains unambiguous and is
+    preserved as a finding candidate.
+    """
+
+    filtered: dict[str, set[str]] = {}
+    for asset_id, matched_aliases in hits.items():
+        if asset_id in declared_ids:
+            filtered.setdefault(asset_id, set()).update(matched_aliases)
+            continue
+        unambiguous: set[str] = set()
+        for alias in matched_aliases:
+            normalized_alias = str(alias).strip().lower()
+            covered_by = [
+                declared_id
+                for declared_id in declared_ids
+                if any(
+                    normalized_alias in str(declared_alias).strip().lower()
+                    for declared_alias in aliases.get(declared_id, set())
+                    if str(declared_alias).strip()
+                )
+            ]
+            if covered_by:
+                for declared_id in covered_by:
+                    filtered.setdefault(declared_id, set()).add(alias)
+            else:
+                unambiguous.add(alias)
+        if unambiguous:
+            filtered.setdefault(asset_id, set()).update(unambiguous)
+    return filtered
 
 
 def manifest_cut_map(manifest: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
@@ -1412,6 +1617,25 @@ def review_entries(
 ) -> list[ReviewOutcome]:
     cuts = manifest_cut_map(manifest)
     aliases = build_asset_aliases(manifest)
+    video_metadata = manifest.get("video_metadata")
+    video_metadata = video_metadata if isinstance(video_metadata, dict) else {}
+    manifest_story_time = str(video_metadata.get("time") or "").strip()
+    manifest_scene_times_of_day: dict[str, tuple[bool, str]] = {}
+    for scene in manifest.get("scenes", []):
+        if not isinstance(scene, dict):
+            continue
+        scene_id = normalize_dotted_id(scene.get("scene_id"))
+        if not scene_id:
+            continue
+        time_of_day_present = "time_of_day" in scene
+        raw_time_of_day = scene.get("time_of_day")
+        normalized_time_of_day = (
+            raw_time_of_day.strip() if isinstance(raw_time_of_day, str) else ""
+        )
+        manifest_scene_times_of_day[scene_id] = (
+            time_of_day_present,
+            normalized_time_of_day,
+        )
     cut_order_map = build_manifest_cut_order_map(manifest)
     reveal_constraints = reveal_constraints or []
     results: list[ReviewOutcome] = []
@@ -1438,13 +1662,14 @@ def review_entries(
         local_story = _scene_context_lookup(story_scene_map, entry.scene_id)
         local_script = _scene_context_lookup(script_scene_map, entry.scene_id)
         local_source_text = "\n".join(part for part in [narration_text, local_story, local_script] if part)
+        drawable_prompt = prompt_drawable_content(entry.prompt)
 
-        prompt_terms = extract_terms(entry.prompt)
+        prompt_terms = extract_terms(drawable_prompt)
         narration_terms = extract_terms(narration_text)
         character_alias_hits = find_alias_hits(local_source_text, aliases["character"])
         object_alias_hits = find_alias_hits(local_source_text, aliases["object"])
-        prompt_character_hits = find_alias_hits(entry.prompt, aliases["character"])
-        prompt_object_hits = find_alias_hits(entry.prompt, aliases["object"])
+        prompt_character_hits = find_alias_hits(drawable_prompt, aliases["character"])
+        prompt_object_hits = find_alias_hits(drawable_prompt, aliases["object"])
         suppressed_character_ids, suppressed_object_ids = _suppressed_subject_ids_for_entry(
             scene_id=entry.scene_id,
             cut_id=entry.cut_id,
@@ -1483,7 +1708,6 @@ def review_entries(
         cut_contract = _cut_contract_for_node(cut) if isinstance(cut, dict) else {}
 
         findings: list[Finding] = []
-        drawable_prompt = prompt_drawable_content(entry.prompt)
 
         if not is_reference_entry and cut_contract:
             cut_must_show = _nested_contract_list(cut_contract, "must_show", "viewer_contract.must_show")
@@ -1492,7 +1716,7 @@ def review_entries(
             cut_must_avoid = _nested_contract_list(cut_contract, "must_avoid", "viewer_contract.must_avoid", "motion_contract.must_not_add")
             first_frame_brief = _nested_contract_string(cut_contract, "first_frame_brief", "first_frame_contract.first_frame_brief")
             visual_proof = _nested_contract_string(cut_contract, "visual_beat", "viewer_contract.visual_proof")
-            missing_cut_terms = [item for item in cut_must_show if item not in entry.prompt]
+            missing_cut_terms = [item for item in cut_must_show if item not in drawable_prompt]
             for item in missing_cut_terms:
                 findings.append(
                     Finding(
@@ -1514,7 +1738,7 @@ def review_entries(
                         message="cut_contract.first_frame_contract.first_frame_brief is missing; p600 cannot produce a startable still.",
                     )
                 )
-            if visual_proof and not any(term in entry.prompt for term in extract_terms(visual_proof)):
+            if visual_proof and not any(term in drawable_prompt for term in extract_terms(visual_proof)):
                 findings.append(
                     Finding(
                         code="image_prompt_story_alignment_weak",
@@ -1526,7 +1750,7 @@ def review_entries(
             scene_id=entry.scene_id,
             cut_id=entry.cut_id,
             output=entry.output,
-            text_fragments=[entry.prompt],
+            text_fragments=[drawable_prompt],
             declared_character_ids=declared_character_ids,
             declared_object_ids=declared_object_ids,
             constraints=reveal_constraints,
@@ -1557,7 +1781,7 @@ def review_entries(
             must_avoid = _contract_string_list(contract, "must_avoid")
             target_focus = str(contract.get("target_focus") or "").strip().lower()
 
-            missing_include = [item for item in must_include if item not in entry.prompt]
+            missing_include = [item for item in must_include if item not in drawable_prompt]
             for item in missing_include:
                 findings.append(
                     Finding(
@@ -1574,7 +1798,7 @@ def review_entries(
                     )
                 )
             focus_terms = IMAGE_TARGET_FOCUS_TERMS.get(target_focus, ())
-            if target_focus and focus_terms and not _text_contains_any(entry.prompt, focus_terms):
+            if target_focus and focus_terms and not _text_contains_any(drawable_prompt, focus_terms):
                 findings.append(
                     Finding(
                         code="image_contract_target_focus_unmet",
@@ -1591,10 +1815,21 @@ def review_entries(
                 )
             )
         elif is_api_prompt_v2:
+            scene_time_present, expected_scene_time = manifest_scene_times_of_day.get(
+                entry.scene_id, (False, "")
+            )
             findings.extend(
                 api_prompt_v2_structural_contract_issues(
                     entry.prompt,
                     image_generation=image_generation if isinstance(image_generation, dict) else {},
+                    expected_story_time=manifest_story_time,
+                    expected_time_of_day=expected_scene_time,
+                    expected_time_of_day_present=scene_time_present,
+                )
+            )
+            findings.extend(
+                image_prompt_temporal_polarity_issues(
+                    image_generation if isinstance(image_generation, dict) else {}
                 )
             )
         else:
@@ -1642,8 +1877,10 @@ def review_entries(
             findings.append(Finding(code=code, message=issue))
 
         # v2's DrawablePromptIR is the cut-local dependency contract. Scene-wide
-        # alias inference belongs to the legacy reviewer and would incorrectly
-        # pull future characters/objects into every cut.
+        # source alias inference belongs to the legacy reviewer and would
+        # incorrectly pull future subjects into every cut. Prompt-local alias
+        # hits are different: a subject actually named in the provider prompt
+        # must still have a declared dependency/reference.
         if is_api_prompt_v2:
             character_alias_hits = {
                 asset_id: {asset_id} for asset_id in declared_character_ids
@@ -1651,9 +1888,39 @@ def review_entries(
             object_alias_hits = {
                 asset_id: {asset_id} for asset_id in declared_object_ids
             }
-            prompt_character_hits = dict(character_alias_hits)
-            prompt_object_hits = dict(object_alias_hits)
+            prompt_character_hits = disambiguate_declared_variant_alias_hits(
+                prompt_character_hits,
+                declared_ids=declared_character_ids,
+                aliases=aliases["character"],
+            )
+            prompt_object_hits = disambiguate_declared_variant_alias_hits(
+                prompt_object_hits,
+                declared_ids=declared_object_ids,
+                aliases=aliases["object"],
+            )
             narration_terms = set()
+            for asset_id, matched in sorted(prompt_character_hits.items()):
+                if asset_id not in declared_character_ids:
+                    findings.append(
+                        Finding(
+                            code="api_prompt_v2_prompt_character_dependency_missing",
+                            message=(
+                                f"provider prompt visibly names character `{asset_id}` via {sorted(matched)!r}, "
+                                "but the cut-local character dependency does not declare it."
+                            ),
+                        )
+                    )
+            for asset_id, matched in sorted(prompt_object_hits.items()):
+                if asset_id not in declared_object_ids:
+                    findings.append(
+                        Finding(
+                            code="api_prompt_v2_prompt_object_dependency_missing",
+                            message=(
+                                f"provider prompt visibly names object `{asset_id}` via {sorted(matched)!r}, "
+                                "but the cut-local object dependency does not declare it."
+                            ),
+                        )
+                    )
 
         if prompt_character_hits and not declared_character_ids:
             findings.append(
@@ -1959,7 +2226,13 @@ def apply_review_statuses(entries: list[PromptEntry], results: list[ReviewOutcom
     return updated
 
 
-def apply_human_review_updates(entries: list[PromptEntry], selectors: list[str], value: bool) -> list[PromptEntry]:
+def apply_human_review_updates(
+    entries: list[PromptEntry],
+    selectors: list[str],
+    value: bool,
+    *,
+    reason: str = "",
+) -> list[PromptEntry]:
     if not selectors:
         return entries
     targets: set[tuple[str, str]] = set()
@@ -1972,8 +2245,8 @@ def apply_human_review_updates(entries: list[PromptEntry], selectors: list[str],
     for entry in entries:
         human_review_ok = value if (entry.scene_id, entry.cut_id) in targets else entry.human_review_ok
         human_review_reason = entry.human_review_reason
-        if (entry.scene_id, entry.cut_id) in targets and not value:
-            human_review_reason = ""
+        if (entry.scene_id, entry.cut_id) in targets:
+            human_review_reason = reason.strip() if value else ""
         updated.append(
             PromptEntry(
                 scene_id=entry.scene_id,
@@ -2001,6 +2274,7 @@ def render_report(
     results: list[ReviewOutcome],
     *,
     manifest_path: Path,
+    source_sha256s: dict[str, str] | None = None,
     fixed_character_ids: int = 0,
     fixed_object_ids: int = 0,
     unresolved_entries: int = 0,
@@ -2008,6 +2282,16 @@ def render_report(
     total = len(results)
     warned = sum(1 for outcome in results if outcome.findings)
     hard_findings = sum(1 for outcome in results for finding in outcome.findings if is_hard_finding(finding))
+    blocking_hard_findings = sum(
+        1
+        for outcome in results
+        if not (
+            outcome.entry.human_review_ok
+            and outcome.entry.human_review_reason.strip()
+        )
+        for finding in outcome.findings
+        if is_hard_finding(finding)
+    )
     soft_findings = sum(1 for outcome in results for finding in outcome.findings if is_soft_finding(finding))
     finding_count = sum(len(outcome.findings) for outcome in results)
     empty_review_scope = total == 0
@@ -2015,13 +2299,24 @@ def render_report(
     lines = [
         "# Image Prompt Story Review",
         "",
+        "- review_format_version: `deterministic_image_prompt_review_v2`",
         f"- manifest: `{manifest_path}`",
+        *(
+            [
+                f"- manifest_sha256: `{source_sha256s.get('manifest', '')}`",
+                f"- story_sha256: `{source_sha256s.get('story', '')}`",
+                f"- script_sha256: `{source_sha256s.get('script', '')}`",
+            ]
+            if source_sha256s is not None
+            else []
+        ),
         f"- status: `{status}`",
         f"- reviewed_entries: `{total}`",
         f"- empty_review_scope: `{'true' if empty_review_scope else 'false'}`",
         f"- entries_with_findings: `{warned}`",
         f"- findings: `{finding_count}`",
         f"- hard_findings: `{hard_findings}`",
+        f"- blocking_hard_findings: `{blocking_hard_findings}`",
         f"- soft_findings: `{soft_findings}`",
         f"- unresolved_entries: `{unresolved_entries}`",
         f"- fixed_character_ids: `{fixed_character_ids}`",
@@ -2049,7 +2344,26 @@ def render_report(
         lines.append(f"- human_review_ok: `{'true' if entry.human_review_ok else 'false'}`")
         if entry.human_review_reason:
             lines.append(f"- human_review_reason: `{entry.human_review_reason}`")
-        lines.append(f"- review: `{'FAIL' if (not entry.agent_review_ok and not entry.human_review_ok) else 'WARN'}`")
+        valid_human_override = bool(
+            entry.human_review_ok and entry.human_review_reason.strip()
+        )
+        lines.append(
+            f"- review: `{'FAIL' if (not entry.agent_review_ok and not valid_human_override) else 'WARN'}`"
+        )
+        hard_finding_codes = list(
+            dict.fromkeys(finding.code for finding in findings if is_hard_finding(finding))
+        )
+        blocking_hard_finding_codes = (
+            hard_finding_codes if not valid_human_override else []
+        )
+        soft_finding_codes = list(
+            dict.fromkeys(finding.code for finding in findings if is_soft_finding(finding))
+        )
+        lines.append(f"- hard_finding_codes: `{', '.join(hard_finding_codes)}`")
+        lines.append(
+            f"- blocking_hard_finding_codes: `{', '.join(blocking_hard_finding_codes)}`"
+        )
+        lines.append(f"- soft_finding_codes: `{', '.join(soft_finding_codes)}`")
         if entry.agent_review_reason_keys:
             lines.append(f"- agent_review_reason_keys: `{', '.join(entry.agent_review_reason_keys)}`")
         if entry.agent_review_reason_messages:
@@ -2187,6 +2501,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--set-human-review", action="append", default=[], help='Mark scene/cut as human-reviewed, e.g. "scene02_cut01" or "scene3.5_cut04" (repeatable).')
     parser.add_argument("--human-review-value", choices=["true", "false"], default="true", help="Value used with --set-human-review.")
     parser.add_argument(
+        "--human-review-reason",
+        default="",
+        help="Required reason when --set-human-review marks an entry true.",
+    )
+    parser.add_argument(
         "--image-plan-modes",
         default="generate_still",
         help="Comma-separated still_image_plan.mode values to include for story scenes when reading directly from the manifest.",
@@ -2210,7 +2529,18 @@ def main() -> int:
     else:
         entries = manifest_prompt_entries(manifest, allowed_story_modes=_parse_csv_set(args.image_plan_modes))
     if args.set_human_review:
-        entries = apply_human_review_updates(entries, args.set_human_review, args.human_review_value == "true")
+        human_review_value = args.human_review_value == "true"
+        human_review_reason = str(args.human_review_reason or "").strip()
+        if human_review_value and not human_review_reason:
+            raise SystemExit(
+                "--human-review-reason is required when --set-human-review marks an entry true"
+            )
+        entries = apply_human_review_updates(
+            entries,
+            args.set_human_review,
+            human_review_value,
+            reason=human_review_reason,
+        )
         if manifest_path.exists():
             apply_review_metadata_to_manifest(manifest_path=manifest_path, manifest=manifest, entries=entries)
             manifest = load_manifest(manifest_path)
@@ -2263,7 +2593,10 @@ def main() -> int:
     unresolved_entries = sum(
         1
         for entry in entries
-        if outcome_map.get((entry.scene_id, entry.cut_id), None) and outcome_map[(entry.scene_id, entry.cut_id)].findings and not entry.agent_review_ok and not entry.human_review_ok
+        if outcome_map.get((entry.scene_id, entry.cut_id), None)
+        and outcome_map[(entry.scene_id, entry.cut_id)].findings
+        and not entry.agent_review_ok
+        and not (entry.human_review_ok and entry.human_review_reason.strip())
     )
     hydrated_results: list[ReviewOutcome] = []
     for entry in entries:
@@ -2283,6 +2616,17 @@ def main() -> int:
     report = render_report(
         hydrated_results,
         manifest_path=manifest_path,
+        source_sha256s={
+            "manifest": hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            if manifest_path.is_file()
+            else "",
+            "story": hashlib.sha256(story_path.read_bytes()).hexdigest()
+            if story_path.is_file()
+            else "",
+            "script": hashlib.sha256(script_path.read_bytes()).hexdigest()
+            if script_path.is_file()
+            else "",
+        },
         fixed_character_ids=fixed_character_ids,
         fixed_object_ids=fixed_object_ids,
         unresolved_entries=unresolved_entries,

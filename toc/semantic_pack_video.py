@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,16 @@ except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
 from toc.immersive_manifest import make_scene_cut_selector, normalize_dotted_id
+from toc.video_prompt_compiler import (
+    VIDEO_API_PROMPT_POLICY_VERSION,
+    VIDEO_PROMPT_COMPILER_VERSION,
+    compile_video_api_prompt_v1,
+    compose_video_render_unit_contract,
+)
+from toc.video_prompt_projection_registry import (
+    VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+    resolve_video_prompt_contract,
+)
 
 
 VIDEO_STAGE_NAMES = {"video_motion"}
@@ -46,45 +57,90 @@ def _load_manifest(run_dir: Path) -> dict[str, Any]:
 def _collect_video_motion_entries(run_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for scene in _iter_scenes(manifest):
-        for cut in _iter_cuts(scene):
-            if _is_deleted(cut):
-                continue
-            video_generation = _mapping(cut.get("video_generation"))
-            if not video_generation:
-                continue
-            selector = _cut_selector(scene, cut)
-            motion_contract = _motion_contract(cut, video_generation)
-            missing_fields = _motion_contract_required_fields_missing(motion_contract)
-            cut_contract = _mapping(cut.get("cut_contract"))
-            entries.append(
-                {
-                    "stage": "video_motion",
-                    "selector": selector,
-                    "scene_id": scene.get("scene_id"),
-                    "cut_id": cut.get("cut_id"),
-                    "source": "video_manifest.md.scenes[].cuts[].video_generation",
-                    "semantic_contract": _semantic_contract(cut, video_generation),
-                    "source_event_contract": _mapping(cut_contract.get("source_event_contract")),
-                    "event_context_for_cut": _mapping(cut_contract.get("event_context_for_cut")),
-                    "motion_prompt": _first_text(video_generation, "motion_prompt", "prompt", "video_prompt"),
-                    "motion_contract": motion_contract,
-                    "motion_contract_missing": not bool(motion_contract),
-                    "motion_contract_required_fields_missing": missing_fields,
-                    "first_frame": _first_text(video_generation, "first_frame", "first_frame_image", "input_image"),
-                    "last_frame": _first_text(video_generation, "last_frame", "last_frame_image"),
-                    "duration_seconds": video_generation.get("duration_seconds"),
-                    "tool": video_generation.get("tool"),
-                    "output": _normalize_relpath(video_generation.get("output")),
-                    "provider_history": _provider_history(video_generation),
-                }
-            )
-        for unit in _iter_render_units(scene):
+        render_units = _iter_render_units(scene)
+        if not render_units:
+            for cut in _iter_cuts(scene):
+                if _is_deleted(cut):
+                    continue
+                video_generation = _mapping(cut.get("video_generation"))
+                if not video_generation:
+                    continue
+                selector = _cut_selector(scene, cut)
+                effective_cut_contract = _effective_video_item_contract(scene, cut)
+                motion_contract = _motion_contract(
+                    cut,
+                    video_generation,
+                    cut_contract=effective_cut_contract,
+                )
+                missing_fields = _motion_contract_required_fields_missing(motion_contract)
+                cut_contract = _mapping(cut.get("cut_contract"))
+                provider_prompt_payload = _provider_prompt_payload(
+                    run_dir=run_dir,
+                    manifest=manifest,
+                    scene=scene,
+                    item=cut,
+                    video_generation=video_generation,
+                    cut_contract=effective_cut_contract,
+                )
+                entries.append(
+                    {
+                        "stage": "video_motion",
+                        "selector": selector,
+                        "scene_id": scene.get("scene_id"),
+                        "cut_id": cut.get("cut_id"),
+                        "source": "video_manifest.md.scenes[].cuts[].video_generation",
+                        "semantic_contract": _semantic_contract(cut, video_generation),
+                        "source_event_contract": _mapping(cut_contract.get("source_event_contract")),
+                        "event_context_for_cut": _mapping(cut_contract.get("event_context_for_cut")),
+                        "motion_prompt": _first_text(video_generation, "motion_prompt", "prompt", "video_prompt"),
+                        "source_motion_prompt": _first_text(
+                            video_generation,
+                            "prompt_authoring_source",
+                            "source_motion_prompt",
+                            "motion_prompt",
+                            "prompt",
+                            "video_prompt",
+                        ),
+                        "provider_prompt": provider_prompt_payload["prompt"],
+                        "provider_prompt_payload": provider_prompt_payload,
+                        "quality_issues": provider_prompt_payload.get(
+                            "quality_issues"
+                        )
+                        or [],
+                        "video_prompt_projection": _compact_video_projection(
+                            provider_prompt_payload.get("projection_review_contract")
+                        ),
+                        "motion_contract": motion_contract,
+                        "motion_contract_missing": not bool(motion_contract),
+                        "motion_contract_required_fields_missing": missing_fields,
+                        "first_frame": _first_text(video_generation, "first_frame", "first_frame_image", "input_image"),
+                        "last_frame": _first_text(video_generation, "last_frame", "last_frame_image"),
+                        "duration_seconds": video_generation.get("duration_seconds"),
+                        "tool": video_generation.get("tool"),
+                        "output": _normalize_relpath(video_generation.get("output")),
+                        "provider_history": _provider_history(video_generation),
+                    }
+                )
+        for unit in render_units:
             if _is_deleted(unit):
                 continue
             video_generation = _mapping(unit.get("video_generation"))
             selector = _render_unit_selector(scene, unit)
-            motion_contract = _motion_contract(unit, video_generation)
+            effective_cut_contract = _effective_video_item_contract(scene, unit)
+            motion_contract = _motion_contract(
+                unit,
+                video_generation,
+                cut_contract=effective_cut_contract,
+            )
             missing_fields = _motion_contract_required_fields_missing(motion_contract)
+            provider_prompt_payload = _provider_prompt_payload(
+                run_dir=run_dir,
+                manifest=manifest,
+                scene=scene,
+                item=unit,
+                video_generation=video_generation,
+                cut_contract=effective_cut_contract,
+            )
             entries.append(
                 {
                     "stage": "video_motion",
@@ -95,6 +151,23 @@ def _collect_video_motion_entries(run_dir: Path, manifest: dict[str, Any]) -> li
                     "source_cut_ids": _list_values(unit.get("source_cut_ids")),
                     "semantic_contract": _semantic_contract(unit, video_generation),
                     "motion_prompt": _first_text(video_generation, "motion_prompt", "prompt", "video_prompt"),
+                    "source_motion_prompt": _first_text(
+                        video_generation,
+                        "prompt_authoring_source",
+                        "source_motion_prompt",
+                        "motion_prompt",
+                        "prompt",
+                        "video_prompt",
+                    ),
+                    "provider_prompt": provider_prompt_payload["prompt"],
+                    "provider_prompt_payload": provider_prompt_payload,
+                    "quality_issues": provider_prompt_payload.get(
+                        "quality_issues"
+                    )
+                    or [],
+                    "video_prompt_projection": _compact_video_projection(
+                        provider_prompt_payload.get("projection_review_contract")
+                    ),
                     "motion_contract": motion_contract,
                     "motion_contract_missing": not bool(motion_contract),
                     "motion_contract_required_fields_missing": missing_fields,
@@ -229,12 +302,17 @@ def _render_contract(manifest: dict[str, Any]) -> Any:
     )
 
 
-def _motion_contract(item: dict[str, Any], video_generation: dict[str, Any]) -> Any:
-    cut_contract = _mapping(item.get("cut_contract"))
+def _motion_contract(
+    item: dict[str, Any],
+    video_generation: dict[str, Any],
+    *,
+    cut_contract: dict[str, Any] | None = None,
+) -> Any:
+    canonical_contract = cut_contract or _mapping(item.get("cut_contract"))
     return (
-        _first_value(video_generation, "motion_contract", "video_motion_contract")
+        _first_value(canonical_contract, "motion_contract")
         or _first_value(item, "motion_contract", "video_motion_contract")
-        or _first_value(cut_contract, "motion_contract")
+        or _first_value(video_generation, "motion_contract", "video_motion_contract")
         or _first_value(video_generation, "semantic_contract", "contract")
     )
 
@@ -255,6 +333,292 @@ def _motion_contract_required_fields_missing(contract: Any) -> list[str]:
         if not any(_has_contract_value(contract, alias) for alias in aliases):
             missing.append(canonical)
     return missing
+
+
+def _provider_prompt_payload(
+    *,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    scene: dict[str, Any],
+    item: dict[str, Any],
+    video_generation: dict[str, Any],
+    cut_contract: dict[str, Any],
+) -> dict[str, Any]:
+    materialized = _mapping(video_generation.get("api_prompt_payload"))
+    materialized_prompt = str(materialized.get("prompt") or "").strip()
+    metadata = _mapping(manifest.get("video_metadata"))
+    scene_contract = _mapping(item.get("scene_contract"))
+    source_prompt_fields = ["prompt_authoring_source", "source_motion_prompt"]
+    if not materialized_prompt:
+        # Legacy manifests without a compiled payload may use these fields as
+        # authoring prose. Once a payload exists, ``motion_prompt`` is the
+        # compiled provider prompt and must not be fed back into the compiler.
+        source_prompt_fields.extend(["motion_prompt", "prompt", "video_prompt"])
+    source_prompt = _first_text(video_generation, *source_prompt_fields)
+    execution_options = _mapping(
+        _mapping(materialized.get("provider_request_binding")).get(
+            "execution_options"
+        )
+    )
+    current = compile_video_api_prompt_v1(
+        cut_contract=cut_contract,
+        scene_contract=scene_contract,
+        video_generation=video_generation,
+        source_prompt=source_prompt,
+        story_time=str(metadata.get("time") or "").strip(),
+        time_of_day=str(scene.get("time_of_day") or "").strip(),
+        tool=str(video_generation.get("tool") or "kling_3_0").strip(),
+        first_frame=_first_text(
+            video_generation,
+            "first_frame",
+            "first_frame_image",
+            "input_image",
+        ),
+        last_frame=_first_text(video_generation, "last_frame", "last_frame_image"),
+        duration_seconds=video_generation.get("duration_seconds"),
+        references=_list_values(video_generation.get("references")),
+        reference_roles=[
+            dict(value)
+            for value in (
+                _mapping(item.get("video_input_contract")).get(
+                    "reference_roles"
+                )
+                or video_generation.get("reference_roles")
+                or []
+            )
+            if isinstance(value, dict)
+        ]
+        or None,
+        quality=str(video_generation.get("quality") or "").strip(),
+        aspect_ratio=str(video_generation.get("aspect_ratio") or "").strip(),
+        execution_options=execution_options,
+        additional_negative_prompt=str(
+            video_generation.get("negative_prompt") or ""
+        ).strip(),
+        direction_notes=_list_values(video_generation.get("direction_notes")),
+        continuity_notes=_list_values(video_generation.get("continuity_notes")),
+        first_frame_visual_plan=_first_frame_visual_plan(scene, item),
+        review_only_dependencies=_video_item_review_dependencies(scene, item),
+        scene_time_of_day_visual_basis=scene.get(
+            "time_of_day_visual_basis"
+        ),
+        scene_location_mode=str(scene.get("location_mode") or "").strip(),
+        scene_location_sequence=(
+            scene.get("location_sequence")
+            if isinstance(scene.get("location_sequence"), list)
+            else []
+        ),
+        scene_location_segments=[
+            dict(value)
+            for value in (
+                scene.get("location_segments")
+                if isinstance(scene.get("location_segments"), list)
+                else []
+            )
+            if isinstance(value, dict)
+        ],
+    )
+    if not materialized_prompt:
+        return current
+
+    version_mismatches = [
+        field
+        for field, expected in (
+            ("policy_version", VIDEO_API_PROMPT_POLICY_VERSION),
+            ("compiler_version", VIDEO_PROMPT_COMPILER_VERSION),
+            (
+                "projection_registry_version",
+                VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+            ),
+        )
+        if str(materialized.get(field) or "") != expected
+    ]
+    if version_mismatches:
+        raise ValueError(
+            "materialized video prompt uses an obsolete projection: "
+            + ", ".join(version_mismatches)
+        )
+
+    exact_sha256 = hashlib.sha256(materialized_prompt.encode("utf-8")).hexdigest()
+    if str(materialized.get("sha256") or "") != exact_sha256:
+        raise ValueError("materialized video prompt hash does not match its exact prompt")
+
+    _validate_materialized_reference_content(
+        run_dir=run_dir,
+        execution_options=execution_options,
+    )
+    # Every field emitted by the compiler is canonical review evidence.  A
+    # persisted payload may carry additional runtime metadata, but it must not
+    # replace or alter any compiler-owned field while leaving only the provider
+    # prompt/hash intact.  Compare against an independent recompile and expose
+    # that recompile to the reviewer so noncanonical persisted keys cannot
+    # influence the semantic decision.
+    stale_fields = [
+        field
+        for field, expected in current.items()
+        if materialized.get(field) != expected
+    ]
+    if stale_fields:
+        raise ValueError(
+            "materialized video prompt is stale for semantic review: "
+            + ", ".join(stale_fields)
+        )
+    return dict(current)
+
+
+def _first_frame_visual_plan(
+    scene: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    own_plan = _mapping(
+        _mapping(item.get("image_generation")).get("first_frame_visual_plan")
+    )
+    if own_plan:
+        return dict(own_plan)
+
+    raw_source_ids = item.get("source_cut_ids")
+    if not isinstance(raw_source_ids, list) or not raw_source_ids:
+        return {}
+    first_source_id = normalize_dotted_id(raw_source_ids[0])
+    for index, cut in enumerate(_iter_cuts(scene), start=1):
+        if _is_deleted(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        if cut_id != first_source_id:
+            continue
+        plan = _mapping(
+            _mapping(cut.get("image_generation")).get("first_frame_visual_plan")
+        )
+        return dict(plan)
+    return {}
+
+
+def _effective_video_item_contract(
+    scene: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    explicit = _mapping(item.get("cut_contract"))
+    raw_source_ids = item.get("source_cut_ids")
+    if not isinstance(raw_source_ids, list) or not raw_source_ids:
+        return dict(explicit)
+
+    source_ids = [normalize_dotted_id(value) for value in raw_source_ids]
+    cuts_by_id: dict[str, dict[str, Any]] = {}
+    for index, cut in enumerate(_iter_cuts(scene), start=1):
+        if _is_deleted(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        cuts_by_id[cut_id] = cut
+    source_contracts = [
+        _mapping(cuts_by_id[source_id].get("cut_contract"))
+        for source_id in source_ids
+        if source_id and source_id in cuts_by_id
+    ]
+    composed = compose_video_render_unit_contract(source_contracts)
+    return resolve_video_prompt_contract(
+        {},
+        cut_contract=explicit,
+        scene_contract=composed,
+    )
+
+
+def _video_item_review_dependencies(
+    scene: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw_source_ids = item.get("source_cut_ids")
+    if not isinstance(raw_source_ids, list) or not raw_source_ids:
+        return None
+    source_ids = [normalize_dotted_id(value) for value in raw_source_ids]
+    cuts_by_id: dict[str, dict[str, Any]] = {}
+    for index, cut in enumerate(_iter_cuts(scene), start=1):
+        if _is_deleted(cut):
+            continue
+        cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
+        cuts_by_id[cut_id] = cut
+    return {
+        "render_unit_source_cut_ids": [
+            source_id for source_id in source_ids if source_id
+        ],
+        "render_unit_source_cut_contracts": [
+            _mapping(cuts_by_id[source_id].get("cut_contract"))
+            for source_id in source_ids
+            if source_id and source_id in cuts_by_id
+        ],
+    }
+
+
+def _validate_materialized_reference_content(
+    *,
+    run_dir: Path,
+    execution_options: dict[str, Any],
+) -> None:
+    expected_by_path = _mapping(execution_options.get("reference_content_sha256"))
+    for raw_path, raw_expected in expected_by_path.items():
+        relative_path = str(raw_path or "").strip()
+        expected = str(raw_expected or "").strip()
+        candidate = run_dir / relative_path
+        if not relative_path or not expected or not candidate.is_file():
+            raise ValueError(
+                "materialized video reference content is missing for semantic review"
+            )
+        digest = hashlib.sha256()
+        with candidate.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise ValueError(
+                "materialized video reference content changed before semantic review"
+            )
+
+
+def _compact_video_projection(value: Any) -> dict[str, Any]:
+    projection = _mapping(value)
+    active_rules: list[dict[str, Any]] = []
+    for raw in projection.get("active_rules") or []:
+        if not isinstance(raw, dict):
+            continue
+        active_rules.append(
+            {
+                key: raw[key]
+                for key in (
+                    "source_key",
+                    "source_keys",
+                    "target_group",
+                    "authoring_relevance",
+                    "provider_projection",
+                    "review_visibility",
+                    "value",
+                )
+                if key in raw
+            }
+        )
+    excluded: list[dict[str, Any]] = []
+    for raw in projection.get("excluded") or []:
+        if not isinstance(raw, dict):
+            continue
+        excluded.append(
+            {
+                key: raw[key]
+                for key in (
+                    "source_keys",
+                    "provider_projection",
+                    "review_visibility",
+                    "exclusion_reason",
+                )
+                if key in raw
+            }
+        )
+    return {
+        "registry_version": projection.get("registry_version"),
+        "provider": projection.get("provider"),
+        "mode": projection.get("mode"),
+        "groups": projection.get("groups") or {},
+        "active_rules": active_rules,
+        "shadowed_sources": projection.get("shadowed_sources") or [],
+        "excluded": excluded,
+        "review_only_sources": projection.get("review_only_sources") or [],
+    }
 
 
 def _has_contract_value(contract: dict[str, Any], key: str) -> bool:

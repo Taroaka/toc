@@ -18,6 +18,7 @@ p400 は、scene を直接画像や動画にする stage ではない。
 ### Success criteria
 
 - 各 scene が purpose / intended affect / visual beat / narration boundary / timing / `done_when` を持つ
+- `script_metadata.scene_time_of_day_contract: required_v1`、歴史的時代の `script_metadata.time`、各 scene の一日の時間帯 `scenes[].time_of_day` が story から一方向 projection され、相互に代用されていない
 - 事実主張は story / research の参照に紐づき、創作補完は production 上の演出として区別されている
 - p400 では narration の役割・境界・draft だけを決め、final `audio.narration.text` / `tts_text` は p700 で actual cut / image / duration に合わせて確定する
 - reveal 順序、主人公、theme、承認済み human request を、無断で変更していない
@@ -60,6 +61,7 @@ p400 の scene 設計は「台本を時間で割る」作業ではなく、story
 - scene の終点は、次 scene の起点を発生させる。`handoff_to_next_scene` が弱い scene は、cut を追加するか scene を統合する。
 - reveal は早出ししない。観客に渡す情報と withheld 情報を別々に書く。
 - spectacle は物語から独立した飾りではなく、誘惑、圧力、危険、発見、報酬、喪失のいずれかに接続する。
+- 各 `scenes[]` item 直下の `time_of_day` は open string で、新規 artifact では非空必須とする。`朝` / `昼` / `夕方` / `夜` に限定せず、`夜明け前` / `真夜中` / `薄暮` なども許容する。歴史的時代を表す `script_metadata.time` とは別の field であり、story の authoring root から投影した script-local read source として扱う。
 
 #### scene contract の必須 field
 
@@ -503,6 +505,12 @@ evaluator は少なくとも次を確認する。
 
 #### p700 Audio Story authoring order
 
+ナレーション作成promptへ設計書を渡す際は、`docs/implementation/narration-prompting.md` と
+`toc/narration_prompt_projection_registry.py` を正本にする。story / scene / cutの全keyを一律転記せず、
+`authoring_relevance` と `spoken_projection` の二軸で背景、必須内容、条件付き候補、追加価値、reveal制約、
+画面重複禁止、delivery、除外へ投影する。新しい設計keyをp700で使う場合はregistryへreview観点とともに登録し、
+authoring promptとp720 semantic review packの両方へ同じprojection contractを反映する。
+
 最終原稿はcut別に独立生成せず、次の順で作る。
 
 1. `audio_story_plan`: audience promise、narrator bible、open loop/payoff、scene attention arc、因果handoff、silence budget
@@ -746,6 +754,8 @@ human_change_requests:
 `script.md` は **物語と映像意図の正本**、`video_manifest.md` は **生成実装の正本** とする。
 
 - `script.md` が持つもの
+  - `script_metadata.time`（`story_metadata.time` から投影した歴史的時代）
+  - `scenes[].time_of_day`（story の同一 scene から投影した一日の時間帯）
   - `scene_summary`
   - `visual_beat`
   - reveal 順序
@@ -809,10 +819,13 @@ human_change_requests:
 
 ```yaml
 script_metadata:
+  scene_time_of_day_contract: "required_v1"  # story metadata からの exact projection
+  time: "<story_metadata.time>"  # 歴史的時代。scene の時間帯ではない
   ending_mode: "happy|bittersweet|tragic|cautionary|ambiguous"
 
 scenes:
   - scene_id: 15
+    time_of_day: "夜"  # open string。新規 artifact では非空必須
     narration_distance_policy: "stay_close|contextual|meaning_first"
     narrative_value_goal:
       mode: "immersion|meaning|mixed"
@@ -976,6 +989,8 @@ character_differentiation:
 # === シーン詳細 ===
 scenes:
   - scene_id: 1
+    # story.md の同一 scene からの一方向 projection。script 内で参照する scene 時間帯の正本。
+    time_of_day: "朝"
     scene_name: "オープニング - 日常世界"
 
     # --- タイミング ---
@@ -1041,7 +1056,8 @@ scenes:
     visual:
       location:
         setting: "場所の説明"
-        time_of_day: "morning | afternoon | evening | night"
+        # legacy 表示用 projection。値は scenes[].time_of_day から取り、ここで独立 authoring しない。
+        time_of_day: "<scenes[].time_of_day>"
         weather: "天候・雰囲気"
         props: "小道具リスト"
 
@@ -1544,6 +1560,8 @@ timing_check:
 # === メタ情報 ===
 script_metadata:
   topic: "string"
+  scene_time_of_day_contract: "required_v1"  # story metadata からの exact projection
+  time: "<story_metadata.time>"  # 歴史的時代。scene の時間帯ではない
   source_story: "output/stories/{file}.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
@@ -1621,6 +1639,8 @@ timeline:
 # === シーン詳細 ===
 scenes:
   - scene_id: 1
+    # story.md の同一 scene からの一方向 projection。open string で、新規 artifact では非空必須。
+    time_of_day: "朝"
     scene_name: "オープニング - フック"
     timing:
       position_percent: "0-10"
@@ -1656,7 +1676,8 @@ scenes:
     visual:
       location:
         setting: "modern apartment living room"
-        time_of_day: "morning"
+        # legacy 表示用 projection。script 内の参照元は scenes[].time_of_day。
+        time_of_day: "<scenes[].time_of_day>"
         weather: "sunny, light streaming through windows"
         props: ["coffee mug", "laptop on table", "plants"]
 
@@ -1717,6 +1738,7 @@ scenes:
   # === Scene 2-8: 同様の構造で続く ===
 
   - scene_id: 4
+    time_of_day: "夕方"
     scene_name: "中盤の視覚報酬"
     timing:
       position_percent: "40-56"

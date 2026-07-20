@@ -1,90 +1,167 @@
-# にわかのAI リード獲得フォーム設計
+# ToC native lead form contract
 
-最終更新: 2026-05-16
-用途: Googleフォーム / Typeform / Notionフォーム等で使う入力項目。
+更新日: 2026-07-19
 
----
+用途: 独立した ToC marketing site 内に実装する idea intake / lead form。Google Forms、Notion Forms、Typeform を canonical route にしない。
 
-## 1. フォーム名
+## Conversion principle
 
-`にわかのAI 制作ノート・改善提案・相談フォーム`
-
----
-
-## 2. フォーム説明
+長い個人情報入力から始めず、visitor が作りたい動画を一行で入力するところから始める。
 
 ```text
-にわかのAIを見てくれてありがとうございます。
-このフォームでは、制作ノートの受け取り、改善提案、次に見たい物語、AI動画制作システムについての相談を受け付けています。
+persona selection
+  -> one-line video idea
+  -> minimum contact details
+  -> consent
+  -> thank-you page
 ```
 
----
+## Step 1: purpose
 
-## 3. 入力項目
+Required, single select.
 
-### 1. 用件
+- `side_business`: 副業のために動画を作りたい
+- `personal_brand`: 自分のブランドを構築したい
+- `other`: その他
 
-必須。ラジオボタン。
+Preserve campaign-provided persona when the visitor came from a persona-specific LP. Allow editing.
 
-- 制作ノートを受け取りたい
-- 改善提案・作ってほしい物語を送りたい
-- AI動画制作システムについて相談したい
-- その他
+Do not ask `あなたはどのタイプですか？`. Ask what the visitor wants to build:
 
-### 2. 名前
+- `副業の可能性を試したい`
+- `自分のブランドを育てたい`
 
-任意。
+## Step 2: video idea
 
-### 3. メールアドレス
+### `video_idea`
 
-必須。
+Required, 10–500 characters.
 
-### 4. 内容
+Label: `どんな動画を作りたいですか？`
 
-必須。長文。
-
-プレースホルダー:
+Placeholder:
 
 ```text
-改善提案、次に見たい物語、相談内容などを自由に書いてください。
+例: 30代会社員向けに、睡眠改善を分かりやすく伝えるYouTube動画
 ```
 
-### 5. 立場
+### `target_audience`
 
-任意。チェックボックス。
+Optional, 0–200 characters.
 
-- 視聴者
-- AI動画制作に興味がある個人
-- クリエイター
-- 企業・メディア担当者
-- 教育・出版関係者
+Label: `誰に届けたいですか？`
+
+### `desired_format`
+
+Optional, multi select.
+
+- YouTube long-form
+- Shorts / Reels / TikTok
+- 解説・教育
+- 商品・サービス紹介
+- personal brand / thought leadership
+- story / entertainment
+- not decided
+
+## Step 3: current obstacle
+
+Optional, multi select.
+
+- 時間がない
+- 編集できない
+- 企画や台本で止まる
+- 生成AIツールが多すぎる
+- 発信を継続できない
+- ブランドの一貫性を保てない
+- 外注費が高い
+- 品質が不安
 - その他
 
-### 6. 返信希望
+Use this for routing and product learning, not for manipulative messaging.
 
-必須。ラジオボタン。
+## Step 3a: persona-specific qualification
 
-- 返信がほしい
-- 制作ノートだけ受け取りたい
-- 返信不要
+Show no more than two fields for the selected persona.
 
-### 7. どこで知りましたか？
+For `side_business`:
 
-任意。ラジオボタン。
+- `side_business_stage`: アイデアだけ / 制作途中 / 公開経験あり / 継続中
+- `side_business_goal`: 最初の1本 / niche 検証 / 投稿継続 / 収益化検証
 
-- YouTube
-- X
-- Instagram
-- 紹介
-- その他
+For `personal_brand`:
 
----
+- `expertise_topic`: `何について知られる人になりたいですか？`
+- `brand_video_goal`: 認知 / 信頼 / 問い合わせ / 教育 / launch support
 
-## 4. 送信後メッセージ
+Collect optional research fields such as weekly time, existing assets, desired cadence, channel URLs, and format preference only after lead submission or during follow-up. Do not turn the first form into a survey.
+
+## Step 4: contact
+
+### `name`
+
+Optional, 0–100 characters.
+
+### `email`
+
+Required, normalized email address.
+
+### `reply_preference`
+
+Required, single select.
+
+- 利用方法を知りたい
+- 最初の1本について相談したい
+- 開発・提供開始の案内だけ受け取りたい
+
+## Step 5: source and consent
+
+Hidden / derived fields:
+
+- `landing_persona`
+- `utm_source`
+- `utm_medium`
+- `utm_campaign`
+- `utm_content`
+- `referrer`
+- `landing_path`
+- `submitted_at`
+- `privacy_policy_version`
+
+Required checkbox:
+
+`プライバシーポリシーを確認し、入力内容の取扱いに同意します。`
+
+Marketing email consent must be separate and optional:
+
+`ToCの提供開始、制作事例、改善情報をメールで受け取る。`
+
+## Validation and security
+
+- client and server validation
+- honeypot or equivalent hidden trap
+- Cloudflare Turnstile or equivalent bot verification
+- rate limit by normalized client signal
+- idempotency key to prevent duplicate leads
+- do not expose provider keys to the browser
+- escape stored and rendered user input
+- log consent version and acquisition source
+- define retention and deletion process before launch
+
+## Submit behavior
+
+On success:
+
+1. persist the lead
+2. notify the operator
+3. send a receipt email when deliverability is configured
+4. emit `generate_lead` with persona and acquisition source, without raw personal data
+5. navigate to `/thanks`
+
+Success message:
 
 ```text
-送信ありがとうございます。
-いただいた内容は、にわかのAIの制作改善や今後の案内に活用します。
-返信希望の方には、内容を確認してからご連絡します。
+動画のアイデアを受け取りました。
+入力内容を確認し、選択した案内方法に合わせてご連絡します。
 ```
 
+On recoverable failure, retain the entered idea and explain the next action. Never clear the entire form after a server or network error.

@@ -31,19 +31,19 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
         "slot": "p410",
         "owner": "scene design producer",
         "artifacts": ["story.md", "script.md", "video_manifest.md"],
-        "focus": "scene purpose, causal order, location/time continuity, and story meaning",
+        "focus": "scene purpose, causal order, scene time-of-day and location continuity, and story meaning",
     },
     "scene_detail": {
         "slot": "p410",
         "owner": "scene detail producer",
         "artifacts": ["script.md", "video_manifest.md"],
-        "focus": "scene detail, visual beats, character state, and handoff meaning",
+        "focus": "scene detail, time-of-day lighting, visual beats, character state, and handoff meaning",
     },
     "cut_blueprint": {
         "slot": "p420",
         "owner": "cut blueprint producer",
         "artifacts": ["script.md", "video_manifest.md"],
-        "focus": "cut function, must-show contract, reveal order, and downstream handoff",
+        "focus": "cut function, scene time-of-day lighting, must-show contract, reveal order, and downstream handoff",
     },
     "asset_plan": {
         "slot": "p540",
@@ -54,8 +54,8 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
     "image_prompt": {
         "slot": "p640",
         "owner": "image prompt producer",
-        "artifacts": ["image_generation_requests.md", "video_manifest.md", "asset_plan.md"],
-        "focus": "prompt-to-cut contract, reference choice, location/object/character correctness, and first-frame meaning",
+        "artifacts": ["video_manifest.md"],
+        "focus": "cut-local include / omit / add / replace decisions, reference choice, historical time, scene time of day, location/object/character correctness, temporal polarity, and first-frame meaning",
     },
     "narration": {
         "slot": "p720",
@@ -66,7 +66,7 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
     "video_motion": {
         "slot": "p820",
         "owner": "video motion producer",
-        "artifacts": ["video_generation_requests.md", "video_manifest.md"],
+        "artifacts": ["video_manifest.md"],
         "focus": "motion prompt, first-frame contract, subject/environment movement, and end state",
     },
 }
@@ -273,6 +273,10 @@ def write_semantic_repair_prompt(
     if stage in {"research", "story"}:
         editable_artifact = "research.md" if stage == "research" else "story.md"
         locked_artifact = "" if stage == "research" else " `research.md` is approved upstream input and must not be edited during story repair."
+        story_time_of_day_repair = "" if stage == "research" else """
+- Restore every current-contract story scene `time_of_day` at its canonical `story.md` source as an open, non-empty string. Preserve authored causal transitions, and do not infer it from location or image-prompt prose.
+- Keep the scene daypart separate from historical `story_metadata.time`: daypart controls sky, natural/artificial light, shadow, and color temperature, while historical time controls clothing, architecture, materials, tools, and technology.
+"""
         stage_specific_repair = f"""
 ## Foundation Repair Boundary
 
@@ -282,15 +286,45 @@ def write_semantic_repair_prompt(
 - Preserve the existing Markdown fenced YAML structure. Quote any scalar containing `: ` so the YAML remains parseable.
 - After editing, use `toc.harness.load_structured_document` on `{run_dir / editable_artifact}` and do not finish while it returns an empty mapping.
 - Do not delegate this repair. You must make the targeted edit, validate the structured round trip, and write the producer repair report yourself.
+{story_time_of_day_repair}
+"""
+    elif stage in {"scene_set", "scene_detail", "cut_blueprint"}:
+        stage_specific_repair = """
+## Scene Time-of-Day Repair Boundary
+
+- Treat each scene-level `time_of_day` as the authored daypart and keep it an open, non-empty string for current-contract artifacts. Values such as 朝, 昼, 夕方, 夜, 夜明け前, and 真夜中 are valid; do not reduce the field to a fixed enum.
+- Use the review entry's `time_of_day_contract_declared` and `time_of_day_status`: the contract is declared only by metadata marker `scene_time_of_day_contract: required_v1`. Repair missing/blank values only when declared, always repair invalid_type, and do not rewrite an undeclared legacy artifact solely to add this newer key.
+- Keep historical `story_metadata.time` / `script_metadata.time` / `video_metadata.time` separate. A daypart repair controls sky brightness, natural and artificial light, shadows, and color temperature; it must not change historical clothing, architecture, materials, or technology.
+- Preserve scene order and authored transitions. If adjacent scenes change daypart, make the transition causally legible; do not infer or overwrite `time_of_day` from a location description or prompt prose.
+- Repair the earliest stage-owned scene projection, then keep the same value through downstream script/manifest projections. For a cut finding, fix the scene-level source and cut-local light plan rather than inventing a second historical-time field.
 """
     elif stage == "image_prompt":
         stage_specific_repair = """
 ## Image Prompt Repair Boundary
 
-- Repair `api_prompt_payload.prompt` and, when needed, the paired `shot_design_contract`, `cut_location_frame_plan`, and `cut_visual_delta` for the failed selector.
+- Treat `video_manifest.md` `image_generation.first_frame_visual_plan` plus the cut-local character/object/location ids and references as the editable source of truth.
+- For every failed selector, make an explicit `include / omit / add / replace` decision: include only drawable facts needed in this still, omit downstream motion/design metadata/unneeded references, add visible behavior or period detail required to make the source meaning imageable, and replace abstract or contradictory prose without changing the story event.
+- Do not hand-edit `api_prompt_payload.prompt`, `image_generation_requests.md`, or `image_generation_request_snapshot.json`; they are compiler/materializer outputs. The orchestrator recompiles and re-freezes them after this repair.
+- When a positive must-show/current-state instruction also appears in `not_yet_happened_in_still`, keep the positive source fact and remove or rewrite the invalid negative projection. Preserve genuine later-event and reveal constraints.
+- Check `video_metadata.time`: when non-empty, the repaired plan and dependencies must allow the compiler to keep period-accurate clothing, architecture, everyday objects, materials, and technology in the provider prompt.
+- Check `scene.time_of_day` separately from `video_metadata.time`. The required contract is declared only by `video_metadata.scene_time_of_day_contract: required_v1`; use `time_of_day_contract_declared` / `time_of_day_status` to repair current-contract missing, blank, or invalid values without forcing this newer key into an undeclared legacy artifact. When valid, preserve the authored daypart and repair sky brightness, natural-light direction and intensity, shadows, color temperature, and artificial lighting so they agree with it. Do not use a daypart repair to change the historical era.
+- If a visibly required character, object, or location lacks an id/reference, repair the cut dependency and the matching `video_manifest.md.assets` bible entry rather than merely naming it in prose. Do not attach scene-wide assets that are not visible in this cut.
 - Keep `scene_event` as the event canon. Do not change what happened in the story to make an image prompt pass.
 - Align the API prompt with the cut's designed visual role: `scene_cut_coverage_plan.cut_assignments`, `scene_film_coverage_plan`, and `scene_shot_mix_plan` are the comparison targets.
-- If the failure is film-role alignment, fix the visual implementation fields and API prompt together so `shot_role`, `shot_scale`, location zone, visible subject, object detail, reaction behavior, and handoff path agree.
+- If the failure is film-role alignment, fix the visual implementation fields together so `shot_role`, `shot_scale`, location zone, visible subject, object detail, reaction behavior, and handoff path agree; the orchestrator will render the paired API prompt.
+"""
+    elif stage == "video_motion":
+        stage_specific_repair = """
+## Video Motion Repair Boundary
+
+- Treat `video_manifest.md` `cut_contract.motion_contract`, `continuity_contract`, the approved first-frame boundary, and `video_input_contract.reference_roles` as the editable canonical sources.
+- For every failed selector, make an explicit `include / omit / add / replace` decision for start state, one primary motion, camera, independent environment motion, visible emotional change, physical end state, continuity, constraints, and reference-role use.
+- Do not hand-edit `api_prompt_payload.prompt`, `video_generation.motion_prompt`, or `video_generation_requests.md`; they are compiler/materializer outputs. The orchestrator will recompile, refresh the digest, rematerialize the request artifact, and run semantic review again.
+- Repair every blocking `quality_issues[]` item at its canonical source. Do not delete diagnostics, copy compiler fallback prose into the contract, or hide unresolved alternatives.
+- Make the primary action name one visible subject and one observable action. Make the end state say who or what stops where and in which physical state. Keep environment and emotion independent from the primary action.
+- Compare failed selectors with neighboring cuts in the same scene. Replace exact or near-duplicate primary motions and end states with obligation-specific actions without crossing the assigned event beat, location, reveal, or first/last-frame boundary.
+- Keep historical time and scene daypart stable. A motion repair must not introduce an unauthored time-lapse, lighting transition, costume change, architecture change, or technology mismatch.
+- Keep `video_input_contract.reference_roles` aligned one-to-one with ordered references. Repair count, 1-based index, order, and semantic role at the contract; never put a file path or asset id into provider prose.
 """
 
     prompt = f"""# Semantic QA Producer Repair: {stage}

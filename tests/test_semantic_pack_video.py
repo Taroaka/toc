@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 
 from toc.semantic_pack_video import collect_entries
+from toc.video_prompt_compiler import compile_video_api_prompt_v1
+from toc.video_prompt_projection_registry import (
+    VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+)
+
+
+BUILD_PACK_PATH = Path(__file__).resolve().parents[1] / "scripts" / "build-semantic-review-pack.py"
+
+
+def load_pack_builder():
+    spec = importlib.util.spec_from_file_location(
+        "build_semantic_review_pack_video_motion",
+        BUILD_PACK_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {BUILD_PACK_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 MANIFEST = """# Manifest
@@ -77,6 +98,213 @@ scenes:
 
 
 class TestSemanticPackVideo(unittest.TestCase):
+    def _manifest_with_materialized_payload(
+        self,
+        payload: dict[str, object],
+        *,
+        authoring_source: str = "主人公が窓辺へ一歩進む",
+    ) -> dict[str, object]:
+        return {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "video_generation": {
+                                "tool": "kling_3_0",
+                                "prompt_authoring_source": authoring_source,
+                                "api_prompt_payload": payload,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def test_render_units_are_the_only_provider_entries_when_declared(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "video_generation": {
+                                "tool": "seedance",
+                                "motion_prompt": "The subject takes one step.",
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "video_generation": {
+                                "tool": "seedance",
+                                "motion_prompt": "The subject stops.",
+                            },
+                        },
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "video_generation": {
+                                "tool": "seedance",
+                                "motion_prompt": "The subject crosses the room and stops.",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entries = collect_entries("video_motion", Path("."), manifest)
+
+        self.assertEqual([entry["selector"] for entry in entries], ["scene1_unit1"])
+        dependencies = entries[0]["provider_prompt_payload"]["projection_review_contract"]
+        self.assertEqual(dependencies["provider"], "seedance")
+
+    def test_render_unit_uses_its_literal_first_source_cut_visual_plan(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {"motion_brief": "She reaches for the door."}
+                            },
+                            "image_generation": {
+                                "first_frame_visual_plan": {
+                                    "temporal_boundary": {
+                                        "first_visible_moment": "She stands beside the closed door."
+                                    }
+                                }
+                            },
+                        },
+                        {"cut_id": 2, "cut_contract": {}},
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "video_generation": {
+                                "tool": "seedance",
+                                "first_frame": "assets/scenes/scene1_cut1.png",
+                                "motion_prompt": "She reaches for the door.",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entry = collect_entries("video_motion", Path("."), manifest)[0]
+        design_source = entry["provider_prompt_payload"]["video_prompt_ir"]
+
+        self.assertIn("She stands beside the closed door", entry["provider_prompt"])
+        self.assertEqual(design_source["mode"], "image_to_video")
+
+    def test_video_motion_review_guidance_defines_projection_pass_fail_criteria(self) -> None:
+        builder = load_pack_builder()
+
+        guidance = "\n".join(builder._stage_specific_review_instructions("video_motion"))
+
+        for expected in (
+            "projection_review_contract",
+            "video_prompt_ir",
+            "one primary motion",
+            "maximum of two camera",
+            "historical time",
+            "time_of_day",
+            "quality_issues",
+            "observable action",
+            "unresolved alternatives",
+            "reference role",
+            "near-duplicate primary motions",
+            "reason keys",
+        ):
+            self.assertIn(expected, guidance)
+
+        for expected in (
+            "source causal action",
+            "start state",
+            "previous end state",
+            "same location",
+            "acquired",
+            "later possession",
+            "video_prompt_source_causal_action_missing",
+            "video_prompt_start_preconsumes_primary_motion",
+            "video_prompt_adjacent_cut_state_reset",
+            "video_prompt_prop_possession_jump",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, guidance)
+
+    def test_video_motion_scope_diagnostics_fail_blocking_quality_issue_entries(self) -> None:
+        builder = load_pack_builder()
+        diagnostics = builder.entry_diagnostics(
+            [
+                {
+                    "id": "video_motion:scene1_cut1",
+                    "quality_issues": [
+                        {
+                            "code": "video_motion_abstract_primary",
+                            "blocking": True,
+                        },
+                        {
+                            "code": "advisory_only",
+                            "blocking": False,
+                        },
+                    ],
+                    "provider_prompt_payload": {
+                        "quality_issues": [
+                            {
+                                "code": "video_motion_abstract_primary",
+                                "blocking": True,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "video_motion:scene1_cut2",
+                    "provider_prompt_payload": {
+                        "quality_issues": [],
+                        "video_prompt_ir": {
+                            "quality_issues": [
+                                {
+                                    "code": "video_motion_abstract_end_state",
+                                    "blocking": True,
+                                },
+                                {
+                                    "code": "   ",
+                                    "blocking": True,
+                                }
+                            ]
+                        },
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(diagnostics["blocking_quality_issue_count"], 3)
+        self.assertEqual(
+            diagnostics["blocking_quality_issue_entries"],
+            ["video_motion:scene1_cut1", "video_motion:scene1_cut2"],
+        )
+        self.assertEqual(
+            diagnostics["blocking_quality_issue_codes"],
+            [
+                "video_motion_abstract_end_state",
+                "video_motion_abstract_primary",
+                "video_motion_blocking_quality_issue",
+            ],
+        )
+        self.assertEqual(
+            diagnostics["failed_selectors"],
+            ["video_motion:scene1_cut1", "video_motion:scene1_cut2"],
+        )
+
     def test_video_motion_collects_cut_and_render_unit_prompts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:
             run_dir = Path(td)
@@ -87,6 +315,21 @@ class TestSemanticPackVideo(unittest.TestCase):
             selectors = [entry["selector"] for entry in entries]
             self.assertEqual(selectors, ["scene3_cut1", "scene4_unit1"])
             self.assertEqual(entries[0]["motion_prompt"], "Cinderella slowly lifts the invitation toward the window light.")
+            self.assertEqual(entries[0]["provider_prompt_payload"]["policy_version"], "video_api_prompt_v1")
+            self.assertEqual(entries[0]["provider_prompt"], entries[0]["provider_prompt_payload"]["prompt"])
+            self.assertIn(
+                "Cinderella notices the invitation with restrained hope",
+                entries[0]["provider_prompt"],
+            )
+            self.assertNotIn(
+                "Cinderella slowly lifts the invitation toward the window light",
+                entries[0]["provider_prompt"],
+            )
+            self.assertNotIn("motion_intent:", entries[0]["provider_prompt"])
+            self.assertEqual(
+                entries[0]["video_prompt_projection"]["registry_version"],
+                VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+            )
             self.assertEqual(entries[0]["semantic_contract"]["target_beat"], "Cinderella sees the invitation")
             self.assertFalse(entries[0]["motion_contract_missing"])
             self.assertEqual(entries[0]["motion_contract_required_fields_missing"], [])
@@ -153,6 +396,333 @@ class TestSemanticPackVideo(unittest.TestCase):
             self.assertEqual(entry["motion_contract"]["source_event_beat_id"], "scene10_event_pressure")
             self.assertEqual(entry["source_event_contract"]["primary_event_beat_id"], "scene10_event_pressure")
             self.assertEqual(entry["event_context_for_cut"]["primary_event_beat"]["beat_id"], "scene10_event_pressure")
+            self.assertIn("圧力の姿勢だけが小さく動く", entry["provider_prompt"])
+            self.assertIn("turnの直前で止まる", entry["provider_prompt"])
+            self.assertNotIn("scene10_event_pressure", entry["provider_prompt"])
+
+    def test_video_motion_reviews_the_exact_current_materialized_provider_payload(self) -> None:
+        authoring_source = "主人公が窓辺へ一歩進む"
+        materialized = compile_video_api_prompt_v1(
+            source_prompt=authoring_source,
+            tool="kling_3_0",
+            duration_seconds=8,
+            quality="1080p",
+            aspect_ratio="16:9",
+        )
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "video_generation": {
+                                "tool": "kling_3_0",
+                                "prompt_authoring_source": authoring_source,
+                                "motion_prompt": "互換field",
+                                "duration_seconds": 8,
+                                "quality": "1080p",
+                                "aspect_ratio": "16:9",
+                                "api_prompt_payload": materialized,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entries = collect_entries("video_motion", Path("."), manifest)
+
+        self.assertEqual(entries[0]["provider_prompt"], materialized["prompt"])
+        self.assertEqual(
+            entries[0]["provider_prompt_payload"]["negative_prompt"],
+            materialized["negative_prompt"],
+        )
+        self.assertEqual(
+            entries[0]["provider_prompt_payload"]["source_digest"],
+            materialized["source_digest"],
+        )
+
+    def test_render_unit_recompile_preserves_reference_roles_and_review_only_scene_sources(self) -> None:
+        source_contract = {
+            "motion_contract": {
+                "motion_brief": "シンデレラが出口へ一歩進む",
+                "end_state": "右足を踏み出した姿勢で止まる",
+            }
+        }
+        references = [
+            "assets/scenes/scene1_cut1.png",
+            "assets/storyboards/scene1_storyboard.png",
+        ]
+        roles = [
+            {"image_index": 1, "role": "start_state_visual_anchor"},
+            {
+                "image_index": 2,
+                "role": "ordered_storyboard_sequence_guide",
+            },
+        ]
+        review_dependencies = {
+            "render_unit_source_cut_ids": ["1"],
+            "render_unit_source_cut_contracts": [source_contract],
+        }
+        location_segments = [
+            {"location": "灰の台所", "responsibility": "開始状態を示す"},
+            {"location": "玄関", "responsibility": "退出の結果を示す"},
+        ]
+        materialized = compile_video_api_prompt_v1(
+            cut_contract=source_contract,
+            source_prompt="シンデレラが出口へ一歩進む",
+            time_of_day="朝",
+            tool="seedance",
+            references=references,
+            reference_roles=roles,
+            duration_seconds=8,
+            scene_time_of_day_visual_basis="朝日、低い明るさ、長い影、淡い暖色",
+            scene_location_mode="sequence",
+            scene_location_sequence=["灰の台所", "玄関"],
+            scene_location_segments=location_segments,
+            review_only_dependencies=review_dependencies,
+        )
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "time_of_day": "朝",
+                    "time_of_day_visual_basis": "朝日、低い明るさ、長い影、淡い暖色",
+                    "location_mode": "sequence",
+                    "location_sequence": ["灰の台所", "玄関"],
+                    "location_segments": location_segments,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": source_contract,
+                        }
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1],
+                            "video_input_contract": {
+                                "reference_roles": roles,
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "references": references,
+                                "prompt_authoring_source": "シンデレラが出口へ一歩進む",
+                                "duration_seconds": 8,
+                                "api_prompt_payload": materialized,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entries = collect_entries("video_motion", Path("."), manifest)
+
+        current = entries[0]["provider_prompt_payload"]
+        self.assertEqual(current["source_digest"], materialized["source_digest"])
+        self.assertEqual(
+            current["provider_request_binding"]["reference_roles"],
+            roles,
+        )
+        self.assertIn("参照画像1は開始状態の基準", current["prompt"])
+        traced = {
+            item["source_key"]: item["value"]
+            for item in current["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(traced["scene.location_segments"], location_segments)
+
+    def test_video_motion_rejects_stale_materialized_provider_payload(self) -> None:
+        old_contract = {
+            "motion_contract": {
+                "motion_brief": "主人公が窓辺へ一歩進む",
+            }
+        }
+        materialized = compile_video_api_prompt_v1(
+            cut_contract=old_contract,
+            tool="kling_3_0",
+        )
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "主人公が扉の前で立ち止まる",
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "kling_3_0",
+                                "api_prompt_payload": materialized,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "stale for semantic review"):
+            collect_entries("video_motion", Path("."), manifest)
+
+    def test_video_motion_rejects_tampered_projection_review_contract(self) -> None:
+        materialized = compile_video_api_prompt_v1(
+            source_prompt="主人公が窓辺へ一歩進む",
+            tool="kling_3_0",
+        )
+        exact_prompt = materialized["prompt"]
+        exact_sha256 = materialized["sha256"]
+        exact_binding = copy.deepcopy(materialized["provider_request_binding"])
+        materialized["projection_review_contract"]["provider"] = "tampered-provider"
+
+        self.assertEqual(materialized["prompt"], exact_prompt)
+        self.assertEqual(materialized["sha256"], exact_sha256)
+        self.assertEqual(materialized["provider_request_binding"], exact_binding)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"stale for semantic review: .*projection_review_contract",
+        ):
+            collect_entries(
+                "video_motion",
+                Path("."),
+                self._manifest_with_materialized_payload(materialized),
+            )
+
+    def test_video_motion_rejects_tampered_video_prompt_ir(self) -> None:
+        materialized = compile_video_api_prompt_v1(
+            source_prompt="主人公が窓辺へ一歩進む",
+            tool="kling_3_0",
+        )
+        exact_prompt = materialized["prompt"]
+        exact_sha256 = materialized["sha256"]
+        exact_binding = copy.deepcopy(materialized["provider_request_binding"])
+        materialized["video_prompt_ir"]["mode"] = "tampered-mode"
+
+        self.assertEqual(materialized["prompt"], exact_prompt)
+        self.assertEqual(materialized["sha256"], exact_sha256)
+        self.assertEqual(materialized["provider_request_binding"], exact_binding)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"stale for semantic review: .*video_prompt_ir",
+        ):
+            collect_entries(
+                "video_motion",
+                Path("."),
+                self._manifest_with_materialized_payload(materialized),
+            )
+
+    def test_video_motion_rejects_tampered_included_fragments(self) -> None:
+        materialized = compile_video_api_prompt_v1(
+            source_prompt="主人公が窓辺へ一歩進む",
+            tool="kling_3_0",
+        )
+        exact_prompt = materialized["prompt"]
+        exact_sha256 = materialized["sha256"]
+        exact_binding = copy.deepcopy(materialized["provider_request_binding"])
+        materialized["included_fragments"][0]["text"] = "tampered review evidence"
+
+        self.assertEqual(materialized["prompt"], exact_prompt)
+        self.assertEqual(materialized["sha256"], exact_sha256)
+        self.assertEqual(materialized["provider_request_binding"], exact_binding)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"stale for semantic review: .*included_fragments",
+        ):
+            collect_entries(
+                "video_motion",
+                Path("."),
+                self._manifest_with_materialized_payload(materialized),
+            )
+
+    def test_video_motion_rejects_tampered_provider_policy(self) -> None:
+        materialized = compile_video_api_prompt_v1(
+            source_prompt="主人公が窓辺へ一歩進む",
+            tool="kling_3_0",
+        )
+        exact_prompt = materialized["prompt"]
+        exact_sha256 = materialized["sha256"]
+        exact_binding = copy.deepcopy(materialized["provider_request_binding"])
+        materialized["provider_policy"]["one_clip_one_intent"] = False
+
+        self.assertEqual(materialized["prompt"], exact_prompt)
+        self.assertEqual(materialized["sha256"], exact_sha256)
+        self.assertEqual(materialized["provider_request_binding"], exact_binding)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"stale for semantic review: .*provider_policy",
+        ):
+            collect_entries(
+                "video_motion",
+                Path("."),
+                self._manifest_with_materialized_payload(materialized),
+            )
+
+    def test_materialized_motion_prompt_is_not_reinterpreted_as_authoring_source(self) -> None:
+        materialized = compile_video_api_prompt_v1(
+            source_prompt="主人公が窓辺へ一歩進む",
+            tool="kling_3_0",
+        )
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "video_generation": {
+                                "tool": "kling_3_0",
+                                "motion_prompt": materialized["prompt"],
+                                "api_prompt_payload": materialized,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "stale for semantic review"):
+            collect_entries("video_motion", Path("."), manifest)
+
+    def test_video_motion_review_evidence_uses_canonical_contract_precedence(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "正本の動作として扉へ一歩進む",
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "kling_3_0",
+                                "motion_prompt": "自由文では窓へ走る",
+                                "motion_contract": {
+                                    "motion_intent": "旧形式では階段を下りる",
+                                },
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entry = collect_entries("video_motion", Path("."), manifest)[0]
+
+        self.assertEqual(
+            entry["motion_contract"]["motion_brief"],
+            "正本の動作として扉へ一歩進む",
+        )
+        self.assertIn("正本の動作として扉へ一歩進む", entry["provider_prompt"])
+        self.assertNotIn("旧形式では階段を下りる", entry["provider_prompt"])
+        self.assertNotIn("自由文では窓へ走る", entry["provider_prompt"])
 
     def test_video_clip_semantic_stage_is_removed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_pack_video_") as td:

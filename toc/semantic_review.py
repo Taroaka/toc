@@ -37,6 +37,8 @@ FOUNDATION_SEMANTIC_CRITERIA = {
         "chronology_causality",
         "character_continuity",
         "conflict_resolution",
+        "historical_time_context",
+        "scene_time_of_day_continuity",
         "duration_scene_readiness",
     ),
 }

@@ -22,9 +22,14 @@ from typing import Any, Callable, Mapping, Protocol
 
 from toc.immersive_manifest import is_non_renderable_manifest_node
 from toc.narration_arc import narration_text_set_hash
+from toc.narration_prompt_projection_registry import (
+    NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION,
+    build_narration_prompt_projection,
+    narration_projection_registry_catalog,
+)
 
 
-INPUT_SCHEMA_VERSION = "narration_semantic_review_input_v1"
+INPUT_SCHEMA_VERSION = "narration_semantic_review_input_v2"
 RESPONSE_SCHEMA_VERSION = "narration_semantic_critic_response_v1"
 AGGREGATE_SCHEMA_VERSION = "narration_semantic_critic_aggregate_v1"
 
@@ -299,9 +304,111 @@ def _generation_context(value: Any) -> dict[str, Any]:
             "video_prompt",
             "duration_seconds",
             "target_duration_seconds",
-            "prompt_contract",
         ),
     )
+
+
+def _scene_intent_context(value: Any) -> dict[str, Any]:
+    intent = _dict(value)
+    return _selected(
+        intent,
+        (
+            "story_purpose",
+            "dramatic_question",
+            "causal_turn",
+            "audience_information",
+            "withheld_information",
+            "reveal_constraints",
+            "affect_transition",
+            "handoff_to_next_scene",
+            "handoff_notes",
+        ),
+    )
+
+
+def _scene_event_context(value: Any) -> dict[str, Any]:
+    event = _dict(value)
+    compact = _selected(event, ("event_logline", "event_summary", "before_state", "after_state"))
+    sequence: list[dict[str, Any]] = []
+    for item in _list(event.get("event_sequence")):
+        if not isinstance(item, dict):
+            continue
+        sequence.append(
+            _selected(
+                item,
+                (
+                    "event_beat_id",
+                    "beat_function",
+                    "what_happens",
+                    "visible_action",
+                    "visible_reaction",
+                    "audience_knowledge_delta",
+                ),
+            )
+        )
+    if sequence:
+        compact["event_sequence"] = sequence
+    return compact
+
+
+def _cut_contract_review_context(value: Any) -> dict[str, Any]:
+    contract = _dict(value)
+    source_event = _dict(contract.get("source_event_contract"))
+    viewer = _dict(contract.get("viewer_contract"))
+    narration = _dict(contract.get("narration_contract"))
+    first_frame = _dict(contract.get("first_frame_contract"))
+    motion = _dict(contract.get("motion_contract"))
+    downstream = _dict(contract.get("downstream_handoff"))
+    return {
+        "source_event_contract": _selected(
+            source_event,
+            (
+                "source_event_summary",
+                "event_facts_to_preserve",
+                "event_facts_not_to_invent",
+                "allowed_reveal_info_ids",
+                "forbidden_reveal_info_ids",
+            ),
+        ),
+        "viewer_contract": _selected(
+            viewer,
+            (
+                "target_beat",
+                "audience_knowledge_delta",
+                "causal_proof",
+                "visual_evidence",
+                "reveal_constraints",
+                "visual_proof",
+                "must_show",
+                "must_avoid",
+            ),
+        ),
+        "narration_contract": _selected(
+            narration,
+            (
+                "schema_version",
+                "story_role",
+                "visual_distance",
+                "rhythm_and_timing",
+                "tts_readiness",
+                "role",
+                "target_function",
+                "must_cover",
+                "must_avoid",
+                "done_when",
+                "timing_intent",
+            ),
+        ),
+        "first_frame_contract": _selected(
+            first_frame,
+            ("first_frame_brief", "visible_start_state", "action_completion_state"),
+        ),
+        "motion_review_only": _selected(
+            motion,
+            ("motion_brief", "start_from_visible_state", "end_state", "must_not_add"),
+        ),
+        "downstream_handoff": _selected(downstream, ("p700_narration",)),
+    }
 
 
 def _render_context(node: Mapping[str, Any]) -> dict[str, Any]:
@@ -335,6 +442,7 @@ def build_narration_semantic_review_pack(
             (
                 "scene_id",
                 "scene_kind",
+                "time_of_day",
                 "title",
                 "summary",
                 "story_role",
@@ -343,12 +451,26 @@ def build_narration_semantic_review_pack(
                 "emotional_beat",
                 "duration_seconds",
                 "target_duration_seconds",
-                "scene_intent",
-                "scene_event",
                 "scene_narration_plan",
-                "scene_contract",
-                "visual",
             ),
+        )
+        scene["scene_contract"] = _selected(
+            _dict(raw_scene.get("scene_contract") or raw_scene.get("contract")),
+            (
+                "story_purpose",
+                "dramatic_question",
+                "causal_turn",
+                "audience_information",
+                "withheld_information",
+                "reveal_constraints",
+                "handoff_to_next_scene",
+            ),
+        )
+        scene["scene_intent"] = _scene_intent_context(raw_scene.get("scene_intent"))
+        scene["scene_event"] = _scene_event_context(raw_scene.get("scene_event"))
+        scene["visual"] = _selected(
+            _dict(raw_scene.get("visual")),
+            ("visual_thesis", "generation_prompt", "prompt"),
         )
         cuts: list[dict[str, Any]] = []
         declared_cuts = _list(raw_scene.get("cuts"))
@@ -366,19 +488,42 @@ def build_narration_semantic_review_pack(
                     "target_duration_seconds",
                     "timeline",
                     "visual_beat",
-                    "cut_contract",
                     "narration_contract",
-                    "cut_blueprint",
-                    "visual",
                 ),
+            )
+            raw_contract = raw_cut.get("cut_contract")
+            if not isinstance(raw_contract, dict):
+                raw_contract = raw_cut.get("scene_contract")
+            cut["cut_contract"] = _cut_contract_review_context(raw_contract)
+            cut["visual"] = _selected(
+                _dict(raw_cut.get("visual")),
+                ("visual_beat", "first_frame_brief", "prompt"),
             )
             cut["image_generation"] = _generation_context(raw_cut.get("image_generation"))
             cut["video_generation"] = _generation_context(raw_cut.get("video_generation"))
             cut["render"] = _render_context(raw_cut)
             narration = _dict(_dict(raw_cut.get("audio")).get("narration"))
             cut["narration"] = _selected(narration, _NARRATION_REVIEW_FIELDS)
+            cut["narration_prompt_projection"] = build_narration_prompt_projection(
+                manifest=manifest_data,
+                scene=raw_scene,
+                cut=raw_cut,
+                scopes=("cut",),
+                include_inactive=False,
+                include_excluded=False,
+                compact=True,
+            )
             cuts.append(cut)
         scene["cuts"] = cuts
+        scene["narration_scene_projection"] = build_narration_prompt_projection(
+            manifest=manifest_data,
+            scene=raw_scene,
+            cut={},
+            scopes=("scene",),
+            include_inactive=False,
+            include_excluded=False,
+            compact=True,
+        )
         if not cuts:
             if declared_cuts:
                 continue
@@ -387,9 +532,29 @@ def build_narration_semantic_review_pack(
             scene["image_generation"] = _generation_context(raw_scene.get("image_generation"))
             scene["video_generation"] = _generation_context(raw_scene.get("video_generation"))
             scene["render"] = _render_context(raw_scene)
+            scene["narration_prompt_projection"] = build_narration_prompt_projection(
+                manifest=manifest_data,
+                scene=raw_scene,
+                cut=raw_scene,
+                scopes=("cut",),
+                include_inactive=False,
+                include_excluded=False,
+                compact=True,
+            )
         scenes.append(scene)
     pack = {
         "schema_version": INPUT_SCHEMA_VERSION,
+        "narration_prompt_projection_registry_version": NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION,
+        "narration_prompt_projection_registry": narration_projection_registry_catalog(),
+        "narration_manifest_projection": build_narration_prompt_projection(
+            manifest=manifest_data,
+            scene={},
+            cut={},
+            scopes=("manifest",),
+            include_inactive=False,
+            include_excluded=False,
+            compact=True,
+        ),
         "narration_text_set_hash": effective_hash,
         "script_metadata": _selected(
             _dict(manifest_data.get("script_metadata")),
@@ -399,6 +564,8 @@ def build_narration_semantic_review_pack(
                 "target_duration_seconds",
                 "duration_plan",
                 "aspect_ratio",
+                "time",
+                "ending_mode",
             ),
         ),
         "video_metadata": _selected(

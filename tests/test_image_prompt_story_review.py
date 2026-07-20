@@ -222,6 +222,10 @@ class TestImagePromptStoryReview(unittest.TestCase):
             "object_ids": [],
             "location_ids": [],
             "references": [],
+            "first_frame_visual_plan": {
+                "subject_binding": {"primary_subject": {"name": "雲間の朝日"}},
+                "spatial_composition": {"subject_priority_order": ["雲間の朝日"]},
+            },
             "api_prompt_payload": {
                 "policy_version": "image_api_prompt_v2",
                 "drawable_prompt_ir": {
@@ -231,7 +235,7 @@ class TestImagePromptStoryReview(unittest.TestCase):
                         "object_ids": [],
                         "location_ids": [],
                         "references": [],
-                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                        "required_groups": ["style", "current_moment", "primary_subject", "composition", "constraints"],
                     },
                     "included_fragments": [
                         {"group": "style", "text": "実写映画調。"},
@@ -324,23 +328,546 @@ class TestImagePromptStoryReview(unittest.TestCase):
             {finding.code for finding in findings},
         )
 
+    def test_v2_story_time_fragment_is_known_and_required_when_declared(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        base_fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "story_time": "江戸時代",
+                        "required_groups": ["style", "story_time", "current_moment", "constraints"],
+                    },
+                    "included_fragments": [
+                        base_fragments[0],
+                        {"group": "story_time", "text": "江戸時代の衣装、建築、生活道具、素材、技術水準を守る。"},
+                        *base_fragments[1:],
+                    ],
+                },
+            },
+        }
+        prompt = "".join(
+            fragment["text"]
+            for fragment in image_generation["api_prompt_payload"]["drawable_prompt_ir"]["included_fragments"]
+        )
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            prompt,
+            image_generation=image_generation,
+        )
+
+        self.assertNotIn(
+            "api_prompt_v2_unknown_fragment_group",
+            {finding.code for finding in findings},
+        )
+        self.assertNotIn(
+            "api_prompt_v2_missing_story_time_fragment",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_time_of_day_fragment_is_known_and_required_when_declared(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {
+                "group": "time_of_day",
+                "text": "このシーンの時間帯は夕方。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。",
+            },
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "time_of_day": "夕方",
+                        "required_groups": [
+                            "style",
+                            "time_of_day",
+                            "current_moment",
+                            "constraints",
+                        ],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+            expected_time_of_day="夕方",
+        )
+        codes = {finding.code for finding in findings}
+
+        self.assertNotIn("api_prompt_v2_unknown_fragment_group", codes)
+        self.assertNotIn("api_prompt_v2_missing_time_of_day_fragment", codes)
+        self.assertNotIn("api_prompt_v2_time_of_day_dependency_mismatch", codes)
+
+        without_time_fragment = [
+            fragment for fragment in fragments if fragment["group"] != "time_of_day"
+        ]
+        image_generation["api_prompt_payload"]["drawable_prompt_ir"][
+            "included_fragments"
+        ] = without_time_fragment
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in without_time_fragment),
+            image_generation=image_generation,
+            expected_time_of_day="夕方",
+        )
+
+        self.assertIn(
+            "api_prompt_v2_missing_time_of_day_fragment",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_time_of_day_dependency_must_exactly_match_manifest_scene(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {
+                "group": "time_of_day",
+                "text": "このシーンの時間帯は朝。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。",
+            },
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        prompt = "".join(fragment["text"] for fragment in fragments)
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "time_of_day": "夜",
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {
+                                "character_ids": [],
+                                "object_ids": [],
+                                "location_ids": [],
+                                "references": [],
+                                "output": "assets/scenes/scene1_cut1.png",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v2",
+                                    "prompt": prompt,
+                                    "drawable_prompt_ir": {
+                                        "schema_version": "drawable_prompt_ir_v1",
+                                        "dependencies": {
+                                            "character_ids": [],
+                                            "object_ids": [],
+                                            "location_ids": [],
+                                            "references": [],
+                                            "time_of_day": "朝",
+                                            "required_groups": [
+                                                "style",
+                                                "time_of_day",
+                                                "current_moment",
+                                                "constraints",
+                                            ],
+                                        },
+                                        "included_fragments": fragments,
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        entries = mod.manifest_prompt_entries(
+            manifest,
+            allowed_story_modes={"generate_still"},
+        )
+
+        outcomes = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        time_findings = [
+            finding
+            for finding in outcomes[0].findings
+            if finding.code == "api_prompt_v2_time_of_day_dependency_mismatch"
+        ]
+
+        self.assertEqual(len(time_findings), 1)
+        self.assertTrue(mod.is_hard_finding(time_findings[0]))
+
+    def test_v2_time_of_day_trace_requires_registered_group_and_exact_fragment_value(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {
+                "group": "time_of_day",
+                "text": "このシーンの時間帯は朝。空、影、色温度を朝に合わせる。",
+            },
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "time_of_day": "夜",
+                        "required_groups": ["style", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+            expected_time_of_day="夜",
+        )
+        codes = {finding.code for finding in findings}
+
+        self.assertIn("api_prompt_v2_time_of_day_required_group_missing", codes)
+        self.assertIn("api_prompt_v2_time_of_day_fragment_value_mismatch", codes)
+
+    def test_v2_story_time_trace_rejects_duplicate_registered_fragments(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "story_time", "text": "物語の時代背景は江戸時代。"},
+            {"group": "story_time", "text": "江戸時代の衣装と建築。"},
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "story_time": "江戸時代",
+                        "required_groups": ["style", "story_time", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+            expected_story_time="江戸時代",
+        )
+
+        self.assertIn(
+            "api_prompt_v2_duplicate_story_time_fragment",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_legacy_scene_without_time_of_day_remains_compatible(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+        )
+        codes = {finding.code for finding in findings}
+
+        self.assertNotIn("api_prompt_v2_time_of_day_dependency_mismatch", codes)
+        self.assertNotIn("api_prompt_v2_missing_time_of_day_fragment", codes)
+        self.assertNotIn("api_prompt_v2_time_of_day_manifest_invalid", codes)
+
+    def test_v2_scene_time_of_day_must_be_nonempty_when_key_is_present(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "旅人が城門に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+            expected_time_of_day="",
+        )
+
+        self.assertIn(
+            "api_prompt_v2_time_of_day_manifest_invalid",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_missing_parent_time_rejects_invented_time_trace(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "time_of_day", "text": "このシーンの時間帯は夜。"},
+            {"group": "current_moment", "text": "月夜の庭に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "time_of_day": "夜",
+                        "required_groups": ["style", "time_of_day", "current_moment", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+            expected_time_of_day="",
+            expected_time_of_day_present=False,
+        )
+        codes = {finding.code for finding in findings}
+
+        self.assertIn("api_prompt_v2_time_of_day_dependency_mismatch", codes)
+        self.assertNotIn("api_prompt_v2_time_of_day_manifest_invalid", codes)
+
+    def test_v2_unrendered_fragment_has_one_canonical_finding(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "雲間から朝日が見える。"},
+            {"group": "primary_subject", "text": "主役は雲間の朝日。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "first_frame_visual_plan": {
+                "subject_binding": {"primary_subject": {"name": "雲間の朝日"}},
+            },
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "primary_subject", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "実写映画調。雲間から朝日が見える。文字やロゴは入れない。",
+            image_generation=image_generation,
+        )
+        codes = [finding.code for finding in findings]
+
+        self.assertEqual(codes.count("api_prompt_v2_fragment_not_rendered:primary_subject"), 1)
+        self.assertNotIn("api_prompt_v2_primary_subject_fragment_not_rendered", codes)
+
+    def test_v2_inactive_character_fragment_has_one_unneeded_finding(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "石段だけが見える。"},
+            {"group": "characters", "text": "人物なし。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "light_material", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        findings = mod.api_prompt_v2_structural_contract_issues(
+            "".join(fragment["text"] for fragment in fragments),
+            image_generation=image_generation,
+        )
+        codes = [finding.code for finding in findings]
+
+        self.assertEqual(codes.count("api_prompt_v2_unneeded_character_fragment"), 1)
+        self.assertNotIn("api_prompt_v2_characters_required_group_missing", codes)
+        self.assertEqual(codes.count("api_prompt_v2_unneeded_light_material_fragment"), 1)
+        self.assertNotIn("api_prompt_v2_missing_light_material_fragment", codes)
+
+    def test_v2_review_flags_positive_visual_directive_in_not_yet(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+        image_generation = {
+            "first_frame_visual_plan": {
+                "temporal_boundary": {
+                    "event_fact_visible_in_still": "ガラスの靴を前景で明確に見せる",
+                    "not_yet_happened_in_still": [
+                        "ガラスの靴を前景で明確に見せる",
+                    ],
+                },
+                "object_visibility_gate": {
+                    "objects": [
+                        {
+                            "object_name": "ガラスの靴",
+                            "visibility_in_this_cut": "clearly_visible",
+                        }
+                    ]
+                },
+            }
+        }
+
+        findings = mod.image_prompt_temporal_polarity_issues(image_generation)
+
+        self.assertIn(
+            "image_prompt_temporal_polarity_conflict",
+            {finding.code for finding in findings},
+        )
+
+    def test_v2_review_flags_japanese_scaffold_meta_leak(self) -> None:
+        mod = _load_review_module(REPO_ROOT)
+
+        for prompt in (
+            "人物の位置関係を画面上の状態差として確定する。"
+            "その結果を次区間へ渡す。後続場面へ観客を運ぶ。",
+            "灰の台所という場面の結果を次へ渡す。",
+            "pressure beatの外部圧力を独立して見せる。",
+            "観客がsceneを誤読しないための情報を画面に置く。",
+            "主人公は行動後の姿勢だが、手元は行為直前の位置にある。",
+            "主人公は行動後の姿勢だが、足元はまだ結果へ到達していない。",
+            "主人公は証明を受け止めた姿勢だが、圧力を受け止めている表情を保つ。",
+            "視線は主要な視覚証拠へ向く。",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(mod.find_prompt_design_meta_leak_issues(prompt))
+
     def test_v2_review_uses_ir_dependencies_instead_of_legacy_scene_wide_heuristics(self) -> None:
         mod = _load_review_module(REPO_ROOT)
         fragments = [
             {"group": "style", "text": "実写映画調。"},
             {"group": "references", "text": "人物参照画像1は人物の同一性だけを保つ。"},
-            {"group": "current_moment", "text": "灰の台所で若い女性が閉じた扉を見る。"},
-            {"group": "primary_subject", "text": "主被写体は閉じた扉を見る若い女性。"},
-            {"group": "characters", "text": "女性は扉へ視線を向け、両手を胸元に置く。"},
-            {"group": "location", "text": "前景に灰の床、中景に女性、背景に閉じた扉。"},
-            {"group": "composition", "text": "視線の優先順位は女性、次に閉じた扉。"},
+            {"group": "current_moment", "text": "灰の台所でシンデレラが閉じた扉を見る。"},
+            {"group": "primary_subject", "text": "主被写体は閉じた扉を見るシンデレラ。"},
+            {"group": "characters", "text": "シンデレラは扉へ視線を向け、両手を胸元に置く。"},
+            {"group": "location", "text": "前景に灰の床、中景にシンデレラ、背景に閉じた扉。"},
+            {"group": "composition", "text": "視線の優先順位はシンデレラ、次に閉じた扉。"},
             {"group": "constraints", "text": "文字、ロゴ、後続の結果を描かない。"},
         ]
         prompt = "\n".join(fragment["text"] for fragment in fragments)
         manifest = {
             "assets": {
                 "character_bible": [
-                    {"character_id": "cinderella", "review_aliases": ["シンデレラ", "若い女性"]},
+                    {"character_id": "cinderella_base", "review_aliases": ["シンデレラ"]},
+                    {"character_id": "cinderella_transformed", "review_aliases": ["変身後のシンデレラ"]},
                     {"character_id": "future_prince", "review_aliases": ["王子"]},
                 ],
                 "object_bible": [
@@ -355,7 +882,7 @@ class TestImagePromptStoryReview(unittest.TestCase):
                             "cut_id": 1,
                             "still_image_plan": {"mode": "generate_still"},
                             "image_generation": {
-                                "character_ids": ["cinderella"],
+                                "character_ids": ["cinderella_transformed"],
                                 "object_ids": [],
                                 "location_ids": ["kitchen"],
                                 "output": "assets/scenes/scene1_cut1.png",
@@ -365,10 +892,10 @@ class TestImagePromptStoryReview(unittest.TestCase):
                                     "drawable_prompt_ir": {
                                         "schema_version": "drawable_prompt_ir_v1",
                                         "dependencies": {
-                                            "character_ids": ["cinderella"],
+                                            "character_ids": ["cinderella_transformed"],
                                             "object_ids": [],
                                             "location_ids": ["kitchen"],
-                                            "references": ["assets/characters/cinderella.png"],
+                                            "references": ["assets/characters/cinderella_transformed.png"],
                                             "required_groups": [fragment["group"] for fragment in fragments],
                                         },
                                         "included_fragments": fragments,
@@ -400,6 +927,9 @@ class TestImagePromptStoryReview(unittest.TestCase):
         self.assertFalse(
             codes
             & {
+                "api_prompt_v2_prompt_character_dependency_missing",
+                "prompt_only_local_mismatch",
+                "prompt_subject_drift",
                 "image_contract_missing",
                 "prompt_leaks_motion_brief",
                 "source_anchor_missing_from_prompt",
@@ -414,6 +944,123 @@ class TestImagePromptStoryReview(unittest.TestCase):
                 "image_prompt_production_readiness_weak",
             }
         )
+
+        named_fragments = [dict(fragment) for fragment in fragments]
+        next(item for item in named_fragments if item["group"] == "characters")["text"] += " 王子が隣に立つ。"
+        image_generation = manifest["scenes"][0]["cuts"][0]["image_generation"]
+        image_generation["api_prompt_payload"]["prompt"] = "\n".join(
+            fragment["text"] for fragment in named_fragments
+        )
+        image_generation["api_prompt_payload"]["drawable_prompt_ir"]["included_fragments"] = named_fragments
+        entries = mod.manifest_prompt_entries(manifest, allowed_story_modes={"generate_still"})
+        outcomes = mod.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={},
+            script_scene_map={},
+            story_text="",
+            script_text="",
+        )
+        self.assertIn(
+            "api_prompt_v2_prompt_character_dependency_missing",
+            {finding.code for finding in outcomes[0].findings},
+        )
+
+    def test_v2_forbidden_section_does_not_activate_object_dependency_or_reveal(self) -> None:
+        from toc.image_prompt_compiler import compile_image_api_prompt_v2
+
+        mod = _load_review_module(REPO_ROOT)
+
+        def review_for(current_moment: str, not_yet: list[str]) -> set[str]:
+            payload = compile_image_api_prompt_v2(
+                first_frame_visual_plan={
+                    "temporal_boundary": {
+                        "event_fact_visible_in_still": current_moment,
+                        "not_yet_happened_in_still": not_yet,
+                    }
+                }
+            )
+            manifest = {
+                "assets": {
+                    "object_bible": [
+                        {
+                            "object_id": "future_slipper",
+                            "review_aliases": ["ガラスの靴"],
+                        }
+                    ]
+                },
+                "scenes": [
+                    {
+                        "scene_id": 1,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "still_image_plan": {"mode": "generate_still"},
+                                "image_generation": {
+                                    "character_ids": [],
+                                    "object_ids": [],
+                                    "location_ids": [],
+                                    "references": [],
+                                    "output": "assets/scenes/scene01_cut01.png",
+                                    "api_prompt_payload": payload,
+                                },
+                                "audio": {"narration": {"text": ""}},
+                            }
+                        ],
+                    },
+                    {
+                        "scene_id": 2,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "still_image_plan": {"mode": "generate_still"},
+                                "image_generation": {
+                                    "output": "assets/scenes/scene02_cut01.png"
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+            outcomes = mod.review_entries(
+                mod.manifest_prompt_entries(
+                    manifest, allowed_story_modes={"generate_still"}
+                ),
+                manifest=manifest,
+                story_scene_map={},
+                script_scene_map={},
+                story_text="",
+                script_text="",
+                reveal_constraints=[
+                    mod.RevealConstraint(
+                        subject_type="object",
+                        subject_id="future_slipper",
+                        rule="must_not_appear_before",
+                        selector="scene02_cut01",
+                        rationale="靴は後の場面まで見せない",
+                    )
+                ],
+            )
+            return {finding.code for finding in outcomes[0].findings}
+
+        forbidden_only_codes = review_for(
+            "灰の台所の閉じた扉に朝の光が細く差している",
+            ["ガラスの靴"],
+        )
+        self.assertNotIn(
+            "api_prompt_v2_prompt_object_dependency_missing", forbidden_only_codes
+        )
+        self.assertNotIn("script_reveal_constraint_violated", forbidden_only_codes)
+        self.assertNotIn("prompt_only_local_mismatch", forbidden_only_codes)
+
+        positive_codes = review_for(
+            "灰の床の前景にガラスの靴が明確に置かれている",
+            [],
+        )
+        self.assertIn(
+            "api_prompt_v2_prompt_object_dependency_missing", positive_codes
+        )
+        self.assertIn("script_reveal_constraint_violated", positive_codes)
 
     def test_render_report_marks_zero_entry_review_failed(self) -> None:
         mod = _load_review_module(REPO_ROOT)
@@ -1477,6 +2124,12 @@ scene03_cut03 の次として、rideable な海亀の到着後に門が開く。
         self.assertIn("prompt is missing required block `[参照画像の使い方]`.", block_messages)
         self.assertIn("prompt is missing required block `[人物状態]`.", block_messages)
         self.assertIn("prompt is missing required block `[動画化のための開始余地]`.", block_messages)
+        report = mod.render_report(results, manifest_path=Path("video_manifest.md"))
+        self.assertIn(
+            "- hard_finding_codes: `image_contract_missing, missing_required_prompt_block`",
+            report,
+        )
+        self.assertIn("- soft_finding_codes: `image_prompt_prompt_craft_weak", report)
 
     def test_required_prompt_block_detection_accepts_fully_structured_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -1968,6 +2621,7 @@ scenes:
 - rationale: `anchor`
 - agent_review_ok: `true`
 - human_review_ok: `true`
+- human_review_reason: `不足を理解したうえで構図を優先する`
 
 ```text
 {_structured_prompt("大人の海亀が波間を進む。")}
@@ -2020,6 +2674,8 @@ scenes:
             report = (run_dir / "image_prompt_story_review.md").read_text(encoding="utf-8")
             self.assertIn("- status: `WARN`", report)
             self.assertIn("- human_review_ok: `true`", report)
+            self.assertIn("- hard_findings: `", report)
+            self.assertIn("- blocking_hard_findings: `0`", report)
             collection = (run_dir / "image_prompt_collection.md").read_text(encoding="utf-8")
             self.assertIn("- agent_review_ok: `false`", collection)
             self.assertIn("- human_review_ok: `true`", collection)
@@ -2053,7 +2709,7 @@ scenes:
 """,
                 encoding="utf-8",
             )
-            result = subprocess.run(
+            missing_reason = subprocess.run(
                 [
                     sys.executable,
                     "scripts/review-image-prompt-story-consistency.py",
@@ -2067,7 +2723,29 @@ scenes:
                 capture_output=True,
                 text=True,
             )
+            self.assertNotEqual(missing_reason.returncode, 0)
+            self.assertIn("--human-review-reason is required", missing_reason.stderr)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/review-image-prompt-story-consistency.py",
+                    "--prompt-collection",
+                    str(prompt_collection),
+                    "--set-human-review",
+                    "scene02_cut01",
+                    "--human-review-reason",
+                    "不足を理解したうえで構図を優先する",
+                ],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             updated = prompt_collection.read_text(encoding="utf-8")
             self.assertIn("- human_review_ok: `true`", updated)
+            self.assertIn(
+                "- human_review_reason: `不足を理解したうえで構図を優先する`",
+                updated,
+            )
             self.assertIn("- agent_review_reason_keys: `source_anchor_missing_from_prompt`", updated)

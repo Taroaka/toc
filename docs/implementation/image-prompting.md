@@ -48,42 +48,61 @@ scene image prompt は、scene の説明文ではなく、**cut の映像が始�
 2. `cut_contract.viewer_contract.visual_proof` / `must_show` / `must_avoid` を読む。
 3. `cut_contract.cinematic_contract` と `continuity_contract` を、人物・場所・道具・行為・光・構図に翻訳し、derived な `first_frame_visual_plan` を作る。
 4. `first_frame_visual_plan` から、描画可能な断片だけを `drawable_prompt_ir_v1` へ抽出する。
-5. `character_ids` / `object_ids` / `location_ids` / references を依存関係として宣言し、該当する条件付き group だけを採用する。
-6. compiler が `api_prompt_payload.prompt` を自然文へレンダリングする。`script.md.scene_intent` と narration は補助参照に留める。
-7. `image_generation_requests.md` の review projection と immutable な `image_generation_request_snapshot.json` を materialize してから実行する。
+5. historical era / scene time-of-day / `character_ids` / `object_ids` / `location_ids` / references を依存関係として宣言し、該当する条件付き group だけを採用する。
+6. compiler が candidate の `api_prompt_payload.prompt` を自然文へレンダリングする。`script.md.scene_intent` と narration は補助参照に留める。
+7. contextless image-prompt reviewer が candidate と設計根拠を比較し、cut ごとに `include / omit / add / replace` を判断する。
+8. fail 時は producer が `first_frame_visual_plan` と cut-local dependencies/references を修正し、compiler が payload を再生成する。payload 本文、request Markdown、snapshot を手編集しない。
+9. request Markdown と draft snapshot を同じ revision から再 materialize し、asset 生成後の参照 bytes を hash 束縛して provider-ready revision にする。その revision から semantic pack を作って再 review する。pass 後の freeze は snapshot を書き換えず、review 済み revision の strict validation と state 遷移だけを行って p650 を完了させる。
 
 `motion_brief` は p800 動画生成の入力であり、p600 の画像 prompt 作成では参照しない。
 画像生成 provider に渡すのは、動画開始前に見えている状態までである。
 「このあと何が動くか」を先に読ませると、静止画が action 完了後の絵へ寄りやすい。
 
 
-prompt 本文は画像生成 provider がそのまま描ける語だけで構成する。`物語「シンデレラ」の scene10`、`この画像は物語「シンデレラ」の一場面`、`scene10_cut01` のような制作管理メタ情報は書かない。必要なのは `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ` のような、画面に現れる具体語である。provider 固定の判断は request metadata / 設計書に置き、prompt 本文には書かない。
+prompt 本文は画像生成 provider がそのまま描ける語だけで構成する。`物語「シンデレラ」の scene10`、`この画像は物語「シンデレラ」の一場面`、`scene10_cut01` のような制作管理メタ情報は書かない。必要なのは `シンデレラの灰の台所`、`灰の残る古い台所で暖炉の灰を掃くシンデレラ` のような、画面に現れる具体語である。provider 固定の判断は request metadata / 設計書に置き、prompt 本文には書かない。`pressure beat`、`観客が scene を誤読しないため`、`場面の結果を次へ渡す` のような producer/reviewer shorthand も blocker とし、姿勢・距離・痕跡・出入口・光・素材へ置換する。同じ still に `行動後` と `行為直前` を混在させない。
 
 さらに、正しい順番は「うまい一文を書く」ではなく、
 **構造化する → anchor を決める → reference を固定する → manifest をレビューする → story/script 整合を確認する → 画像生成する** である。
 camera は `30mm` のような数値単独で止めず、`広め / 中広角 / 寄り` と `前景 / 中景 / 背景`、そして「何を読ませるか」まで書く。
 
-構造化 artifact と API prompt は同一ではない。cut image は `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` の一方向 compiler を通す。`image_generation_requests.md` の `api_prompt` fence は人間向け review projection で、実行時の正本は同内容を凍結した `image_generation_request_snapshot.json` である。provider へ送る文字列は snapshot に束縛された `api_prompt_payload.prompt` だけとし、`debug_prompt_source`、`first_frame_visual_plan`、`drawable_prompt_ir`、`cut_contract`、`scene_event`、`motion_brief`、hash、path、ID は送らない。asset stage は別契約であり、scene/cut first-frame prompt を流用せず、asset prompt source から legacy `image_api_prompt_v1` の `api_prompt` を作れる。
+構造化 artifact と API prompt は同一ではない。cut image は `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` の一方向 compiler を通す。`image_generation_requests.md` の `api_prompt` fence は人間向け review projection で、実行時の正本は semantic review に合格した同内容を凍結した `image_generation_request_snapshot.json` である。最初に materialize した snapshot は candidate revision の draft であり、`review.image_prompt.request_freeze.status=draft` とする。asset 生成後、semantic pack を作る前に全 reference を実在 bytes の sha256 へ束縛する。semantic pass 後は snapshot を atomic replace しない。同じ request revision、source mtime、reference hash が保たれていることを strict validate し、state だけを `frozen` へ進める。provider へ送る文字列は `status=frozen` の snapshot に束縛された `api_prompt_payload.prompt` だけとし、`debug_prompt_source`、`first_frame_visual_plan`、`drawable_prompt_ir`、`cut_contract`、`scene_event`、`motion_brief`、hash、path、ID は送らない。asset stage は別契約であり、scene/cut first-frame prompt を流用せず、asset prompt source から legacy `image_api_prompt_v1` の `api_prompt` を作れる。歴史的時代の `story_time` は reusable asset prompt にも適用してよいが、scene 固有の `time_of_day` は reusable character / object / location asset prompt へ自動付与しない。時間帯別 asset が必要なら明示した variant として設計する。
 
 ### Production v2 の group 契約
+
+画像 prompt の虎の巻は、作品に依存しない不変原則と、設計 key ごとの投影規則を分離する。不変原則は「単一瞬間」「描画可能な語への変換」「未確定選択の解消」「future motion の除外」「scene overview の除外」「reference role binding」「cut差分」「制作meta除外」とする。key別の機械可読な正本は `toc/image_prompt_projection_registry.py` の `prompt_projection_registry_v2` とし、source key、`required|conditional|none`、target group、transform、deterministic check、semantic checkを登録する。
+
+frontendからの任意入力をimage prompt agentへ直接渡さない。story / scene / cut / asset stageで共通設計keyへ正規化し、image prompt stageはregistryに登録されたkeyだけを `first_frame_visual_plan` と `drawable_prompt_ir` へ投影する。semantic review packはcutごとの `prompt_projection_review_contract` を持ち、active ruleに対する `include / omit / add / replace` を判断する。
+
+新しい設計keyを追加するときは、同じ変更でprompt relevanceを必ず分類する。
+
+- `required|conditional`: registry entry、変換責務、deterministic/semantic review観点、正常系/異常系testを追加する。
+- `none`: provider promptへ流さない理由をregistryへ登録する。
+
+compiler groupを増やしたのにregistryへ登録していない変更は、registry coverage testでfailする。未知keyをprovider promptへ自動転記してはならない。
 
 `drawable_prompt_ir_v1` の group 順は次で固定する。ただし、順序が固定されるのは **採用された group 間**だけであり、全 group を毎回出すという意味ではない。
 
 | group | 採用条件 |
 |---|---|
 | `style` | 常時 |
+| `story_time` | `video_metadata.time` が非空のとき。衣装・髪型・建築・生活道具・素材・技術水準をその時代に整合させる |
+| `time_of_day` | `scenes[].time_of_day` が非空のとき。空の明るさ・自然光/人工光・影・色温度をその時間帯に整合させる |
 | `references` | resolved reference が1件以上あるとき |
 | `current_moment` | 常時 |
-| `primary_subject` | 常時 |
+| `primary_subject` | `subject_binding.primary_subject.name\|label` に描画可能な値があるとき |
 | `characters` | `character_ids` が1件以上あるとき |
 | `objects` | `object_ids` が1件以上あるとき |
 | `location` | `location_ids` が1件以上あるとき |
-| `composition` | 常時 |
+| `composition` | subject priority、shot size、camera angle/height のいずれかに描画可能な値があるとき |
 | `light_material` | 明示された、非定型の描画可能な光・素材情報があるとき |
 | `current_state_delta` | sequential state progression に明示された描画可能な差分があるとき |
 | `constraints` | 常時 |
 
-`dependencies.required_groups` は実際に採用した全 group を上記順で列挙する。`included_fragments[]` の各 `text` は最終 `prompt` にそのまま含まれ、採用しなかった group は `omitted_groups[]` に入る。人物がいない cut に `人物なし`、小道具がない cut に `小道具なし` といった穴埋め文を追加しない。画面上の不在そのものが物語上の証拠である場合だけ、描画可能な constraint として明示する。
+`dependencies.story_time` は非空の `video_manifest.md.video_metadata.time`（script/story metadata からの projection）、`dependencies.time_of_day` は非空の同一 `video_manifest.md.scenes[].time_of_day` の projection とする。どちらも空文字では key 自体を省略して legacy payload と互換にする。新規 story/script/manifest は metadata に `scene_time_of_day_contract: required_v1` を一方向 projection し、この marker がある場合は各 scene の `time_of_day` を非空にする。歴史的時代の `time` key は新契約 marker に使わず、marker がない legacy artifact だけは scene 値の欠落を互換扱いにする。reviewer は dependency と manifest-local 正本の exact match を確認する。`story_time` は歴史的時代、`time_of_day` は一日の時間帯であり、相互に推測・代用しない。`dependencies.required_groups` は実際に採用した全 group を上記順で列挙する。`included_fragments[]` の各 `text` は最終 `prompt` にそのまま含まれる。値が空の `story_time` / `time_of_day` は dependency / `required_groups` / `included_fragments` / `omitted_groups` のいずれにも placeholder として追加しない。人物がいない cut に `人物なし`、小道具がない cut に `小道具なし` といった穴埋め文を追加しない。画面上の不在そのものが物語上の証拠である場合だけ、描画可能な constraint として明示する。
+
+`scenes[].time_of_day_visual_basis` は canonical `time_of_day` から導いた光源・明るさ・影・色温度の review evidence として分類し、第二の provider-prompt authoring root にはしない。`story.script.scenes[].visualizable_action` は単一場所でも複数beatをまたぐscene overviewなのでreview-onlyとし、positive evidenceへ直接コピーしない。`scenes[].location_sequence` と `location_segments` は scene review に使うが、一枚の prompt は担当 cut の primary event beat に対応する一つの segment / location dependency だけを投影する。route 全体の prose、`A → B → C` の出来事列、別場所名、`または` などの未解決選択、`変化点` / `変化の証拠` などの設計 placeholder が positive drawable fragment に残る場合は compile を失敗させる。
+
+人物 reference は path の順番だけでなく `reference_binding.character_references[]` の `target_character_name` と `role_in_frame` へ束縛する。provider prompt には path や内部 ID を出さず、`人物参照画像1（人物名）` のように対象だけを明示する。canonical `time_of_day` と素材文の明白な正反対の光条件も、semantic review 前に deterministic error とする。
 
 `image_api_prompt_v2` で固定6ブロック／11ブロックを要求してはならない。`image_api_prompt_v1` は既存 artifact の読み込み用にのみ許容し、v2 compilation failure 時に暗黙 fallback しない。
 
@@ -92,15 +111,15 @@ camera は `30mm` のような数値単独で止めず、`広め / 中広角 / �
 0. asset stage が必要な run では、先に `asset_plan.md` を review / approve して reusable asset を作る
 0.1. image request は参照あり/なしを問わず `tool: codex_builtin_image` を使う。no-reference image request だけ `execution_lane=bootstrap_builtin` として互換 lane に寄せる
 1. `still_image_plan` で新規生成対象を確定する
-2. cut ごとに `first_frame_visual_plan` を作り、v2 compiler で `drawable_prompt_ir` と `api_prompt_payload` を materialize する
-3. `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --fix-character-ids` で story/script 整合を確認し、不足 `character_ids` を補完する
-4. review 結果で問題がある cut は `image_generation.review.agent_review_ok: false` になり、理由は `agent_review_reason_keys`（または互換 alias の `agent_review_reason_codes`）に残る
-5. rubric の各軸 `story_alignment` / `subject_specificity` / `prompt_craft` / `continuity_readiness` / `first_frame_readiness` / `production_readiness` を見て、弱い軸から直す
-6. false reason に対応する fix を manifest に反映する
-7. fix 後に再 compile / review して finding が消えた cut は、subagent が `agent_review_ok: true` に戻す
-8. 人間が issue を理解したうえで例外許容して進める cut だけ `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --set-human-review scene02_cut01` のように `human_review_ok: true` を付け、判断理由も残す
-9. `image_generation_requests.md` と `image_generation_request_snapshot.json` を同じ revision から materialize し、一致 gate を通す
-10. approved snapshot を Codex app-server runtime に渡して画像生成を回す
+2. story/research の人物 key を reusable character asset へ解決し、各 cut では assigned event に実際に見える人物だけを `character_ids` / references に選ぶ
+3. cut ごとに `first_frame_visual_plan` を作り、v2 compiler で candidate の `drawable_prompt_ir` と `api_prompt_payload` を materialize する
+4. `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --fix-character-ids` の hard check と contextless semantic reviewer で story/script/時代/dependency/時間境界を確認する
+5. reviewer は上流 key を一対一転記せず、cut ごとに `include / omit / add / replace` を決める。肯定側と `not_yet` の衝突、制作メタ、見えるのに未宣言の人物・物・場所、不要な scene-wide reference、cut 間の不当な重複を blocker とする
+6. fail 時は `first_frame_visual_plan`、cut-local dependencies/references、必要なら同じ `video_manifest.md.assets` bible を修正する。`api_prompt_payload.prompt` と派生済み `asset_plan.md` は修正対象にしない
+7. orchestrator が v2 compiler を再実行し、`image_generation_requests.md` と draft snapshot を同じ revision から再 materialize する。このとき repaired `first_frame_visual_plan` から `shot_design_contract`、location frame、visual delta、blocking と `debug_prompt_source.first_frame_visual_plan` も再導出し、修正前の review metadata を残さない。asset bible も変わった場合は asset request/画像を先に更新し、その参照 hash を scene snapshot へ再束縛する
+8. `image_prompt_story_review.md` を修正後 revision から再生成し、その fresh deterministic report と semantic 再 review で finding が消えた cut だけを pass とする。report は canonical `video_manifest.md` path と manifest/story/script の sha256、reviewed selector section、raw / blocking hard finding を持ち、gate は summary と section detail の一致まで検証する。deterministic hard finding は selector、reason code、message を保ったまま semantic aggregate の blocker に合成し、該当 selector だけを次の producer repair へ戻す。selector が scope に解決できない、dotted id が衝突する、または report が stale / malformed / source不一致なら安全側で全 entry を block する。`human_review_ok: true` の明示例外は raw finding として監査に残すが blocking hard finding には数えない。semantic agent 単独の誤 pass で freeze させない。soft finding は警告として扱える。コード生成の固定 `status: passed` report や修正前 report を review の代用にしない
+9. 人間が issue を理解したうえで例外許容して進める cut だけ `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --set-human-review scene02_cut01 --human-review-reason "許容理由"` のように `human_review_ok: true` と判断理由を同時に残す。理由が空なら blocking hard finding は解除しない
+10. semantic reviewer が pass した request/snapshot revision を `frozen` にする。この実結果から p630 hard review と p640 judgment review の artifact/state を確定し、p650 を `done` にしてから Codex app-server runtime へ渡す
 
 補足:
 - 関数 review は hard gate を優先する。missing contract / missing ids / required IR fragment 欠落 / reveal 破り / self-contained 違反のような構造問題は `agent_review_ok: false` に直結させる
@@ -115,8 +134,10 @@ Codex app-server へは snapshot item 単位で request を渡す。runtime が 
 - reference dependency から DAG group を作り、依存先の無い同一 group 内だけを並列化する。参照 asset を作る group は、それを読む group より先に完了させる
 - process 内 semaphore と process 間 global slot で同時 provider turn 数を制限する。authoritative request-bound provenance を利用できない互換 lane は serial fallback にする
 - 各 item の送信直前に `prompt_sha256` と reference content hash を snapshot と照合する
+- image prompt を含むいずれかの semantic stage が最終 fail した run では、asset 成功分を保持しても p660 の scene image generation は一件も開始しない。`partial_media_allowed=false` とし、修復後に p650 を再通過させる
 - provider result は `generation_job_id` / `item_id` / `turn_id` / `image_generation_item_id` / destination / hash が request と一致し、生成 item が exactly one の場合だけ atomic copy する
 - destination は snapshot 内で一意にする。既存 output は request revision、request digest、prompt/reference/output hash、compiler version、source digest が一致する場合だけ再利用する
+- edit-style regeneration で destination 自身を明示的に参照する場合は、materialize 時点で既存画像がある場合だけ許可し、その入力 bytes の hash を snapshot に固定する。生成時は同じ bytes を退避して provider に渡し、未生成 output への循環依存として扱わない
 - 失敗した item の retry でも同じ snapshot revision と destination ownership を保ち、別 revision の結果を混ぜない
 
 この境界により、cut ごとの prompt が異なっていても並列 worker 間で prompt 文や参照画像が取り違えられない。snapshot drift、循環参照、同一 destination、provenance mismatch は並列化せず hard fail する。
@@ -126,6 +147,8 @@ Codex app-server へは snapshot item 単位で request を渡す。runtime が 
 画像生成は `script.md` と `video_manifest.md` を併読するが、役割は同じではない。
 
 - 主参照: `video_manifest.md`
+  - `video_metadata.time`（歴史的時代）
+  - `scenes[].time_of_day`（scene 固有の一日の時間帯）
   - `cut_contract.first_frame_contract`
   - `cut_contract.viewer_contract`
   - `cut_contract.cinematic_contract`
@@ -319,11 +342,15 @@ production v2 は `first_frame_visual_plan` から `drawable_prompt_ir` を作�
 subagent review の production v2 必須 criterion:
 
 - `policy_version: image_api_prompt_v2` と `schema_version: drawable_prompt_ir_v1` がある
-- `style`, `current_moment`, `primary_subject`, `composition`, `constraints` がある
+- `style`, `current_moment`, `constraints` がある
+- `primary_subject`, `composition` は対応する canonical plan key に描画可能な値がある場合だけ存在する
 - `references`, `characters`, `objects`, `location` は対応する dependency がある場合だけ存在する
 - `light_material`, `current_state_delta` は明示的な描画値がある場合だけ存在する
 - `dependencies.required_groups`、`included_fragments[]`、`omitted_groups[]` が互いに矛盾しない
 - `included_fragments[].text` がすべて `api_prompt_payload.prompt` に含まれる
+- `video_metadata.time` が非空なら exact `dependencies.story_time` と `story_time` fragment があり、同一 scene の `time_of_day` が非空なら exact `dependencies.time_of_day` と `time_of_day` fragment がある。自己申告された `required_groups` だけで欠落判定しない
+- 衣装変化のある人物 entry / variant は `assets.character_bible[].appearance_continuity` または `character_variant_ids[]` で選んだ `reference_variants[].appearance_continuity` を正本とし、`character_state_gate.character_states[]` へ人物別に束縛する。主被写体や `character_ids` の先頭だけで選ばない
+- `character_states[]` の `character_name`、`costume_state`、各 `forbidden_costume_states[]` は同じ人物名と一緒に `characters` fragment / provider prompt へ exact 投影する。複数人物の cut で無主語の `衣装は...` 一文へ畳み込まない
 
 固定6ブロック欠落の `missing_required_prompt_block` は `image_api_prompt_v1` の legacy review criterion である。v2 に対して、依存しない人物・小道具 block の欠落を failure にしてはならない。
 
@@ -406,6 +433,8 @@ still 生成の既定実行対象:
 - `prompt_authoring_context` は prompt 生成エージェントと review エージェントのためだけに置ける。生成 API に送る対象ではない。
 
 ```yaml
+# 親 scene の正本。image_generation 内や material pack で独立 authoring しない。
+time_of_day: "夜明け"
 image_generation:
   prompt_authoring_context:
     image_role: "video_first_frame_candidate"
@@ -432,11 +461,9 @@ production v2 の常時 group（順序固定）:
 
 1. `style`
 2. `current_moment`
-3. `primary_subject`
-4. `composition`
-5. `constraints`
+3. `constraints`
 
-`references` / `characters` / `objects` / `location` / `light_material` / `current_state_delta` は条件付きである。固定見出し数を gate にせず、dependency が要求した group の欠落、dependency が無い group の混入、空 fragment、IR metadata の prompt 混入を false にする。
+`story_time` / `time_of_day` / `references` / `primary_subject` / `characters` / `objects` / `location` / `composition` / `light_material` / `current_state_delta` は条件付きである。条件付き group の canonical order は `story_time`、`time_of_day`、`references` の順から始まる。固定見出し数を gate にせず、dependency または canonical plan source が要求した group の欠落、正本sourceが無い group の混入、空 fragment、IR metadata の prompt 混入を false にする。
 
 この repo の production v2 は、最終的に snapshot に凍結した `scenes[].cuts[].image_generation.api_prompt_payload.prompt` だけを API に渡す。新規の静止画は、anchor を作る scene/cut に集中させる。
 
@@ -449,13 +476,14 @@ p600 は、p400 が作った scene/cut contract を生成 provider が描ける�
 
 ### 0.1 入力優先順位
 
-1. `video_manifest.md.scenes[].cuts[].cut_contract.first_frame_contract`
-2. `cut_contract.viewer_contract.visual_proof` / `must_show` / `must_avoid`
-3. `cut_contract.cinematic_contract.subject_priority` / `screen_geography`
-4. `cut_contract.continuity_contract`
-5. `video_manifest.md.assets.*_bible`
-6. `script.md.scene_intent` / `human_change_requests[]` / `approved_image_notes[]`
-7. narration / `tts_text`（補助参照のみ）
+1. `video_manifest.md.video_metadata.time` / `scenes[].time_of_day`
+2. `video_manifest.md.scenes[].cuts[].cut_contract.first_frame_contract`
+3. `cut_contract.viewer_contract.visual_proof` / `must_show` / `must_avoid`
+4. `cut_contract.cinematic_contract.subject_priority` / `screen_geography`
+5. `cut_contract.continuity_contract`
+6. `video_manifest.md.assets.*_bible`
+7. `script.md.scene_intent` / `human_change_requests[]` / `approved_image_notes[]`
+8. narration / `tts_text`（補助参照のみ）
 
 除外する入力:
 
@@ -465,6 +493,8 @@ p600 は、p400 が作った scene/cut contract を生成 provider が描ける�
 
 | contract field | prompt への変換 |
 |---|---|
+| `video_metadata.time` | 衣装・髪型・建築・生活道具・素材・技術水準を歴史的時代へ整合させる |
+| `scenes[].time_of_day` | 空の明るさ、自然光と人工光、影、色温度を scene の時間帯へ整合させる |
 | `viewer_contract.screen_question` | `[シーン]` の中で、観客が何を画面から気にするかが読める配置にする |
 | `viewer_contract.visual_evidence` | 表情、距離、手、姿勢、光の変化、壊れた/残された物などに翻訳する |
 | `viewer_contract.causal_proof` | still では「原因と結果の証拠が同居する状態」として具体化する |
@@ -599,10 +629,12 @@ aspect ratio / size は `image_generation.aspect_ratio` / `image_generation.imag
 次は人物と場所を必要とし、小道具・参照・状態差分を必要としない cut の例である。空の group は作らない。
 
 ```yaml
+# 親 scene の正本。image_generation 内や material pack で独立 authoring しない。
+time_of_day: "夜明け"
 image_generation:
   character_ids: ["protagonist"]
   object_ids: []
-  location_ids: ["village_at_dawn"]
+  location_ids: ["village"]
   references: []
   first_frame_visual_plan:
     schema_version: "first_frame_visual_plan_v1"
@@ -614,23 +646,36 @@ image_generation:
     subject_binding:
       primary_subject:
         name: "道の先を見つめる主人公"
+    character_state_gate:
+      pose: "道の先を見たまま立ち止まっている"
+      character_states:
+        - character_id: "protagonist"
+          character_name: "主人公"
+          appearance_continuity:
+            costume_state: "旅立ち前の作業着"
+            forbidden_costume_states: ["到着後の礼装"]
     spatial_composition:
       foreground: "霧に濡れた土の道"
       midground: "立ち止まる主人公"
       background: "木造家屋と遠い山の輪郭"
+    scene_material_pack:
+      # scene.time_of_day からの read-only projection。ここを独立 authoring しない。
+      time_of_day: "夜明け"
   api_prompt_payload:
     policy_version: "image_api_prompt_v2"
-    compiler_version: "conditional_drawable_prompt_compiler_v1"
+    compiler_version: "conditional_drawable_prompt_compiler_v3"
     prompt: |-
       [全体 / 不変条件]
       実写映画調、自然な映画照明、実物セットとして見える質感。
+      このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。
 
       [シーン]
       画面には、主人公はまだ歩き出していない。
       観客が最初に読む主被写体は、道の先を見つめる主人公。
 
       [登場人物]
-      人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。
+      主人公の衣装は、旅立ち前の作業着を維持し、到着後の礼装には変えない。
+      姿勢は、道の先を見たまま立ち止まっている。
 
       [場所と構図]
       場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。
@@ -648,14 +693,16 @@ image_generation:
       dependencies:
         character_ids: ["protagonist"]
         object_ids: []
-        location_ids: ["village_at_dawn"]
+        location_ids: ["village"]
         references: []
-        required_groups: ["style", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
+        time_of_day: "夜明け"
+        required_groups: ["style", "time_of_day", "current_moment", "primary_subject", "characters", "location", "composition", "constraints"]
       included_fragments:
         - {group: "style", text: "実写映画調、自然な映画照明、実物セットとして見える質感。"}
+        - {group: "time_of_day", text: "このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。"}
         - {group: "current_moment", text: "画面には、主人公はまだ歩き出していない。"}
         - {group: "primary_subject", text: "観客が最初に読む主被写体は、道の先を見つめる主人公。"}
-        - {group: "characters", text: "人物の姿勢と状態は、主人公はまだ歩き出していないとして明確に見える。"}
+        - {group: "characters", text: "主人公の衣装は、旅立ち前の作業着を維持し、到着後の礼装には変えない。\n姿勢は、道の先を見たまま立ち止まっている。"}
         - {group: "location", text: "場所は、前景に霧に濡れた土の道、中景に立ち止まる主人公、背景に木造家屋と遠い山の輪郭。"}
         - {group: "composition", text: "道の先を見つめる主人公が最初に読める構図。"}
         - {group: "constraints", text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。\nまだ描かないものは、主人公が村を出る。"}
@@ -920,6 +967,8 @@ scene の主役級 setpiece を object_bible と一致させる。材質、構�
 - [ ] `policy_version: image_api_prompt_v2` と `drawable_prompt_ir_v1` があり、legacy `image_generation.prompt` を送信正本にしていない
 - [ ] dependency のある group だけが `included_fragments[]` にあり、空／穴埋め fragment がない
 - [ ] `included_fragments[].text` がすべて exact `api_prompt_payload.prompt` に含まれている
+- [ ] `story_time` が歴史的時代、`time_of_day` が scene の一日の時間帯に exact binding され、衣装/建築と光/影の責務が混ざっていない
+- [ ] reusable asset prompt に scene 固有の `time_of_day` が意図せず混入していない
 - [ ] 視点（POV/三人称）とカメラ意図が明示されている（1カット内でブレない）
 - [ ] “画面内のアンカー”が書かれている（前景/中景/背景の配置。手元固定に限らない）
 - [ ] 観客が最初に見る主被写体の優先順位が明確である

@@ -237,9 +237,23 @@ def materialize_request_snapshot(
             producer_item_id = producer_by_destination.get(reference_path)
             if producer_item_id is not None:
                 if producer_item_id == item_id:
-                    raise ImageRequestSnapshotError(
-                        f"item cannot defer a reference to its own destination: {item_id}"
+                    resolved_reference = base / reference_path
+                    if not resolved_reference.is_file():
+                        raise ImageRequestSnapshotError(
+                            f"self-reference does not exist for {item_id}: {reference_path}"
+                        )
+                    actual_sha256 = sha256_file(resolved_reference)
+                    if declared_reference_sha256 and declared_reference_sha256 != actual_sha256:
+                        raise ImageRequestSnapshotError(
+                            f"reference sha256 mismatch for {item_id}: {reference_path}"
+                        )
+                    references.append(
+                        ImageRequestReference(
+                            path=reference_path,
+                            sha256=actual_sha256,
+                        )
                     )
+                    continue
                 if declared_producer and declared_producer != producer_item_id:
                     raise ImageRequestSnapshotError(
                         f"reference producer mismatch for {item_id}: {reference_path}"
@@ -363,6 +377,75 @@ def write_request_snapshot_atomic(
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
     return path
+
+
+def bind_request_snapshot_references(
+    snapshot: ImageRequestSnapshot,
+    *,
+    run_dir: Path,
+    allow_existing_hash_changes: bool = False,
+) -> ImageRequestSnapshot:
+    """Replace every deferred reference with a hash-bound reference.
+
+    Review-time snapshots may defer assets that are generated earlier in the
+    same run.  A provider-ready revision must instead bind the exact bytes now
+    present on disk so later mutations invalidate that revision.
+    """
+
+    base = run_dir.resolve()
+    validate_request_snapshot(
+        snapshot,
+        run_dir=base,
+        verify_references=not allow_existing_hash_changes,
+    )
+    bound_items: list[ImageRequestSnapshotItem] = []
+    for item in snapshot.items:
+        bound_references: list[ImageRequestReference] = []
+        for reference in item.references:
+            reference_path = base / _normalize_run_relative_path(
+                base,
+                reference.path,
+                field="reference",
+            )
+            if not reference_path.is_file():
+                raise ImageRequestSnapshotError(
+                    f"reference does not exist for {item.item_id}: {reference.path}"
+                )
+            actual_sha256 = sha256_file(reference_path)
+            if (
+                reference.sha256 is not None
+                and reference.sha256 != actual_sha256
+                and not allow_existing_hash_changes
+            ):
+                raise ImageRequestSnapshotError(
+                    f"reference sha256 mismatch for {item.item_id}: {reference.path}"
+                )
+            bound_references.append(
+                ImageRequestReference(
+                    path=reference.path,
+                    sha256=actual_sha256,
+                    deferred=False,
+                    producer_item_id=reference.producer_item_id,
+                )
+            )
+        rebound_item = replace(item, references=tuple(bound_references), request_digest="")
+        bound_items.append(
+            replace(
+                rebound_item,
+                request_digest=sha256_canonical_json(_item_digest_payload(rebound_item)),
+            )
+        )
+    rebound_snapshot = replace(
+        snapshot,
+        items=tuple(bound_items),
+        request_revision="",
+    )
+    rebound_snapshot = replace(
+        rebound_snapshot,
+        request_revision=_expected_request_revision(rebound_snapshot),
+    )
+    validate_request_snapshot(rebound_snapshot, run_dir=base, verify_references=True)
+    return rebound_snapshot
 
 
 def load_request_snapshot(

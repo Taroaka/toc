@@ -1,5 +1,7 @@
 # YouTube 初期チャンネル仕様案
 
+> Status: legacy initial experiment. 2026-07-18 の repositioning により superseded。公開済み設定の履歴確認にのみ使い、現行の brand / persona / CTA は `marketing/README.md` と `strategy.md` を使う。
+
 最終更新: 2026-04-26
 用途: deep research を踏まえて、にわかのAI の YouTube 公開面を実際に決めるための初期確定案。
 

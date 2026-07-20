@@ -1122,6 +1122,61 @@ def _write_manifest_yaml(run_dir: Path, data: dict) -> None:
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
+    def test_scene_time_of_day_contract_is_enforced_by_canonical_stage_evaluators(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_time_") as td:
+            run_dir = Path(td)
+            story = yaml.safe_load(_good_story_yaml().removeprefix("```yaml\n").removesuffix("```\n"))
+            story["story_metadata"] = {
+                "time": "",
+                "scene_time_of_day_contract": "required_v1",
+            }
+            for scene in story["script"]["scenes"]:
+                scene["time_of_day"] = "朝"
+            story["script"]["scenes"][0]["time_of_day"] = ""
+            story["script"]["scenes"][1]["time_of_day"] = 12
+            (run_dir / "story.md").write_text(
+                "```yaml\n" + yaml.safe_dump(story, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+
+            story_stage, _ = STAGE_EVALUATOR.check_story(run_dir, "fast")
+            story_checks = {check["id"]: check for check in story_stage["checks"]}
+
+            self.assertFalse(story_checks["story.scene_time_of_day"]["passed"])
+            self.assertEqual(story_stage["details"]["missing_time_of_day_scene_ids"], "1,2")
+            self.assertTrue(story_checks["story.scene_time_of_day_contract"]["passed"])
+
+            story["story_metadata"]["scene_time_of_day_contract"] = "optional_v1"
+            (run_dir / "story.md").write_text(
+                "```yaml\n" + yaml.safe_dump(story, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+            invalid_marker_stage, _ = STAGE_EVALUATOR.check_story(run_dir, "fast")
+            invalid_marker_checks = {check["id"]: check for check in invalid_marker_stage["checks"]}
+            self.assertFalse(invalid_marker_checks["story.scene_time_of_day_contract"]["passed"])
+
+            (run_dir / "script.md").write_text(
+                "```yaml\nscript_metadata:\n  time: ''\n  scene_time_of_day_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 夜\n    phase: opening\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    phase: ending\n    cuts: []\n```\n",
+                encoding="utf-8",
+            )
+
+            script_stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
+            script_checks = {check["id"]: check for check in script_stage["checks"]}
+
+            self.assertFalse(script_checks["script.scene_time_of_day"]["passed"])
+            self.assertIn("2", script_checks["script.scene_time_of_day"]["message"])
+
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\nmanifest_phase: production\nvideo_metadata:\n  topic: 桃太郎\n  time: ''\n  scene_time_of_day_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 朝\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    cuts: []\n```\n",
+                encoding="utf-8",
+            )
+
+            manifest_stage, _ = STAGE_EVALUATOR.check_manifest_single(run_dir, "fast", "toc-run")
+            manifest_checks = {check["id"]: check for check in manifest_stage["checks"]}
+
+            self.assertFalse(manifest_checks["manifest.scene_time_of_day"]["passed"])
+            self.assertIn("2", manifest_checks["manifest.scene_time_of_day"]["message"])
+
     def test_stage_evaluator_accepts_compact_grounded_research_pack(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0010"
@@ -2271,6 +2326,10 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             "object_ids": [],
             "location_ids": [],
             "references": [],
+            "first_frame_visual_plan": {
+                "subject_binding": {"primary_subject": {"name": "雲の裂け目"}},
+                "spatial_composition": {"subject_priority_order": ["雲の裂け目"]},
+            },
             "api_prompt_payload": {
                 "policy_version": "image_api_prompt_v2",
                 "prompt": "実写映画調。薄明の空に浮かぶ雲の裂け目。主役は雲の裂け目。裂け目を正面に置く。文字やロゴは入れない。",
@@ -2281,7 +2340,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "object_ids": [],
                         "location_ids": [],
                         "references": [],
-                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                        "required_groups": ["style", "current_moment", "primary_subject", "composition", "constraints"],
                     },
                     "included_fragments": [
                         {"group": "style", "text": "実写映画調。"},
@@ -2297,6 +2356,147 @@ class TestStageEvaluatorScripts(unittest.TestCase):
         issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
 
         self.assertEqual(issues, [])
+
+    def test_image_api_prompt_v2_gate_knows_and_requires_declared_time_of_day_fragment(self) -> None:
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {
+                "group": "time_of_day",
+                "text": "このシーンの時間帯は夜。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。",
+            },
+            {"group": "current_moment", "text": "月明かりの石段に立つ一瞬。"},
+            {"group": "primary_subject", "text": "主役は石段に立つ人物。"},
+            {"group": "composition", "text": "人物を中景に置く。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        dependencies = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "time_of_day": "夜",
+            # Registry trace requires every active projection in raw required_groups.
+            "required_groups": ["style", "current_moment", "primary_subject", "composition", "constraints"],
+        }
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "first_frame_visual_plan": {
+                "subject_binding": {"primary_subject": {"name": "石段に立つ人物"}},
+                "spatial_composition": {"subject_priority_order": ["石段に立つ人物"]},
+            },
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "".join(fragment["text"] for fragment in fragments),
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": dependencies,
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn(
+            "scene1_cut1:api_prompt_v2_time_of_day_required_group_missing",
+            issues,
+        )
+
+        dependencies["required_groups"].insert(1, "time_of_day")
+        self.assertEqual(
+            STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation),
+            [],
+        )
+
+        image_generation["api_prompt_payload"]["drawable_prompt_ir"]["included_fragments"] = [
+            fragment for fragment in fragments if fragment["group"] != "time_of_day"
+        ]
+        missing_fragment_issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn("scene1_cut1:api_prompt_v2_missing_time_of_day_fragment", missing_fragment_issues)
+
+    def test_image_api_prompt_v2_gate_compares_parent_story_and_scene_time(self) -> None:
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "story_time", "text": "物語の時代背景は平安時代。"},
+            {"group": "time_of_day", "text": "このシーンの時間帯は夜。"},
+            {"group": "current_moment", "text": "月明かりの庭に立つ。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "".join(fragment["text"] for fragment in fragments),
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "story_time": "平安時代",
+                        "time_of_day": "夜",
+                        "required_groups": [
+                            "style", "story_time", "time_of_day", "current_moment", "constraints"
+                        ],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues(
+            "scene1_cut1",
+            image_generation,
+            expected_story_time="江戸時代",
+            expected_time_of_day="朝",
+        )
+
+        self.assertIn("scene1_cut1:api_prompt_v2_story_time_dependency_mismatch", issues)
+        self.assertIn("scene1_cut1:api_prompt_v2_time_of_day_dependency_mismatch", issues)
+
+    def test_image_api_prompt_v2_gate_treats_missing_plan_as_known_empty_source(self) -> None:
+        fragments = [
+            {"group": "style", "text": "実写映画調。"},
+            {"group": "current_moment", "text": "門前に立つ。"},
+            {"group": "light_material", "text": "光源は月明かり。"},
+            {"group": "constraints", "text": "文字やロゴは入れない。"},
+        ]
+        image_generation = {
+            "character_ids": [],
+            "object_ids": [],
+            "location_ids": [],
+            "references": [],
+            "api_prompt_payload": {
+                "policy_version": "image_api_prompt_v2",
+                "prompt": "".join(fragment["text"] for fragment in fragments),
+                "drawable_prompt_ir": {
+                    "schema_version": "drawable_prompt_ir_v1",
+                    "dependencies": {
+                        "character_ids": [],
+                        "object_ids": [],
+                        "location_ids": [],
+                        "references": [],
+                        "required_groups": ["style", "current_moment", "light_material", "constraints"],
+                    },
+                    "included_fragments": fragments,
+                },
+            },
+        }
+
+        issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
+
+        self.assertIn(
+            "scene1_cut1:api_prompt_v2_unneeded_light_material_fragment",
+            issues,
+        )
 
     def test_manifest_rubric_reads_v2_api_payload_without_legacy_prompt(self) -> None:
         prompt = "灰の台所の前景に灰の床、中景に若い女性、背景に閉じた扉が見える。" * 4
@@ -2407,7 +2607,13 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                         "object_ids": [],
                         "location_ids": [],
                         "references": [],
-                        "required_groups": ["current_moment", "primary_subject", "composition", "constraints"],
+                        "required_groups": [
+                            "current_moment",
+                            "primary_subject",
+                            "composition",
+                            "light_material",
+                            "constraints",
+                        ],
                     },
                     "included_fragments": [
                         {"group": "style", "text": "実写映画調。"},
@@ -2425,6 +2631,22 @@ class TestStageEvaluatorScripts(unittest.TestCase):
         issues = STAGE_EVALUATOR._image_api_prompt_v2_issues("scene1_cut1", image_generation)
 
         self.assertIn("scene1_cut1:api_prompt_v2_unneeded_character_fragment", issues)
+        self.assertEqual(
+            issues.count("scene1_cut1:api_prompt_v2_unneeded_character_fragment"),
+            1,
+        )
+        self.assertNotIn(
+            "scene1_cut1:api_prompt_v2_characters_required_group_missing",
+            issues,
+        )
+        self.assertEqual(
+            issues.count("scene1_cut1:api_prompt_v2_unneeded_light_material_fragment"),
+            1,
+        )
+        self.assertNotIn(
+            "scene1_cut1:api_prompt_v2_missing_light_material_fragment",
+            issues,
+        )
         self.assertIn("scene1_cut1:api_prompt_v2_included_fragment_empty:objects", issues)
 
     def test_image_api_prompt_v2_gate_requires_included_fragment_text_in_prompt(self) -> None:
@@ -2433,6 +2655,10 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             "object_ids": [],
             "location_ids": [],
             "references": [],
+            "first_frame_visual_plan": {
+                "subject_binding": {"primary_subject": {"name": "雲間の朝日"}},
+                "spatial_composition": {"subject_priority_order": ["雲間の朝日"]},
+            },
             "api_prompt_payload": {
                 "policy_version": "image_api_prompt_v2",
                 "prompt": "実写映画調。雲間から朝日が見える。文字やロゴは入れない。",
@@ -2460,6 +2686,14 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
         self.assertIn("scene1_cut1:api_prompt_v2_fragment_not_rendered:primary_subject", issues)
         self.assertIn("scene1_cut1:api_prompt_v2_fragment_not_rendered:composition", issues)
+        self.assertEqual(
+            issues.count("scene1_cut1:api_prompt_v2_fragment_not_rendered:primary_subject"),
+            1,
+        )
+        self.assertNotIn(
+            "scene1_cut1:api_prompt_v2_primary_subject_fragment_not_rendered",
+            issues,
+        )
 
     def test_image_api_prompt_v2_gate_rejects_drawable_ir_metadata_leak(self) -> None:
         image_generation = {

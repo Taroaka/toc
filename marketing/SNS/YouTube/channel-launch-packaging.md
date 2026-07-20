@@ -1,5 +1,7 @@
 # YouTube チャンネル公開導線設計
 
+> Status: legacy test-channel artifact. 2026-07-18 以降の ToC product positioning には使わない。浦島太郎を中心とした初期チャンネル実験の記録として参照し、現行方針は `marketing/README.md` と `strategy.md` を使う。
+
 最終更新: 2026-04-26
 用途: 初回公開前に、チャンネルページを `着地ページ` として成立させるための設計メモ。
 

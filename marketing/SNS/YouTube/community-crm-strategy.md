@@ -1,5 +1,7 @@
 # YouTube コミュニティ / CRM 戦略
 
+> Status: legacy test-channel artifact. `AIを一緒に育てる初期メンバー` は浦島太郎公開期の仮説であり、現行の primary personas ではない。現行方針は `marketing/README.md` と `strategy.md` を使う。
+
 最終更新: 2026-06-20
 対象: `にわかのAI` のYouTubeコメント、概要欄、About、SNS導線
 

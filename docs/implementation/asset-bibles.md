@@ -45,6 +45,7 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - 対象: 主人公の状態差分、相手役、敵役/権力者、案内役/助力者、物語固有の小道具、setpiece、繰り返し使う場所、reusable still。
 - ゴール: 後続 cut で visual identity が揺れる主要 subject が `asset_inventory.md` に洗い出され、`asset_plan.md` 候補に入っていること。
 - 判断基準: `script.md` / `story.md` / `video_manifest.md` に出る固有名詞・固有の場所・物語上の証拠品・再利用される背景を拾う。単発 cut の一時的な構図や演技は p600 に残す。
+- 人物 key は題材固有名へハードコードせず、`research.story_materials.characters[].character_id` と `story.script.scenes[].character_ids` から reusable character asset へ解決する。asset bible に存在することと、全 cut で参照することは別であり、p600 は assigned event に画面上で必要な人物だけを cut-local `character_ids` / references に採用する。
 
 #### p530 asset plan authoring
 
@@ -73,8 +74,12 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 - やること: `asset_plan.md` から `asset_generation_requests.md` と `asset_generation_manifest.md` を materialize する。
 - ゴール: 人間が request file だけを見て、何を、どの参照画像で、どの output に、どの status で生成するか判断できること。
 - prompt 本文は image API に渡る凍結文なので、制作管理メタではなく具体的に見える対象を書く。
+- `story.md.story_metadata.time` が非空なら、asset prompt に同じ時代を入れ、人物の衣装・髪型、場所の建築・生活道具、小道具の素材・技術水準を整合させる。空文字なら時代指定の見出しや placeholder を追加しない。
 - asset request は final prompt compiler を通し、`prompt_policy_version: image_api_prompt_v1` と `api_prompt` fence を持つ。API に渡すのは `api_prompt` fence だけで、構造化設計・debug・review source は送らない。
 - asset stage の deterministic compiler は `asset_stage_manifest.md` / `asset_plan.md` の asset prompt を source にする。scene/cut の `first_frame_visual_plan`、`cut_contract`、`motion_brief` は asset request prompt に混ぜない。
+- image-prompt repair が `video_manifest.md.assets` の bible、時代、fixed prompt、visual subject、生成参照を変更した場合は、同じ内容を `asset_plan.md` へ projection し、初期 materialize と同じ共通 asset prompt compiler で request/snapshot を再生成する。既存 output の旧 prompt/source digest を無条件に再利用しない。
+- manifest bible node に `generation_prompt` が無い場合、旧 `asset_plan.md` に残った明示 prompt は削除し、最新の fixed prompt / visual subject から再 compile する。明示 `generation_prompt` がある場合も、非空の物語時代文字列が本文に無ければ共通 compiler が同じ時代制約を先頭へ付加する。
+- asset request digest が変わった場合は reusable asset を先に再生成し、その新しいファイル hash を scene request/snapshot へ再束縛してから image-prompt review をやり直す。
 - prompt editor は、構造化 artifact から provider が描ける語だけを残す。LLM agent で編集する場合も、出力は同じ `api_prompt` contract に凍結し、agent report は別 artifact に置く。
 - leak gate は `api_prompt` 内の `sceneNN_cutNN`、`debug_prompt_source`、`first_frame_visual_plan`、`source_event_beat_id`、`motion_brief` などを fail にする。source selector などの metadata 欄は検査対象ではない。
 - NG:

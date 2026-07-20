@@ -13,8 +13,12 @@ def write_manifest(run_dir: Path) -> None:
                 "# Video Manifest",
                 "",
                 "```yaml",
+                "video_metadata:",
+                "  time: 17世紀フランス時代",
+                "  scene_time_of_day_contract: required_v1",
                 "scenes:",
                 "  - scene_id: 10",
+                "    time_of_day: 夜",
                 "    scene_intent:",
                 "      story_event_obligations:",
                 "        - event_id: scene01_story_event",
@@ -304,6 +308,10 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertIn("shot_role: character_action", entry["prompt"])
             self.assertEqual(entry["legacy_prompt"], "灰の台所でシンデレラが立つ。画面内テキストなし。")
             self.assertEqual(entry["api_prompt_policy_version"], "image_api_prompt_v1")
+            self.assertEqual(entry["story_time"], "17世紀フランス時代")
+            self.assertEqual(entry["time_of_day"], "夜")
+            self.assertTrue(entry["time_of_day_contract_declared"])
+            self.assertEqual(entry["time_of_day_status"], "valid")
             self.assertEqual(entry["api_prompt_payload"]["negative_prompt"], "text, logo")
             self.assertEqual(entry["shot_design_contract"]["shot_role"], "character_action")
             self.assertEqual(entry["cut_visual_delta"]["this_cut_new_information"], "灰の台所の姿勢が新しく見える")
@@ -317,6 +325,8 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertIn("image_prompt_gate_focus", entry)
             self.assertIn("設計上の絵としての役割", "\n".join(entry["image_prompt_gate_focus"]))
             self.assertIn("scene state progression", "\n".join(entry["image_prompt_gate_focus"]))
+            self.assertIn("story_time", "\n".join(entry["image_prompt_gate_focus"]))
+            self.assertIn("time_of_day", "\n".join(entry["image_prompt_gate_focus"]))
             self.assertIn("first_frame_visual_plan", entry)
             self.assertEqual(entry["first_frame_visual_plan"]["schema_version"], "first_frame_visual_plan_v1")
             self.assertFalse(entry["first_frame_visual_plan"]["editable"])
@@ -326,6 +336,7 @@ class TestSemanticPackImage(unittest.TestCase):
             )
             self.assertIn("temporal_boundary", entry["first_frame_visual_plan"])
             self.assertIn("motion_affordance", entry["first_frame_visual_plan"])
+            self.assertEqual(entry["first_frame_visual_plan"]["scene_material_pack"]["time_of_day"], "夜")
             self.assertEqual(entry["references"], ["assets/characters/cinderella.png", "assets/locations/kitchen.png"])
             self.assertEqual(entry["character_ids"], ["cinderella"])
             self.assertEqual(entry["location_ids"], ["kitchen"])
@@ -373,6 +384,11 @@ class TestSemanticPackImage(unittest.TestCase):
             composite = entries[1]
             self.assertEqual(composite["review_scope"], "scene_composite")
             self.assertEqual(composite["stage"], "image_prompt")
+            self.assertEqual(composite["story_time"], "17世紀フランス時代")
+            self.assertEqual(composite["time_of_day"], "夜")
+            self.assertTrue(composite["time_of_day_contract_declared"])
+            self.assertEqual(composite["time_of_day_status"], "valid")
+            self.assertEqual(composite["scene_contract"]["time_of_day"], "夜")
             self.assertEqual(composite["cut_count"], 2)
             self.assertEqual(composite["scene_cut_coverage_plan"]["selected_cut_count"], 2)
             self.assertEqual(composite["story_event_obligations"][0]["event_id"], "scene01_story_event")
@@ -387,6 +403,9 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertIn("cut_context_packet_diagnostics", composite["cut_entries"][0])
             self.assertIn("shot_role: character_action", composite["cut_entries"][0]["prompt"])
             self.assertEqual(composite["cut_entries"][0]["api_prompt_policy_version"], "image_api_prompt_v1")
+            self.assertEqual(composite["cut_entries"][0]["time_of_day"], "夜")
+            self.assertIn("time_of_day", "\n".join(composite["scene_composite_gate"]["must_judge"]))
+            self.assertIn("image_prompt_time_of_day_mismatch", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("scene_cut_prompt_too_similar", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("event_beat_reference_integrity", composite["scene_composite_gate"]["failure_reason_keys"])
             self.assertIn("audience_knowledge_delta_missing", composite["scene_composite_gate"]["failure_reason_keys"])
@@ -457,10 +476,148 @@ class TestSemanticPackImage(unittest.TestCase):
         entries = collect_image_prompt_entries(manifest)
 
         self.assertEqual(entries[0]["drawable_prompt_dependencies"]["object_ids"], ["glass_slipper"])
+        self.assertNotIn("time_of_day", entries[0])
+        self.assertFalse(entries[0]["time_of_day_contract_declared"])
+        self.assertEqual(entries[0]["time_of_day_status"], "missing")
         self.assertEqual(
             entries[0]["included_drawable_fragment_groups"],
             ["style", "current_moment", "primary_subject", "composition", "objects", "constraints"],
         )
+        projection_contract = entries[0]["prompt_projection_review_contract"]
+        active_groups = {
+            item["target_group"] for item in projection_contract["active_rules"]
+        }
+        self.assertIn("objects", active_groups)
+        self.assertIn("current_moment", active_groups)
+        inactive_groups = {
+            item["target_group"] for item in projection_contract["inactive_rules"]
+        }
+        self.assertIn("composition", inactive_groups)
+        self.assertTrue(projection_contract["invariant_principles"])
+
+    def test_canonical_stored_visual_plan_is_exposed_without_masking_daypart_mismatch(self) -> None:
+        manifest = {
+            "video_metadata": {
+                "time": "17世紀フランス時代",
+                "scene_time_of_day_contract": "required_v1",
+            },
+            "scenes": [
+                {
+                    "scene_id": 10,
+                    "time_of_day": "夜",
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "first_frame_visual_plan": {
+                                "scene_material_pack": {"time_of_day": "夕方"},
+                            },
+                            "image_generation": {
+                                "output": "assets/scenes/scene10_cut01.png",
+                                "first_frame_visual_plan": {
+                                    "scene_material_pack": {"time_of_day": "朝"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        entry = collect_image_prompt_entries(manifest)[0]
+
+        self.assertEqual(entry["time_of_day"], "夜")
+        self.assertEqual(entry["first_frame_visual_plan"]["scene_material_pack"]["time_of_day"], "朝")
+        self.assertEqual(entry["first_frame_visual_plan_status"], "canonical_valid")
+
+    def test_v2_missing_empty_or_invalid_canonical_visual_plan_is_not_synthesized(self) -> None:
+        cases = (
+            ("missing", None, "canonical_missing"),
+            ("empty", {}, "canonical_empty"),
+            ("invalid", ["not", "a", "mapping"], "canonical_invalid_type"),
+        )
+        for label, canonical_plan, expected_status in cases:
+            with self.subTest(label=label):
+                image_generation = {
+                    "output": "assets/scenes/scene10_cut01.png",
+                    "api_prompt_payload": {"policy_version": "image_api_prompt_v2"},
+                }
+                if canonical_plan is not None:
+                    image_generation["first_frame_visual_plan"] = canonical_plan
+                manifest = {
+                    "video_metadata": {
+                        "time": "17世紀フランス時代",
+                        "scene_time_of_day_contract": "required_v1",
+                    },
+                    "scenes": [
+                        {
+                            "scene_id": 10,
+                            "time_of_day": "夜",
+                            "cuts": [
+                                {
+                                    "cut_id": 1,
+                                    "still_image_plan": {"mode": "generate_still"},
+                                    "image_generation": image_generation,
+                                }
+                            ],
+                        }
+                    ],
+                }
+
+                entry = collect_image_prompt_entries(manifest)[0]
+
+                self.assertEqual(entry["first_frame_visual_plan"], {})
+                self.assertEqual(entry["first_frame_visual_plan_status"], expected_status)
+
+    def test_v2_missing_canonical_provider_prompt_does_not_fallback_to_legacy_prompt(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 10,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {
+                                "prompt": "古いlegacy promptを使わない",
+                                "api_prompt_payload": {
+                                    "policy_version": "image_api_prompt_v2",
+                                },
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        entry = collect_image_prompt_entries(manifest)[0]
+
+        self.assertEqual(entry["prompt"], "")
+        self.assertEqual(entry["legacy_prompt"], "古いlegacy promptを使わない")
+
+    def test_legacy_scene_daypart_does_not_declare_required_contract_without_marker(self) -> None:
+        manifest = {
+            "video_metadata": {"time": "17世紀フランス時代"},
+            "scenes": [
+                {
+                    "scene_id": 10,
+                    "time_of_day": "夜",
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "still_image_plan": {"mode": "generate_still"},
+                            "image_generation": {"output": "assets/scenes/scene10_cut01.png"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        entry = collect_image_prompt_entries(manifest)[0]
+
+        self.assertFalse(entry["time_of_day_contract_declared"])
+        self.assertEqual(entry["time_of_day"], "夜")
+        self.assertEqual(entry["time_of_day_status"], "valid")
 
     def test_scene_image_semantic_stage_is_removed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:

@@ -1,228 +1,149 @@
-# にわかのAI YouTube戦略マスタードキュメント
+# ToC YouTube Strategy
 
-最終更新: 2026-06-20
+更新日: 2026-07-18
 
----
+このファイルは ToC の YouTube 配信における北極星である。marketing 全体の positioning は `marketing/README.md` を正本とする。
 
-## 0. このドキュメントの使い方
+## 1. Channel job
 
-このドキュメントは `にわかのAI` を YouTube で展開するための**北極星**です。
-他のファイルはここから派生しています。
+YouTube は、ToC が動画制作を速く、簡単に、繰り返し可能にすることを、完成動画と制作証拠で示すチャネルである。
 
-```
-このファイルを読む
-  └─ チャンネル設計と初期設定 → channel-branding-and-setup.md
-  └─ チャンネル公開導線 → channel-launch-packaging.md
-  └─ policy / 運用設定 → channel-policy-and-ops.md
-  └─ 初回公開の実行手順 → publishing-strategy-urashima.md
-  └─ 単発通常投稿の統合手順 → first-upload-playbook.md
-  └─ 投稿直前のコピペ用文面 → urashima-publish-kit.md
-  └─ Studio 自動投稿仕様 → youtube-studio-automation-spec.md
-  └─ Studio 自動投稿ランブック → youtube-studio-automation-runbook.md
-  └─ browser 操作が必要 → ../../browser-use.md
-  └─ 初回アップロード前  → upload-checklist.md
-  └─ 単発公開のコメント設計 → engagement-strategy-single-upload.md
-  └─ コミュニティ/CRM方針 → community-crm-strategy.md
-  └─ 収益化・LP準備時   → monetization.md
-  └─ 2本目以降の計画時  → content-calendar.md
-  └─ 公開後の分析時     → analytics-kpis.md
-```
+主目的:
 
----
+1. ToC の完成能力を proof する
+2. 副業 / 個人ブランドの visitor に `自分にも作れそう` を渡す
+3. persona-specific LP へ送る
+4. 最初の1本と継続利用へ接続する
 
-## 1. チャンネルの二重ゴール
+チャンネルの既存運用名 `にわかのAI` と浦島太郎は初期実験資産として扱えるが、ToC の product positioning を神話・民話へ限定しない。公開ブランド名は site implementation 前に別途確定する。
 
-`にわかのAI` は、生成AIで世界中のナラティブを再現し、語り継ぐチャンネル。
-初期はAI好きのアーリーアダプターに向けて、物語名を送るだけで台本設計から動画生成までAIエージェントが自動で組み立てる仕組みを、作品と制作過程の両方で見せる。
+## 2. Audience
 
-YouTube は `リスト集客` の場として扱う。
-概要欄は視聴者を次の接点へ進める `中間導線` であり、セールス本文ではない。
-販売・相談・契約は LP / フォーム / DM / 個別相談に分離する。
+### Persona A: side business
 
-このチャンネルは一本の動画が**同時に2つの目的**を果たすよう設計する。
+- interest: 副業、YouTube、Shorts、AI、コンテンツ収益化
+- obstacle: 時間、編集経験、ツール過多、外注費、継続
+- YouTube promise: 限られた時間でも、最初の1本を完成させて反応を試せる
+- CTA: `副業の最初の1本を作る`
 
-| ゴール | 直接収益 | チャンネルでの役割 |
-|--------|---------|-----------------|
-| **A. 動画配信** | AdSense / メンバーシップ | 視聴時間を積み、信頼を作る |
-| **B. システム販売** | LP誘導 / 受託 / ライセンス | 視聴者をクライアント候補に変換する |
+### Persona B: personal brand
 
-**設計思想**: 「作品」が信頼を作り、「人間の制作者がAIを育てている過程」と「全自動生成の仕組み」がリスト獲得と問い合わせの理由を作る。
-浦島太郎を見た人が「物語名を送るだけでここまで作れるのか」と思う流れを設計する。
+- interest: expertise, thought leadership, creator brand, education, service business
+- obstacle: 発信停止、制作負担、ブランド不統一、没個性
+- YouTube promise: 知識や世界観を一貫した動画 series へ変えられる
+- CTA: `自分のブランド動画を設計する`
 
-**横展開思想**: YouTube の長尺動画を `原液` とする。
-X、Instagram、Shorts、newsletter、LP は YouTube から切り出して展開する。
-各プラットフォームで毎回ゼロから作らず、長尺動画の世界観、制作過程、コメント、改善ログを再利用する。
+## 3. Content pillars
 
----
+| Pillar | Content | Job |
+|--------|---------|-----|
+| 完成 proof | diverse finished videos | ToC can finish videos across formats |
+| one-line-to-video | initial idea through completed timeline | speed and simplicity |
+| 制作比較 | fragmented manual operation vs ToC flow | clarify mechanism and saved work |
+| 副業実験 | niche idea, first video, response, iteration | side-business relevance |
+| brand series | one expertise into a repeatable series | personal-brand relevance |
+| build in public | failure, repair, human approval | trust and realistic expectations |
 
-## 1-1. 売り手優先の全体設計
+Story, mythology, and folklore may appear in `完成 proof`; they are not the default content ratio or channel identity.
 
-YouTube の表現は視聴者主語にするが、内部設計は売り手優先で逆算する。
-先に決めるのは `この接点で相手に何を感じ、どこへ進んでもらうか`。
+## 4. Packaging
 
-設計順:
+### Title rule
 
-1. 最後に欲しい行動を決める: 視聴継続、コメント、制作ノート登録、改善提案、相談フォーム
-2. 相手のセグメントを1つ選ぶ: 物語好き、AI好き、制作者・企業、初期応援者
-3. 1秒で入る視点を決める: 失われた時間、AIの自動化、制作可能性、改善参加
-4. タイトル、サムネ、冒頭、概要欄、固定コメントを同じ視点で揃える
-5. CTA は押し込まず、相手が自分で判断したように選べる問いにする
+Lead with visitor outcome or visible proof.
 
-判断基準:
+Examples:
 
-| 悪い設計 | 良い設計 |
-|----------|----------|
-| 商品やAIシステムを主語にする | 視聴者が見たい物語、作りたい企画、参加したい改善を主語にする |
-| 起承転結で丁寧に説明する | まず結論、あとから理由と背景を出す |
-| 全員に同じ投稿を見せる | セグメントごとに1秒の入口を変える |
-| 理屈で納得させる | 感情で足を止め、情報で後押しする |
-| CTA を命令する | 選択肢と問いを置き、相手の自己決定にする |
+- `会社員の副業動画、テーマ1行からどこまで作れるか`
+- `専門知識を動画シリーズにするまで｜ToC制作ログ`
+- `企画・台本・映像・音声を一つにつないだ結果`
+- `この1行から、1本の動画ができるまで`
 
-この方針では、動画そのものは `作品`、概要欄は `中間導線`、コメント欄は `CRM接点`、LP は `セグメント分岐` として扱う。
+Provider names and agent architecture belong in secondary copy unless they are the subject of the video.
 
----
+### Thumbnail rule
 
-## 2. YouTubeアルゴリズム入門（素人向け）
+- show input and output in one frame when comparing transformation
+- use one short claim, one completed visual, one clear persona cue
+- avoid mythic motifs as a channel-wide identity
+- avoid unverified `完全自動`, revenue claims, or time reduction percentages
 
-YouTubeが動画を推薦するかどうかは主に**3つの指標**で決まる。
+## 5. Video structure
 
-### 2-1. CTR（クリック率）
-
-サムネイルとタイトルを見た人が実際にクリックする割合。
-
-- **目安**: 4〜8%
-- **2%未満**: タイトルかサムネイルを見直す
-- **改善ポイント**: 大きな文字、感情を呼ぶビジュアル、具体的な数字や問いかけ
-
-### 2-2. 視聴維持率（Audience Retention）
-
-動画全体の何%を視聴者が見続けたか。
-
-- **目安**: 45%以上
-- **30%未満**: 冒頭30秒の構成を改善する
-- **重要**: 最初の15秒で「なぜ見るべきか」を伝えないと離脱される
-- AI生成動画は人間の顔・感情表現が少ないため、ナレーションのテンポとBGMで補う
-
-### 2-3. エンゲージメント
-
-いいね、コメント、シェア、保存の総量。
-
-- **「保存」が最強シグナル**: 「あとで見たい」という意思をアルゴリズムが重視する
-- **コメントを呼ぶコツ**: 説明欄や動画内で質問を投げかける
-- **目安**: 再生数の0.5%以上がコメント
-
----
-
-## 3. ニッチ選定と競合分析
-
-### 現在の競合地図
-
-```
-[物語・民話 × 人間制作]        →  既存チャンネル多数。作品品質と蓄積で強い
-[AI生成動画 × 手動制作]         →  生成サービスを人間が操作して作る例が多い
-[AI生成動画 × 解説/チュートリアル] →  ノウハウ需要は強いが作品体験とは別物
-[AIエージェント × 物語全自動生成]  →  `にわかのAI` の主戦場
+```text
+0–5 sec: completed result or visible transformation
+5–20 sec: whose problem this solves
+20–60 sec: input and constraint
+body: ToC flow, human decisions, output
+end: measured result, limitation, persona-specific next step
 ```
 
-### にわかのAIのポジション
+## 6. Description / CTA
 
-**「生成AIで世界中のナラティブを再現し、語り継ぐ。さらに、その生成プロセスを人間の手作業ではなくAIエージェントで自動化する」**
+Side-business video:
 
-- 視聴者にはまず `物語体験` を届ける
-- AI好きには `物語名だけで台本設計から動画生成まで進む仕組み` を見せる
-- コメントでは `未完成なAIを人間が育てている` ことを出し、応援・改善提案・次回希望をCRM接点にする
-- 制作過程への関心を、リスト獲得や問い合わせにつなげる
-
----
-
-## 4. コンテンツ戦略
-
-### 柱コンテンツ 3本設計
-
-| 柱 | 内容 | 目的 |
-|----|------|------|
-| **柱1: Narrative作品** | 世界中の民話・神話・伝承のフル動画 | 視聴時間・登録者獲得 |
-| **柱2: 全自動生成の裏側** | 物語名から動画完成までのAIエージェント工程 | リスト獲得・問い合わせ喚起 |
-| **柱3: World Narrative** | 日本以外の物語・伝承・神話 | グローバル展開の土台 |
-| **柱4: 成長ログ/CRM** | 視聴者の改善提案、制作メモ、AIの育成過程 | 応援・登録・リスト獲得 |
-
-### 柱2（全自動生成の裏側）の具体例
-
-- 「浦島太郎という名前だけで、AIエージェントはどこまで作れるか」
-- 「台本設計から動画生成まで、どこを自動化しているか」
-- 「人間がサービスを操作するAI動画制作と、プログラム化された全自動生成の違い」
-
----
-
-## 5. 言語戦略（グローバル展開）
-
-| フェーズ | 言語設定 | 理由 |
-|---------|---------|------|
-| Phase 1（〜Day 90） | 日本語のみ | 品質が高く、まず実績を作る |
-| Phase 2（Day 91〜180） | 日本語音声 + 英語字幕 | 「authentic Japanese folklore」として英語圏に届ける |
-| Phase 3（Day 181〜） | 英語ナレーション版を別途投稿 | 生成パイプラインでTTSテキストを英訳→再生成 |
-
----
-
-## 6. チャンネル設計
-
-### チャンネル名候補
-
-| 路線 | 候補名 |
-|------|--------|
-| 初期運用名 | にわかのAI |
-| handle | @niwakanoai |
-| 後続ブランド候補 | 物語アトラス / 物語綺譚 / 物語巡礼 |
-
-### チャンネル説明文テンプレート
-
-```
-にわかのAIは、生成AIで世界中のナラティブを再現し、語り継ぐチャンネルです。
-物語名を送るだけで、台本設計から動画生成までAIエージェントが自動で組み立てる仕組みを作品と制作過程の両方で見せていきます。
-
-制作システムについてのお問い合わせはこちら:
-[LP URL]
+```text
+副業の最初の1本を、自分のテーマから作りたい方はこちら:
+[SIDE_BUSINESS_LP_URL]
 ```
 
----
+Personal-brand video:
 
-## 7. フェーズ別ロードマップ
+```text
+知識や世界観を、続けられる動画発信に変えたい方はこちら:
+[PERSONAL_BRAND_LP_URL]
+```
 
-### Phase 0: 準備（〜1週間）
+Do not send both personas to one generic form. Preserve UTM source, video id, campaign, and persona.
 
-- [ ] 浦島太郎 video.mp4 を完成させる
-- [ ] YouTubeチャンネル開設
-- [ ] チャンネルアイコン・バナー・説明文を設定
-- [ ] LP（販売ページ）の仮URLを用意（Notion or Googleフォームで可）
+## 7. Proof contract
 
-### Phase 1: 種まき（〜Day 90）
+Claims about speed and simplicity require:
 
-- **目標**: 投稿10本、登録者100人
-- 月4本ペース（Narrative作品を中心）
-- 全自動生成の裏側を月1本混ぜる
-- コメント欄への返信を毎回行う（エンゲージメント維持）
-- SNS（X / Instagram）で投稿のたびにシェア
+- initial brief
+- output duration and format
+- elapsed production time
+- human working time
+- ToC-owned stages
+- human-owned decisions
+- provider or external waiting time when material
+- revision count
+- completed output
 
-### Phase 2: 成長（Day 91〜180）
+Use `もっと速く、もっと簡単に` until a defensible comparison supports `圧倒的`.
 
-- **目標**: 登録者500人、視聴時間1,000時間/月
-- 英語字幕を追加
-- Shorts展開（本編の見どころ30秒を縦にトリミング）
-- LP（システム販売ページ）を説明欄に正式追加
-- 桃太郎など2本目以降を量産
+## 8. Publishing phases
 
-### Phase 3: 収益化（Day 181〜365）
+### Phase 0: repositioning
 
-- **目標**: 登録者1,000人、視聴時間4,000時間（AdSense申請条件）
-- 英語ナレーション版の並行投稿
-- World Narrativeシリーズ開始
-- B2B問い合わせ対応フロー整備（→ monetization.md 参照）
-- AdSense申請 → 月次収益レポート開始
+- [ ] public product / channel name decision
+- [ ] common site and two persona LPs
+- [ ] native form and conversion tracking
+- [ ] 3 diverse proof videos
+- [ ] speed comparison measurement
 
----
+### Phase 1: proof
 
-## 8. 今日やること（最初の1アクション）
+- publish one completed proof and one making-of per core use case
+- test side-business and personal-brand packaging separately
+- establish baseline CTR, view completion, LP click, idea input, and lead quality
 
-1. `upload-checklist.md` を開く
-2. 浦島太郎の video.mp4 完成後にチェックリストを一項目ずつ埋める
-3. 公開後は `analytics-kpis.md` の週次レビューを開始する
+### Phase 2: acquisition
+
+- expand winning organic hooks into persona-specific Meta creatives
+- create repeatable formats for each persona
+- optimize for qualified leads and first-video starts, not raw views
+
+### Phase 3: retention
+
+- show second and subsequent video creation
+- publish series consistency and improvement evidence
+- measure continued creation and brand / side-business outcomes without promising revenue
+
+## 9. Related files
+
+- marketing North Star: `marketing/README.md`
+- site / LP: `marketing/LP/toc-marketing-site.md`
+- monetization: `marketing/SNS/YouTube/monetization.md`
+- analytics: `marketing/SNS/YouTube/analytics-kpis.md`
+- campaign-specific Urashima documents: legacy test campaign artifacts, not product positioning

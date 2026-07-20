@@ -150,6 +150,55 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
         (run_dir / paths["scope"]).write_text(json.dumps(scope, ensure_ascii=False) + "\n", encoding="utf-8")
         (run_dir / paths["prompt"]).write_text("# canonical image prompt review\n", encoding="utf-8")
         (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+        # The semantic shard reviewer is downstream of the deterministic
+        # story/prompt gate.  Keep this fixture provider-ready instead of
+        # accidentally testing the missing-gate failure path.
+        for source_name in ("story.md", "script.md", "video_manifest.md"):
+            (run_dir / source_name).write_text(f"# {source_name}\n", encoding="utf-8")
+        deterministic_selectors = [
+            str(entry["selector"])
+            for entry in entries
+            if "_cut" in str(entry.get("selector") or "")
+        ]
+        deterministic_sections = [
+            line
+            for selector in deterministic_selectors
+            for line in (
+                f"## {selector}",
+                "",
+                f"- output: `assets/scenes/{selector}.png`",
+                "- narration: `(silent)`",
+                "- overall_score: `1.000`",
+                "- rubric_scores: `{}`",
+                "- review: `PASS`",
+                "",
+            )
+        ]
+        (run_dir / "image_prompt_story_review.md").write_text(
+            "\n".join(
+                [
+                    "# Image Prompt Story Review",
+                    "",
+                    "- review_format_version: `deterministic_image_prompt_review_v2`",
+                    f"- manifest: `{run_dir / 'video_manifest.md'}`",
+                    f"- manifest_sha256: `{image_gen_app._file_sha256(run_dir / 'video_manifest.md')}`",
+                    f"- story_sha256: `{image_gen_app._file_sha256(run_dir / 'story.md')}`",
+                    f"- script_sha256: `{image_gen_app._file_sha256(run_dir / 'script.md')}`",
+                    "- status: `PASS`",
+                    f"- reviewed_entries: `{len(deterministic_selectors)}`",
+                    "- empty_review_scope: `false`",
+                    "- entries_with_findings: `0`",
+                    "- findings: `0`",
+                    "- hard_findings: `0`",
+                    "- blocking_hard_findings: `0`",
+                    "- soft_findings: `0`",
+                    "- unresolved_entries: `0`",
+                    "",
+                    *deterministic_sections,
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     def test_runtime_reviews_one_shard_per_scene_with_bounded_concurrency_and_exact_coverage(self) -> None:
         entries = [

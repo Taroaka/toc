@@ -14,6 +14,7 @@ from typing import Any
 
 from toc.cut_context_packet import cut_context_packet_for_review
 from toc.harness import load_structured_document
+from toc.image_prompt_projection_registry import build_projection_review_contract
 
 try:
     import yaml  # type: ignore
@@ -56,6 +57,8 @@ def _image_api_prompt_payload(image_generation: dict[str, Any]) -> dict[str, Any
 
 def _image_api_prompt(image_generation: dict[str, Any]) -> str:
     payload = _image_api_prompt_payload(image_generation)
+    if _as_str(payload.get("policy_version")) == "image_api_prompt_v2":
+        return _as_str(payload.get("prompt"))
     return _as_str(payload.get("prompt") or image_generation.get("prompt"))
 
 
@@ -93,10 +96,13 @@ def _prompt_block_labels(prompt: str) -> list[str]:
 def build_first_frame_visual_plan(scene: dict[str, Any], cut: dict[str, Any]) -> dict[str, Any]:
     """Build the review-side derived plan that turns event intent into a drawable still."""
 
-    explicit = _dict(cut.get("first_frame_visual_plan"))
-    if explicit:
-        return explicit
     image_generation = _dict(cut.get("image_generation"))
+    if "first_frame_visual_plan" in image_generation:
+        return _dict(image_generation.get("first_frame_visual_plan"))
+    if _as_str(_image_api_prompt_payload(image_generation).get("policy_version")) == "image_api_prompt_v2":
+        return {}
+    if "first_frame_visual_plan" in cut:
+        return _dict(cut.get("first_frame_visual_plan"))
     contract = _cut_semantic_contract(cut, image_generation=image_generation)
     source = _dict(contract.get("source_event_contract"))
     event_context = _event_context_for_cut(scene, cut)
@@ -134,6 +140,7 @@ def build_first_frame_visual_plan(scene: dict[str, Any], cut: dict[str, Any]) ->
         or (ids["object_ids"] + ids["character_ids"] + ids["location_ids"] + _as_str_list(contract.get("must_include")) or [""])[0]
         or visible_fact
     )
+    scene_time_of_day = _as_str(_time_of_day_review_fields(scene).get("time_of_day"))
     return {
         "schema_version": "first_frame_visual_plan_v1",
         "derived_from": [
@@ -203,6 +210,7 @@ def build_first_frame_visual_plan(scene: dict[str, Any], cut: dict[str, Any]) ->
             "location_id": ids["location_ids"][0] if ids["location_ids"] else "",
             "light_source": _as_str(first_frame.get("light_source") or "scene固有の光源"),
             "dominant_materials": _as_str_list(first_frame.get("dominant_materials")),
+            **({"time_of_day": scene_time_of_day} if scene_time_of_day else {}),
         },
         "motion_affordance": {
             "movable_subjects": [{"subject_id": primary_anchor, "movement_vector": _as_str(motion.get("subject_motion") or "静止画の姿勢から自然に動き出す方向")}],
@@ -263,7 +271,11 @@ def collect_image_prompt_entries(
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     asset_context = asset_context or {}
+    video_metadata = _dict(manifest.get("video_metadata"))
+    story_time = _as_str(video_metadata.get("time"))
+    time_of_day_contract_declared = _time_of_day_contract_declared(manifest)
     for scene, cut in iter_scene_cuts(manifest):
+        time_of_day_fields = _time_of_day_review_fields(scene)
         image_generation = _dict(cut.get("image_generation"))
         if not image_generation:
             continue
@@ -304,9 +316,18 @@ def collect_image_prompt_entries(
                 "legacy_prompt": _as_str(image_generation.get("prompt")),
                 "api_prompt_payload": api_prompt_payload,
                 "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                "story_time": story_time,
+                "time_of_day_contract_declared": time_of_day_contract_declared,
+                **time_of_day_fields,
                 "drawable_prompt_ir": _drawable_prompt_ir(image_generation),
                 "drawable_prompt_dependencies": _drawable_prompt_dependencies(image_generation),
                 "included_drawable_fragment_groups": _included_drawable_fragment_groups(image_generation),
+                "prompt_projection_review_contract": build_projection_review_contract(
+                    story_time=story_time,
+                    time_of_day=_as_str(time_of_day_fields.get("time_of_day")),
+                    dependencies=_drawable_prompt_dependencies(image_generation),
+                    first_frame_visual_plan=first_frame_visual_plan,
+                ),
                 "scene_cut_coverage_plan": _dict(scene.get("scene_cut_coverage_plan")),
                 "scene_film_coverage_plan": _dict(scene.get("scene_film_coverage_plan")),
                 "scene_shot_mix_plan": _dict(scene.get("scene_shot_mix_plan")),
@@ -329,6 +350,12 @@ def collect_image_prompt_entries(
                     "参照画像の使い方、人物状態、小道具 visibility、構図、光/質感、動画化の開始余地が描画可能な具体語になっているか",
                     "motion_brief や後続の出来事が API prompt に混入していないか",
                     "first_frame_visual_plan が poster 的な雰囲気画像ではなく、cutの出来事が始まる1つの瞬間へ変換されているか",
+                    "上流の抽象キーを一対一で転記せず、このcutに必要な情報を include / omit / add / replace しているか",
+                    "prompt_projection_review_contract のactive ruleごとに、source keyをtarget groupへ正しく変換し、inactive/none keyを惰性でprovider promptへ流していないか",
+                    "story_time が非空なら、衣装、建築、生活道具、素材、技術水準がその時代と整合し、別時代の要素を混ぜていないか",
+                    "time_of_day が非空なら、歴史時代を変えずに、空の明るさ、自然光の方向と強さ、影、色温度、人工照明がその時間帯と整合しているか",
+                    "肯定側の must-show / current state と not_yet / constraints が同じ人物・物・状態を同時に要求・禁止していないか",
+                    "画面に見える主要人物・小道具・場所が dependencies / asset_reference_context に存在し、見えないscene-wide assetを惰性で参照していないか",
                 ],
                 "references": _as_str_list(image_generation.get("references")),
                 **ids,
@@ -340,6 +367,7 @@ def collect_image_prompt_entries(
                 "cut_context_packet": cut_context_packet,
                 "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
                 "first_frame_visual_plan": first_frame_visual_plan,
+                "first_frame_visual_plan_status": _first_frame_visual_plan_status(cut),
                 "cut_character_emotion_transition": _dict(raw_cut_contract.get("cut_character_emotion_transition")),
                 "cut_film_grammar_contract": _dict(raw_cut_contract.get("cut_film_grammar_contract")),
                 "semantic_contract": semantic_contract,
@@ -433,12 +461,15 @@ def collect_scene_composite_entries(
     run_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
+    story_time = _as_str(_dict(manifest.get("video_metadata")).get("time"))
+    time_of_day_contract_declared = _time_of_day_contract_declared(manifest)
     scenes = manifest.get("scenes")
     if not isinstance(scenes, list):
         return entries
     for scene in scenes:
         if not isinstance(scene, dict):
             continue
+        time_of_day_fields = _time_of_day_review_fields(scene)
         cuts = [cut for cut in _list(scene.get("cuts")) if isinstance(cut, dict)]
         if not cuts:
             continue
@@ -487,9 +518,17 @@ def collect_scene_composite_entries(
                     "legacy_prompt": _as_str(image_generation.get("prompt")),
                     "api_prompt_payload": api_prompt_payload,
                     "api_prompt_policy_version": _as_str(api_prompt_payload.get("policy_version")),
+                    "time_of_day_contract_declared": time_of_day_contract_declared,
+                    **time_of_day_fields,
                     "drawable_prompt_ir": _drawable_prompt_ir(image_generation),
                     "drawable_prompt_dependencies": _drawable_prompt_dependencies(image_generation),
                     "included_drawable_fragment_groups": _included_drawable_fragment_groups(image_generation),
+                    "prompt_projection_review_contract": build_projection_review_contract(
+                        story_time=story_time,
+                        time_of_day=_as_str(time_of_day_fields.get("time_of_day")),
+                        dependencies=_drawable_prompt_dependencies(image_generation),
+                        first_frame_visual_plan=first_frame_visual_plan,
+                    ),
                     "image_output": output,
                     "image_output_exists": output_exists,
                     "video_motion_prompt": _as_str(video_generation.get("motion_prompt")),
@@ -499,6 +538,7 @@ def collect_scene_composite_entries(
                     "cut_context_packet": cut_context_packet,
                     "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
                     "first_frame_visual_plan": first_frame_visual_plan,
+                    "first_frame_visual_plan_status": _first_frame_visual_plan_status(cut),
                     "semantic_contract": semantic_contract,
                 }
             )
@@ -506,6 +546,8 @@ def collect_scene_composite_entries(
         scene_event = _dict(scene.get("scene_event"))
         scene_contract = {
             "scene_id": scene.get("scene_id"),
+            "time_of_day_contract_declared": time_of_day_contract_declared,
+            **time_of_day_fields,
             "scene_intent": scene_intent,
             "role_coverage": _dict(scene_intent.get("role_coverage")) or _dict(scene.get("role_coverage")) or _dict(scene_event.get("role_coverage")),
             "audience_knowledge_plan": _audience_knowledge_items(scene_intent) or _as_str_list(scene.get("audience_knowledge_plan")) or _as_str_list(scene_event.get("audience_knowledge_plan")),
@@ -528,6 +570,9 @@ def collect_scene_composite_entries(
                 "review_scope": "scene_composite",
                 "selector": f"scene{scene.get('scene_id')}",
                 "scene_id": scene.get("scene_id"),
+                "story_time": story_time,
+                "time_of_day_contract_declared": time_of_day_contract_declared,
+                **time_of_day_fields,
                 "scene_contract": scene_contract,
                 "scene_event": scene_event,
                 "scene_cut_coverage_plan": scene_cut_coverage_plan,
@@ -555,6 +600,7 @@ def collect_scene_composite_entries(
                         "scene_character_state_timeline の start/mid/end と cut_character_emotion_transition が scene_event の trigger に沿い、感情が face/gaze/posture/hands/feet/distance として見えるか",
                         "scene_film_coverage_plan と cut_film_grammar_contract が action/reaction、insert、eyeline、silence の required_when を満たし、audience_emotion_target を character emotion と分けているか",
                         "scene_state_progression_plan が suspended_moment と sequential_state_progression を scene ごとに正しく選び、sequential scene では cut の first frame が毎回scene開始前へ戻っていないか",
+                        "time_of_day_contract_declared=true の場合、scene.time_of_day が非空stringとして全cutで共有され、各 API prompt の空、自然光、影、色温度、人工照明が同じ時間帯として一貫しているか。false の legacy 欠落だけを理由に失敗させず、story_time の時代考証とは別に判定する",
                         "scene_film_coverage_plan / scene_shot_mix_plan / cut_assignments の絵としての役割が、各 cut の API prompt の shot_role / shot_scale / 構図 / 対象に反映されているか",
                         "role_coverage.required_roles にある妨害者・助力者・証人・共同体などが、必要なsceneで主人公単独に潰されていないか",
                         "cutごとの差異が番号差分や同義反復ではなく、sceneを再現するために必要な視覚要件の分担になっているか",
@@ -615,6 +661,7 @@ def collect_scene_composite_entries(
                         "cut_first_frame_reverts_to_scene_start",
                         "scene_progression_not_visible_across_api_prompts",
                         "suspended_moment_quality_regressed",
+                        "image_prompt_time_of_day_mismatch",
                     ],
                 },
             }
@@ -1003,6 +1050,46 @@ def _relpath(run_dir: Path, path: Path) -> str:
         return path.resolve().relative_to(run_dir.resolve()).as_posix()
     except ValueError:
         return path.resolve().as_posix()
+
+
+def _time_of_day_contract_declared(manifest: dict[str, Any]) -> bool:
+    video_metadata = _dict(manifest.get("video_metadata"))
+    return _as_str(video_metadata.get("scene_time_of_day_contract")) == "required_v1"
+
+
+def _first_frame_visual_plan_status(cut: dict[str, Any]) -> str:
+    image_generation = _dict(cut.get("image_generation"))
+    if "first_frame_visual_plan" in image_generation:
+        raw = image_generation.get("first_frame_visual_plan")
+        if not isinstance(raw, dict):
+            return "canonical_invalid_type"
+        return "canonical_valid" if raw else "canonical_empty"
+    if _as_str(_image_api_prompt_payload(image_generation).get("policy_version")) == "image_api_prompt_v2":
+        return "canonical_missing"
+    if "first_frame_visual_plan" in cut:
+        raw = cut.get("first_frame_visual_plan")
+        if not isinstance(raw, dict):
+            return "legacy_invalid_type"
+        return "legacy_valid" if raw else "legacy_empty"
+    return "legacy_derived"
+
+
+def _time_of_day_review_fields(scene: dict[str, Any]) -> dict[str, Any]:
+    if "time_of_day" not in scene:
+        return {"time_of_day_status": "missing"}
+    raw = scene.get("time_of_day")
+    if not isinstance(raw, str):
+        return {
+            "time_of_day_status": "invalid_type",
+            "time_of_day_raw": raw,
+        }
+    value = raw.strip()
+    if not value:
+        return {"time_of_day_status": "blank"}
+    return {
+        "time_of_day": value,
+        "time_of_day_status": "valid",
+    }
 
 
 def _dict(value: Any) -> dict[str, Any]:

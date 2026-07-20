@@ -195,6 +195,9 @@ assets:
           reference_images: ["assets/characters/hero_night_front.png"]
           fixed_prompts:
             - "night costume"
+          appearance_continuity:
+            costume_state: "夜用の黒い外套"
+            forbidden_costume_states: ["昼用の白い上着"]
 
 scenes:
   - scene_id: 10
@@ -223,6 +226,10 @@ scenes:
         self.assertEqual(scenes[0].image_references, ["assets/characters/hero_night_front.png"])
         self.assertIn("hero base", scenes[0].image_prompt)
         self.assertIn("night costume", scenes[0].image_prompt)
+        self.assertIn(
+            "heroの衣装は夜用の黒い外套で固定し、昼用の白い上着には変えない。",
+            scenes[0].image_prompt,
+        )
         self.assertNotIn("day costume", scenes[0].image_prompt)
 
     def test_apply_asset_guides_injects_physical_scale_and_relative_rules(self) -> None:

@@ -18,7 +18,7 @@
 ## Steps
 1. `sceneN.png -> sceneN+1.png` を first/last frame として clip生成する
 2. prompt は `scene_outline` から組み立てる（global constraints + sceneN/sceneN+1 + continuity + video_motion）
-3. 推奨: chaining frame（前clipの「ほぼ最終フレーム」）を次clipの first frame に使う
+3. 推奨: chaining frame（前clipの「ほぼ最終フレーム」）を保存した後、次clipの first frame として再materialize・再review・再approveして使う。provider実行中に未承認のframeへ動的差し替えしない
 4. clipを結合し、継ぎ目（フェード/カット/急な画変化）を検査する
 
 ## Prompt assembly (recommended)

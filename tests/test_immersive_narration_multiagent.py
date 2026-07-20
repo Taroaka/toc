@@ -413,6 +413,84 @@ scenes:
             self.assertTrue(refreshed_scene10["cuts"][1]["read_only"])
             self.assertEqual(refreshed_scene10["cuts"][1]["narration_text"], "彼は、帰ると決めました。")
 
+    def test_prepare_projects_design_keys_into_narration_authoring_prompt(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_narration_projection_prepare_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(
+                """```yaml
+video_metadata:
+  time: "17世紀末フランス・ルイ14世時代"
+scenes:
+  - scene_id: 10
+    time_of_day: "朝"
+    scene_intent:
+      withheld_information: ["舞踏会への招待"]
+      handoff_notes:
+        p700_narration: ["自由への願いを補う"]
+    cuts:
+      - cut_id: 1
+        visual_beat: "灰の床で出口へ視線を向ける"
+        cut_contract:
+          narration_contract:
+            story_role:
+              voice_function: emotion
+              must_cover: ["自由への願い"]
+              must_not_reveal: ["妖精の登場"]
+            visual_distance:
+              distance_policy: contextual
+              visible_facts_in_frame: ["灰の床", "出口を見る視線"]
+              narration_should_add: ["抑圧されても願いは消えない"]
+          motion_contract:
+            motion_brief: "出口へ駆け出す"
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "script.md").write_text(
+                """```yaml
+script_metadata:
+  ending_mode: happy
+scenes: []
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "ai" / "toc-immersive-narration-multiagent.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--min-cuts",
+                    "1",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            prompt = (run_dir / "scratch" / "narration" / "authoring_prompt.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("narration_prompt_projection_registry_v1", prompt)
+            self.assertIn("背景文脈（自動的に読み上げない）", prompt)
+            self.assertIn("17世紀末フランス・ルイ14世時代", prompt)
+            self.assertIn("happy", prompt)
+            self.assertIn("条件付き候補（必要な場合だけ語る）", prompt)
+            self.assertIn("朝", prompt)
+            self.assertIn("優先して追加する価値", prompt)
+            self.assertIn("抑圧されても願いは消えない", prompt)
+            self.assertIn("画面の見たままなので原則言い直さない", prompt)
+            self.assertIn("灰の床", prompt)
+            self.assertIn("妖精の登場", prompt)
+            self.assertIn("spoken_projection=must_not_surface", prompt)
+            self.assertNotIn("出口へ駆け出す", prompt)
+            self.assertEqual(prompt.count("17世紀末フランス・ルイ14世時代"), 1)
+            self.assertEqual(prompt.count("このシーンの時間帯"), 1)
+
     def test_revision_aware_merge_updates_script_then_syncs_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_narration_multiagent_revision_") as td:
             run_dir = Path(td)

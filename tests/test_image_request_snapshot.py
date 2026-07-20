@@ -44,6 +44,47 @@ def _item(
 
 
 class ImageRequestSnapshotTests(unittest.TestCase):
+    def test_materialize_hashes_existing_self_reference_instead_of_deferring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "scenes" / "scene1.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"existing-image")
+
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    _item(
+                        "scene1_cut1",
+                        "assets/scenes/scene1.png",
+                        references=["assets/scenes/scene1.png"],
+                    )
+                ],
+            )
+
+        reference = snapshot.items[0].references[0]
+        self.assertFalse(reference.deferred)
+        self.assertEqual(reference.sha256, sha256_text("existing-image"))
+        self.assertIsNone(reference.producer_item_id)
+
+    def test_materialize_rejects_missing_self_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            with self.assertRaisesRegex(ImageRequestSnapshotError, "self-reference does not exist"):
+                materialize_request_snapshot(
+                    run_dir,
+                    kind="scene",
+                    items=[
+                        _item(
+                            "scene1_cut1",
+                            "assets/scenes/scene1.png",
+                            references=["assets/scenes/scene1.png"],
+                        )
+                    ],
+                    defer_missing_references=True,
+                )
+
     def test_materialize_can_defer_cross_stage_reference_until_send(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)

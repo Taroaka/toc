@@ -1,4 +1,8 @@
 import base64
+import importlib.util
+import socket
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +15,83 @@ def _tiny_png_bytes() -> bytes:
 
 
 class TestKlingProvider(unittest.TestCase):
+    def test_standalone_kling_cli_blocks_unreviewed_provider_submission(self) -> None:
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "generate-kling-video.py"
+        spec = importlib.util.spec_from_file_location(
+            "generate_kling_video_under_test",
+            script_path,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    str(script_path),
+                    "--prompt",
+                    "unreviewed raw prompt",
+                    "--out",
+                    "clip.mp4",
+                ],
+            ),
+            mock.patch.object(module, "load_env_files"),
+            mock.patch.object(module.KlingClient, "start_video_generation") as submit,
+            self.assertRaisesRegex(SystemExit, "approved manifest request path"),
+        ):
+            module.main()
+
+        submit.assert_not_called()
+
+    def test_download_to_file_does_not_forward_provider_authorization(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *_args):  # noqa: ANN002, ANN204
+                return False
+
+            def read(self, limit: int = -1) -> bytes:
+                body = b"video-bytes"
+                return body if limit < 0 else body[:limit]
+
+        class FakeOpener:
+            def open(self, request, *, timeout):  # noqa: ANN001, ANN201
+                captured["request"] = request
+                captured["timeout"] = timeout
+                return FakeResponse()
+
+        public_dns = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+        with tempfile.TemporaryDirectory(prefix="kling_download_") as td:
+            out_path = Path(td) / "clip.mp4"
+            with (
+                mock.patch(
+                    "toc.providers.media_download.socket.getaddrinfo",
+                    return_value=public_dns,
+                ),
+                mock.patch(
+                    "toc.providers.media_download.urllib.request.build_opener",
+                    return_value=FakeOpener(),
+                ),
+            ):
+                KlingClient(KlingConfig(api_key="provider-secret")).download_to_file(
+                    uri="https://signed-cdn.example/clip.mp4?signature=abc",
+                    out_path=out_path,
+                )
+
+            self.assertEqual(out_path.read_bytes(), b"video-bytes")
+
+        request = captured["request"]
+        self.assertEqual(request.full_url, "https://signed-cdn.example/clip.mp4?signature=abc")
+        self.assertNotIn("authorization", {key.lower() for key in request.headers})
+
     def test_headers_support_official_jwt_auth(self) -> None:
         import json
 
@@ -84,11 +165,27 @@ class TestKlingProvider(unittest.TestCase):
             duration_seconds=6,
             aspect_ratio="9:16",
             resolution="720p",
-            extra_payload={"foo": {"bar": 1}, "duration_seconds": 12},
+            extra_payload={"foo": {"bar": 1}},
         )
         self.assertEqual(payload["foo"]["bar"], 1)
-        # extra_payload should be able to override defaults (deep merge behavior).
-        self.assertEqual(payload["duration_seconds"], 12)
+        self.assertEqual(payload["duration_seconds"], 6)
+
+    def test_build_video_payload_rejects_protected_extra_payload_overrides(self) -> None:
+        client = KlingClient(KlingConfig(api_key="test", video_model="kling-3.0"))
+        for extra_payload in (
+            {"prompt": "unreviewed"},
+            {"duration_seconds": 12},
+            {"input": {"prompt": "unreviewed"}},
+        ):
+            with self.subTest(extra_payload=extra_payload):
+                with self.assertRaisesRegex(ValueError, "protected"):
+                    client.build_video_payload(
+                        prompt="reviewed",
+                        duration_seconds=6,
+                        aspect_ratio="9:16",
+                        resolution="720p",
+                        extra_payload=extra_payload,
+                    )
 
     def test_start_video_generation_sends_extra_payload(self) -> None:
         captured = {}

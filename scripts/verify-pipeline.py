@@ -42,7 +42,7 @@ from toc.image_request_snapshot import (  # noqa: E402
 )
 from toc.semantic_review import check_image_prompt_judgment, check_semantic_review  # noqa: E402
 from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
-from toc.stage_evaluator import check_visual_value  # noqa: E402
+from toc.stage_evaluator import check_visual_value, scene_time_of_day_contract_missing  # noqa: E402
 from toc.story_duration import (  # noqa: E402
     MINIMUM_EFFECTIVE_RATIO,
     audit_duration,
@@ -389,6 +389,19 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
             details[f"missing_{field}_scene_ids"] = ",".join(missing[:20])
         add_check(checks, f"story.scene_{field}", not missing, f"all scripted scenes include {field}", kind="rubric")
 
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="story")
+    if missing_time_of_day is not None:
+        if missing_time_of_day:
+            details["missing_time_of_day_scene_ids"] = ",".join(missing_time_of_day[:20])
+        add_check(
+            checks,
+            "story.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored story scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
+
     research_refs_missing = [
         str(scene.get("scene_id") or index + 1)
         for index, scene in enumerate(scenes)
@@ -437,6 +450,16 @@ def check_script_single(run_dir: Path, profile: str, *, target_slot: str = "p450
     text, data = load_structured_document(path)
     append_grounding_checks(checks, run_dir=run_dir, stage="script")
     _script_text_quality_checks(checks, text, data, profile)
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="script")
+    if missing_time_of_day is not None:
+        add_check(
+            checks,
+            "script.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored script scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
     details: dict[str, Any] = {}
     require_scene_semantic = target_number in {410, 420} or target_number >= 500
     append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
@@ -496,6 +519,16 @@ def _manifest_checks(checks: list[dict[str, Any]], text: str, data: dict[str, An
     nodes = _iter_manifest_nodes(data)
     add_check(checks, f"{path_label}.scenes", len(scenes) >= 1, f"{path_label} contains scenes", kind="rubric")
     add_check(checks, f"{path_label}.nodes", len(nodes) >= 1, f"{path_label} exposes renderable nodes", kind="rubric")
+    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="manifest")
+    if missing_time_of_day is not None:
+        add_check(
+            checks,
+            f"{path_label}.scene_time_of_day",
+            not missing_time_of_day,
+            "all newly authored manifest scenes include non-empty time_of_day"
+            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
 
     if profile == "standard":
         add_check(checks, f"{path_label}.no_todo", not has_todo(text), f"{path_label} does not contain TODO/TBD markers", kind="rubric")
@@ -2011,9 +2044,14 @@ def _supervisor_result_issues(path: Path, *, run_dir: Path, bucket: str, state: 
     except json.JSONDecodeError:
         return [f"{bucket}:result_invalid_json"]
     issues: list[str] = []
+    pending_image_prompt_freeze = (
+        bucket == "p600"
+        and state.get("slot.p650.status") == "pending"
+        and state.get("review.image_prompt.request_freeze.status") == "draft"
+    )
     if payload.get("bucket") != bucket:
         issues.append(f"{bucket}:result_bucket_mismatch")
-    if payload.get("status") != "done":
+    if payload.get("status") != ("pending" if pending_image_prompt_freeze else "done"):
         issues.append(f"{bucket}:result_status_not_done")
     completed_slots = payload.get("completed_slots")
     if not isinstance(completed_slots, list) or not completed_slots:
@@ -2088,7 +2126,13 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
         call_status = state.get(f"{prefix}.call_status")
         supervisor_status = state.get(f"{prefix}.status")
         finished_at = state.get(f"{prefix}.finished_at")
-        if call_status != "returned" or supervisor_status != "done" or not finished_at:
+        pending_image_prompt_freeze = (
+            bucket == "p600"
+            and state.get("slot.p650.status") == "pending"
+            and state.get("review.image_prompt.request_freeze.status") == "draft"
+        )
+        expected_supervisor_status = "pending" if pending_image_prompt_freeze else "done"
+        if call_status != "returned" or supervisor_status != expected_supervisor_status or not finished_at:
             missing_returned_state.append(
                 f"{bucket}:call_status={call_status or '(unset)'},status={supervisor_status or '(unset)'},finished_at={finished_at or '(unset)'}"
             )
@@ -2096,7 +2140,7 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
         checks,
         "orchestration.state_terminal",
         not missing_returned_state,
-        "state.txt records every required L2 P-Bucket Supervisor as returned and done"
+        "state.txt records every required L2 P-Bucket Supervisor as returned and at its truthful workflow status"
         + (f" (missing/non-terminal: {', '.join(missing_returned_state)})" if missing_returned_state else ""),
         kind="rubric",
     )
@@ -2115,7 +2159,7 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
         checks,
         "orchestration.supervisor_results",
         not result_issues,
-        "required L2 supervisor result JSON files exist and report status=done"
+        "required L2 supervisor result JSON files exist and match the current workflow status"
         + (f" (issues: {', '.join(result_issues[:8])})" if result_issues else ""),
         kind="rubric",
     )

@@ -1,174 +1,99 @@
-# 収益化フロー設計
+# ToC acquisition and monetization design
 
-最終更新: 2026-04-26
+更新日: 2026-07-18
 
----
+## 1. Principle
 
-## 1. 収益化の全体マップ
+ToC の収益化は、YouTube 広告収益や民話制作代行を中心に置かない。個人が ToC を使って動画を作り、副業の検証または個人ブランドの構築を継続できる提供形態を中心に設計する。
 
-前提:
-
-- YouTube は `リスト集客` の場であり、動画内で直接売り切らない
-- 概要欄は `中間導線` として、制作ノート、改善提案、相談フォームへ送る
-- セールスは LP / フォーム / DM / 個別相談で行う
-- YouTube 長尺動画を原液にして、各SNSやLPへ横展開する
-
-```
-視聴者が動画を見る
-  │
-  ├─ [広告を見る] ────────────── AdSense広告収益（条件達成後に自動）
-  │
-  ├─ [説明欄リンクをクリック] ─── LP（販売ページ）
-  │                               ├─ ライセンス申込み（月額）
-  │                               ├─ 制作代行申込み（スポット）
-  │                               └─ 法人向け問い合わせ
-  │
-  ├─ [コメント・DM] ───────────── 個別相談 → 受託案件
-  │
-  └─ [メンバーシップ] ──────────── 制作過程の限定動画・Q&A（Phase 3以降）
+```text
+content / ad
+  -> persona LP
+  -> one-line idea
+  -> first-video experience
+  -> continued use
 ```
 
----
+## 2. Persona value
 
-## 2. AdSense 達成ロードマップ
+### Side business
 
-### 申請条件（2026年4月時点）
+The user pays to reduce the time, learning, and operational burden required to test video ideas. Do not sell guaranteed income.
 
-| 条件 | 必要数値 |
-|------|---------|
-| チャンネル登録者 | 1,000人以上 |
-| 過去12ヶ月の総視聴時間 | 4,000時間以上 |
+### Personal brand
 
-### 逆算シミュレーション
+The user pays to turn expertise and worldview into consistent, repeatable video publishing. Do not sell generic AI output as a brand solution.
 
-浦島太郎の動画が5分・平均視聴率60%の場合:
-- 1再生 = 3分の視聴時間
-- 4,000時間 = 240,000分 ÷ 3分 = **80,000再生が必要**
-- 10本投稿で割ると → 1本あたり約**8,000再生**が目安
+## 3. Offer architecture to validate
 
-### 現実的なスケジュール
+Final prices are not yet decided. Validate the delivery model before publishing a rate table.
 
-| 期間 | 目標 |
-|------|------|
-| 〜3ヶ月 | 登録者100人、累計視聴時間200時間 |
-| 〜6ヶ月 | 登録者500人、累計視聴時間1,500時間 |
-| 〜12ヶ月 | 登録者1,000人、累計視聴時間4,000時間（申請） |
+| Offer | Purpose | Likely persona |
+|-------|---------|----------------|
+| First video | experience the complete flow with one real idea | both |
+| Guided creator | recurring access with setup / review support | side business |
+| Brand system | brand brief, series design, repeated production | personal brand |
+| Done-for-you | managed production for cases that cannot self-operate | optional |
 
-**注意**: AdSenseの月収は初期は月数千〜数万円レベル。
-主目的は「チャンネルの信頼担保」と「視聴者層の把握」。
-メインの収益はサービス販売から得る設計にする。
+For each offer, decide:
 
----
+- deliverables
+- user-owned decisions
+- ToC-owned stages
+- turnaround target
+- included revisions
+- provider costs
+- support boundary
+- cancellation and data handling
 
-## 3. サービス販売フロー（LP設計）
+## 4. Site conversion
 
-### LP（ランディングページ）に必要な要素
+The canonical route is a dedicated public site with a native form. Do not use Notion or Google Forms as the standard landing or intake route.
 
-1. **ヒーロー動画**: 浦島太郎の完成映像（にわかのAIの実力を見せる）
-2. **ストーリー**: 「なぜ生成AIで世界中のナラティブを語り継ぐのか」の背景
-3. **制作の仕組み図**: 物語名→台本設計→動画生成までをAIエージェントが自動で組み立てる流れを図解
-4. **料金プラン**: 下表参照
-5. **問い合わせCTA**: Googleフォームやメールで可（最初期）
+Required pages:
 
-### LP 初期リリースの最小構成
+- common home
+- side-business LP
+- personal-brand LP
+- examples / proof
+- how it works
+- contact / idea intake
+- privacy
+- thank-you
 
-Notion（無料）でOK。以下だけあれば機能する:
-- 動画埋め込み（YouTube）
-- 料金表
-- 申込みフォーム（Googleフォーム）
+## 5. Evidence before sales claims
 
-初期LP原稿:
+Before selling speed:
 
-- `marketing/LP/niwakanoai-lp.md`
-- `marketing/LP/lead-form-schema.md`
+- measure elapsed and human working time
+- define the comparison baseline
+- disclose external generation waiting time
+- show the completed output and revision count
 
----
+Before selling side-business value:
 
-## 4. 料金プラン（初期版）
+- show how lower production burden increases the ability to test
+- do not claim or imply guaranteed revenue
 
-| プラン | 内容 | 価格 | 対象 |
-|--------|------|------|------|
-| **ライセンス** | GitHub Private Repoアクセス + セットアップドキュメント | 月額 ¥9,800 | 自分でやりたい個人・法人 |
-| **プロ（サポート付き）** | ライセンス + 月1回オンラインQAセッション（30分） | 月額 ¥29,800 | サポートが欲しい方 |
-| **制作代行** | 民話1本（〜3分）のフル制作・納品 | ¥150,000〜/本 | 自分では作れない方 |
-| **法人ライセンス** | 複数タイトル・ホワイトラベル・社内展開対応 | 要見積もり | 出版社・教育機関・放送 |
+Before selling brand value:
 
-### 価格設定の根拠
+- show brand brief, series consistency, and human approval
+- demonstrate that different creators do not collapse into the same style
 
-- ライセンス ¥9,800: SaaS型ツールの相場感（Notion, Figmaなど）
-- プロ ¥29,800: ライセンス + コンサル30分（時給換算 ¥40,000相当）
-- 制作代行 ¥150,000〜: 映像制作会社の最安値帯と同水準。AI効率化込みで利益率は高い
+## 6. Acquisition sequence
 
----
+1. Build common site and persona LPs
+2. Publish diverse proof examples
+3. Validate native form and follow-up operation
+4. Test organic packaging for each persona
+5. Turn winning hooks into Meta creatives
+6. Optimize for qualified lead and first-video start
+7. Validate continued use before scaling ad spend
 
-## 5. 収益モデル比較と選択
+## 7. Reply principles
 
-| モデル | 初期工数 | 継続工数 | 収益上限 | 推奨タイミング |
-|--------|---------|---------|---------|--------------|
-| ライセンス販売 | 小（ドキュメント整備） | 小 | 中（人数×月額） | **Phase 1から可能** |
-| 制作代行 | 中（見積・納品フロー） | 高（1案件ずつ） | 高（単価大） | Phase 2以降 |
-| 月額コミュニティ | 高（コンテンツ設計必要） | 高（継続提供） | 中〜高（積み上げ） | Phase 3以降 |
-
-**推奨戦略**: Phase 1〜2はライセンス販売を主軸。制作代行は来た問い合わせのみ対応（断らない）。月額コミュニティはチャンネル1,000人超えてから検討する。
-
----
-
-## 6. 段階別 優先アクション
-
-```
-TODAY
-  └─ 浦島太郎 video.mp4 を完成させる
-
-WEEK 1
-  └─ YouTubeチャンネル開設
-  └─ 説明欄にLP仮URL（Notionページ）を記載
-
-MONTH 1
-  └─ LP（Notion）を最小限の形で公開
-  └─ 問い合わせが来た場合の返答テンプレートを用意
-
-MONTH 2〜3
-  └─ 実績（再生数・問い合わせ数）を元にLPをアップデート
-  └─ 料金プランに制作代行を追加
-
-MONTH 6
-  └─ AdSense申請（条件達成次第）
-  └─ 料金プランの見直し（値上げ or 追加プラン）
-
-YEAR 1
-  └─ 法人向けプランの設計開始
-  └─ 代理店パートナー検討（映像制作会社・広告代理店）
-```
-
----
-
-## 7. 問い合わせ対応テンプレート
-
-初回問い合わせへの返答（メール / DM）:
-
-```
-（相手の名前）さん、ご連絡ありがとうございます。
-
-にわかのAIの制作システムについてのお問い合わせを受け付けました。
-
-まず、現在提供しているプランをご案内します:
-[LP URL]
-
-ご要望に合ったプランをご確認いただき、
-ご不明点があればこちらのフォームからお気軽にどうぞ:
-[Googleフォーム URL]
-
-引き続きよろしくお願いいたします。
-```
-
----
-
-## 8. リスクと対策
-
-| リスク | 対策 |
-|--------|------|
-| 登録者1,000人に達しない | Shorts展開 / コラボ企画でショートカット |
-| 問い合わせが来ない | 全自動生成の裏側動画で「物語名だけで動画化できる仕組み」への興味を喚起する |
-| 制作代行の工数が大きすぎる | 受付上限を月1〜2本に制限。価格を上げて調整 |
-| AIツールのAPI料金が上がる | 複数プロバイダ対応でリスク分散 |
-| 動画がBANされる | 著作権フリーの民話を選ぶ（浦島太郎・桃太郎は問題なし） |
+- repeat the visitor's video idea, not a generic sales greeting
+- clarify audience, desired outcome, format, and available time
+- never promise views, revenue, or brand growth
+- explain what ToC handles and what the user must decide
+- route side-business and personal-brand leads to different follow-up questions

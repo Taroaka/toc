@@ -524,6 +524,9 @@ stage target resolution:
 #### Duration-aware story run contract
 
 - create API の request field は `target_duration_seconds`。省略時は `300`、整数 `300..1200` のみを受け付ける。以下、この値を `T` とする。
+- `story.md.story_metadata.time` は物語世界の歴史的時代を表す string とする。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作は `""` を許容する。`story.md.story_metadata.time -> script.md.script_metadata.time -> video_manifest.md.video_metadata.time` の一方向だけで projection し、非空値は asset / scene image provider prompt の時代整合制約と video provider prompt の continuity に含める。空文字では時代用 fragment を生成しない。
+- p600 の candidate request を materialize した時点では `slot.p650.status=pending`、`review.image_prompt.request_freeze.status=draft` とする。image-prompt semantic repair は `video_manifest.md.scenes[].cuts[].image_generation.first_frame_visual_plan` と cut-local dependency/reference を修正し、orchestrator が payload / request Markdown / snapshot を同期再生成する。asset 生成後かつ semantic pack 構築前に全 scene reference を実在 bytes の sha256 へ束縛し、provider-ready request revision を確定する。deterministic hard gate と semantic report が同一 revision で pass した後の freeze は snapshot を変更せず、strict validation と state 遷移だけを行う。その場合だけ `request_freeze.status=frozen`、`slot.p650.status=done`、p600 supervisor result `status=done` にできる。
+- repair が `video_manifest.md.assets` を変えた場合は `asset_plan.md` と asset request/snapshot を共通 compiler から再 projection し、変更 asset の生成後に scene snapshot の参照 hash を再束縛する。修正後の deterministic story-consistency report も再生成し、修正前 report や旧 asset prompt/source digest を current revision として扱わない。
 - request、`runtime.target_video_seconds`、`research.md.metadata.target_duration_seconds`、`story.md.story_metadata.target_duration_seconds`、`script.md.script_metadata.target_duration_seconds`、`video_manifest.md.video_metadata.target_duration_seconds` は同じ `T` を保持し、後段が独自の固定 300 秒へ戻してはならない。
 - research/story の semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。review transport failure、criterion 欠落、根拠欠落、failed criterion は pass とみなさない。
 - semantic repair 後は artifact を再読し、research の `metadata.target_duration_seconds` / `duration_plan` と story の `story_metadata.target_duration_seconds` / scene / narration floors を request target に再照合する。不一致は `review.*.duration_contract.status=failed` として story または cut materialization 前に停止する。
@@ -785,13 +788,78 @@ output/<topic>_<timestamp>/
 
 この manifest の契約は、最終的に `scripts/generate-assets-from-manifest.py` が読み取り、各 provider に投げる前提。
 
+### 4.0 Historical era と scene time-of-day
+
+- `story.md.story_metadata.time` は物語世界全体の**歴史的時代**を表す string である。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作では `""` を許容する
+- `story.md.script.scenes[].time_of_day` は各 scene の**一日の時間帯**を表す open string である。`朝` / `昼` / `夕方` / `夜` は例であり、`夜明け前` / `真夜中` / `薄暮` なども許容する。新規 artifact では各 scene に非空値を必須とする
+- 新契約の明示 marker は `story_metadata.scene_time_of_day_contract -> script_metadata.scene_time_of_day_contract -> video_metadata.scene_time_of_day_contract` の一方向 projection で、値は exact `required_v1` とする。対応 metadata にこの marker がある artifact だけ全 scene の非空 gate を有効化する。歴史的時代の `time` key は marker に使わず、marker がない legacy artifact では scene `time_of_day` の missing / empty を読み込み互換として許容する
+- projection は `story.md.script.scenes[].time_of_day -> script.md.scenes[].time_of_day -> video_manifest.md.scenes[].time_of_day` の一方向とする。`visual_world.setting.time_of_day` などに別の authoring 正本を作らない。derived artifact に複写する場合も `scene.time_of_day` からの read-only projection とする
+- 新規 artifact は `scene_time_of_day_visual_basis_contract: required_v1` を metadata 間で exact projection し、各 scene の `time_of_day_visual_basis` を同一値で story → script → manifest へ渡す。この field は `time_of_day` から導く review evidence で、光源・空/窓外の明るさ・影・色温度をすべて含む。provider prompt の独立 authoring sourceにはせず、画像・動画・ナレーション各 projection registry で `review_only` / `none` を明示分類する
+- 複数場所 scene は story の `location.mode: sequence` / `location.sequence[]` / `location.segments[]` を正本とする。`segments[]` は sequence の各場所を重複なく一度ずつ覆い、各 item に `location / responsibility / primary_subject / visible_action / required_visual_evidence / required_roles / motion_brief / motion_end_state` を必須とする。任意の `visible_character_state` は `posture / gaze / expression / hands / feet` を持ち、still prompt の人物状態へだけ投影する。script / manifest の `location_mode` / `location_sequence[]` / `location_segments[]` へ順序と値を保って projection する。scene authoring / narration review は全経路を見てよいが、cut image / video prompt は primary event beat に対応する一つの segment と一場所だけを dependency とする
+- cut materialization は `primary event beat の where == location reference == spatial background == provider prompt 内の唯一の route location` を fail-closed で検証する。未配置 segment、別場所の文言混入、場所参照との不一致があれば画像・動画 requestを作らない
+- `story_metadata.time` は衣装、髪型、建築、生活道具、素材、技術水準へ効かせる。`scene.time_of_day` は空の明るさ、自然光と人工光、影、色温度へ効かせる。両者を相互に推測・代用しない
+- cut image compiler は非空の scene 値を `drawable_prompt_ir.dependencies.time_of_day` と `time_of_day` group に exact binding する。legacy の missing / empty 値では同 group を生成せず、後段で placeholder を捏造しない
+- video prompt compiler は非空の `video_metadata.time` / `scene.time_of_day` を `video_prompt_ir.dependencies` に exact binding し、動画中に時代や時間帯を描き直す指示ではなく `continuity` fragment として維持する。time-lapse、衣装替え、建築変更、日の出・日没を metadata だけから発明しない
+- 時代または時間帯そのものが変わる cut は metadata の暗黙変換で表現せず、canonical event / motion / end-state 設計へ明示する
+- reusable character / object / location asset prompt に scene 固有の `time_of_day` を自動付与しない。時間帯別 asset が必要な場合は、意図した reusable variant として別途宣言する
+
+#### 4.0.1 Location function / cut-obligation overrides
+
+`location_segments[]` は場所単位の scene 設計であり、provider prompt そのものではない。同じ segment が複数の `setup | pressure | turn | payoff` beat を担う場合、任意の空 map を持てる。
+
+```yaml
+location_segments:
+  - location: "<このsegmentの一場所>"
+    primary_subject: "<segment既定の主体>"
+    primary_subject_by_function: {}
+    beat_overrides: {}
+```
+
+- `primary_subject_by_function.<function>` は、その function の primary subject だけを segment 既定値から切り替える
+- `beat_overrides.<function>` は function に対応する一つの canonical event beat を具体化する。`primary_subject / visible_action / visible_reaction / required_visual_evidence / required_roles / visible_character_state / motion_brief / motion_end_state / motion_attention_target` を必要なものだけ持つ
+- `beat_overrides.<function>.obligation_overrides.<obligation_id>` は、その beat へ割り当てられた一つの cut 責務だけを上書きする。key は次に限定する
+  - `primary_subject`
+  - `visible_action` / `visible_reaction`
+  - `required_visual_evidence[]` / `required_roles[]`
+  - `visible_character_state`（`posture / gaze / expression / hands / feet`）
+  - `motion_brief` / `motion_end_state` / `motion_attention_target`
+  - `environment_motion` / `emotional_change`
+  - `retain_carried_character_subjects: boolean`
+  - `allowed_new_reveal_elements: [string, ...]`
+  - `allowed_reveal_info_ids: [string, ...]`
+  - `use_next_cut_first_frame_as_last_frame: boolean`
+
+projection precedence は `obligation_overrides.<obligation_id> -> beat_overrides.<function> -> primary_subject_by_function.<function> / segment既定値 -> scene既定値`。map の不在または `{}` は継承を表し、未指定 field を空値で消さない。`retain_carried_character_subjects` の既定は `true` である。`false` は前 cut から自動的に carry された character subject / reference を当該 cut で保持しない指定であり、同じ cut の `required_roles`、明示 evidence、canonical event の人物を削除しない。
+
+`allowed_new_reveal_elements`、`allowed_reveal_info_ids`、`use_next_cut_first_frame_as_last_frame` は **exact `obligation_id` の entry にだけ許可する**。segment root / `beat_overrides.<function>` root の共有値として sibling obligation へ伝播させない。
+
+- `allowed_new_reveal_elements[]` は開始画像にないが当該 cut の主動作で因果的に現れてよい具体的な画面要素。非空・一意、最大8件とし、各値が exact obligation の `motion_brief` または `motion_end_state` に文字列として接地し、`must_not_add[]` と交差しないことを compile 前後で検証する
+- `allowed_reveal_info_ids[]` は canonical scene / event の reveal inventory に存在する ID だけを受け付け、当該 cut の `source_event_contract.allowed_reveal_info_ids` / narration allowed info へ投影する。同じ cut の forbidden reveal からだけ除外し、provider prompt 本文へ ID を出さない
+- `use_next_cut_first_frame_as_last_frame: true` は次 cut が存在し、current / next cut の location が同一で、current `motion_end_state` と許可済み reveal が next `first_frame_contract` に一致するときだけ有効。materializer は current `video_generation.last_frame` を next cut の first-frame imageへ束縛し、next image の approval / bytes / hash を provider-request identity に含める
+- 境界指定だけでは reveal を許可しない。開始画像から新要素が現れる場合は `allowed_new_reveal_elements`、物語情報を解禁する場合は `allowed_reveal_info_ids` も同じ exact obligation に必要である
+
+投影境界は次の通り。
+
+1. segment と function から canonical event beat を確定する
+2. beat に cut obligation を割り当て、exact obligation override を解決する
+3. image 側は `primary_subject / visible_action / visible_reaction / required_visual_evidence / required_roles / visible_character_state` から一枚の `first_frame_visual_plan` を作る。future motion は still prompt 本文へ出さない
+4. video 側は承認済み first frame を開始状態とし、`motion_brief / motion_end_state / motion_attention_target / environment_motion / emotional_change` を対応する motion fragment へ投影する
+5. provider prompt へは解決後の描画・motion 文だけを送り、`primary_subject_by_function`、`beat_overrides`、`obligation_overrides`、function / obligation ID、未選択候補を出さない
+
+video compiler は非空の `allowed_new_reveal_elements` を positive `constraints` fragment に「主動作によって新しく現れてよいもの」として出し、それ以外の新規人物・重要物・建築・revealを禁止する。`negative_prompt_mode: separate` では、この正の allowlist 文と許可要素名を separate `negative_prompt` から除外し、「承認済み要素以外」の禁止だけを残す。`inline` mode では保存 `negative_prompt` は空で、同じ allowlist / prohibition を positive prompt の constraints 内に保持する。
+
+override は segment の `location` を変更できない。cut の event location、location reference、first-frame background、provider prompt 内の route location は同じ一場所でなければならない。主被写体、action、reaction、evidence、roles は具体的な一状態へ確定し、actor inversion、別場所混入、`または` 等の未解決 alternative を fail closed にする。
+
 ### 4.1 `assets`（bible）
 
 - `assets.character_bible[]`（人物の参照画像 + 不変条件 + optional な体格契約）
+- `assets.character_bible[].appearance_continuity.costume_state` / `forbidden_costume_states[]`（optional。人物entry自体が状態別assetである場合）
 - `assets.character_bible[].reference_variants[]`（optional）
   - `variant_id`
   - `reference_images: [string, ...]`
   - `fixed_prompts: [string, ...]`（optional）
+  - `appearance_continuity.costume_state: string`（optional。描画する現在の衣装状態）
+  - `appearance_continuity.forbidden_costume_states: [string, ...]`（optional。近接する別 variant の先取り・逆戻り防止）
 - `assets.character_bible[].review_aliases[]`（optional。story/script review で使う別名）
 - `assets.character_bible[].physical_scale.height_cm|body_length_cm|shell_length_cm|shoulder_height_cm`（optional）
 - `assets.character_bible[].physical_scale.silhouette_notes[]`（optional）
@@ -805,7 +873,7 @@ output/<topic>_<timestamp>/
 ### 4.2 `scenes[].image_generation` / `scenes[].cuts[].image_generation`
 
 - production cut image の送信正本は `api_prompt_payload.prompt`（正本: `docs/implementation/image-prompting.md`）
-- `api_prompt_payload.policy_version` は `image_api_prompt_v2`、`compiler_version` は `conditional_drawable_prompt_compiler_v1` とする
+- `api_prompt_payload.policy_version` は `image_api_prompt_v2`、`compiler_version` は `conditional_drawable_prompt_compiler_v3` とする
 - `first_frame_visual_plan` は derived design、`api_prompt_payload.drawable_prompt_ir` は条件付き抽出結果であり、provider へは送らない
 - `prompt` は `image_api_prompt_v1` 互換の read-only field。v2 failure 時の暗黙 fallback に使わない
 - 言語: provider-facing `api_prompt_payload.prompt` は原則 **日本語**
@@ -815,6 +883,21 @@ output/<topic>_<timestamp>/
 - `object_variant_ids: []` は optional。複数 variant がある object/setpiece を scene/cut ごとに切り替えるときに使う
 - 新規の静止画生成は必須ではない。連続性アンカーを作る scene/cut、または同じ場所/物体/人物状態を複数scene/cutで再利用したい場合に優先する
 - 既存の参照画像や直前の anchor frame を再利用できる場合は、同じ構図の再生成を避けてよい
+
+### 4.2.1 `scenes[].video_generation` / `scenes[].cuts[].video_generation`
+
+- canonical story / scene / cut design と provider prompt を分離する。詳細正本は [`docs/implementation/video-prompting.md`](implementation/video-prompting.md)
+- provider へ送る motion text は materialize 済み `video_generation.api_prompt_payload.prompt`
+- `api_prompt_payload.policy_version` は `video_api_prompt_v1`、`compiler_version` は `conditional_video_prompt_compiler_v3`、`projection_registry_version` は `video_prompt_projection_registry_v3`
+- `video_prompt_ir` と `projection_review_contract` は review / trace 用であり、provider prompt 本文へ出さない
+- `projection_review_contract.review_only_sources[]` は `must_not_surface` source の `source_key` と exact `value` を reviewer / `source_digest` に保持する。daypart visual basis、scene route / segments、cut responsibility、event / reveal 境界、image / narration prose、reference path を provider prompt 本文へ転載しない
+- compiler は `quality_issues[]` を `api_prompt_payload` と `video_prompt_ir` に同値で保存する。`blocking: true` の issue が一件でもある target は canonical motion field を修正して再 compile するまで approval / provider execution へ進めない
+- `prompt_authoring_source` は frontend / legacy 自由文の compatibility input。canonical `cut_contract` に同じ group の値がある場合は canonical 値を優先する
+- `motion_prompt` は legacy 入力として読めるが、新規 artifact では `api_prompt_payload.prompt` の read-only compatibility projection とし、compiled payload がある場合の送信正本にしない
+- first frame は開始境界、last frame は到達境界である。last frame を別 shot として挿入せず、一つの連続運動で到達する
+- authoring identity（canonical design + fallback source）、compiler identity（version + `source_digest`）、persisted provider-request identity（prompt / negative prompt / `provider_request_binding`）を分離する。`motion_prompt` から authoring identity へ逆投影しない
+- frontend/server、CLI、scene storyboard は同じ compiler output を target に保存してから生成する。未 materialize または current design / settings と不一致の payload は stale として拒否する
+- materialize-only は target を `pending` にする。frontend/server approval workflow の明示的な `approve_for_generation` 以外、CLI の materialize / 通常実行を含む経路は未承認 target を自動承認しない
 
 ### 4.3 `scenes[].cuts[]`（optional, recommended）
 
@@ -848,8 +931,27 @@ output/<topic>_<timestamp>/
   - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
   - optional `render_units[]` を持てる
     - `render_units[]` は最終 render 用の動画クリップ単位
-    - `unit_id`, `source_cut_ids[]`, `video_generation` を持つ
+    - `unit_id`, `source_cut_ids[]`, optional unit-level `cut_contract`, `video_generation` を持つ
     - scene に `render_units[]` がある場合、最終 render の動画正本は cut ではなく render unit 側を使う
+    - `source_cut_ids[]` は canonical cut 順の非空 list。active cut は scene 内で exactly once 被覆し、重複・欠落・deleted cut 参照を許さない
+    - unit duration は source cut duration の合計と一致させる。provider 上限（現在 60 秒）を超える場合は unit を分割する
+    - 1 cut unit は source contract を exact 継承する。複数 cut unit の effective contract は先頭の first-frame 境界、末尾の end-state、全 source cut の continuity / prohibition を合成し、explicit unit contract を同 group の優先値として重ねる
+    - 複数 cut の個別 action は連結しない。unit 全体の一つの primary motion は unit-level contract / authoring source に明示する
+
+```yaml
+render_units:
+  - unit_id: 1
+    source_cut_ids: [1, 2]  # canonical cut order
+    cut_contract:           # optional explicit unit-level override
+      motion_contract:
+        motion_brief: "<unit全体を代表する一つの主動作>"
+    video_generation:
+      duration_seconds: "<cut1 duration + cut2 duration>"
+      prompt_authoring_source: "<unit-level fallback>"
+      api_prompt_payload:
+        source_digest: "<ordered source_cut_ids/source contractsも含む>"
+        prompt: "<exact compiled unit prompt>"
+```
 
 generator の読み順:
 
@@ -861,9 +963,12 @@ generator の読み順:
   5. immutable request snapshot
   6. narration は authoring の補助参照に留め、provider payload には入れない
 - video generation
-  1. `video_manifest.md`
-  2. `script.md`
-  3. narration は補助参照
+  1. `video_manifest.md` の canonical `cut_contract`、first / last frame、provider settings
+  2. `script.md` の story / reveal 境界（必要時の review context）
+  3. video projection registry / compiler
+  4. materialized `video_generation.api_prompt_payload`
+  5. `video_generation_requests.md` の exact prompt review projection
+  6. provider 実行は保存済み payload を読み、narration は補助参照に留める
 
 制約:
 
@@ -871,7 +976,10 @@ generator の読み順:
 - `tts_text` を image/video generation の主ソースにしてはならない
 - `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
 - materialize された `image_generation_requests.md` は human review projection として `source_requests` metadata と exact `api_prompt` fence を含んでよい。production v2 の実行正本は `image_generation_request_snapshot.json` とする
-- `video_generation_requests.md` は引き続き video request の review artifact として扱う
+- `video_generation_requests.md` は exact compiled prompt、policy / compiler version、source digest、prompt hash、provider settings を表示する review artifact とする。runtime は Markdown を再解釈して provider prompt を再構成しない
+- `video_generation_requests.md` は positive prompt を `video_prompt` fence、negative prompt を `negative_prompt` fence に exact 保存し、`negative_prompt_sha256` と target section 全体の `request_section_sha256` を approval に束縛する
+- provider 実行前に保存済み payload の `prompt` / `negative_prompt` / `sha256` / `source_digest` / `provider_request_binding` と current canonical design の再 compile 結果、tool / duration / quality / aspect ratio / first / last / ordered references / reference content hash / model / execution options を照合する。不一致または payload 不在は再 materialize まで停止する
+- per-item approval identity は `status=approved`、`request_section_sha256`、prompt `sha256`、`source_digest`。`approved_by` / `approved_at` は audit metadata であり、identity binding の代用にしない
 - story cut の `video_generation` 採否は human review 正本に従う
   - `delete_scene` / `delete_cut` で消されていない cut は既定で `video_generation` を持つ
   - `still_image_plan.mode` は image planning 用であり、動画 cut の削除理由には使わない
@@ -1052,6 +1160,8 @@ location の例外ルール:
   - 人間レビュー時の固定観点
 - `script.md.script_metadata.ending_mode`（optional）
   - `happy|bittersweet|tragic|cautionary|ambiguous`
+  - p700 authoring後のscript→manifest syncで `video_manifest.md.video_metadata.ending_mode` へexact one-way projectionする
+  - p700 authoring promptとp720 semantic reviewは、このruntime projectionを同じkey sourceとして読む
 - `script.md.scenes[].narration_distance_policy`（optional）
   - `stay_close|contextual|meaning_first`
 - `script.md.scenes[].narrative_value_goal`（optional）
@@ -1333,11 +1443,25 @@ Image contract:
 
 Production v2 prompt groups:
 
-- 常時: `style`, `current_moment`, `primary_subject`, `composition`, `constraints`
+- 常時: `style`, `current_moment`, `constraints`
+- metadata 条件付き: `story_time`, `time_of_day`
 - dependency 条件付き: `references`, `characters`, `objects`, `location`
-- explicit drawable value 条件付き: `light_material`, `current_state_delta`
+- explicit drawable value 条件付き: `primary_subject`, `composition`, `light_material`, `current_state_delta`
+
+Prompt projection registry:
+
+- schema/version: `prompt_projection_registry_v2`
+- code source of truth: `toc/image_prompt_projection_registry.py`
+- 各ruleは `source_keys`, `relevance: required|conditional|none`, `target_group`（`none`以外）、`transform`, `deterministic_checks`, `semantic_checks` を持つ
+- `none` ruleは `exclusion_reason` を持ち、例として `cut_contract.motion_contract.motion_brief` はp800専用のためstill promptへ投影しない
+- semantic image prompt entryは `prompt_projection_review_contract` にregistry version、不変原則、active/inactive/excluded rules、expected required groups、`include|omit|add|replace` operationsを持つ
+- 新しい設計keyを追加する変更はprompt relevanceを必ず分類し、`required|conditional`ならprojection/review/test、`none`なら除外理由を同時に追加する
 
 subagent review は `drawable_prompt_ir.dependencies.required_groups` をその entry の必須 criterion とする。required group の欠落、不要 group の混入、空 fragment、`included_fragments[].text` と `api_prompt_payload.prompt` の不一致を `agent_review_ok: false` にする。`missing_required_prompt_block` は `image_api_prompt_v1` の legacy criterion とし、v2 に固定6ブロックを要求しない。
+
+registryでactiveとなったgroupは、正本source value、IR dependency、raw `required_groups`、exactly oneの非空fragment、provider promptのtraceを持つ。値bindingを持つgroupはfragmentとprovider promptにも正本値がexactに現れなければならず、dependencyだけ一致する状態をpassにしない。
+
+自己申告された `required_groups` だけで completeness を判定しない。`video_manifest.md.video_metadata.time` が非空なら exact `dependencies.story_time` と `story_time` fragment、同一 `video_manifest.md.scenes[].time_of_day` が非空なら exact `dependencies.time_of_day` と `time_of_day` fragment を独立に必須とする。
 
 ---
 
@@ -2406,6 +2530,23 @@ first_frame_visual_plan:
     primary_subject: {}
     secondary_subjects: []
     background_subjects: []
+  reference_binding:
+    character_references: []
+    object_references: []
+    location_references: []
+  character_state_gate:
+    pose: ""
+    gaze: ""
+    expression: ""
+    hand_position: ""
+    foot_position: ""
+    physical_state: ""
+    character_states:
+      - character_id: "<image_generation.character_ids[] の一要素>"
+        character_name: "<同一人物の表示名>"
+        appearance_continuity:
+          costume_state: "<現在描画する衣装状態>"
+          forbidden_costume_states: []
   object_visibility_gate:
     objects: []
   spatial_composition:
@@ -2415,6 +2556,8 @@ first_frame_visual_plan:
     subject_priority_order: []
     frame_edge_handoff: ""
   scene_material_pack:
+    # scenes[].time_of_day からの read-only projection。独立 authoring しない。
+    time_of_day: "夜明け"
     light_source: ""
     dominant_materials: []
     story_specific_texture: ""
@@ -2432,6 +2575,8 @@ first_frame_visual_plan:
 
 `motion_affordance` は review 用の境界情報であり、`motion_brief` は p800 専用である。image prompt compiler は `motion_brief` を入力にせず、`first_frame_visual_plan` 内でも描画可能な現在状態だけを採用する。
 
+`character_state_gate.character_states[]` は optional で、衣装などの状態 variant がある人物だけを持つ。`assets.character_bible[].appearance_continuity`、または `image_generation.character_variant_ids[]` で選んだ `reference_variants[].appearance_continuity` から一方向に導出する。各 `character_id` は同じ cut の `image_generation.character_ids[]` に存在しなければならず、配列順や主被写体に依存してはならない。compiler は reference binding の canonical identity と人物名を照合し、人物名付きの衣装文を生成する。projection trace は同一行に `character_name` と各 `costume_state` / `forbidden_costume_states[]` が揃うことを検証し、人物間の入れ替えも fail closed にする。legacy の flat `character_state_gate.costume_state` は旧 artifact の読み込み用に保持できるが、複数人物の新規 artifact では使わない。
+
 ## Drawable Prompt IR v1
 
 production cut image は `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` の一方向変換とする。IR は provider prompt そのものではなく、どの描画断片を採用したかを検証する derived artifact である。
@@ -2444,28 +2589,28 @@ drawable_prompt_ir:
     object_ids: []
     location_ids: []
     references: []
+    time_of_day: "夜明け"
     required_groups:
       - style
+      - time_of_day
       - current_moment
-      - primary_subject
-      - composition
       - constraints
   included_fragments:
     - group: "style"
       text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
+    - group: "time_of_day"
+      text: "このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。"
     - group: "current_moment"
       text: "画面には、<この cut で現在見える出来事の証拠>。"
-    - group: "primary_subject"
-      text: "観客が最初に読む主被写体は、<描画可能な主被写体>。"
-    - group: "composition"
-      text: "<主被写体と空間の優先順位が読める構図>。"
     - group: "constraints"
       text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。"
   omitted_groups:
     - references
+    - primary_subject
     - characters
     - objects
     - location
+    - composition
     - light_material
     - current_state_delta
 ```
@@ -2473,25 +2618,27 @@ drawable_prompt_ir:
 group の canonical order と採用条件:
 
 1. `style`（常時）
-2. `references`（references が1件以上）
-3. `current_moment`（常時）
-4. `primary_subject`（常時）
-5. `characters`（`character_ids` が1件以上）
-6. `objects`（`object_ids` が1件以上）
-7. `location`（`location_ids` が1件以上）
-8. `composition`（常時）
-9. `light_material`（明示された非定型の描画値がある）
-10. `current_state_delta`（sequential progression の明示された描画値がある）
-11. `constraints`（常時）
+2. `story_time`（`video_metadata.time` が非空）
+3. `time_of_day`（`scenes[].time_of_day` が非空）
+4. `references`（references が1件以上）
+5. `current_moment`（常時）
+6. `primary_subject`（`subject_binding.primary_subject.name|label` に描画可能な値がある）
+7. `characters`（`character_ids` が1件以上）
+8. `objects`（`object_ids` が1件以上）
+9. `location`（`location_ids` が1件以上）
+10. `composition`（subject priority、shot size、camera angle/height のいずれかに描画可能な値がある）
+11. `light_material`（明示された非定型の描画値がある）
+12. `current_state_delta`（sequential progression の明示された描画値がある）
+13. `constraints`（常時）
 
-`dependencies.required_groups` は採用した全 group を canonical order で持つ。各 `included_fragments[].text` は exact `api_prompt_payload.prompt` に含まれなければならない。dependency が無い group、空 text、定型 placeholder は採用しない。「人物なし」「小道具なし」の穴埋めも禁止し、不在自体が画面上の重要な証拠である場合だけ `constraints` 等の描画文へ落とす。
+`dependencies.story_time` は非空の `video_manifest.md.video_metadata.time`（script/story metadata からの projection）、`dependencies.time_of_day` は非空の同一 `video_manifest.md.scenes[].time_of_day` と exact match しなければならない。`dependencies.required_groups` は採用した全 group を canonical order で持つ。各 `included_fragments[].text` は exact `api_prompt_payload.prompt` に含まれなければならない。値が空の `story_time` / `time_of_day` は dependency / `required_groups` / `included_fragments` / `omitted_groups` のいずれにも placeholder として追加しない。dependency が無い group、空 text、定型 placeholder は採用しない。「人物なし」「小道具なし」の穴埋めも禁止し、不在自体が画面上の重要な証拠である場合だけ `constraints` 等の描画文へ落とす。
 
 ## Image API Prompt Payload v2
 
 ```yaml
 api_prompt_payload:
   policy_version: "image_api_prompt_v2"
-  compiler_version: "conditional_drawable_prompt_compiler_v1"
+  compiler_version: "conditional_drawable_prompt_compiler_v3"
   prompt: "<included_fragments の描画文だけを自然文化した exact provider prompt>"
   negative_prompt: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト"
   reference_instructions: ""
@@ -2524,7 +2671,7 @@ items:
     prompt: "<exact api_prompt_payload.prompt>"
     prompt_sha256: "<sha256-of-exact-prompt>"
     prompt_policy_version: "image_api_prompt_v2"
-    compiler_version: "conditional_drawable_prompt_compiler_v1"
+    compiler_version: "conditional_drawable_prompt_compiler_v3"
     source_digest: "<sha256-of-compilation-source>"
     references:
       - path: "assets/characters/protagonist_front.png"
@@ -2535,3 +2682,184 @@ items:
 ```
 
 runtime は Markdown から provider request を再構成せず、snapshot item の prompt / destination / references / hashes / revision を検証してから送信する。Markdown drift、source digest drift、reference content drift、prompt hash mismatch は stale request として停止する。並列 worker は item ごとの immutable snapshot と destination ownership に束縛し、同じ destination の重複実行や別 revision の結果混在を許可しない。output provenance は少なくとも `request_revision`、`request_digest`、`prompt_sha256`、`compiler_version` と照合できるようにする。
+
+## Video Prompt Projection Registry v3
+
+code source of truth は `toc/video_prompt_projection_registry.py`。registry version は `video_prompt_projection_registry_v3`。運用詳細は [`docs/implementation/video-prompting.md`](implementation/video-prompting.md) を正本とする。
+
+canonical group order:
+
+1. `start_state`
+2. `primary_motion`
+3. `camera_motion`
+4. `environment_motion`
+5. `emotional_change`
+6. `end_state`
+7. `continuity`
+8. `constraints`
+
+各 rule は次の 3 axes を持つ。
+
+- `authoring_relevance: required|conditional|none`
+- `provider_projection: derive|may_surface|must_not_surface`
+- `review_visibility: projection|review_only|none`
+
+併せて `source_keys`、`target_group`、`transform`、`semantic_checks`、必要なら `activation_dependency` / `exclusion_reason` を持つ。`cut_function`、`target_beat`、event / reveal ID は `review_only`、image / narration prose は動画 motion の source とせず `must_not_surface` とする。`scene.time_of_day_visual_basis`、`scene.location_mode / location_sequence / location_segments`、参照 path も `review_only / must_not_surface` であり、exact value は `review_only_sources[]` と `source_digest` に残す。解決済み `motion_contract.allowed_new_reveal_elements` だけは正の allowlist として `constraints` へ条件付き `derive` し、`source_event_contract.allowed_reveal_info_ids` と upstream の `use_next_cut_first_frame_as_last_frame` は review / boundary 解決専用として provider prose へ出さない。
+
+registry review projection は少なくとも次を持つ。
+
+```yaml
+projection_review_contract:
+  registry_version: "video_prompt_projection_registry_v3"
+  group_order: [start_state, primary_motion, camera_motion, environment_motion, emotional_change, end_state, continuity, constraints]
+  groups: {}
+  active_rules: []
+  inactive_rules: []
+  excluded: []
+  review_only_sources:
+    - source_key: "scene.time_of_day_visual_basis"
+      provider_projection: "must_not_surface"
+      review_visibility: "review_only"
+      value: {light_source: "<exact canonical review evidence>"}
+  shadowed_sources: []
+  provider: "kling_3_0"
+  mode: "image_to_video"
+```
+
+canonical `cut_contract` の値は、flat `video_generation.motion_contract`、legacy `scene_contract`、`prompt_authoring_source` / `source_motion_prompt` / `motion_prompt` より優先する。上位 source がある group へ競合する下位値を追加しない。旧形式と自由文は canonical 値がない場合だけ fallback として読む。
+
+新しい story / scene / cut / video design key を追加する場合、同じ変更で registry classification、compiler projection、tests、semantic reviewer の projection contract を更新する。provider に出さない key も 3 axes と除外理由を登録する。
+
+## Video Prompt IR v2 / API Prompt Payload v1
+
+`compile_video_api_prompt_v1` は canonical design から deterministic payload を生成する。
+
+```yaml
+video_generation:
+  prompt_authoring_source: "<frontend / legacy free-text fallback>"
+  motion_prompt: "<api_prompt_payload.prompt の read-only compatibility projection>"
+  api_prompt_payload:
+    policy_version: "video_api_prompt_v1"
+    compiler_version: "conditional_video_prompt_compiler_v3"
+    projection_registry_version: "video_prompt_projection_registry_v3"
+    provider: "kling_3_0"
+    mode: "text_to_video|image_to_video|first_last_frame"
+    provider_policy:
+      one_clip_one_intent: true
+      max_camera_instructions: 2
+      single_continuous_shot: true
+      first_last_frame_boundary: false
+    provider_request_binding:
+      duration_seconds: 8
+      quality: "1080p"
+      aspect_ratio: "16:9"
+      first_frame: "assets/scenes/scene1_cut1.png"
+      last_frame: ""
+      references: []
+      reference_roles: []
+      execution_options:
+        backend: "kling"
+        model: "kling-3.0"
+        extra_payload: {}
+        reference_content_sha256:
+          assets/scenes/scene1_cut1.png: "<sha256-of-reference-bytes>"
+    prompt: "<exact provider-facing motion prompt>"
+    negative_prompt: "<compiled high-risk constraints>"
+    source_digest: "<sha256-of-normalized-compilation-source>"
+    sha256: "<sha256-of-exact-prompt-utf8>"
+    included_fragments:
+      - group: "primary_motion"
+        text: "<provider-facing sentence>"
+    omitted_groups: []
+    quality_issues: []
+    projection_review_contract: {}
+    video_prompt_ir:
+      schema_version: "video_prompt_ir_v2"
+      provider: "kling_3_0"
+      mode: "image_to_video"
+      dependencies:
+        story_time: ""
+        time_of_day: "夜明け"
+        has_first_frame: true
+        has_last_frame: false
+        duration_seconds: 8
+        reference_roles: []
+        required_groups: [start_state, primary_motion, continuity, constraints]
+      included_fragments: []
+      omitted_groups: []
+      quality_issues: []
+```
+
+- `prompt` は exact provider-facing motion text
+- `sha256` は `prompt` の UTF-8 bytes の SHA-256
+- `provider_request_binding` は duration / quality / aspect ratio / first-last / ordered references / execution options の exact materialized request。materialize 時点で読める first / last / auxiliary reference は run-relative path と file bytes SHA-256 の両方を持つ
+- `provider_request_binding.reference_roles` は ordered references と同じ順序の意味 binding。role は provider prose に role 指示としてのみ現れ、path / asset ID / hash は本文へ出さない
+- `source_digest` は policy / compiler / provider / mode / duration / time continuity / first-last binding / ordered references / reference content hash / model / execution options / exact negative prompt / canonical design / fallback input / projection result を正規化した compilation source の SHA-256
+- review-only design が変わり provider text が同じ場合、`sha256` が同一でも `source_digest` は変わり得る
+- `video_prompt_ir`、projection trace、internal key / ID / path / hash、image prompt、narration は provider prompt 本文へ出さない
+- `review_only_sources[].value` は exact source value を reviewer と `source_digest` に渡すが provider prompt 本文へ出さない
+- optional group の空値を placeholder として provider prompt に出さない
+- `video_metadata.time` と scene `time_of_day` は動画中に描き直す情報ではなく `continuity` として保持する
+- Kling 系は 1 clip 1 intent、camera 最大2指示、single continuous shot を必須 policy とする
+- first / last frame mode は last frame を arrival boundary とし、fade / cut / dissolve / 別 shot 化を禁止する
+- `mode` は `text_to_video | image_to_video | first_last_frame | reference_to_video`。Seedance の frame-boundary mode と `reference_to_video` は相互排他で、後者は reference 対応 I2V model を使う
+- `provider_policy.negative_prompt_mode` は `separate | inline`。`separate` は `allowed_new_reveal_elements` の正の allowlist 文と許可要素名を `negative_prompt` から除外し、「承認済み要素以外」の残余禁止だけを保持する。separate field 非対応の Seedance は allowlist と禁止条件を `constraints` fragment へ inline し、保存 `negative_prompt` を空文字にする
+- storyboard render unit のreference modeは sibling `video_input_contract` に `schema_version: render_unit_video_input_v1`、`input_mode: reference_images`、ordered `required_references` と同数・同順の `reference_roles` を持ち、first / input / last frameを持たない。`image_index` は1起点の連番・一意、roleは `start_state_visual_anchor | ordered_storyboard_sequence_guide` とし、compiler / provider binding / IR / digestまで同値を保持する
+- duration / reference count は共通値ではなく provider / model / input mode の capability に従う。Seedance 1.0 reference-image mode は2–12秒、ordered references 1–4枚とし、grouping・materialization・approval・server/CLI実行で同じ判定を使う
+
+`quality_issues[]` の blocking code は次の6種である。
+
+- `video_motion_generated_fallback`
+- `video_motion_unresolved_alternative`
+- `video_motion_abstract_primary`
+- `video_motion_abstract_end_state`
+- `video_motion_duplicate_environment`
+- `video_motion_duplicate_emotion`
+
+各 issue は `blocking: true`、`group`、`message`、`value` を持つ。provider prompt を直接修正して消すのではなく、対応する canonical start / motion / environment / emotion / end field を具体化して再 compile する。
+
+## Video Prompt Materialization / Stale Gate
+
+frontend/server、CLI、scene storyboard は、provider 実行前に同じ compiler output を対象 cut / render unit の `video_generation.api_prompt_payload` へ保存し、`video_generation_requests.md` に exact prompt と metadata を投影する。CLI の materialize-only は manifest payload と review artifact を保存するが approval ではなく、未承認 item を自動で `approved` にしない。
+
+materialized contract:
+
+```yaml
+video_request_materialization:
+  prompt_policy_version: "video_api_prompt_v1"
+  compiler_version: "conditional_video_prompt_compiler_v3"
+  projection_registry_version: "video_prompt_projection_registry_v3"
+  review_projection: "video_generation_requests.md"
+  positive_prompt_fence: "video_prompt"
+  negative_prompt_fence: "negative_prompt"
+  per_item_approval_state: "review.video_prompt.item.<item_id>"
+  approval_identity_bindings: [request_section_sha256, prompt_sha256, source_digest]
+  approval_audit_metadata: [approved_by, approved_at]
+  provider_prompt_paths:
+    - "scenes[].cuts[].video_generation.api_prompt_payload.prompt"
+    - "scenes[].render_units[].video_generation.api_prompt_payload.prompt"
+  persist_payload_before_provider_call: true
+  reject_unmaterialized: true
+  reject_prompt_hash_drift: true
+  reject_source_digest_drift: true
+  reject_setting_or_reference_drift: true
+  bind_reference_content_sha256: true
+  bind_ordered_reference_roles: true
+  reject_blocking_quality_issues: true
+  reject_pending_or_stale_per_item_approval: true
+  cli_auto_approval: false
+```
+
+生成 API は provider call の前に次を照合する。
+
+- target と materialized payload の存在
+- current policy / compiler / projection registry version
+- saved `prompt` と `sha256`
+- current canonical design の再 compile 結果と saved `prompt` / `negative_prompt` / `sha256` / `source_digest` / `provider_request_binding`
+- tool / duration / quality / aspect ratio / first frame / last frame / ordered references / materialized reference content hash / provider model / execution options
+- review projection の exact `video_prompt` / `negative_prompt` fence と saved payload
+- per-item `status=approved` と current `request_section_sha256` / prompt `sha256` / `source_digest`
+
+`approved_by` / `approved_at` は誰がいつ承認操作をしたかを残す audit metadata であり、request identity ではない。metadata が存在しても `status` と 3 つの approval identity binding が current でなければ生成しない。
+
+不在、pending / missing approval、obsolete version、hash mismatch、design digest drift、setting / reference bytes / execution-option drift は stale request として拒否する。editable `prompt_authoring_source` や review Markdown を provider call 時に再解釈しない。修正は canonical design または authoring source へ戻し、payload と review projection を再 materialize / 再 review / 再承認する。

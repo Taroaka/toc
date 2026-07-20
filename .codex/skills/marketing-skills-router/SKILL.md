@@ -1,52 +1,56 @@
 ---
 name: marketing-skills-router
-description: Use when the task is explicitly scoped to files under `marketing/` in this repo, especially `marketing/SNS/`. This skill routes Codex to the repo's SNS marketing docs. Never use for normal ToC story creation, script creation, image generation, or video generation tasks.
+description: Use when the task is explicitly scoped to ToC marketing, including the public site, persona-specific LPs, digital acquisition, lead conversion, or SNS distribution under `marketing/`.
 ---
 
 # Marketing Skills Router
 
 ## Purpose
 
-This skill is the scoped gateway for the marketing/SNS docs bundled in this repository.
-It exists to keep marketing-specific guidance available without leaking it into the default ToC production workflow.
+This skill is the scoped gateway for marketing guidance in this repository. It keeps visitor acquisition and conversion rules available without leaking them into normal ToC production.
 
-Primary sources:
+Primary source:
 
 - `marketing/README.md`
-- `marketing/SNS/`
 
-## Scope Gate
+Routed sources:
 
-Use this skill only when at least one of these is true:
+- public site / LP / native form: `marketing/LP/`
+- SNS / channel distribution: `marketing/SNS/`
+- YouTube strategy: `marketing/SNS/YouTube/strategy.md`
 
-- The user explicitly asks about files under `marketing/`
-- The task is to create, edit, review, or organize `marketing/SNS/` content
-- The task is clearly a marketing or SNS workflow for this repository
+## Scope gate
 
-Do not use this skill when the task is about:
+Use this skill when at least one is true:
 
-- `docs/story-creation.md`
-- `docs/script-creation.md`
-- `docs/video-generation.md`
-- `output/`
-- Standard ToC research, story, script, image, narration, or video generation work
+- the task creates, edits, reviews, or organizes files under `marketing/`
+- the task concerns the ToC public marketing site or persona-specific LPs
+- the task concerns digital acquisition, lead conversion, Meta / SNS routing, or marketing analytics for ToC
 
-If the task is outside `marketing/`, stop and use the normal ToC workflow instead.
+Do not use this skill for normal:
 
-## How to Work
+- research or story production
+- script or narration production
+- image or video generation
+- output run orchestration
+- production frontend behavior under `server/web/`
+
+## How to work
 
 1. Read `marketing/README.md` first.
-2. Read the relevant files under `marketing/SNS/`.
-3. Apply the result back to this repository's `marketing/` files.
-
-## Selection Rules
-
-- Treat `marketing/SNS/` as the source of truth for marketing work in this repo.
-- If a request mixes ToC production and marketing, use this skill only for the marketing slice.
+2. Select only the relevant slice:
+   - site / LP / form -> `marketing/LP/`
+   - channel / campaign / analytics -> `marketing/SNS/`
+3. Preserve the positioning boundary:
+   - ToC is a system for making individual video production faster and simpler
+   - primary personas are side-business and personal-brand individuals
+   - mythology / folklore are proof examples, not the product category
+4. Apply changes only to marketing-scoped files and required repo pointers.
 
 ## Guardrails
 
-- Never invoke this skill for ordinary story production tasks.
-- Never let marketing-oriented prompts or heuristics rewrite story/script/video rules.
-- Do not treat marketing guidance as globally available defaults for the whole repository.
-- If scope is ambiguous, do not use this skill.
+- Never let marketing promises rewrite production quality gates.
+- Never use unmeasured speed claims, revenue guarantees, or fake scarcity.
+- Keep the two primary personas separate in ads, LPs, CTA, and analytics.
+- Treat campaign-specific files as subordinate to `marketing/README.md`.
+- Do not use Notion or Google Forms as the canonical public site / intake route.

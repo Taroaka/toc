@@ -34,9 +34,48 @@
 ### 下流 prompt 設計への受け渡し
 
 - Story は下流の `script.md` / `video_manifest.md` が **1 clip = 1意図** で分解しやすい粒度で設計する
+- `story_metadata.time` は物語世界全体の**歴史的時代**を表す string とする。古典・既存物語では `平安時代`、`江戸時代`、`ヴィクトリア時代` のように具体化し、ユーザー創作では空文字を許容する
+- 非空の `story_metadata.time` は asset と scene/cut の画像生成 prompt へ渡し、衣装・髪型・建築・生活道具・素材・技術水準をその時代に整合させる。空文字では時代指定を追加しない
+- `script.scenes[].time_of_day` は各 scene 固有の**一日の時間帯**を表す、非空の open string とする。`朝` / `昼` / `夕方` / `夜` に限定せず、`夜明け前` / `真夜中` / `薄暮` など、物語に必要な粒度を許容する
+- 新規 artifact は `story_metadata.scene_time_of_day_contract: required_v1` を持つ。この marker がある場合は全 scene の `time_of_day` を非空必須とし、歴史的時代の `story_metadata.time` の有無を新契約判定に使わない
+- `time_of_day` の authoring root は `story.md.script.scenes[]` とし、`story.md.script.scenes[].time_of_day -> script.md.scenes[].time_of_day -> video_manifest.md.scenes[].time_of_day` の一方向だけで projection する。scene/cut 画像の空の明るさ、自然光と人工光、影、色温度へ反映し、`story_metadata.time` と同じ値にしたり、相互に代用したりしない
+- 新規 artifact は `story_metadata.scene_time_of_day_visual_basis_contract: required_v1` も持ち、各 scene に derived review key `time_of_day_visual_basis` を置く。この値は `time_of_day` を光源・空/窓外の明るさ・影・色温度へ具体化した根拠であり、第二の時間帯 authoring root にはしない。同一値を script / manifest へ一方向 projection し、画像・動画・ナレーションの registry では用途を明示分類する
+- 一つの scene が複数場所の出来事を担う場合は `location.mode: sequence` と順序付き `location.sequence` を持ち、各場所を一度ずつ覆う `location.segments[]` を必須にする。各 segment は `location / responsibility / primary_subject / visible_action / required_visual_evidence / required_roles / motion_brief / motion_end_state` を持ち、必要なら `visible_character_state`（`posture / gaze / expression / hands / feet`）で静止画の人物状態を確定する。同じ場所で beat function ごとに主被写体や出来事が変わる場合だけ、任意の `primary_subject_by_function` / `beat_overrides` を使う。scene review は経路全体の因果を評価し、cut compiler は一つの segment と event beat だけを投影する。経路全体の `visualizable_action` を一枚の静止画や一つの clip に転記しない
+- reusable character / object / location asset の基準画像 prompt には scene 固有の `time_of_day` を自動付与しない。時間帯差分が再利用対象として必要な場合だけ、明示した variant として設計する
 - 動画プロバイダが未指定なら、汎用ルールとして `docs/video-generation.md` を前提にしてよい
 - 動画プロバイダが `kling_3_0` / `kling_3_0_omni` と明示されている場合、後続 agent が参照する動画 prompt guide は
   `docs/video-generation.md` に加えて `workflow/playbooks/video-generation/kling.md` を優先する前提で、scene の意図を切り出す
+
+#### Location segment から cut 責務への override 契約
+
+`location.segments[]` は場所ごとの物語事実を正本とし、完成した画像・動画 prompt を保持しない。標準値で足りる segment では次の map を空のまま省略できる。
+
+- `primary_subject_by_function: {}`: `setup | pressure | turn | payoff` を key に、その event beat で最初に読む主体だけを切り替える
+- `beat_overrides: {}`: 同じ4 function を key に、その beat の具体的な action / reaction / evidence / roles / character state / motion boundary を上書きする
+- `beat_overrides.<function>.obligation_overrides.<obligation_id>`: 同じ beat から複数 cut 責務が作られる場合に、その obligation の cut だけを具体化する。scene 全体や同 function の別 cut を変更しない
+
+`obligation_overrides.<obligation_id>` で使う値は、次の描画・motion 設計 key に限定する。
+
+- `primary_subject`
+- `visible_action` / `visible_reaction`
+- `required_visual_evidence[]` / `required_roles[]`
+- `visible_character_state`（`posture / gaze / expression / hands / feet`）
+- `motion_brief` / `motion_end_state` / `motion_attention_target`
+- `environment_motion` / `emotional_change`
+- `retain_carried_character_subjects`（既定 `true`。`false` は前 cut から自動継承された人物を今回の主被写体群から外すが、`required_roles` や物語事実を削除する権限は持たない）
+- `allowed_new_reveal_elements[]`（主動作によって開始画像から新しく現れてよい、具体的な人物状態・小道具・舞台要素の正の allowlist）
+- `allowed_reveal_info_ids[]`（この cut だけで開示してよい canonical reveal 情報 ID）
+- `use_next_cut_first_frame_as_last_frame: boolean`（現在 cut の到達境界を同じ場所にある次 cut の承認済み first frame へ束縛する）
+
+解決順は cut 固有から広い値へ、`obligation override -> beat override -> primary_subject_by_function / segment既定値 -> scene既定値` とする。空 map は継承を意味し、空文字や抽象 placeholder で上位値を消さない。各値は人物・物・位置・姿勢・視線として一つに確定し、`または` のような未解決候補を残さない。
+
+上記3つの reveal / boundary key は `beat_overrides.<function>.obligation_overrides.<obligation_id>` の **exact obligation entry だけ**に置く。segment root や function rootへ広げて sibling cut まで一括許可しない。`allowed_new_reveal_elements[]` は非空・一意の具体語を最大8件とし、各要素が同じ obligation の `motion_brief` または `motion_end_state` に明示され、`must_not_add` と交差しないことを検証する。`allowed_reveal_info_ids[]` は canonical reveal inventory に存在し、同じ cut の forbidden reveal からだけ除外されることを検証する。どちらも空なら従来どおり新規 reveal を許可しない。
+
+`use_next_cut_first_frame_as_last_frame: true` は次 cut が存在し、両 cut の location が同一で、現在 cut の `motion_end_state` と許可済み reveal が次 cut の first-frame contract に現れる場合だけ有効にする。これは `allowed_new_reveal_elements` や `allowed_reveal_info_ids` の代用ではなく、許可済み変化の到達画像を固定する境界指定である。
+
+下流は `segment -> event beat -> cut obligation -> first_frame_visual_plan / motion_contract -> prompt compiler` の一方向で投影する。設計 key、function 名、obligation ID、map 全体を provider prompt へ連結せず、その cut に必要な描画可能な現在状態と一つの motion fragment だけを送る。
+
+compiler は `allowed_new_reveal_elements` を positive prompt の constraints に明示し、それ以外の新規要素を禁止する。separate `negative_prompt` にはこの正の allowlist 文と許可要素名を入れず、「承認済み要素以外」の禁止だけを残す。`allowed_reveal_info_ids` と内部 ID は provider prose に出さない。
 
 ---
 
@@ -55,6 +94,8 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - p100 の素材から scene / beat / emotion curve / candidate selection が明示的に作られている
 - p200 は原則 20 scene 単位の物語骨格までを担当し、短尺/限定 flow では 8 scene 以上の dense grounded scenes でもよい。cut 分割は後続 stage に渡す
 - 各 scene は `purpose / conflict / turn / affect / visualizable_action / grounding_note` を持ち、単なる一行要約で終わらせない
+- 各 scene は非空の `time_of_day` を持ち、歴史的時代の `story_metadata.time` と分離されている
+- 各 scene は `time_of_day_visual_basis` で光源・明るさ・影・色温度を説明でき、複数場所の場合は順序付き location contract と場所別 segment contract を持つ
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
 - 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
 - 後続の `scene_event` では、抽象的な `dramatic_question / value_shift / causal_turn` を残しつつ、各 event beat が `abstract_function / concrete_event / story_grounding` を持つ前提で source story を渡す
@@ -577,6 +618,8 @@ accuracy_checklist:
 # === メタ情報 ===
 story_metadata:
   topic: "string"
+  scene_time_of_day_contract: "required_v1"
+  time: "string"  # 古典・既存物語は「〇〇時代」。ユーザー創作は "" を許容
   source_research: "output/<topic>_<timestamp>/research.md"
   created_at: "ISO8601"
   target_duration: null  # 秒数（任意、未指定可）
@@ -648,6 +691,7 @@ story_structure:
 script:
   scenes:
     - scene_id: 1
+      time_of_day: "朝"  # open string。新規 artifact では非空必須
       position_percent: "0-10"
       phase: "opening"
       purpose: "この scene が物語全体で果たす役割"
@@ -677,19 +721,23 @@ script:
       hook_type: "question | statement | shock | emotion"
 
     - scene_id: 2
+      time_of_day: "昼"
       position_percent: "10-25"
       phase: "development"
       # ... 以下同様
 
     - scene_id: 3
+      time_of_day: "夕方"
       position_percent: "25-55"
       phase: "ordeal"
 
     - scene_id: 4
+      time_of_day: "夜"
       position_percent: "55-85"
       phase: "transformation"
 
     - scene_id: 5
+      time_of_day: "夜明け前"
       position_percent: "85-100"
       phase: "ending"
 

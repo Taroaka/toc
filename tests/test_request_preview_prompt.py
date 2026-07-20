@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,23 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
+
+
+def _approve_video_request_entries(
+    request_path: Path,
+    entries: list[dict],
+) -> None:
+    pending = MODULE._video_prompt_pending_state_updates(
+        request_path=request_path,
+        entries=entries,
+    )
+    approved = dict(pending)
+    for entry in entries:
+        prefix = MODULE._video_prompt_approval_state_prefix(entry["selector"])
+        approved[f"{prefix}.status"] = "approved"
+        approved[f"{prefix}.approved_by"] = "test_reviewer"
+        approved[f"{prefix}.approved_at"] = "2026-07-18T00:00:00+09:00"
+    MODULE.append_state_snapshot(request_path.parent / "state.txt", approved)
 
 
 def _scene_intent_dict(scene_id: int | str, *, topic: str = "request preview") -> dict:
@@ -1090,9 +1108,15 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
             cut_id = cut.get("cut_id", cut_index)
             video_generation = cut.setdefault("video_generation", {})
             if isinstance(video_generation, dict):
-                video_generation["duration_seconds"] = 15
+                preview_duration = (
+                    12
+                    if "seedance"
+                    in str(video_generation.get("tool") or "").strip().lower()
+                    else 15
+                )
+                video_generation["duration_seconds"] = preview_duration
                 video_generation.setdefault("motion_prompt", "人物がゆっくり前へ進む。")
-                total_duration += 15
+                total_duration += preview_duration
             image_generation = cut.setdefault("image_generation", {})
             if isinstance(image_generation, dict):
                 image_generation.setdefault("prompt", "画面内テキストなし。実写映画風の具体的な人物、場所、道具、光が見える。")
@@ -1434,6 +1458,157 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
 
 
 class TestRequestPreviewPrompt(unittest.TestCase):
+    def test_cli_provider_dispatch_gate_rejects_blocking_video_quality_issues(self) -> None:
+        payload = {
+            "quality_issues": [
+                {
+                    "code": "video_motion_generated_fallback",
+                    "blocking": True,
+                }
+            ],
+            "video_prompt_ir": {
+                "quality_issues": [
+                    {
+                        "code": "video_motion_generated_fallback",
+                        "blocking": True,
+                    },
+                    {
+                        "code": "video_motion_unresolved_alternative",
+                        "blocking": True,
+                    },
+                    {
+                        "code": "   ",
+                        "blocking": True,
+                    },
+                ]
+            },
+        }
+
+        self.assertEqual(
+            MODULE._blocking_video_prompt_quality_issue_codes(payload),
+            [
+                "video_motion_generated_fallback",
+                "video_motion_unresolved_alternative",
+                "video_motion_blocking_quality_issue",
+            ],
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"scene2_unit1.*video_motion_generated_fallback.*video_motion_unresolved_alternative.*video_motion_blocking_quality_issue",
+        ):
+            MODULE._assert_video_prompt_quality_allows_provider_execution(
+                selector="scene2_unit1",
+                payload=payload,
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"scene2_unit1.*video_motion_generated_fallback.*video_motion_unresolved_alternative.*video_motion_blocking_quality_issue",
+        ):
+            MODULE._dispatch_reviewed_video_provider_call(
+                selector="scene2_unit1",
+                tool="kling_3_0",
+                api_prompt_payload=payload,
+                prompt="",
+                negative_prompt="",
+                input_image=None,
+                last_frame_image=None,
+                reference_images=[],
+                out_path=Path("unused.mp4"),
+                log_dir=Path("unused-logs"),
+                poll_every=0.1,
+                timeout_seconds=1.0,
+                force=False,
+                dry_run=True,
+                gemini_client=None,
+                kling_client=None,
+                evolink_client=None,
+                seedance_client=None,
+            )
+
+    def test_cli_materialization_keeps_blocking_video_quality_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: blocking quality evidence
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: kling_3_0
+          motion_prompt: sceneの変化点を見せる
+          output: assets/videos/scene1_cut1.mp4
+```
+""",
+                encoding="utf-8",
+            )
+            _make_p400_ready_for_request_preview(run_dir)
+            ready_text = manifest_path.read_text(encoding="utf-8")
+            ready_manifest = MODULE.yaml.safe_load(
+                MODULE.extract_yaml_block(ready_text)
+            )
+            ready_manifest["scenes"][0]["cuts"][0]["cut_contract"][
+                "motion_contract"
+            ]["motion_brief"] = "sceneの変化点を見せる"
+            MODULE._write_manifest_yaml_atomic(
+                manifest_path=manifest_path,
+                original_text=ready_text,
+                manifest=ready_manifest,
+            )
+            common_argv = [
+                str(SCRIPT_PATH),
+                "--manifest",
+                str(manifest_path),
+                "--skip-images",
+                "--skip-audio",
+                "--skip-image-prompt-review",
+                "--dry-run",
+                "--kling-api-key",
+                "test-api-key",
+            ]
+
+            with patch.object(MODULE, "load_env_files"), patch.object(
+                sys,
+                "argv",
+                [*common_argv, "--materialize-request-files-only"],
+            ):
+                MODULE.main()
+
+            manifest = MODULE.yaml.safe_load(
+                MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))
+            )
+            payload = manifest["scenes"][0]["cuts"][0]["video_generation"][
+                "api_prompt_payload"
+            ]
+            self.assertIn(
+                "video_motion_abstract_primary",
+                MODULE._blocking_video_prompt_quality_issue_codes(payload),
+            )
+            request_path = run_dir / "video_generation_requests.md"
+            _approve_video_request_entries(
+                request_path,
+                [{"selector": "scene1_cut1", "api_prompt_payload": payload}],
+            )
+
+            with patch.object(MODULE, "load_env_files"), patch.object(
+                MODULE,
+                "_dispatch_reviewed_video_provider_call",
+            ) as dispatch, patch.object(sys, "argv", common_argv):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"scene1_cut1.*video_motion_abstract_primary",
+                ):
+                    MODULE.main()
+
+            dispatch.assert_not_called()
+
     def test_image_tool_aliases_normalize_to_codex_builtin_image(self) -> None:
         for tool in [
             "google_nanobanana_2",
@@ -2014,7 +2189,7 @@ scenes:
         api_payload = MODULE._image_api_prompt_payload_for_scene(scene)
         api_prompt = api_payload["prompt"]
         self.assertEqual(api_payload["policy_version"], "image_api_prompt_v2")
-        self.assertEqual(api_payload["compiler_version"], "conditional_drawable_prompt_compiler_v1")
+        self.assertEqual(api_payload["compiler_version"], "conditional_drawable_prompt_compiler_v3")
         self.assertIn("[シーン]", api_prompt)
         self.assertIn("[場所と構図]", api_prompt)
         self.assertNotIn("[登場人物]", api_prompt)
@@ -2049,9 +2224,22 @@ scenes:
         self.assertIn("drawable_prompt_ir", api_payload)
 
         video_prompt = MODULE._compose_final_video_prompt(scene, prefix="", suffix="")
-        self.assertIn("motion_brief: 王子の手が靴へゆっくり近づく", video_prompt)
-        self.assertIn("end_state: 手が靴に触れる直前で止まる", video_prompt)
+        self.assertIn("王子の手が靴へゆっくり近づく", video_prompt)
+        self.assertIn("手が靴に触れる直前で止まる", video_prompt)
         self.assertIn("低い位置からゆっくり寄る。", video_prompt)
+        self.assertIn("単一の連続ショット", video_prompt)
+        self.assertNotIn("cut_contract", video_prompt)
+        self.assertNotIn("cut_function:", video_prompt)
+        self.assertNotIn("target_beat:", video_prompt)
+        self.assertNotIn("motion_brief:", video_prompt)
+        self.assertNotIn("end_state:", video_prompt)
+
+        video_payload = MODULE._video_api_prompt_payload_for_scene(scene, prefix="", suffix="")
+        self.assertEqual(video_payload["policy_version"], "video_api_prompt_v1")
+        self.assertEqual(video_payload["compiler_version"], "conditional_video_prompt_compiler_v3")
+        self.assertEqual(video_payload["prompt"], video_prompt)
+        self.assertEqual(len(video_payload["sha256"]), 64)
+        self.assertIn("video_prompt_ir", video_payload)
 
     def test_sequential_cut_state_progression_shapes_api_prompt_without_internal_fields(self) -> None:
         manifest_yaml = """
@@ -2877,6 +3065,55 @@ scenes:
             self.assertIn("`参照画像1`: `assets/scenes/scene01_cut01.png`", request_text)
             self.assertIn("`小道具参照画像1`: `assets/objects/tamatebako.png`", request_text)
 
+    def test_request_snapshot_binding_accepts_frozen_self_reference_archive(self) -> None:
+        from toc.image_request_snapshot import (
+            materialize_request_snapshot,
+            write_request_snapshot_atomic,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "scenes" / "scene01_cut01.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"existing-image")
+            prompt = "既存画像を参照して小道具だけを修正する。"
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    {
+                        "item_id": "scene1_cut1",
+                        "kind": "scene",
+                        "destination": "assets/scenes/scene01_cut01.png",
+                        "prompt": prompt,
+                        "prompt_policy_version": "image_api_prompt_v2",
+                        "compiler_version": "conditional_drawable_prompt_compiler_v1",
+                        "source_digest": hashlib.sha256(b"source").hexdigest(),
+                        "references": ["assets/scenes/scene01_cut01.png"],
+                    }
+                ],
+            )
+            write_request_snapshot_atomic(
+                run_dir / "image_generation_request_snapshot.json",
+                snapshot,
+                run_dir=run_dir,
+            )
+            archive = run_dir / "assets" / "test" / "scene01_cut01__recreate_backup.png"
+            archive.parent.mkdir(parents=True)
+            destination.replace(archive)
+
+            binding = MODULE._direct_request_snapshot_binding(
+                run_dir=run_dir,
+                item_id="scene1_cut1",
+                prompt=prompt,
+                destination=destination,
+                references=[archive],
+                prompt_policy_version="image_api_prompt_v2",
+            )
+
+            self.assertIsNotNone(binding)
+            self.assertEqual(binding[2], [hashlib.sha256(b"existing-image").hexdigest()])
+
     def test_build_image_scene_dependencies_tracks_inter_scene_refs_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3123,7 +3360,7 @@ scenes:
         source_cut_ids: [1]
         video_generation:
           tool: "kling_3_0_omni"
-          duration_seconds: 8
+          duration_seconds: 15
           first_frame: "assets/scenes/scene03_cut01.png"
           motion_prompt: "unit1"
           output: "assets/videos/scene03_cut01.mp4"
@@ -3131,7 +3368,7 @@ scenes:
         source_cut_ids: [2, 3]
         video_generation:
           tool: "kling_3_0_omni"
-          duration_seconds: 11
+          duration_seconds: 45
           first_frame: "assets/scenes/scene03_cut02.png"
           motion_prompt: "unit2"
           output: "assets/videos/scene03_cut02.mp4"
@@ -3164,6 +3401,2085 @@ scenes:
             self.assertIn("`scene3_cut2`", video_request_text)
             self.assertIn("`scene3_cut3`", video_request_text)
             self.assertNotIn("## scene3_cut3", video_request_text)
+
+    def test_video_request_materialization_binds_frames_refs_and_negative_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            for rel, content in {
+                "assets/scenes/scene01_cut01.png": b"first-frame-v1",
+                "assets/scenes/scene01_cut01_end.png": b"last-frame-v1",
+                "assets/characters/hero.png": b"hero-v1",
+                "assets/characters/hero_refstrip.png": b"hero-strip-v1",
+                "assets/locations/home.png": b"home-v1",
+            }.items():
+                path = tmp_path / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: "seedance"
+          quality: "720p"
+          aspect_ratio: "4:3"
+          references:
+            - "assets/characters/hero.png"
+            - "assets/characters/hero_refstrip.png"
+            - "assets/locations/home.png"
+          prompt_authoring_source: "主人公が扉へ一歩進む"
+          motion_prompt: "[主動作] 旧コンパイル済み本文"
+          output: "assets/videos/scene01_cut01.mp4"
+      - cut_id: 2
+        image_generation:
+          output: "assets/scenes/scene01_cut02.png"
+        video_generation:
+          tool: "kling_3_0"
+          first_frame: "assets/scenes/scene01_cut02.png"
+          last_frame: "assets/scenes/scene01_cut02_end.png"
+          prompt_authoring_source: "主人公が光へ顔を向ける"
+          motion_prompt: "[主動作] 旧コンパイル済み本文2"
+          output: "assets/videos/scene01_cut02.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+            _make_p400_ready_for_request_preview(tmp_path)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                    "--dry-run",
+                    "--enable-last-frame",
+                    "--video-negative-prompt",
+                    "霧を追加しない",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+
+            request_text = (tmp_path / "video_generation_requests.md").read_text(
+                encoding="utf-8"
+            )
+            reviewed = MODULE._parse_video_request_artifact(request_text)
+            state = MODULE.parse_state_file(tmp_path / "state.txt")
+            persisted_manifest = MODULE.yaml.safe_load(
+                MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))
+            )
+            persisted_payload = persisted_manifest["scenes"][0]["cuts"][0][
+                "video_generation"
+            ]["api_prompt_payload"]
+            MODULE.append_state_snapshot(
+                tmp_path / "state.txt",
+                {
+                    f"{MODULE._video_prompt_approval_state_prefix(selector)}.status": "approved"
+                    for selector in reviewed
+                },
+            )
+            runtime_completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--dry-run",
+                    "--skip-images",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                    "--enable-last-frame",
+                    "--video-negative-prompt",
+                    "霧を追加しない",
+                ],
+                check=False,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(
+            reviewed["scene1_cut2"]["first_frame"],
+            "assets/scenes/scene01_cut02.png",
+        )
+        self.assertEqual(
+            reviewed["scene1_cut2"]["last_frame"],
+            "assets/scenes/scene01_cut02_end.png",
+        )
+        self.assertNotIn("旧コンパイル済み本文", reviewed["scene1_cut1"]["prompt"])
+        self.assertIn("霧を追加しない", reviewed["scene1_cut1"]["prompt"])
+        self.assertEqual(reviewed["scene1_cut1"]["negative_prompt"], "")
+        self.assertIn("霧を追加しない", reviewed["scene1_cut2"]["negative_prompt"])
+        self.assertIn("assets/characters/hero_refstrip.png", request_text)
+        self.assertIn("assets/locations/home.png", request_text)
+        self.assertNotIn("- `人物参照画像1`: `assets/characters/hero.png`", request_text)
+        self.assertEqual(reviewed["scene1_cut1"]["quality"], "720p")
+        self.assertEqual(reviewed["scene1_cut1"]["resolution"], "720p")
+        self.assertEqual(reviewed["scene1_cut1"]["aspect_ratio"], "4:3")
+        self.assertEqual(persisted_payload["prompt"], reviewed["scene1_cut1"]["prompt"])
+        content_hashes = persisted_payload["provider_request_binding"][
+            "execution_options"
+        ]["reference_content_sha256"]
+        self.assertEqual(
+            content_hashes["assets/characters/hero_refstrip.png"],
+            hashlib.sha256(b"hero-strip-v1").hexdigest(),
+        )
+        prefix = MODULE._video_prompt_approval_state_prefix("scene1_cut1")
+        self.assertEqual(state[f"{prefix}.status"], "pending")
+        self.assertEqual(
+            state[f"{prefix}.request_section_sha256"],
+            reviewed["scene1_cut1"]["request_section_sha256"],
+        )
+        self.assertEqual(state[f"{prefix}.prompt_sha256"], persisted_payload["sha256"])
+        self.assertEqual(
+            runtime_completed.returncode,
+            0,
+            msg=runtime_completed.stderr,
+        )
+
+    def test_dynamic_chain_frame_flag_is_rejected_before_materialization_or_provider_dispatch(self) -> None:
+        for extra_args in ([], ["--materialize-request-files-only"]):
+            with self.subTest(materializing=bool(extra_args)), patch.object(
+                MODULE,
+                "load_env_files",
+            ), patch.object(
+                MODULE,
+                "_dispatch_reviewed_video_provider_call",
+            ) as dispatch, patch.object(
+                sys,
+                "argv",
+                [
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    "does-not-need-to-exist.md",
+                    "--chain-first-frame-from-prev-video",
+                    *extra_args,
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "deprecated and unsupported.*rematerialize and approve",
+                ):
+                    MODULE.main()
+                dispatch.assert_not_called()
+
+    def test_video_request_materialization_omits_last_frame_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "video_manifest.md"
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: "浦島太郎"
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: "assets/scenes/scene01_cut01.png"
+        video_generation:
+          tool: "kling_3_0"
+          first_frame: "assets/scenes/scene01_cut01.png"
+          last_frame: "assets/scenes/scene01_cut01_end.png"
+          motion_prompt: "主人公が扉へ一歩進む"
+          output: "assets/videos/scene01_cut01.mp4"
+```
+""",
+                encoding="utf-8",
+            )
+            _make_p400_ready_for_request_preview(tmp_path)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--manifest",
+                    str(manifest_path),
+                    "--materialize-request-files-only",
+                    "--skip-audio",
+                    "--skip-image-prompt-review",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+            reviewed = MODULE._parse_video_request_artifact(
+                (tmp_path / "video_generation_requests.md").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(reviewed["scene1_cut1"]["last_frame"], "")
+
+    def test_evolink_extra_payload_cannot_override_reviewed_video_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "protected reviewed fields"):
+            MODULE._validate_evolink_video_extra_payload(
+                {"prompt": "unreviewed", "sound": True}
+            )
+
+    def test_video_request_artifact_round_trips_the_exact_reviewed_provider_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "video_generation_requests.md"
+            prompt = "[主動作]\n主人公が扉へ一歩進む。\n\n[禁止]\n単一の連続ショット。"
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            entry = {
+                "selector": "scene3_cut1",
+                "tool": "kling_3_0",
+                "output": "assets/videos/scene3_cut1.mp4",
+                "duration_seconds": 8,
+                "aspect_ratio": "16:9",
+                "resolution": "1080p",
+                "first_frame": "assets/scenes/scene3_cut1.png",
+                "last_frame": "",
+                "references": [],
+                "api_prompt_payload": {
+                    "policy_version": "video_api_prompt_v1",
+                    "compiler_version": "conditional_video_prompt_compiler_v1",
+                    "source_digest": "a" * 64,
+                    "sha256": prompt_sha256,
+                    "prompt": prompt,
+                },
+                "prompt": prompt,
+            }
+
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[entry],
+            )
+            MODULE.append_state_snapshot(
+                request_path.parent / "state.txt",
+                MODULE._video_prompt_pending_state_updates(
+                    request_path=request_path,
+                    entries=[entry],
+                ),
+            )
+            with self.assertRaisesRegex(SystemExit, "approval_status"):
+                MODULE._validated_video_prompts_from_review_artifact(
+                    request_path=request_path,
+                    entries=[entry],
+                )
+            _approve_video_request_entries(request_path, [entry])
+            reviewed = MODULE._validated_video_prompts_from_review_artifact(
+                request_path=request_path,
+                entries=[entry],
+            )
+            request_text = request_path.read_text(encoding="utf-8")
+
+        self.assertEqual(reviewed, {"scene3_cut1": prompt})
+        self.assertIn("```video_prompt", request_text)
+        self.assertIn("- compiler_version: `conditional_video_prompt_compiler_v1`", request_text)
+        self.assertIn("- source_digest: `" + "a" * 64 + "`", request_text)
+        self.assertIn(f"- prompt_sha256: `{prompt_sha256}`", request_text)
+
+    def test_video_request_artifact_rejects_source_drift_without_rewriting_reviewed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "video_generation_requests.md"
+            prompt = "[主動作]\n主人公が扉へ一歩進む。"
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            entry = {
+                "selector": "scene3_cut1",
+                "tool": "kling_3_0",
+                "output": "assets/videos/scene3_cut1.mp4",
+                "duration_seconds": 8,
+                "aspect_ratio": "16:9",
+                "resolution": "1080p",
+                "first_frame": "assets/scenes/scene3_cut1.png",
+                "last_frame": "",
+                "references": [],
+                "api_prompt_payload": {
+                    "policy_version": "video_api_prompt_v1",
+                    "compiler_version": "conditional_video_prompt_compiler_v1",
+                    "source_digest": "a" * 64,
+                    "sha256": prompt_sha256,
+                    "prompt": prompt,
+                },
+                "prompt": prompt,
+            }
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[entry],
+            )
+            _approve_video_request_entries(request_path, [entry])
+            reviewed_text = request_path.read_text(encoding="utf-8")
+            stale_entry = json.loads(json.dumps(entry, ensure_ascii=False))
+            stale_entry["api_prompt_payload"]["source_digest"] = "b" * 64
+
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE._validated_video_prompts_from_review_artifact(
+                    request_path=request_path,
+                    entries=[stale_entry],
+                )
+
+            self.assertIn("stale", str(ctx.exception))
+            self.assertEqual(request_path.read_text(encoding="utf-8"), reviewed_text)
+
+    def test_video_request_artifact_rejects_reference_or_negative_prompt_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "video_generation_requests.md"
+            prompt = "[主動作]\n主人公が扉へ一歩進む。"
+            negative_prompt = "新しい人物を追加しない。"
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            entry = {
+                "selector": "scene3_cut1",
+                "tool": "kling_3_0",
+                "output": "assets/videos/scene3_cut1.mp4",
+                "duration_seconds": 8,
+                "aspect_ratio": "16:9",
+                "resolution": "1080p",
+                "first_frame": "assets/scenes/scene3_cut1.png",
+                "last_frame": "",
+                "references": ["assets/characters/hero.png"],
+                "api_prompt_payload": {
+                    "policy_version": "video_api_prompt_v1",
+                    "compiler_version": "conditional_video_prompt_compiler_v1",
+                    "source_digest": "a" * 64,
+                    "sha256": prompt_sha256,
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                },
+                "prompt": prompt,
+            }
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[entry],
+            )
+            _approve_video_request_entries(request_path, [entry])
+            reviewed_text = request_path.read_text(encoding="utf-8")
+
+            stale_references = json.loads(json.dumps(entry, ensure_ascii=False))
+            stale_references["references"] = ["assets/characters/hero_alt.png"]
+            with self.assertRaises(SystemExit):
+                MODULE._validated_video_prompts_from_review_artifact(
+                    request_path=request_path,
+                    entries=[stale_references],
+                )
+
+            request_path.write_text(
+                reviewed_text.replace(negative_prompt, "別のnegative prompt。"),
+                encoding="utf-8",
+            )
+            with self.assertRaises(SystemExit):
+                MODULE._validated_video_prompts_from_review_artifact(
+                    request_path=request_path,
+                    entries=[entry],
+                )
+
+    def test_video_reference_content_binding_rejects_same_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            reference = base_dir / "assets" / "characters" / "hero.png"
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            reference.write_bytes(b"approved-reference-bytes")
+            bound = MODULE._video_execution_options_with_reference_content(
+                options={"resolution": "1080p"},
+                base_dir=base_dir,
+                bindings=["assets/characters/hero.png"],
+                stored_payload=None,
+                materializing=True,
+            )
+            stored_payload = {
+                "provider_request_binding": {"execution_options": bound}
+            }
+            reference.write_bytes(b"replaced-at-the-same-path")
+
+            with self.assertRaisesRegex(SystemExit, "reference content changed"):
+                MODULE._video_execution_options_with_reference_content(
+                    options={"resolution": "1080p"},
+                    base_dir=base_dir,
+                    bindings=["assets/characters/hero.png"],
+                    stored_payload=stored_payload,
+                    materializing=False,
+                )
+
+    def test_video_provider_input_snapshot_freezes_approved_bytes_and_rejects_pre_copy_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            binding = "assets/characters/hero.png"
+            reference = base_dir / binding
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            approved_bytes = b"approved-reference-bytes"
+            reference.write_bytes(approved_bytes)
+            payload = {
+                "provider_request_binding": {
+                    "first_frame": "",
+                    "last_frame": "",
+                    "references": [binding],
+                    "execution_options": {
+                        "reference_content_sha256": {
+                            binding: hashlib.sha256(approved_bytes).hexdigest()
+                        }
+                    },
+                }
+            }
+
+            snapshot_dir, input_image, last_image, references = (
+                MODULE._snapshot_reviewed_video_reference_inputs(
+                    base_dir=base_dir,
+                    selector="scene1_cut1",
+                    api_prompt_payload=payload,
+                    input_image=None,
+                    last_frame_image=None,
+                    reference_images=[reference],
+                )
+            )
+            self.assertIsNotNone(snapshot_dir)
+            self.assertIsNone(input_image)
+            self.assertIsNone(last_image)
+            self.assertNotEqual(references[0], reference)
+            self.assertEqual(references[0].read_bytes(), approved_bytes)
+
+            reference.write_bytes(b"swapped-after-validation")
+            self.assertEqual(references[0].read_bytes(), approved_bytes)
+            MODULE.shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "reference content changed before provider submission",
+            ):
+                MODULE._snapshot_reviewed_video_reference_inputs(
+                    base_dir=base_dir,
+                    selector="scene1_cut1",
+                    api_prompt_payload=payload,
+                    input_image=None,
+                    last_frame_image=None,
+                    reference_images=[reference],
+                )
+
+    def test_main_dispatch_receives_private_approved_reference_bytes_and_cleans_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            manifest_path = run_dir / "video_manifest.md"
+            reference_binding = "assets/characters/hero.png"
+            reference = run_dir / reference_binding
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            approved_bytes = b"approved-main-dispatch-reference"
+            reference.write_bytes(approved_bytes)
+            manifest_path.write_text(
+                """# Manifest
+
+```yaml
+video_metadata:
+  topic: snapshot test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: seedance
+          references:
+            - assets/characters/hero.png
+          motion_prompt: 主人公が一歩進む
+          output: assets/videos/scene1_cut1.mp4
+```
+""",
+                encoding="utf-8",
+            )
+            _make_p400_ready_for_request_preview(run_dir)
+            common_args = [
+                "--manifest",
+                str(manifest_path),
+                "--scene-ids",
+                "scene1_cut1",
+                "--skip-images",
+                "--skip-audio",
+                "--skip-image-prompt-review",
+                "--ark-seedance-i2v-model",
+                "seedance-1-0-lite-i2v-250428",
+            ]
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    *common_args,
+                    "--materialize-request-files-only",
+                    "--dry-run",
+                ],
+                check=True,
+                cwd=REPO_ROOT,
+            )
+            request_path = run_dir / "video_generation_requests.md"
+            persisted_manifest = MODULE.yaml.safe_load(
+                MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))
+            )
+            payload = persisted_manifest["scenes"][0]["cuts"][0][
+                "video_generation"
+            ]["api_prompt_payload"]
+            _approve_video_request_entries(
+                request_path,
+                [{"selector": "scene1_cut1", "api_prompt_payload": payload}],
+            )
+
+            captured_paths: list[Path] = []
+
+            def fake_dispatch(**kwargs) -> None:
+                provider_references = kwargs["reference_images"]
+                self.assertEqual(len(provider_references), 1)
+                provider_reference = provider_references[0]
+                captured_paths.append(provider_reference)
+                self.assertNotEqual(provider_reference, reference)
+                self.assertTrue(provider_reference.is_file())
+                reference.write_bytes(b"swapped-inside-provider-boundary")
+                self.assertEqual(provider_reference.read_bytes(), approved_bytes)
+
+            with patch.object(MODULE, "load_env_files"), patch.object(
+                MODULE,
+                "_dispatch_reviewed_video_provider_call",
+                side_effect=fake_dispatch,
+            ) as dispatch, patch.object(
+                sys,
+                "argv",
+                [
+                    str(SCRIPT_PATH),
+                    *common_args,
+                    "--ark-api-key",
+                    "test-api-key",
+                ],
+            ):
+                MODULE.main()
+
+            dispatch.assert_called_once()
+            self.assertEqual(len(captured_paths), 1)
+            self.assertFalse(captured_paths[0].exists())
+
+    def test_video_parser_preserves_canonical_motion_and_per_item_settings(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: seedance
+          quality: 720p
+          aspect_ratio: "4:3"
+          motion_contract:
+            motion_intent: 主人公が窓へ一歩近づく
+            camera_motion: カメラはゆっくり寄る
+          output: assets/videos/scene01_cut01.mp4
+"""
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=MODULE.yaml.safe_load(yaml_text),
+            scenes=scenes,
+        )
+
+        self.assertTrue(MODULE._video_target_has_prompt_source(targets[0]))
+        self.assertEqual(targets[0].video_quality, "720p")
+        self.assertEqual(targets[0].video_aspect_ratio, "4:3")
+        payload = MODULE._video_api_prompt_payload_for_target(
+            targets[0],
+            prefix="",
+            suffix="",
+        )
+        self.assertIn("主人公が窓へ一歩近づく", payload["prompt"])
+        self.assertIn("カメラはゆっくり寄る", payload["prompt"])
+        self.assertEqual(payload["provider_request_binding"]["quality"], "720p")
+        self.assertEqual(payload["provider_request_binding"]["aspect_ratio"], "4:3")
+
+    def test_render_unit_explicit_contract_overlays_composed_source_boundaries(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 3
+    cuts:
+      - cut_id: 1
+        cut_contract:
+          first_frame_contract:
+            first_frame_brief: 主人公が扉の前で立ち止まっている
+          motion_contract:
+            motion_brief: 主人公が扉へ手を伸ばす
+            must_not_add: [新しい人物]
+          continuity_contract:
+            carry_forward_to_next_cut: [主人公の青い外套を変えない]
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          motion_prompt: 主人公が扉へ手を伸ばす
+          output: assets/videos/scene03_cut01.mp4
+      - cut_id: 2
+        cut_contract:
+          motion_contract:
+            motion_brief: 主人公が扉を開ける
+            end_state: 扉が半分開き、主人公が中を見ている
+            must_not_add: [別の場所]
+          continuity_contract:
+            carry_forward_to_next_cut: [扉の木目を変えない]
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          motion_prompt: 主人公が扉を開ける
+          output: assets/videos/scene03_cut02.mp4
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        cut_contract:
+          motion_contract:
+            motion_brief: 主人公がためらいを越えて扉を開く
+            camera_motion: カメラは胸の高さで固定する
+        video_generation:
+          tool: seedance
+          duration_seconds: 8
+          prompt_authoring_source: 主人公がためらいを越えて扉を開く
+          output: assets/videos/scene03_unit01.mp4
+"""
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=MODULE.yaml.safe_load(yaml_text),
+            scenes=scenes,
+        )
+
+        contract = MODULE._video_contract_for_target(targets[0])
+
+        self.assertEqual(
+            contract["first_frame_contract"]["first_frame_brief"],
+            "主人公が扉の前で立ち止まっている",
+        )
+        self.assertEqual(
+            contract["motion_contract"]["motion_brief"],
+            "主人公がためらいを越えて扉を開く",
+        )
+        self.assertEqual(
+            contract["motion_contract"]["camera_motion"],
+            "カメラは胸の高さで固定する",
+        )
+        self.assertEqual(
+            contract["motion_contract"]["end_state"],
+            "扉が半分開き、主人公が中を見ている",
+        )
+        self.assertEqual(
+            contract["motion_contract"]["must_not_add"],
+            ["新しい人物", "別の場所"],
+        )
+        self.assertEqual(
+            contract["continuity_contract"]["carry_forward_to_next_cut"],
+            ["主人公の青い外套を変えない", "扉の木目を変えない"],
+        )
+
+    def test_cut_video_duration_prefers_approved_render_then_generation_then_legacy(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        duration_seconds: 6
+        render:
+          video_duration_seconds: 12
+        video_generation:
+          tool: seedance
+          duration_seconds: 9
+          motion_prompt: 主人公が進む
+          output: assets/videos/scene01_cut01.mp4
+      - cut_id: 2
+        duration_seconds: 6
+        video_generation:
+          tool: seedance
+          duration_seconds: 9
+          motion_prompt: 主人公が止まる
+          output: assets/videos/scene01_cut02.mp4
+      - cut_id: 3
+        duration_seconds: 6
+        video_generation:
+          tool: seedance
+          motion_prompt: 主人公が振り返る
+          output: assets/videos/scene01_cut03.mp4
+"""
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=MODULE.yaml.safe_load(yaml_text),
+            scenes=scenes,
+        )
+
+        self.assertEqual([scene.duration_seconds for scene in scenes], [12, 9, 6])
+        self.assertEqual([target.duration_seconds for target in targets], [12, 9, 6])
+
+    def test_render_unit_duration_is_inferred_from_approved_source_cut_total(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        render: {video_duration_seconds: 4}
+        video_generation: {tool: seedance, motion_prompt: one, output: one.mp4}
+      - cut_id: 2
+        render: {video_duration_seconds: 6}
+        video_generation: {tool: seedance, motion_prompt: two, output: two.mp4}
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        video_generation:
+          tool: seedance
+          prompt_authoring_source: one motion
+          output: unit.mp4
+"""
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=MODULE.yaml.safe_load(yaml_text),
+            scenes=scenes,
+        )
+
+        self.assertEqual(targets[0].duration_seconds, 10)
+
+    def test_render_unit_duration_rejects_source_total_mismatch_and_provider_overflow(self) -> None:
+        def manifest_for(*, first: int, second: int, unit: int) -> str:
+            return f"""
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        render: {{video_duration_seconds: {first}}}
+        video_generation: {{tool: seedance, motion_prompt: one, output: one.mp4}}
+      - cut_id: 2
+        render: {{video_duration_seconds: {second}}}
+        video_generation: {{tool: seedance, motion_prompt: two, output: two.mp4}}
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        video_generation:
+          tool: seedance
+          duration_seconds: {unit}
+          prompt_authoring_source: one motion
+          output: unit.mp4
+"""
+
+        mismatch = manifest_for(first=4, second=6, unit=9)
+        _metadata, _guides, mismatch_scenes = MODULE.parse_manifest_yaml_full(mismatch)
+        with self.assertRaisesRegex(SystemExit, "must equal source-cut total 10s"):
+            MODULE._build_video_render_targets(
+                manifest=MODULE.yaml.safe_load(mismatch),
+                scenes=mismatch_scenes,
+            )
+
+        overflow = manifest_for(first=31, second=30, unit=61)
+        _metadata, _guides, overflow_scenes = MODULE.parse_manifest_yaml_full(overflow)
+        with self.assertRaisesRegex(SystemExit, "61s exceeds the 60s provider limit"):
+            MODULE._build_video_render_targets(
+                manifest=MODULE.yaml.safe_load(overflow),
+                scenes=overflow_scenes,
+            )
+
+    def test_seedance_reference_render_unit_enforces_duration_and_reference_limits(self) -> None:
+        def manifest_for(*, duration: int) -> dict:
+            first_reference = "assets/scenes/scene1_cut1.png"
+            storyboard_reference = "assets/storyboards/scene1_storyboard.png"
+            references = [first_reference, storyboard_reference]
+            return {
+                "video_metadata": {"topic": "test"},
+                "scenes": [
+                    {
+                        "scene_id": 1,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "render": {"video_duration_seconds": duration},
+                                "image_generation": {"output": first_reference},
+                                "video_generation": {
+                                    "tool": "seedance",
+                                    "motion_prompt": "source motion",
+                                    "output": "assets/videos/source.mp4",
+                                },
+                            }
+                        ],
+                        "render_units": [
+                            {
+                                "unit_id": 1,
+                                "source_cut_ids": [1],
+                                "storyboard_image": storyboard_reference,
+                                "video_input_contract": {
+                                    "schema_version": "render_unit_video_input_v1",
+                                    "input_mode": "reference_images",
+                                    "required_references": references,
+                                    "reference_roles": [
+                                        {"image_index": 1, "role": "start_state_visual_anchor"},
+                                        {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                                    ],
+                                },
+                                "video_generation": {
+                                    "tool": "seedance",
+                                    "duration_seconds": duration,
+                                    "references": references,
+                                    "prompt_authoring_source": "reference motion",
+                                    "output": "assets/videos/unit.mp4",
+                                    "api_prompt_payload": {
+                                        "provider_request_binding": {
+                                            "execution_options": {
+                                                "model": "seedance-1-0-lite-i2v-250428"
+                                            }
+                                        }
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        valid = manifest_for(duration=12)
+        valid_text = MODULE.yaml.safe_dump(valid, allow_unicode=True, sort_keys=False)
+        _metadata, _guides, valid_scenes = MODULE.parse_manifest_yaml_full(valid_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=valid,
+            scenes=valid_scenes,
+        )
+        self.assertEqual(targets[0].duration_seconds, 12)
+
+        for duration in (1, 13):
+            with self.subTest(duration=duration):
+                invalid = manifest_for(duration=duration)
+                invalid_text = MODULE.yaml.safe_dump(
+                    invalid,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                _metadata, _guides, invalid_scenes = MODULE.parse_manifest_yaml_full(
+                    invalid_text
+                )
+                with self.assertRaisesRegex(SystemExit, "outside.*2-12"):
+                    MODULE._build_video_render_targets(
+                        manifest=invalid,
+                        scenes=invalid_scenes,
+                    )
+
+        for reference_count in (0, 5):
+            with self.subTest(reference_count=reference_count):
+                issues = MODULE._video_provider_capability_issues(
+                    label="scene1_unit1",
+                    tool="seedance",
+                    model="seedance-1-0-lite-i2v-250428",
+                    input_mode="reference_images",
+                    duration_seconds=12,
+                    reference_count=reference_count,
+                )
+                self.assertEqual(len(issues), 1)
+                self.assertRegex(
+                    issues[0],
+                    "reference image count.*outside.*1-4",
+                )
+
+    def test_seedance_cut_capabilities_cover_text_image_reference_and_unknown_model(self) -> None:
+        def manifest_for(*, mode: str, duration: int, model: str = "") -> dict:
+            generation = {
+                "tool": "seedance",
+                "duration_seconds": duration,
+                "motion_prompt": "主人公が一歩進む",
+                "output": "assets/videos/scene1_cut1.mp4",
+            }
+            if mode == "image_to_video":
+                generation["first_frame"] = "assets/scenes/scene1_cut1.png"
+            elif mode == "reference_images":
+                generation["references"] = ["assets/references/hero.png"]
+            if model:
+                generation["api_prompt_payload"] = {
+                    "provider_request_binding": {
+                        "execution_options": {"model": model}
+                    }
+                }
+            return {
+                "video_metadata": {"topic": "test"},
+                "scenes": [
+                    {
+                        "scene_id": 1,
+                        "cuts": [
+                            {
+                                "cut_id": 1,
+                                "render": {"video_duration_seconds": duration},
+                                "video_generation": generation,
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        for mode in ("text_to_video", "image_to_video", "reference_images"):
+            for duration in (2, 12):
+                with self.subTest(mode=mode, valid_duration=duration):
+                    valid = manifest_for(mode=mode, duration=duration)
+                    valid_text = MODULE.yaml.safe_dump(
+                        valid,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                    _metadata, _guides, valid_scenes = MODULE.parse_manifest_yaml_full(
+                        valid_text
+                    )
+                    self.assertEqual(
+                        len(
+                            MODULE._build_video_render_targets(
+                                manifest=valid,
+                                scenes=valid_scenes,
+                            )
+                        ),
+                        1,
+                    )
+            for duration in (1, 13):
+                with self.subTest(mode=mode, invalid_duration=duration):
+                    invalid = manifest_for(mode=mode, duration=duration)
+                    invalid_text = MODULE.yaml.safe_dump(
+                        invalid,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                    _metadata, _guides, invalid_scenes = MODULE.parse_manifest_yaml_full(
+                        invalid_text
+                    )
+                    with self.assertRaisesRegex(SystemExit, "outside.*2-12"):
+                        MODULE._build_video_render_targets(
+                            manifest=invalid,
+                            scenes=invalid_scenes,
+                        )
+
+        unknown = manifest_for(
+            mode="reference_images",
+            duration=8,
+            model="seedance-2-experimental",
+        )
+        unknown_text = MODULE.yaml.safe_dump(
+            unknown,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        _metadata, _guides, unknown_scenes = MODULE.parse_manifest_yaml_full(
+            unknown_text
+        )
+        with self.assertRaisesRegex(SystemExit, "no reviewed capability contract"):
+            MODULE._build_video_render_targets(
+                manifest=unknown,
+                scenes=unknown_scenes,
+            )
+
+        effective = manifest_for(mode="reference_images", duration=8)
+        effective_text = MODULE.yaml.safe_dump(
+            effective,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        _metadata, _guides, effective_scenes = MODULE.parse_manifest_yaml_full(
+            effective_text
+        )
+        target = MODULE._build_video_render_targets(
+            manifest=effective,
+            scenes=effective_scenes,
+        )[0]
+        MODULE._validate_effective_video_provider_capabilities(
+            target=target,
+            duration_seconds=8,
+            has_first_frame=False,
+            has_last_frame=False,
+            reference_count=1,
+            execution_options={
+                "backend": "ark",
+                "model": "seedance-1-0-lite-i2v-250428",
+            },
+        )
+        with self.assertRaisesRegex(SystemExit, "no reviewed capability contract"):
+            MODULE._validate_effective_video_provider_capabilities(
+                target=target,
+                duration_seconds=8,
+                has_first_frame=False,
+                has_last_frame=False,
+                reference_count=1,
+                execution_options={
+                    "backend": "ark",
+                    "model": "seedance-2-experimental",
+                },
+            )
+        with self.assertRaisesRegex(SystemExit, "outside.*2-12"):
+            MODULE._validate_effective_video_provider_capabilities(
+                target=target,
+                duration_seconds=13,
+                has_first_frame=False,
+                has_last_frame=False,
+                reference_count=1,
+                execution_options={
+                    "backend": "ark",
+                    "model": "seedance-1-0-lite-i2v-250428",
+                },
+            )
+
+    def test_cli_render_unit_video_input_contract_matches_server_fail_closed_validation(self) -> None:
+        from server import image_gen_app
+
+        first_reference = "assets/scenes/scene1_cut1.png"
+        storyboard_reference = "assets/storyboards/scene1_storyboard.png"
+        base_manifest = {
+            "video_metadata": {"topic": "test"},
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "render": {"video_duration_seconds": 8},
+                            "image_generation": {"output": first_reference},
+                            "video_generation": {
+                                "tool": "seedance",
+                                "motion_prompt": "source motion",
+                                "output": "assets/videos/source.mp4",
+                            },
+                        }
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1],
+                            "storyboard_image": storyboard_reference,
+                            "video_input_contract": {
+                                "schema_version": "render_unit_video_input_v1",
+                                "input_mode": "reference_images",
+                                "required_references": [
+                                    first_reference,
+                                    storyboard_reference,
+                                ],
+                                "reference_roles": [
+                                    {"image_index": 1, "role": "start_state_visual_anchor"},
+                                    {"image_index": 2, "role": "ordered_storyboard_sequence_guide"},
+                                ],
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 8,
+                                "references": [
+                                    first_reference,
+                                    storyboard_reference,
+                                ],
+                                "prompt_authoring_source": "reference motion",
+                                "output": "assets/videos/unit.mp4",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        def clone_manifest() -> dict:
+            return json.loads(json.dumps(base_manifest))
+
+        valid = clone_manifest()
+        valid_text = MODULE.yaml.safe_dump(valid, allow_unicode=True, sort_keys=False)
+        _metadata, _guides, valid_scenes = MODULE.parse_manifest_yaml_full(valid_text)
+        valid_targets = MODULE._build_video_render_targets(
+            manifest=valid,
+            scenes=valid_scenes,
+        )
+        self.assertEqual(len(valid_targets), 1)
+        compiled = MODULE._video_api_prompt_payload_for_target(
+            valid_targets[0],
+            prefix="",
+            suffix="",
+        )
+        self.assertEqual(
+            compiled["provider_request_binding"]["reference_roles"],
+            base_manifest["scenes"][0]["render_units"][0][
+                "video_input_contract"
+            ]["reference_roles"],
+        )
+        self.assertIn("参照画像1は開始状態の基準", compiled["prompt"])
+        self.assertNotIn(first_reference, compiled["prompt"])
+
+        invalid_cases: list[tuple[str, str, object]] = []
+
+        wrong_schema = clone_manifest()
+        wrong_schema["scenes"][0]["render_units"][0]["video_input_contract"][
+            "schema_version"
+        ] = "render_unit_video_input_v0"
+        invalid_cases.append(("wrong_schema", "unsupported.*schema_version", wrong_schema))
+
+        wrong_mode = clone_manifest()
+        wrong_mode["scenes"][0]["render_units"][0]["video_input_contract"][
+            "input_mode"
+        ] = "first_frame"
+        invalid_cases.append(("wrong_mode", "input_mode must be reference_images", wrong_mode))
+
+        missing_roles = clone_manifest()
+        missing_roles["scenes"][0]["render_units"][0][
+            "video_input_contract"
+        ].pop("reference_roles")
+        invalid_cases.append(
+            ("missing_roles", "reference_roles count must equal", missing_roles)
+        )
+
+        duplicate_role_index = clone_manifest()
+        duplicate_role_index["scenes"][0]["render_units"][0][
+            "video_input_contract"
+        ]["reference_roles"][1]["image_index"] = 1
+        invalid_cases.append(
+            (
+                "duplicate_role_index",
+                "image_index must be 1-based, consecutive, unique",
+                duplicate_role_index,
+            )
+        )
+
+        unknown_role = clone_manifest()
+        unknown_role["scenes"][0]["render_units"][0][
+            "video_input_contract"
+        ]["reference_roles"][1]["role"] = "unknown_role"
+        invalid_cases.append(
+            ("unknown_role", "unsupported video reference role", unknown_role)
+        )
+
+        reversed_references = clone_manifest()
+        reversed_references["scenes"][0]["render_units"][0]["video_generation"][
+            "references"
+        ] = [storyboard_reference, first_reference]
+        invalid_cases.append(
+            ("reversed_references", "exactly preserve the ordered", reversed_references)
+        )
+
+        mixed_frame_mode = clone_manifest()
+        mixed_frame_mode["scenes"][0]["render_units"][0]["video_generation"][
+            "first_frame"
+        ] = first_reference
+        invalid_cases.append(("mixed_frame_mode", "must not combine", mixed_frame_mode))
+
+        missing_storyboard = clone_manifest()
+        missing_storyboard_unit = missing_storyboard["scenes"][0]["render_units"][0]
+        missing_storyboard_unit["video_input_contract"]["required_references"] = [
+            first_reference
+        ]
+        missing_storyboard_unit["video_generation"]["references"] = [first_reference]
+        invalid_cases.append(
+            ("missing_storyboard", "storyboard_image must remain", missing_storyboard)
+        )
+
+        jointly_tampered_references = clone_manifest()
+        jointly_tampered_unit = jointly_tampered_references["scenes"][0][
+            "render_units"
+        ][0]
+        jointly_tampered_pair = [storyboard_reference, first_reference]
+        jointly_tampered_unit["video_input_contract"][
+            "required_references"
+        ] = jointly_tampered_pair
+        jointly_tampered_unit["video_generation"][
+            "references"
+        ] = jointly_tampered_pair
+        invalid_cases.append(
+            (
+                "jointly_tampered_references",
+                "canonical ordered first-source/storyboard pair",
+                jointly_tampered_references,
+            )
+        )
+
+        missing_first_source_output = clone_manifest()
+        missing_first_source_output["scenes"][0]["cuts"][0].pop(
+            "image_generation"
+        )
+        invalid_cases.append(
+            (
+                "missing_first_source_output",
+                "requires the first source cut image_generation.output",
+                missing_first_source_output,
+            )
+        )
+
+        missing_storyboard_field = clone_manifest()
+        missing_storyboard_field["scenes"][0]["render_units"][0].pop(
+            "storyboard_image"
+        )
+        invalid_cases.append(
+            (
+                "missing_storyboard_field",
+                "requires storyboard_image",
+                missing_storyboard_field,
+            )
+        )
+
+        for label, expected_error, invalid in invalid_cases:
+            with self.subTest(case=label):
+                unit = invalid["scenes"][0]["render_units"][0]
+                self.assertEqual(
+                    MODULE._render_unit_video_input_issues(
+                        selector="scene1_unit1",
+                        node=unit,
+                    ),
+                    image_gen_app._render_unit_video_input_issues(
+                        selector="scene1_unit1",
+                        node=unit,
+                    ),
+                )
+                invalid_text = MODULE.yaml.safe_dump(
+                    invalid,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                _metadata, _guides, invalid_scenes = MODULE.parse_manifest_yaml_full(
+                    invalid_text
+                )
+                with self.assertRaisesRegex(SystemExit, expected_error):
+                    MODULE._build_video_render_targets(
+                        manifest=invalid,
+                        scenes=invalid_scenes,
+                    )
+
+    def test_reviewed_video_provider_dispatch_uses_bound_per_item_settings(self) -> None:
+        common = {
+            "prompt": "承認済みの動画プロンプト",
+            "negative_prompt": "新しい人物を追加しない",
+            "input_image": None,
+            "last_frame_image": None,
+            "reference_images": [],
+            "out_path": Path("assets/videos/test.mp4"),
+            "log_dir": Path("logs/providers"),
+            "poll_every": 0.1,
+            "timeout_seconds": 1.0,
+            "force": False,
+            "dry_run": True,
+            "gemini_client": None,
+            "kling_client": None,
+            "evolink_client": None,
+            "seedance_client": None,
+        }
+
+        def payload(
+            *,
+            backend: str,
+            model: str,
+            extra_payload: dict | None = None,
+            generate_audio: bool = False,
+        ) -> dict:
+            return {
+                "provider_request_binding": {
+                    "duration_seconds": 8,
+                    "quality": "720p",
+                    "aspect_ratio": "4:3",
+                    "first_frame": "",
+                    "last_frame": "",
+                    "references": [],
+                    "execution_options": {
+                        "backend": backend,
+                        "model": model,
+                        "extra_payload": extra_payload or {},
+                        "generate_audio": generate_audio,
+                        "watermark": False,
+                    },
+                }
+            }
+
+        with patch.object(MODULE, "generate_kling_video") as generate:
+            MODULE._dispatch_reviewed_video_provider_call(
+                selector="scene1_cut1",
+                tool="kling_3_0",
+                api_prompt_payload=payload(
+                    backend="kling",
+                    model="reviewed-kling-model",
+                    extra_payload={"cfg_scale": 0.4},
+                ),
+                **common,
+            )
+            kwargs = generate.call_args.kwargs
+            self.assertEqual(kwargs["duration_seconds"], 8)
+            self.assertEqual(kwargs["aspect_ratio"], "4:3")
+            self.assertEqual(kwargs["resolution"], "720p")
+            self.assertEqual(kwargs["model"], "reviewed-kling-model")
+            self.assertEqual(kwargs["extra_payload"], {"cfg_scale": 0.4})
+
+        with patch.object(MODULE, "generate_evolink_video") as generate:
+            MODULE._dispatch_reviewed_video_provider_call(
+                selector="scene2_cut1",
+                tool="kling_3_0_omni",
+                api_prompt_payload=payload(
+                    backend="evolink",
+                    model="reviewed-evolink-model",
+                    extra_payload={"sound": False},
+                ),
+                **common,
+            )
+            kwargs = generate.call_args.kwargs
+            self.assertEqual(kwargs["aspect_ratio"], "4:3")
+            self.assertEqual(kwargs["resolution"], "720p")
+            self.assertEqual(kwargs["model"], "reviewed-evolink-model")
+            self.assertEqual(kwargs["extra_payload"], {"sound": False})
+
+        with patch.object(MODULE, "generate_seedance_video") as generate:
+            MODULE._dispatch_reviewed_video_provider_call(
+                selector="scene3_cut1",
+                tool="seedance",
+                api_prompt_payload=payload(
+                    backend="ark",
+                    model="reviewed-seedance-model",
+                    extra_payload={"camera_fixed": True},
+                    generate_audio=True,
+                ),
+                **common,
+            )
+            kwargs = generate.call_args.kwargs
+            self.assertEqual(kwargs["aspect_ratio"], "4:3")
+            self.assertEqual(kwargs["resolution"], "720p")
+            self.assertEqual(kwargs["model"], "reviewed-seedance-model")
+            self.assertEqual(kwargs["extra_payload"], {"camera_fixed": True})
+            self.assertTrue(kwargs["generate_audio"])
+            self.assertFalse(kwargs["watermark"])
+
+        with patch.object(MODULE, "generate_veo_video") as generate:
+            MODULE._dispatch_reviewed_video_provider_call(
+                selector="scene4_cut1",
+                tool="google_veo_3_1",
+                api_prompt_payload=payload(
+                    backend="gemini",
+                    model="reviewed-veo-model",
+                ),
+                **common,
+            )
+            kwargs = generate.call_args.kwargs
+            self.assertEqual(kwargs["aspect_ratio"], "4:3")
+            self.assertEqual(kwargs["resolution"], "720p")
+            self.assertEqual(kwargs["model"], "reviewed-veo-model")
+
+    def test_reviewed_kling_video_reuse_requires_exact_request_and_output_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            out_path = run_dir / "assets/videos/scene1_cut1.mp4"
+            log_dir = run_dir / "logs/providers"
+            calls: list[dict] = []
+
+            def generate(**kwargs) -> None:
+                calls.append(kwargs)
+                kwargs["out_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["out_path"].write_bytes(b"approved-kling-video")
+                kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["log_path"].write_text(
+                    json.dumps(
+                        {
+                            "submit": {"data": {"task_id": "kling-task-1"}},
+                            "operation": {"data": {"task_status": "succeed"}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            payload = {
+                "policy_version": MODULE.VIDEO_API_PROMPT_POLICY_VERSION,
+                "compiler_version": "test-compiler-v1",
+                "source_digest": hashlib.sha256(b"source-a").hexdigest(),
+                "provider_request_binding": {
+                    "duration_seconds": 8,
+                    "quality": "720p",
+                    "aspect_ratio": "16:9",
+                    "first_frame": "",
+                    "last_frame": "",
+                    "references": [],
+                    "execution_options": {
+                        "backend": "kling",
+                        "model": "kling-3.0",
+                        "extra_payload": {},
+                    },
+                },
+            }
+            common = {
+                "selector": "scene1_cut1",
+                "tool": "kling_3_0",
+                "api_prompt_payload": payload,
+                "prompt": "承認済みプロンプトA",
+                "negative_prompt": "余計な人物を出さない",
+                "input_image": None,
+                "last_frame_image": None,
+                "reference_images": [],
+                "out_path": out_path,
+                "log_dir": log_dir,
+                "poll_every": 0.1,
+                "timeout_seconds": 1.0,
+                "force": False,
+                "dry_run": False,
+                "gemini_client": None,
+                "kling_client": None,
+                "evolink_client": None,
+                "seedance_client": None,
+            }
+
+            with patch.object(MODULE, "generate_kling_video", side_effect=generate):
+                MODULE._dispatch_reviewed_video_provider_call(**common)
+                MODULE._dispatch_reviewed_video_provider_call(**common)
+                sidecar_path = out_path.with_name(out_path.name + ".provenance.json")
+                sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "existing video output provenance does not match the approved request",
+                ):
+                    MODULE._dispatch_reviewed_video_provider_call(
+                        **{**common, "prompt": "承認済みプロンプトB"}
+                    )
+                sidecar_path.unlink()
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "existing video output provenance does not match the approved request",
+                ):
+                    MODULE._dispatch_reviewed_video_provider_call(**common)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(sidecar["schema_version"], "video_output_provenance_v1")
+            self.assertEqual(
+                sidecar["output_sha256"], hashlib.sha256(out_path.read_bytes()).hexdigest()
+            )
+            self.assertEqual(sidecar["provider_job"]["job_id"], "kling-task-1")
+
+    def test_reviewed_seedance_video_reuse_rejects_changed_output_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            out_path = run_dir / "assets/videos/scene2_cut1.mp4"
+            log_dir = run_dir / "logs/providers"
+            calls: list[dict] = []
+
+            def generate(**kwargs) -> None:
+                calls.append(kwargs)
+                kwargs["out_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["out_path"].write_bytes(b"approved-seedance-video")
+                kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["log_path"].write_text(
+                    json.dumps(
+                        {
+                            "submit": {"id": "seedance-task-1"},
+                            "task": {"id": "seedance-task-1", "status": "succeeded"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            payload = {
+                "policy_version": MODULE.VIDEO_API_PROMPT_POLICY_VERSION,
+                "compiler_version": "test-compiler-v1",
+                "source_digest": hashlib.sha256(b"source-b").hexdigest(),
+                "provider_request_binding": {
+                    "duration_seconds": 8,
+                    "quality": "720p",
+                    "aspect_ratio": "16:9",
+                    "first_frame": "",
+                    "last_frame": "",
+                    "references": [],
+                    "execution_options": {
+                        "backend": "ark",
+                        "model": "seedance-1-0-pro-250528",
+                        "extra_payload": {},
+                        "generate_audio": False,
+                        "watermark": False,
+                    },
+                },
+            }
+            common = {
+                "selector": "scene2_cut1",
+                "tool": "seedance",
+                "api_prompt_payload": payload,
+                "prompt": "承認済みSeedanceプロンプト",
+                "negative_prompt": "",
+                "input_image": None,
+                "last_frame_image": None,
+                "reference_images": [],
+                "out_path": out_path,
+                "log_dir": log_dir,
+                "poll_every": 0.1,
+                "timeout_seconds": 1.0,
+                "force": False,
+                "dry_run": False,
+                "gemini_client": None,
+                "kling_client": None,
+                "evolink_client": None,
+                "seedance_client": None,
+            }
+
+            with patch.object(MODULE, "generate_seedance_video", side_effect=generate):
+                MODULE._dispatch_reviewed_video_provider_call(**common)
+                MODULE._dispatch_reviewed_video_provider_call(**common)
+                out_path.write_bytes(b"tampered-video")
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "existing video output provenance does not match the approved request",
+                ):
+                    MODULE._dispatch_reviewed_video_provider_call(**common)
+
+            self.assertEqual(len(calls), 1)
+
+    def test_video_generation_paths_must_resolve_inside_the_run_before_hashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external:
+            run_dir = Path(tmp)
+            external_dir = Path(external)
+            legitimate = run_dir / "assets/scenes/frame.png"
+            legitimate.parent.mkdir(parents=True)
+            legitimate.write_bytes(b"frame")
+            external_frame = external_dir / "outside.png"
+            external_frame.write_bytes(b"outside")
+            symlink_dir = run_dir / "assets/escape"
+            symlink_dir.parent.mkdir(parents=True, exist_ok=True)
+            symlink_dir.symlink_to(external_dir, target_is_directory=True)
+
+            self.assertEqual(
+                MODULE._resolve_run_confined_video_path(
+                    base_dir=run_dir,
+                    maybe_path="assets/scenes/frame.png",
+                    selector="scene1_cut1",
+                    role="first frame",
+                ),
+                legitimate,
+            )
+            invalid_paths = (
+                str(external_frame),
+                "../outside.png",
+                "assets/escape/outside.png",
+            )
+            for invalid_path in invalid_paths:
+                with self.subTest(path=invalid_path), self.assertRaisesRegex(
+                    SystemExit,
+                    "must be a run-relative path confined to the manifest directory",
+                ):
+                    MODULE._resolve_run_confined_video_path(
+                        base_dir=run_dir,
+                        maybe_path=invalid_path,
+                        selector="scene1_cut1",
+                        role="reference image",
+                    )
+
+            payload = {
+                "provider_request_binding": {
+                    "first_frame": "",
+                    "last_frame": "",
+                    "references": ["assets/escape/outside.png"],
+                    "execution_options": {
+                        "reference_content_sha256": {
+                            "assets/escape/outside.png": hashlib.sha256(b"outside").hexdigest()
+                        }
+                    },
+                }
+            }
+            with patch.object(MODULE, "sha256_file") as hash_file, self.assertRaisesRegex(
+                SystemExit,
+                "must be a run-relative path confined to the manifest directory",
+            ):
+                MODULE._snapshot_reviewed_video_reference_inputs(
+                    base_dir=run_dir,
+                    selector="scene1_cut1",
+                    api_prompt_payload=payload,
+                    input_image=None,
+                    last_frame_image=None,
+                    reference_images=[symlink_dir / "outside.png"],
+                )
+            hash_file.assert_not_called()
+
+    def test_seedance_provider_log_redacts_signed_media_url_query_and_fragment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            out_path = run_dir / "scene.mp4"
+            log_path = run_dir / "provider.json"
+            signed_url = (
+                "https://cdn.example.test/video/scene.mp4"
+                "?X-Amz-Credential=secret&X-Amz-Signature=top-secret#private"
+            )
+
+            class FakeSeedanceClient:
+                def build_video_payload(self, **_kwargs):
+                    return {"model": "seedance-test"}
+
+                def create_task(self, *, payload):
+                    return {"id": "task-1", "upload_url": signed_url, "payload": payload}
+
+                def extract_task_id(self, _submit):
+                    return "task-1"
+
+                def poll_task(self, **_kwargs):
+                    return {
+                        "id": "task-1",
+                        "status": "succeeded",
+                        "content": {"video_url": signed_url},
+                    }
+
+                def is_failed_task(self, _task):
+                    return False
+
+                def extract_video_url(self, _task):
+                    return signed_url
+
+                def download_to_file(self, *, url, out_path):
+                    self.downloaded_url = url
+                    out_path.write_bytes(b"video")
+
+            MODULE.generate_seedance_video(
+                client=FakeSeedanceClient(),
+                model="seedance-test",
+                prompt="reviewed prompt",
+                duration_seconds=4,
+                aspect_ratio="16:9",
+                resolution="720p",
+                input_image=None,
+                last_frame_image=None,
+                reference_images=[],
+                generate_audio=False,
+                watermark=False,
+                extra_payload=None,
+                out_path=out_path,
+                poll_every=0.1,
+                timeout_seconds=1.0,
+                force=True,
+                log_path=log_path,
+                dry_run=False,
+            )
+
+            persisted = log_path.read_text(encoding="utf-8")
+            self.assertIn("https://cdn.example.test/video/scene.mp4", persisted)
+            self.assertNotIn("X-Amz-Credential", persisted)
+            self.assertNotIn("X-Amz-Signature", persisted)
+            self.assertNotIn("top-secret", persisted)
+            self.assertNotIn("#private", persisted)
+
+    def test_cli_execution_options_match_server_for_direct_kling_and_seedance(self) -> None:
+        from server import image_gen_app
+
+        def target_for(tool: str) -> MODULE.VideoRenderTargetSpec:
+            return MODULE.VideoRenderTargetSpec(
+                selector="scene1_cut1",
+                manifest_scene_id="1",
+                unit_id=None,
+                source_cut_ids=["1"],
+                source_selectors=["scene1_cut1"],
+                source_scenes=[],
+                video_tool=tool,
+                video_input_image="assets/scenes/scene1_cut1.png",
+                video_first_frame="assets/scenes/scene1_cut1.png",
+                video_last_frame=None,
+                video_motion_prompt="主人公が一歩進む",
+                video_output="assets/videos/scene1_cut1.mp4",
+                video_applied_request_ids=[],
+                duration_seconds=8,
+                timestamp=None,
+            )
+
+        args = MODULE.argparse.Namespace(
+            kling_video_model="kling-3.0",
+            kling_omni_video_model="kling-3.0-omni",
+            evolink_kling_v3_i2v_model="kling-v3-image-to-video",
+            evolink_kling_v3_t2v_model="kling-v3-text-to-video",
+            evolink_kling_o3_i2v_model="kling-v3-image-to-video",
+            evolink_kling_o3_t2v_model="kling-o3-text-to-video",
+            ark_seedance_i2v_model="seedance-1-0-lite-i2v-250428",
+            ark_seedance_t2v_model="seedance-1-0-pro-250528",
+            ark_generate_audio=False,
+        )
+        with patch.object(image_gen_app, "load_env_files"), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            for tool in ("kling_3_0", "kling_3_0_omni", "seedance"):
+                with self.subTest(tool=tool):
+                    actual = MODULE._video_execution_options(
+                        target=target_for(tool),
+                        args=args,
+                        has_first_frame=True,
+                        has_reference_images=False,
+                        evolink_enabled=False,
+                        kling_extra_payload=None,
+                        kling_omni_extra_payload=None,
+                        ark_extra_payload=None,
+                    )
+                    expected = image_gen_app._server_video_execution_options(
+                        tool=tool,
+                        has_first_frame=True,
+                    )
+                    self.assertEqual(actual, expected)
+
+    def test_cli_seedance_reference_only_request_uses_visual_input_model(self) -> None:
+        from server import image_gen_app
+
+        target = MODULE.VideoRenderTargetSpec(
+            selector="scene1_cut1",
+            manifest_scene_id="1",
+            unit_id=None,
+            source_cut_ids=["1"],
+            source_selectors=["scene1_cut1"],
+            source_scenes=[],
+            video_tool="seedance",
+            video_input_image=None,
+            video_first_frame=None,
+            video_last_frame=None,
+            video_motion_prompt="主人公が一歩進む",
+            video_output="assets/videos/scene1_cut1.mp4",
+            video_applied_request_ids=[],
+            duration_seconds=8,
+            timestamp=None,
+            video_references=["assets/characters/hero.png"],
+        )
+        args = MODULE.argparse.Namespace(
+            ark_seedance_i2v_model="reviewed-reference-model",
+            ark_seedance_t2v_model="text-only-model",
+            ark_generate_audio=False,
+        )
+        with patch.object(image_gen_app, "load_env_files"), patch.dict(
+            os.environ,
+            {
+                "ARK_SEEDANCE_I2V_MODEL": "reviewed-reference-model",
+                "ARK_SEEDANCE_T2V_MODEL": "text-only-model",
+            },
+            clear=True,
+        ):
+            actual = MODULE._video_execution_options(
+                target=target,
+                args=args,
+                has_first_frame=False,
+                has_reference_images=True,
+                evolink_enabled=False,
+                kling_extra_payload=None,
+                kling_omni_extra_payload=None,
+                ark_extra_payload=None,
+            )
+            expected = image_gen_app._server_video_execution_options(
+                tool="seedance",
+                has_first_frame=False,
+                has_reference_images=True,
+            )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["model"], "reviewed-reference-model")
+
+    def test_cli_materializes_server_reference_only_render_unit_without_frame_fallback(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        render: {video_duration_seconds: 4}
+        image_generation: {output: assets/scenes/scene1_cut1.png}
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          motion_prompt: 前の場面が動く
+          output: assets/videos/scene1_cut1.mp4
+  - scene_id: 2
+    cuts:
+      - cut_id: 1
+        render: {video_duration_seconds: 4}
+        image_generation: {output: assets/scenes/scene2_cut1.png}
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          motion_prompt: 主人公が扉へ近づく
+          output: assets/videos/scene2_cut1.mp4
+      - cut_id: 2
+        render: {video_duration_seconds: 4}
+        image_generation: {output: assets/scenes/scene2_cut2.png}
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          motion_prompt: 主人公が扉を開く
+          output: assets/videos/scene2_cut2.mp4
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        storyboard_image: assets/storyboards/scene2_storyboard.png
+        video_input_contract:
+          schema_version: render_unit_video_input_v1
+          input_mode: reference_images
+          required_references:
+            - assets/scenes/scene2_cut1.png
+            - assets/storyboards/scene2_storyboard.png
+          reference_roles:
+            - image_index: 1
+              role: start_state_visual_anchor
+            - image_index: 2
+              role: ordered_storyboard_sequence_guide
+        video_generation:
+          tool: seedance
+          duration_seconds: 8
+          references:
+            - assets/scenes/scene2_cut1.png
+            - assets/storyboards/scene2_storyboard.png
+          prompt_authoring_source: 主人公がためらいを越えて扉を開く
+          output: assets/videos/scene2_unit1.mp4
+"""
+        manifest = MODULE.yaml.safe_load(yaml_text)
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(manifest=manifest, scenes=scenes)
+        unit = targets[1]
+
+        first_frame, last_frame = MODULE._effective_video_target_frame_paths(
+            Path("/tmp/reference-only-run"),
+            targets,
+            1,
+            chain_first_frame_from_prev_video=True,
+            enable_last_frame=True,
+        )
+        execution_options = MODULE._video_execution_options(
+            target=unit,
+            args=MODULE.argparse.Namespace(
+                ark_seedance_i2v_model="seedance-reference-model",
+                ark_seedance_t2v_model="seedance-text-model",
+                ark_generate_audio=False,
+            ),
+            has_first_frame=False,
+            has_reference_images=True,
+            evolink_enabled=False,
+            kling_extra_payload=None,
+            kling_omni_extra_payload=None,
+            ark_extra_payload=None,
+        )
+        payload = MODULE._video_api_prompt_payload_for_target(
+            unit,
+            prefix="",
+            suffix="",
+            first_frame_override=MODULE._video_binding_path(
+                Path("/tmp/reference-only-run"), first_frame
+            ),
+            last_frame_override=MODULE._video_binding_path(
+                Path("/tmp/reference-only-run"), last_frame
+            ),
+            references_override=unit.video_references,
+            quality="1080p",
+            aspect_ratio="16:9",
+            execution_options=execution_options,
+        )
+
+        self.assertEqual(unit.video_input_mode, "reference_images")
+        self.assertIsNone(first_frame)
+        self.assertIsNone(last_frame)
+        self.assertEqual(payload["mode"], "reference_to_video")
+        self.assertEqual(payload["provider_request_binding"]["first_frame"], "")
+        self.assertEqual(
+            payload["provider_request_binding"]["references"],
+            [
+                "assets/scenes/scene2_cut1.png",
+                "assets/storyboards/scene2_storyboard.png",
+            ],
+        )
+        self.assertEqual(
+            payload["provider_request_binding"]["execution_options"]["model"],
+            "seedance-reference-model",
+        )
+
+    def test_kling_video_materialization_rejects_auxiliary_references(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        video_generation:
+          tool: kling_3_0
+          motion_prompt: 主人公が窓へ一歩近づく
+          references: [assets/characters/hero.png]
+          output: assets/videos/scene01_cut01.mp4
+"""
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        with self.assertRaisesRegex(
+            SystemExit,
+            "reference image count 1.*0-0",
+        ):
+            MODULE._build_video_render_targets(
+                manifest=MODULE.yaml.safe_load(yaml_text),
+                scenes=scenes,
+            )
+
+    def test_kling_first_frame_does_not_inherit_image_prompt_references(self) -> None:
+        yaml_text = """
+video_metadata:
+  topic: test
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        render:
+          video_duration_seconds: 8
+        image_generation:
+          references:
+            - assets/characters/hero.png
+            - assets/locations/kitchen.png
+          output: assets/scenes/scene1_cut1.png
+        video_generation:
+          tool: kling_3_0_omni
+          first_frame: assets/scenes/scene1_cut1.png
+          motion_prompt: 主人公が窓へ一歩近づく
+          output: assets/videos/scene1_cut1.mp4
+"""
+        manifest = MODULE.yaml.safe_load(yaml_text)
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(
+            manifest=manifest,
+            scenes=scenes,
+        )
+
+        self.assertEqual(
+            targets[0].source_scenes[0].image_references,
+            ["assets/characters/hero.png", "assets/locations/kitchen.png"],
+        )
+        self.assertEqual(MODULE._video_target_reference_strings(targets[0]), [])
+        self.assertEqual(
+            MODULE._effective_video_target_reference_strings(
+                targets[0],
+                prefer_character_refstrips=False,
+                character_reference_strip_suffix="_strip.png",
+            ),
+            [],
+        )
+
+    def test_filtered_video_request_materialization_preserves_other_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "video_generation_requests.md"
+            original = {
+                "selector": "scene1_cut1",
+                "tool": "seedance",
+                "output": "assets/videos/scene1_cut1.mp4",
+                "references": [],
+                "prompt": "original prompt",
+            }
+            replacement = {
+                "selector": "scene2_cut1",
+                "tool": "seedance",
+                "output": "assets/videos/scene2_cut1.mp4",
+                "references": [],
+                "prompt": "replacement prompt",
+            }
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[original],
+            )
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[replacement],
+                merge_existing_sections=True,
+            )
+            merged = request_path.read_text(encoding="utf-8")
+
+        self.assertEqual(merged.count("## scene1_cut1"), 1)
+        self.assertEqual(merged.count("## scene2_cut1"), 1)
+        self.assertIn("original prompt", merged)
+        self.assertIn("replacement prompt", merged)
+
+    def test_filtered_render_unit_migration_removes_obsolete_cut_sections_and_revokes_state(self) -> None:
+        yaml_text = """
+video_metadata: {topic: test}
+scenes:
+  - scene_id: 1
+    cuts:
+      - cut_id: 1
+        render: {video_duration_seconds: 4}
+        video_generation: {tool: seedance, motion_prompt: one, output: one.mp4}
+      - cut_id: 2
+        render: {video_duration_seconds: 4}
+        video_generation: {tool: seedance, motion_prompt: two, output: two.mp4}
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1, 2]
+        video_generation:
+          tool: seedance
+          duration_seconds: 8
+          prompt_authoring_source: one motion
+          output: unit.mp4
+  - scene_id: 2
+    cuts:
+      - cut_id: 1
+        render: {video_duration_seconds: 4}
+        video_generation: {tool: seedance, motion_prompt: other, output: other.mp4}
+    render_units:
+      - unit_id: 1
+        source_cut_ids: [1]
+        video_generation:
+          tool: seedance
+          duration_seconds: 4
+          prompt_authoring_source: other motion
+          output: other-unit.mp4
+"""
+        manifest = MODULE.yaml.safe_load(yaml_text)
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        targets = MODULE._build_video_render_targets(manifest=manifest, scenes=scenes)
+        scene2_target = next(
+            target for target in targets if target.selector == "scene2_unit1"
+        )
+        self.assertFalse(MODULE._video_target_matches_filter(scene2_target, {"1"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            request_path = run_dir / "video_generation_requests.md"
+            old_entries = [
+                {
+                    "selector": selector,
+                    "tool": "seedance",
+                    "output": f"{selector}.mp4",
+                    "references": [],
+                    "prompt": f"old {selector}",
+                }
+                for selector in ("scene1_cut1", "scene1_cut2", "scene2_cut1")
+            ]
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=old_entries,
+            )
+            approved_state = {}
+            for selector in ("scene1_cut1", "scene1_cut2", "scene2_cut1"):
+                prefix = MODULE._video_prompt_approval_state_prefix(selector)
+                approved_state.update(
+                    {
+                        f"{prefix}.status": "approved",
+                        f"{prefix}.request_section_sha256": "old-section",
+                        f"{prefix}.prompt_sha256": "old-prompt",
+                        f"{prefix}.source_digest": "old-source",
+                        f"{prefix}.approved_by": "reviewer",
+                        f"{prefix}.approved_at": "2026-07-18T00:00:00+09:00",
+                    }
+                )
+            MODULE.append_state_snapshot(run_dir / "state.txt", approved_state)
+
+            obsolete = MODULE._obsolete_video_request_selectors_for_selected_scenes(
+                existing_text=request_path.read_text(encoding="utf-8"),
+                targets=targets,
+                scene_filter={"1"},
+            )
+            MODULE._write_request_preview_md(
+                out_path=request_path,
+                title="Video Generation Requests",
+                entries=[
+                    {
+                        "selector": "scene1_unit1",
+                        "tool": "seedance",
+                        "output": "unit.mp4",
+                        "references": [],
+                        "prompt": "new unit prompt",
+                    }
+                ],
+                merge_existing_sections=True,
+                drop_existing_sections=obsolete,
+            )
+            MODULE.append_state_snapshot(
+                run_dir / "state.txt",
+                MODULE._obsolete_video_prompt_state_updates(obsolete),
+            )
+            merged = request_path.read_text(encoding="utf-8")
+            state = MODULE.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(obsolete, {"scene1_cut1", "scene1_cut2"})
+        self.assertNotIn("## scene1_cut1", merged)
+        self.assertNotIn("## scene1_cut2", merged)
+        self.assertIn("## scene1_unit1", merged)
+        self.assertIn("## scene2_cut1", merged)
+        for selector in obsolete:
+            prefix = MODULE._video_prompt_approval_state_prefix(selector)
+            self.assertEqual(state[f"{prefix}.status"], "revoked")
+            self.assertEqual(state[f"{prefix}.request_section_sha256"], "")
+            self.assertEqual(state[f"{prefix}.prompt_sha256"], "")
+            self.assertEqual(state[f"{prefix}.source_digest"], "")
+        scene2_prefix = MODULE._video_prompt_approval_state_prefix("scene2_cut1")
+        self.assertEqual(state[f"{scene2_prefix}.status"], "approved")
 
     def test_validate_human_change_requests_rejects_unknown_applied_request_ids(self) -> None:
         manifest = {
@@ -3297,8 +5613,10 @@ scenes:
 
             request_text = (tmp_path / "image_generation_requests.md").read_text(encoding="utf-8")
             self.assertIn("```api_prompt", request_text)
-            self.assertIn("[この1枚に写る瞬間]", request_text)
-            self.assertIn("視線は、", request_text)
+            self.assertIn("[シーン]", request_text)
+            self.assertNotIn("[この1枚に写る瞬間]", request_text)
+            api_prompt = request_text.split("```api_prompt\n", 1)[1].split("\n```", 1)[0]
+            self.assertNotIn("hand_position:", api_prompt)
             self.assertIn("hand_position:", request_text)
             self.assertNotIn("[場面の核]", request_text)
             self.assertIn("竜宮城の宴会エリアで楽しむ他のキャラクターたちに囲まれる中、頭をかかえる浦島太郎", request_text)

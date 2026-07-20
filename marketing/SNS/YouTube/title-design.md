@@ -1,5 +1,7 @@
 # YouTube タイトル設計ガイド
 
+> Status: legacy mythology-campaign guide. 民話・神話向けタイトルを作るときだけ使い、ToC product / side-business / personal-brand の title positioning には `strategy.md` を使う。
+
 最終更新: 2026-06-20  
 用途: 浦島太郎以降の全動画に共通して使う。タイトルを考えるときは必ずここを参照する。
 

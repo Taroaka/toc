@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,13 +8,28 @@ from pathlib import Path
 from toc.semantic_pack_scene import collect_entries
 
 
+BUILD_PACK_PATH = Path(__file__).resolve().parents[1] / "scripts" / "build-semantic-review-pack.py"
+
+
+def load_pack_builder():
+    spec = importlib.util.spec_from_file_location("build_semantic_review_pack_time_of_day", BUILD_PACK_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {BUILD_PACK_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 SCRIPT_FIXTURE = """# Script
 
 ```yaml
 script_metadata:
   topic: "シンデレラ"
+  time: "17世紀フランス時代"
+  scene_time_of_day_contract: required_v1
 scenes:
   - scene_id: 10
+    time_of_day: 朝
     phase: opening
     importance: high
     handoff_to_next_scene: "灰の台所から舞踏会の予感へつなぐ"
@@ -65,6 +81,7 @@ scenes:
           target_beat: "扉の向こうに次の場所を感じる"
           must_show: ["扉", "光"]
   - scene_id: 20
+    time_of_day: 夜
     phase: development
     semantic_contract:
       dramatic_question: "魔法は時間制限に勝てるか"
@@ -116,6 +133,10 @@ class TestSemanticPackScene(unittest.TestCase):
         self.assertEqual(entries[0]["selector"], "scene10")
         self.assertEqual(entries[0]["source_path"], "script.md")
         self.assertEqual(entries[0]["source_json_pointer"], "/scenes/0")
+        self.assertEqual(entries[0]["time_of_day"], "朝")
+        self.assertEqual(entries[1]["time_of_day"], "夜")
+        self.assertTrue(entries[0]["time_of_day_contract_declared"])
+        self.assertEqual(entries[0]["time_of_day_status"], "valid")
         self.assertIn("シンデレラは灰の中で希望を保てるか", entries[0]["summary"])
         self.assertEqual(entries[0]["semantic_contract"]["dramatic_question"], "シンデレラは灰の中で希望を保てるか")
         self.assertEqual(entries[0]["scene_generation"]["schema_version"], "scene_generation_v1")
@@ -154,6 +175,9 @@ scenes:
             entries = collect_entries("scene_set", run_dir)
 
         self.assertFalse(entries[0]["semantic_contract_missing"])
+        self.assertNotIn("time_of_day", entries[0])
+        self.assertFalse(entries[0]["time_of_day_contract_declared"])
+        self.assertEqual(entries[0]["time_of_day_status"], "missing")
         self.assertEqual(entries[0]["semantic_contract"]["done_when"], ["scene全体の完了条件"])
         self.assertEqual(entries[0]["normalized_semantic_contract"]["done_when"], ["scene全体の完了条件"])
 
@@ -166,6 +190,7 @@ scenes:
 
         self.assertEqual(entries[0]["cut_count"], 2)
         self.assertEqual(entries[0]["cut_summaries"][0]["selector"], "scene10_cut01")
+        self.assertEqual(entries[0]["time_of_day"], "朝")
         self.assertEqual(entries[0]["cut_summaries"][1]["selector"], "scene10_cut02")
         self.assertEqual(entries[0]["scene_generation"]["scene_prompt_payload"]["schema_version"], "scene_prompt_payload_v1")
         self.assertEqual(entries[0]["cut_summaries"][0]["must_show"], ["シンデレラ", "灰の台所"])
@@ -181,6 +206,8 @@ scenes:
         self.assertEqual([entry["selector"] for entry in entries], ["scene10_cut01", "scene10_cut02", "scene20_cut01"])
         self.assertEqual(entries[0]["semantic_contract"]["target_beat"], "灰の台所でシンデレラが立ち上がる")
         self.assertEqual(entries[0]["source_json_pointer"], "/scenes/0/cuts/0")
+        self.assertEqual(entries[0]["time_of_day"], "朝")
+        self.assertEqual(entries[2]["time_of_day"], "夜")
         self.assertTrue(entries[0]["semantic_contract_present"])
         self.assertFalse(entries[0]["semantic_contract_missing"])
         self.assertEqual(
@@ -201,6 +228,83 @@ scenes:
         self.assertEqual(entries[0]["asset_dependency_hint"] if "asset_dependency_hint" in entries[0] else None, None)
         self.assertEqual(entries[2]["semantic_contract"]["target_beat"], "ガラスの靴が証拠になる")
         self.assertFalse(entries[2]["semantic_contract_missing"])
+
+    def test_declared_contract_exposes_missing_and_invalid_time_of_day_without_stringifying(self) -> None:
+        fixture = """# Script
+
+```yaml
+script_metadata:
+  time: "17世紀フランス時代"
+  scene_time_of_day_contract: required_v1
+scenes:
+  - scene_id: 10
+    scene_intent: {dramatic_question: "問い", value_shift: "変化", causal_turn: "因果", done_when: ["完了"]}
+    cuts: []
+  - scene_id: 20
+    time_of_day: [夜]
+    scene_intent: {dramatic_question: "問い", value_shift: "変化", causal_turn: "因果", done_when: ["完了"]}
+    cuts: []
+```
+"""
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(fixture, encoding="utf-8")
+
+            entries = collect_entries("scene_set", run_dir)
+
+        self.assertTrue(entries[0]["time_of_day_contract_declared"])
+        self.assertEqual(entries[0]["time_of_day_status"], "missing")
+        self.assertNotIn("time_of_day", entries[0])
+        self.assertEqual(entries[1]["time_of_day_status"], "invalid_type")
+        self.assertEqual(entries[1]["time_of_day_raw"], ["夜"])
+        self.assertNotIn("time_of_day", entries[1])
+
+    def test_legacy_partial_daypart_values_do_not_declare_the_required_contract(self) -> None:
+        fixture = """# Script
+
+```yaml
+script_metadata:
+  topic: legacy
+scenes:
+  - scene_id: 10
+    time_of_day: "夜"
+    scene_intent: {dramatic_question: "問い", value_shift: "変化", causal_turn: "因果", done_when: ["完了"]}
+    cuts: []
+  - scene_id: 20
+    time_of_day: ""
+    scene_intent: {dramatic_question: "問い", value_shift: "変化", causal_turn: "因果", done_when: ["完了"]}
+    cuts: []
+  - scene_id: 30
+    scene_intent: {dramatic_question: "問い", value_shift: "変化", causal_turn: "因果", done_when: ["完了"]}
+    cuts: []
+```
+"""
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(fixture, encoding="utf-8")
+
+            entries = collect_entries("scene_set", run_dir)
+
+        self.assertEqual([entry["time_of_day_contract_declared"] for entry in entries], [False, False, False])
+        self.assertEqual([entry["time_of_day_status"] for entry in entries], ["valid", "blank", "missing"])
+
+    def test_scene_review_guidance_covers_all_scene_stages_and_legacy_status(self) -> None:
+        builder = load_pack_builder()
+
+        for stage in ("scene_set", "scene_detail", "cut_blueprint"):
+            guidance = "\n".join(builder._stage_specific_review_instructions(stage))
+            self.assertIn("time_of_day_contract_declared", guidance)
+            self.assertIn("time_of_day_status", guidance)
+            self.assertIn("undeclared legacy omission", guidance)
+            self.assertIn("invalid_type", guidance)
+            self.assertIn("script_metadata.time", guidance)
+        self.assertIn(
+            "producer-facing repair example",
+            "\n".join(builder._stage_specific_review_instructions("cut_blueprint")),
+        )
+        story_guidance = "\n".join(builder._stage_specific_review_instructions("story"))
+        self.assertIn("scene_time_of_day_statuses[].status", story_guidance)
+        self.assertIn("time_of_day_contract_declared", story_guidance)
 
     def test_cut_blueprint_entry_uses_event_context_without_full_scene_event(self) -> None:
         fixture = """# Script

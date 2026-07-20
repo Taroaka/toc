@@ -29,6 +29,18 @@ def load_frontend_run_module():
     return module
 
 
+def load_image_prompt_review_module():
+    spec = importlib.util.spec_from_file_location(
+        "image_prompt_story_review_under_test",
+        REPO_ROOT / "scripts" / "review-image-prompt-story-consistency.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def parse_state(path: Path) -> dict[str, str]:
     state: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -197,9 +209,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             p200 = json.loads(
                 (run_dir / "logs" / "orchestration" / "p200.supervisor_result.json").read_text(encoding="utf-8")
             )
+            p600 = json.loads(
+                (run_dir / "logs" / "orchestration" / "p600.supervisor_result.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(p100["state_keys"]["slot.p130.status"], "done")
         self.assertEqual(p200["state_keys"]["slot.p230.status"], "done")
+        self.assertEqual(p600["status"], "pending")
+        self.assertEqual(p600["completed_slots"], ["p610", "p620"])
+        self.assertEqual(p600["state_keys"]["slot.p680.status"], "pending")
 
     def test_reviewed_foundations_feed_story_and_cut_builders(self) -> None:
         module = load_frontend_run_module()
@@ -220,6 +238,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         research_profile = module._profile_from_reviewed_research(base_profile, reviewed_research)
         story = module._build_story("桃太郎", Path("output/reviewed-foundation"), "2026-07-11T00:00:00+09:00", research_profile)
 
+        self.assertIn("time", story["story_metadata"])
+        self.assertIsInstance(story["story_metadata"]["time"], str)
         self.assertEqual(research_profile["events"], [reviewed_event])
         self.assertIn(reviewed_event, story["script"]["scenes"][0]["purpose"])
         self.assertIn("research.story_materials.chronological_events[E99]", story["script"]["scenes"][0]["research_refs"])
@@ -228,7 +248,9 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         reviewed_turn = "審査で修正された不可逆な転換を画面上の事実にする。"
         story["script"]["scenes"][0]["purpose"] = "審査で修正されたscene目的"
         story["script"]["scenes"][0]["turn"] = reviewed_turn
+        story["story_metadata"]["time"] = "室町時代"
         cut_profile = module._profile_from_reviewed_story(research_profile, story)
+        self.assertEqual(cut_profile["story_time"], "室町時代")
         location = module._location_spec_for_scene(cut_profile, 1)
         scene_intent = module._scene_intent_for_cut_design(
             title=cut_profile["scene_titles"][0],
@@ -251,6 +273,438 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertEqual(scene_intent["causal_turn"], reviewed_turn)
         turn_beat = next(item for item in scene_event["event_sequence"] if item["beat_function"] == "turn")
         self.assertEqual(turn_beat["what_happens"], reviewed_turn)
+
+    def test_reviewed_story_scene_overview_stays_out_of_drawable_evidence(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._story_profile(
+            "桃太郎", "桃太郎", variant_seed="reviewed-scene-overview"
+        )
+        overview = "炉を掃除する → 籠を置かれる → 一人だけ台所に残される"
+        profile["reviewed_story_scenes"] = [
+            {
+                "scene_id": 1,
+                "visualizable_action": overview,
+                "research_refs": [],
+            }
+        ]
+        blueprint = {
+            "visible_evidence": ["灰の床", "家事道具の籠"],
+            "research_refs": [],
+        }
+
+        reviewed = module._apply_reviewed_story_scene_to_blueprint(
+            blueprint,
+            profile=profile,
+            idx=1,
+        )
+
+        self.assertEqual(reviewed["visible_evidence"], blueprint["visible_evidence"])
+        self.assertEqual(reviewed["review_only_visualizable_action"], overview)
+        self.assertNotIn("→", " / ".join(reviewed["visible_evidence"]))
+
+    def test_reviewed_story_preserves_explicit_empty_time_instead_of_profile_fallback(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._story_profile("シンデレラを下敷きにした創作", "ユーザー創作")
+        self.assertTrue(profile["story_time"])
+
+        reviewed = module._profile_from_reviewed_story(
+            profile,
+            {
+                "story_metadata": {"time": ""},
+                "script": {"scenes": []},
+            },
+        )
+
+        self.assertEqual(reviewed["story_time"], "")
+
+    def test_reviewed_story_time_of_day_contract_blocks_missing_or_non_string_scene_values(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("桃太郎", "桃太郎", variant_seed="daypart-contract"),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            story = module._build_story(
+                "桃太郎",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        story["script"]["scenes"][0]["time_of_day"] = ""
+        story["script"]["scenes"][1]["time_of_day"] = ["夜"]
+
+        with self.assertRaisesRegex(RuntimeError, r"scene\[1\]\.time_of_day.*scene\[2\]\.time_of_day"):
+            module._validate_reviewed_story_time_of_day_contract(story)
+
+    def test_blank_scene_time_of_day_never_becomes_an_unknown_prompt_placeholder(self) -> None:
+        module = load_frontend_run_module()
+
+        self.assertEqual(module._scene_time_of_day({"scene_times_of_day": [""]}, 1), "")
+
+    def test_time_of_day_visual_basis_names_every_lighting_dimension(self) -> None:
+        module = load_frontend_run_module()
+
+        self.assertEqual(module._time_of_day_visual_basis(""), "")
+        for time_of_day in ("朝", "昼", "夕方", "夜", "真夜中", "薄明の架空時間"):
+            basis = module._time_of_day_visual_basis(time_of_day)
+            for dimension in ("光源", "明るさ", "影", "色温度"):
+                self.assertIn(dimension, basis, (time_of_day, basis))
+
+    def test_reviewed_story_time_of_day_contract_requires_visual_basis(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("桃太郎", "桃太郎", variant_seed="daypart-visual-contract"),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            story = module._build_story(
+                "桃太郎",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        story["script"]["scenes"][0]["time_of_day_visual_basis"] = ""
+
+        with self.assertRaisesRegex(RuntimeError, r"scene\[1\]\.time_of_day_visual_basis"):
+            module._validate_reviewed_story_time_of_day_contract(story)
+
+    def test_reviewed_story_multi_location_contract_requires_one_segment_per_location(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="location-segment-gate"),
+            target_duration_seconds=300,
+        )
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/location-segment-gate"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+        story["script"]["scenes"][7]["location"]["segments"] = story["script"]["scenes"][7]["location"]["segments"][:-1]
+
+        with self.assertRaisesRegex(RuntimeError, "location.segments must cover every sequence location"):
+            module._validate_reviewed_story_time_of_day_contract(story)
+
+    def test_scene_time_of_day_reaches_story_script_manifest_and_scene_prompts(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            profile = module._duration_aware_profile(
+                module._story_profile("シンデレラ", "シンデレラ", variant_seed="daypart-audit"),
+                target_duration_seconds=300,
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            story = module._build_story(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            reviewed_profile = module._profile_from_reviewed_story(profile, story)
+            script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                reviewed_profile,
+            )
+
+        story_times = [scene["time_of_day"] for scene in story["script"]["scenes"]]
+        script_times = [scene["time_of_day"] for scene in script["scenes"]]
+        manifest_times = [scene["time_of_day"] for scene in manifest["scenes"]]
+        story_bases = [scene["time_of_day_visual_basis"] for scene in story["script"]["scenes"]]
+        script_bases = [scene["time_of_day_visual_basis"] for scene in script["scenes"]]
+        manifest_bases = [scene["time_of_day_visual_basis"] for scene in manifest["scenes"]]
+        self.assertEqual(story["story_metadata"]["scene_time_of_day_contract"], "required_v1")
+        self.assertEqual(story["story_metadata"]["scene_time_of_day_visual_basis_contract"], "required_v1")
+        self.assertEqual(script["script_metadata"]["scene_time_of_day_contract"], "required_v1")
+        self.assertEqual(script["script_metadata"]["scene_time_of_day_visual_basis_contract"], "required_v1")
+        self.assertEqual(manifest["video_metadata"]["scene_time_of_day_contract"], "required_v1")
+        self.assertEqual(manifest["video_metadata"]["scene_time_of_day_visual_basis_contract"], "required_v1")
+        self.assertEqual(story_times, script_times)
+        self.assertEqual(script_times, manifest_times)
+        self.assertEqual(story_bases, script_bases)
+        self.assertEqual(script_bases, manifest_bases)
+        self.assertTrue(all(story_times))
+        self.assertTrue(all(story_bases))
+        self.assertIn("朝", story_times)
+        self.assertIn("夜", story_times)
+        self.assertIn("真夜中", story_times)
+        self.assertIn("昼", story_times)
+        for scene, time_of_day, visual_basis in zip(
+            script["scenes"], script_times, script_bases, strict=True
+        ):
+            authoring_context = scene["scene_generation"]["scene_authoring_context"]
+            self.assertEqual(authoring_context["time_of_day"], time_of_day)
+            self.assertEqual(authoring_context["time_of_day_visual_basis"], visual_basis)
+            self.assertIn(
+                f"時間帯: {time_of_day}",
+                scene["scene_generation"]["scene_prompt_payload"]["prompt"],
+            )
+            self.assertIn(
+                f"時間帯の視覚根拠: {visual_basis}",
+                scene["scene_generation"]["scene_prompt_payload"]["prompt"],
+            )
+        for scene, time_of_day in zip(manifest["scenes"], manifest_times, strict=True):
+            for cut in scene["cuts"]:
+                payload = cut["image_generation"]["api_prompt_payload"]
+                visual_plan = cut["image_generation"]["first_frame_visual_plan"]
+                self.assertEqual(
+                    visual_plan["scene_material_pack"]["time_of_day"],
+                    time_of_day,
+                )
+                self.assertEqual(
+                    payload["drawable_prompt_ir"]["dependencies"]["time_of_day"],
+                    time_of_day,
+                )
+                self.assertIn(f"このシーンの時間帯は{time_of_day}", payload["prompt"])
+
+    def test_story_time_reaches_asset_and_scene_image_prompts(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            cinderella_profile = module._story_profile("シンデレラ", "シンデレラ")
+        self.assertEqual(cinderella_profile["story_time"], "17世紀末フランス・ルイ14世時代")
+        profile = module._story_profile("桃太郎", "桃太郎", variant_seed="story-time")
+        self.assertEqual(profile["story_time"], "")
+        profile["story_time"] = "室町時代"
+        asset_prompt = module._prompt_for_asset(
+            {
+                "asset_id": "protagonist",
+                "asset_type": "character_reference",
+                "story_purpose": "主人公の同一性を固定する",
+                "visual_spec": {"subject": "若い旅人の全身参照"},
+                "generation_plan": {"reference_inputs": []},
+            },
+            profile,
+        )
+        self.assertIn("物語の時代背景は室町時代", asset_prompt)
+
+        plan = {
+            "temporal_boundary": {"event_fact_visible_in_still": "旅人が木造の門前に立っている"},
+            "subject_binding": {"primary_subject": {"name": "門前に立つ旅人"}},
+            "spatial_composition": {
+                "foreground": "土の道",
+                "midground": "門前に立つ旅人",
+                "background": "木造の門",
+            },
+            "scene_material_pack": {"dominant_materials": ["木、土、麻布"]},
+        }
+        payload = module._image_api_prompt_payload_for_scaffold(
+            first_frame_visual_plan=plan,
+            character_ids=[],
+            object_ids=[],
+            location_ids=["village_gate"],
+            references=[],
+            story_time=profile["story_time"],
+        )
+        self.assertIn("物語の時代背景は室町時代", payload["prompt"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            build_profile = module._duration_aware_profile(profile, target_duration_seconds=300)
+            script, manifest, _selectors = module._build_script_and_manifest(
+                "桃太郎",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                build_profile,
+            )
+        self.assertEqual(script["script_metadata"]["time"], "室町時代")
+        self.assertEqual(manifest["video_metadata"]["time"], "室町時代")
+        first_prompt = manifest["scenes"][0]["cuts"][0]["image_generation"]["api_prompt_payload"]["prompt"]
+        self.assertIn("物語の時代背景は室町時代", first_prompt)
+        provider_prompts = [
+            cut["image_generation"]["api_prompt_payload"]["prompt"]
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        ]
+        for production_term in (
+            "setup beat",
+            "pressure beat",
+            "turn beat",
+            "payoff beat",
+            "観客がscene",
+            "sceneを誤読",
+            "scene理解",
+            "画面に置く",
+            "人物を囲む配置",
+            "へ具体的に反応する",
+            "sceneの結果を次へ渡す",
+            "場面の結果を次へ渡す",
+            "主要な視覚証拠",
+        ):
+            self.assertFalse(
+                any(production_term in prompt for prompt in provider_prompts),
+                production_term,
+            )
+        for prompt in provider_prompts:
+            self.assertFalse(
+                "行動後" in prompt and "行為直前" in prompt,
+                prompt,
+            )
+
+        profile["story_time"] = ""
+        empty_asset_prompt = module._prompt_for_asset(
+            {
+                "asset_id": "protagonist",
+                "asset_type": "character_reference",
+                "visual_spec": {"subject": "創作世界の旅人"},
+                "generation_plan": {"reference_inputs": []},
+            },
+            profile,
+        )
+        self.assertNotIn("物語の時代背景", empty_asset_prompt)
+
+    def test_cinderella_provider_prompts_are_era_grounded_and_free_of_production_shorthand(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            profile = module._duration_aware_profile(
+                module._story_profile("シンデレラ", "シンデレラ", variant_seed="provider-audit"),
+                target_duration_seconds=300,
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        prompts = [
+            cut["image_generation"]["api_prompt_payload"]["prompt"]
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        ]
+        self.assertGreaterEqual(len(prompts), 40)
+        self.assertTrue(
+            all("物語の時代背景は17世紀末フランス・ルイ14世時代" in prompt for prompt in prompts)
+        )
+        _inventory, asset_plan = module._build_asset_artifacts_from_manifest(
+            profile=profile,
+            manifest=manifest,
+        )
+        asset_prompts = [
+            module._prompt_for_asset(entry, profile)
+            for entry in asset_plan["assets"]
+        ]
+        self.assertGreaterEqual(len(asset_prompts), 10)
+        self.assertTrue(
+            all(
+                "物語の時代背景は17世紀末フランス・ルイ14世時代" in prompt
+                for prompt in asset_prompts
+            )
+        )
+        for production_term in (
+            "setup beat",
+            "pressure beat",
+            "turn beat",
+            "payoff beat",
+            "観客がscene",
+            "sceneを誤読",
+            "scene理解",
+            "画面に置く",
+            "人物を囲む配置",
+            "へ具体的に反応する",
+            "sceneの結果を次へ渡す",
+            "場面の結果を次へ渡す",
+            "主要な視覚証拠",
+        ):
+            self.assertFalse(any(production_term in prompt for prompt in prompts), production_term)
+        self.assertFalse(any("行動後" in prompt and "行為直前" in prompt for prompt in prompts))
+        self.assertFalse(
+            any("行動後" in prompt and "まだ結果へ到達していない" in prompt for prompt in prompts)
+        )
+        self.assertFalse(
+            any("証明を受け止めた姿勢" in prompt and "圧力を受け止めている表情" in prompt for prompt in prompts)
+        )
+        reviewer = load_image_prompt_review_module()
+        entries = reviewer.manifest_prompt_entries(
+            manifest,
+            allowed_story_modes={"generate_still"},
+        )
+        outcomes = reviewer.review_entries(
+            entries,
+            manifest=manifest,
+            story_scene_map={},
+            script_scene_map=reviewer.extract_scene_context_map(script),
+            story_text="",
+            script_text="",
+            reveal_constraints=[],
+        )
+        hard_findings = [
+            (reviewer._selector_label(outcome.entry.scene_id, outcome.entry.cut_id), finding.code)
+            for outcome in outcomes
+            for finding in outcome.findings
+            if reviewer.is_hard_finding(finding)
+        ]
+        self.assertEqual(hard_findings, [])
+
+    def test_scaffold_not_yet_never_copies_next_positive_first_frame_brief(self) -> None:
+        module = load_frontend_run_module()
+        self.assertEqual(
+            module._drawable_phrase_for_scaffold(
+                "前cutの「扉が閉じている」から、このcutでは「旅人が「古い鍵」を掲げる」へ進む"
+            ),
+            "旅人が「古い鍵」を掲げる",
+        )
+        plan = module._first_frame_visual_plan_for_scaffold(
+            selector="scene10_cut01",
+            profile={
+                "slug": "sample",
+                "protagonist_name": "旅人",
+                "artifact_name": "古い鍵",
+                "artifact_output_dir": "objects",
+            },
+            location_spec={
+                "asset_id": "stone_gate",
+                "visual_spec": {"subject": "石造りの城門、夕方の斜光"},
+            },
+            location_name="石造りの城門",
+            cut_number=1,
+            cut_plan={
+                "foreground": "古い鍵",
+                "midground": "旅人",
+                "background": "石造りの城門",
+                "screen_direction": "右奥",
+            },
+            cut_blueprint={
+                "cut_function": "setup",
+                "visual_beat": "旅人が古い鍵を手に城門の前で立ち止まる",
+                "target_beat": "城門を越える前",
+                "first_frame_brief": "旅人と古い鍵が城門の前に見える",
+                "causal_proof": "古い鍵",
+                "dramatic_job": "越境の準備",
+            },
+            cut_contract={
+                "source_event_contract": {},
+                "first_frame_contract": {
+                    "event_fact_visible_in_still": "旅人が古い鍵を手に城門の前で立ち止まる",
+                    "event_time_position": "before_trigger",
+                },
+                "viewer_contract": {
+                    "reveal_constraints": {
+                        "forbidden_until_later_cut": ["城門の向こうにいる人物の正体"],
+                    },
+                },
+                "cinematic_contract": {
+                    "screen_geography": {
+                        "foreground": "古い鍵",
+                        "midground": "旅人",
+                        "background": "石造りの城門",
+                    }
+                },
+                "cut_state_progression": {
+                    "must_not_advance_beyond": "古い鍵を前景で明確に見せる",
+                },
+            },
+            character_ids=["traveler"],
+            object_ids=["old_key"],
+            references=["assets/characters/traveler.png", "assets/objects/old_key.png"],
+            cut_uses_artifact=False,
+        )
+
+        not_yet = plan["temporal_boundary"]["not_yet_happened_in_still"]
+        self.assertEqual(not_yet, ["城門の向こうにいる人物の正体"])
+        self.assertNotIn("古い鍵を前景で明確に見せる", not_yet)
 
     def test_cinderella_research_is_causally_complete_and_yaml_round_trippable(self) -> None:
         module = load_frontend_run_module()
@@ -391,6 +845,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertIn("探索を命じ", scenes[7]["segment_responsibility"])
         self.assertIn("王宮の使者", scenes[7]["visualizable_action"])
         self.assertIn("試着", scenes[7]["visualizable_action"])
+        self.assertEqual(scenes[7]["location"]["mode"], "sequence")
+        self.assertEqual(
+            scenes[7]["location"]["sequence"],
+            ["王宮の命令の間", "町の家々", "靴合わせの部屋"],
+        )
+        self.assertIn("王宮の命令の間", scenes[7]["visualizable_action"])
+        self.assertIn("町の家々", scenes[7]["visualizable_action"])
+        self.assertIn("探索", scenes[7]["narration"])
+        self.assertIn("試着", scenes[7]["narration"])
         self.assertIn("公に", scenes[7]["turn"])
 
     def test_twenty_minute_cinderella_scenes_have_distinct_segment_responsibilities(self) -> None:
@@ -656,10 +1119,31 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertEqual(five_minutes["canonical_scene_indices"], list(range(1, 9)))
         self.assertEqual(len(twenty_minutes["scene_titles"]), 30)
         self.assertEqual(len(twenty_minutes["scene_locations"]), 30)
+        self.assertEqual(len(twenty_minutes["scene_location_sequences"]), 30)
+        self.assertTrue(all(sequence for sequence in twenty_minutes["scene_location_sequences"]))
+        self.assertEqual(len(twenty_minutes["scene_location_segments"]), 30)
+        for sequence, segments in zip(
+            twenty_minutes["scene_location_sequences"],
+            twenty_minutes["scene_location_segments"],
+            strict=True,
+        ):
+            if segments:
+                self.assertEqual(
+                    {segment["location"] for segment in segments},
+                    set(sequence),
+                )
+        self.assertEqual(len(twenty_minutes["scene_times_of_day"]), 30)
         self.assertEqual(len(twenty_minutes["canonical_scene_indices"]), 30)
         self.assertEqual(twenty_minutes["canonical_scene_indices"][0], 1)
         self.assertEqual(twenty_minutes["canonical_scene_indices"][-1], 8)
         self.assertEqual(sorted(twenty_minutes["canonical_scene_indices"]), twenty_minutes["canonical_scene_indices"])
+        self.assertEqual(
+            twenty_minutes["scene_times_of_day"],
+            [
+                twenty_minutes["canonical_scene_times_of_day"][canonical_index - 1]
+                for canonical_index in twenty_minutes["canonical_scene_indices"]
+            ],
+        )
         self.assertEqual(twenty_minutes["duration_plan"]["target_seconds"], 1200)
         self.assertEqual(twenty_minutes["duration_plan"]["minimum_scene_count"], 30)
         self.assertEqual(twenty_minutes["duration_plan"]["minimum_cut_count"], 100)
@@ -742,6 +1226,697 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertEqual(len({cut["obligation_id"] for cut in cuts}), len(cuts))
         self.assertTrue(all(cut.get("primary_event_beat_id") for cut in cuts))
 
+    def test_core_cut_obligations_use_concrete_single_states_and_distinct_motion(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="concrete-cut-projection"),
+            target_duration_seconds=300,
+        )
+        idx = 1
+        title = profile["scene_titles"][idx - 1]
+        location = module._location_spec_for_scene(profile, idx)
+        scene_intent = module._scene_intent_for_cut_design(
+            title=title,
+            idx=idx,
+            location_spec=location,
+            profile=profile,
+            include_artifact=False,
+        )
+        scene_event = module._scene_event_for_cut_design(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=profile,
+            include_artifact=False,
+        )
+        result = module._scene_cut_coverage_plan(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            scene_event=scene_event,
+            location_name=str(location["name"]),
+            profile=profile,
+            include_artifact=False,
+        )
+        by_id = {cut["obligation_id"]: cut for cut in result["cuts"]}
+        pressure = by_id["scene_pressure"]
+        shift = by_id["visible_value_shift"]
+        provider_fields = " / ".join(
+            str(cut.get(key) or "")
+            for cut in (pressure, shift)
+            for key in (
+                "target_beat",
+                "visual_proof",
+                "first_frame_brief",
+                "foreground",
+                "motion_brief",
+                "motion_end_state",
+            )
+        )
+
+        for unresolved in (
+            "または",
+            "変化点",
+            "変化の証拠",
+            "物証",
+            "空間の締めつけ",
+            "人物の制約",
+            "押し戻すに",
+            ", ",
+        ):
+            self.assertNotIn(unresolved, provider_fields)
+        self.assertNotEqual(pressure["motion_brief"], shift["motion_brief"])
+        self.assertNotEqual(pressure["motion_end_state"], shift["motion_end_state"])
+        self.assertIn("手", pressure["motion_brief"])
+        self.assertIn("継母", pressure["motion_brief"])
+        self.assertIn(profile["protagonist_name"], pressure["motion_end_state"])
+        turn = next(beat for beat in scene_event["event_sequence"] if beat["beat_function"] == "turn")
+        self.assertNotIn(f"{profile['protagonist_name']}が「", turn["visible_action"])
+        self.assertNotIn("直後", turn["visible_action"])
+        self.assertIn("手を止め", turn["visible_action"])
+
+    def test_first_two_cuts_bind_motion_channels_to_visible_people_and_physical_end_states(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="cut-motion-binding"),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        first, second = manifest["scenes"][0]["cuts"][:2]
+        first_motion = first["cut_contract"]["motion_contract"]
+        second_motion = second["cut_contract"]["motion_contract"]
+        second_start_state = second["cut_contract"]["first_frame_contract"]["visible_start_state"]
+        first_gate = first["image_generation"]["first_frame_visual_plan"]["character_state_gate"]
+        second_gate = second["image_generation"]["first_frame_visual_plan"]["character_state_gate"]
+        first_prompt = first["image_generation"]["api_prompt_payload"]["prompt"]
+        second_prompt = second["image_generation"]["api_prompt_payload"]["prompt"]
+        self.assertEqual(first_motion["camera_motion"], "locked_off")
+        self.assertEqual(second_motion["camera_motion"], "slow_push")
+        self.assertNotEqual(first_motion["subject_motion"], second_motion["subject_motion"])
+        self.assertIn("継母", first_gate["gaze"])
+        self.assertIn("出入口", second_gate["gaze"])
+        self.assertIn("出入口へ向き", second_gate["foot_position"])
+        self.assertNotIn("出入口から外れ", second_gate["foot_position"])
+        self.assertIn("出入口", first_motion["emotional_change"])
+        self.assertIn("継母", second_motion["emotional_change"])
+        self.assertNotIn("を受け、", second_start_state["character_state"])
+        self.assertNotIn("同じ画面に、光が明確に見える", first_prompt)
+        self.assertNotIn("同じ画面に、灰の台所、光が明確に見える", second_prompt)
+        for motion in (first_motion, second_motion):
+            provider_motion = " / ".join(
+                str(motion.get(key) or "")
+                for key in (
+                    "subject_motion",
+                    "environment_motion",
+                    "emotional_change",
+                    "end_state",
+                )
+            )
+            for unresolved in (
+                "押し戻すに",
+                "変化点",
+                "変化の証拠",
+                "sceneの前提",
+                "次cut",
+                "内面の変化",
+                "または",
+            ):
+                self.assertNotIn(unresolved, provider_motion)
+            self.assertIn("シンデレラ", motion["subject_motion"])
+            self.assertIn("シンデレラ", motion["end_state"])
+
+    def test_multi_location_scene_assigns_every_location_as_primary_without_cross_location_text(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="multi-location-primary"),
+            target_duration_seconds=300,
+        )
+        idx = 8
+        title = profile["scene_titles"][idx - 1]
+        location = module._location_spec_for_scene(profile, idx)
+        scene_intent = module._scene_intent_for_cut_design(
+            title=title,
+            idx=idx,
+            location_spec=location,
+            profile=profile,
+            include_artifact=True,
+        )
+        scene_event = module._scene_event_for_cut_design(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=profile,
+            include_artifact=True,
+        )
+        result = module._scene_cut_coverage_plan(
+            title=title,
+            idx=idx,
+            scene_intent=scene_intent,
+            scene_event=scene_event,
+            location_name=str(location["name"]),
+            profile=profile,
+            include_artifact=True,
+        )
+        beat_by_id = {beat["beat_id"]: beat for beat in scene_event["event_sequence"]}
+        expected_locations = set(profile["scene_location_sequences"][idx - 1])
+        primary_locations = {
+            beat_by_id[cut["primary_event_beat_id"]]["concrete_event"]["where"]
+            for cut in result["cuts"]
+        }
+
+        self.assertEqual(primary_locations, expected_locations)
+        for cut in result["cuts"]:
+            primary_location = beat_by_id[cut["primary_event_beat_id"]]["concrete_event"]["where"]
+            provider_text = " / ".join(
+                str(cut.get(key) or "")
+                for key in ("target_beat", "visual_proof", "first_frame_brief", "foreground", "background")
+            )
+            self.assertIn(primary_location, provider_text)
+            for other_location in expected_locations - {primary_location}:
+                self.assertNotIn(other_location, provider_text)
+
+    def test_multi_location_manifest_binds_location_and_focal_character_per_cut(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="multi-location-manifest"),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        scene = manifest["scenes"][7]
+        expected_locations = set(scene["location_sequence"])
+        actual_locations: set[str] = set()
+        expected_primary_subject = {
+            "王宮の命令の間": "王子",
+            "町の家々": "王宮の使者",
+            "靴合わせの部屋": "シンデレラ",
+        }
+        previous_cut = None
+        for cut in scene["cuts"]:
+            contract = cut["cut_contract"]
+            concrete_event = contract["source_event_contract"]["source_concrete_events"][0]
+            location_name = concrete_event["where"]
+            actual_locations.add(location_name)
+            prompt = cut["image_generation"]["api_prompt_payload"]["prompt"]
+            self.assertIn(location_name, prompt)
+            for other_location in expected_locations - {location_name}:
+                self.assertNotIn(other_location, prompt)
+            primary_subject = contract["cinematic_contract"]["subject_priority"]["primary"]
+            self.assertEqual(primary_subject, expected_primary_subject[location_name])
+            character_bindings = cut["image_generation"]["first_frame_visual_plan"][
+                "reference_binding"
+            ]["character_references"]
+            self.assertTrue(character_bindings)
+            self.assertIn(primary_subject, character_bindings[0]["target_character_name"])
+
+            if cut["selector"] == "scene80_cut03":
+                plan = cut["image_generation"]["first_frame_visual_plan"]
+                self.assertIn(
+                    "数センチ手前", plan["character_state_gate"]["foot_position"]
+                )
+                self.assertNotIn(
+                    "隙間なく合",
+                    plan["object_visibility_gate"]["objects"][0]["object_state"],
+                )
+
+            first_visible_moment = contract["first_frame_contract"][
+                "event_fact_visible_in_still"
+            ]
+            subject_motion = contract["motion_contract"]["subject_motion"]
+            if location_name == "町の家々":
+                self.assertNotIn("家の人物", subject_motion)
+            if location_name == "靴合わせの部屋":
+                self.assertNotIn("視線は靴からシンデレラの顔へ上がる", first_visible_moment)
+                self.assertNotIn(subject_motion, first_visible_moment)
+            if (
+                previous_cut is not None
+                and previous_cut["location_name"] == location_name
+            ):
+                self.assertIn(previous_cut["end_state"], first_visible_moment)
+            previous_cut = {
+                "location_name": location_name,
+                "source_event_beat_id": contract["source_event_contract"][
+                    "primary_event_beat_id"
+                ],
+                "end_state": contract["motion_contract"]["end_state"],
+            }
+
+        self.assertEqual(actual_locations, expected_locations)
+
+    def test_duration_expanded_cuts_keep_motion_and_end_state_distinct_within_each_scene(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile("シンデレラ", "シンデレラ", variant_seed="distinct-cut-motion"),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        for scene in manifest["scenes"]:
+            motions = [
+                cut["cut_contract"]["motion_contract"]["subject_motion"]
+                for cut in scene["cuts"]
+            ]
+            end_states = [
+                cut["cut_contract"]["motion_contract"]["end_state"]
+                for cut in scene["cuts"]
+            ]
+            self.assertEqual(len(motions), len(set(motions)), scene["scene_id"])
+            self.assertEqual(len(end_states), len(set(end_states)), scene["scene_id"])
+            for cut in scene["cuts"]:
+                plan = cut["image_generation"]["first_frame_visual_plan"]
+                primary_name = plan["subject_binding"]["primary_subject"]["name"]
+                character_references = plan["reference_binding"][
+                    "character_references"
+                ]
+                if primary_name == "シンデレラ" and character_references:
+                    self.assertEqual(
+                        character_references[0]["role_in_frame"],
+                        "primary_subject",
+                        cut["selector"],
+                    )
+                if cut["selector"] == "scene70_cut03":
+                    self.assertIn(
+                        "踵から半分外れ",
+                        plan["character_state_gate"]["foot_position"],
+                    )
+                    self.assertNotIn(
+                        "隙間なく合",
+                        plan["object_visibility_gate"]["objects"][0][
+                            "object_state"
+                        ],
+                    )
+
+    def test_cinderella_turn_actions_and_slipper_handoff_are_physically_continuous(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="physical-turn-continuity",
+            ),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        cuts = {
+            cut["selector"]: cut
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        }
+        character_bible_by_id = {
+            entry["character_id"]: entry
+            for entry in manifest["assets"]["character_bible"]
+        }
+        post_midnight_bible = character_bible_by_id[
+            profile["protagonist_post_midnight_asset_id"]
+        ]
+        self.assertEqual(
+            post_midnight_bible["appearance_continuity"],
+            {
+                "costume_state": "魔法が解けた後の質素な衣装",
+                "forbidden_costume_states": ["舞踏会ドレス"],
+            },
+        )
+        self.assertEqual(
+            post_midnight_bible["review_aliases"][0],
+            profile["protagonist_name"],
+        )
+        self.assertTrue(
+            any(
+                "魔法が解けた後の質素な衣装" in fixed_prompt
+                for fixed_prompt in post_midnight_bible["fixed_prompts"]
+            )
+        )
+        artifact_reference = f"assets/objects/{profile['artifact_asset_id']}.png"
+        for scene_prefix in ("scene10", "scene20"):
+            for selector, cut in cuts.items():
+                if not selector.startswith(f"{scene_prefix}_cut"):
+                    continue
+                source_forbidden = cut["cut_contract"]["source_event_contract"][
+                    "forbidden_reveal_info_ids"
+                ]
+                self.assertIn("ガラスの靴", source_forbidden, selector)
+                image_generation = cut["image_generation"]
+                visual_plan = image_generation["first_frame_visual_plan"]
+                self.assertIn(
+                    "ガラスの靴",
+                    visual_plan["temporal_boundary"]["not_yet_happened_in_still"],
+                    selector,
+                )
+                api_payload = image_generation["api_prompt_payload"]
+                self.assertIn(
+                    "まだ描かないものは、ガラスの靴",
+                    api_payload["prompt"],
+                    selector,
+                )
+                self.assertNotIn(
+                    profile["artifact_asset_id"], image_generation["object_ids"], selector
+                )
+                self.assertNotIn(
+                    profile["artifact_asset_id"],
+                    api_payload["drawable_prompt_ir"]["dependencies"]["object_ids"],
+                    selector,
+                )
+                self.assertNotIn(artifact_reference, image_generation["references"], selector)
+                self.assertFalse(
+                    any(
+                        item.get("object_id") == profile["artifact_asset_id"]
+                        for item in visual_plan["object_visibility_gate"]["objects"]
+                    ),
+                    selector,
+                )
+
+        for selector, cut in cuts.items():
+            if not selector.startswith("scene70_cut"):
+                continue
+            visual_plan = cut["image_generation"]["first_frame_visual_plan"]
+            self.assertNotIn(
+                "時間制限の結果",
+                visual_plan["temporal_boundary"]["not_yet_happened_in_still"],
+                selector,
+            )
+            self.assertNotIn(
+                "時間制限の結果",
+                cut["image_generation"]["api_prompt_payload"]["prompt"],
+                selector,
+            )
+        scene40 = next(
+            scene for scene in manifest["scenes"] if scene["scene_id"] == 40
+        )
+        scene40_payoff = next(
+            beat
+            for beat in scene40["scene_event"]["event_sequence"]
+            if beat["beat_function"] == "payoff"
+        )
+        self.assertIn(
+            "protagonist", scene40_payoff["concrete_event"]["who"]
+        )
+        for selector in ("scene40_cut05", "scene40_cut06"):
+            self.assertIn(
+                "protagonist",
+                cuts[selector]["cut_contract"]["viewer_contract"]["required_roles"],
+                selector,
+            )
+        expected_turn_motion = {
+            "scene10_cut03": "家事道具を入れた籠を灰の床へ",
+            "scene20_cut03": "裏口の掛け金を外し",
+            "scene30_cut03": "開いた馬車扉へ一歩だけ進む",
+            "scene40_cut03": "身体を一度だけ客室内へ乗り入れる",
+            "scene50_cut03": "大階段を二段だけ上り",
+            "scene60_cut03": "最初の一歩だけ踊り始める",
+            "scene70_cut03": "ガラスの靴が踵から外れて一段上に残る",
+            "scene80_cut03": "ガラスの靴へ踵まで入れる",
+        }
+        for selector, expected in expected_turn_motion.items():
+            self.assertIn(
+                expected,
+                cuts[selector]["cut_contract"]["motion_contract"][
+                    "subject_motion"
+                ],
+                selector,
+            )
+
+        scene30_cut2 = cuts["scene30_cut02"]
+        scene30_cut3 = cuts["scene30_cut03"]
+        self.assertNotIn(
+            profile["artifact_asset_id"],
+            scene30_cut2["image_generation"]["object_ids"],
+        )
+        self.assertIn(
+            "ドレス、ガラスの靴、馬車の形へ変える",
+            scene30_cut2["cut_contract"]["motion_contract"]["subject_motion"],
+        )
+        self.assertEqual(
+            scene30_cut2["cut_contract"]["motion_contract"][
+                "allowed_new_reveal_elements"
+            ],
+            ["変身後のシンデレラ", "ガラスの靴", "完成したかぼちゃの馬車"],
+        )
+        self.assertEqual(
+            scene30_cut2["video_generation"]["last_frame"],
+            "assets/scenes/scene30_cut03.png",
+        )
+        self.assertIn(
+            scene30_cut2["cut_contract"]["motion_contract"]["end_state"],
+            scene30_cut3["cut_contract"]["first_frame_contract"][
+                "event_fact_visible_in_still"
+            ],
+        )
+        scene30_plan = scene30_cut3["image_generation"][
+            "first_frame_visual_plan"
+        ]
+        self.assertFalse(
+            any(
+                "魔法の助力者" in binding["target_character_name"]
+                for binding in scene30_plan["reference_binding"][
+                    "character_references"
+                ]
+            )
+        )
+        object_states = {
+            item["object_name"]: item["object_state"]
+            for item in scene30_plan["object_visibility_gate"]["objects"]
+        }
+        self.assertNotIn("足に隙間なく合", object_states["馬車"])
+        self.assertIn("足に隙間なく合", object_states["ガラスの靴"])
+
+        scene70_cut4 = cuts["scene70_cut04"]
+        scene70_cut5 = cuts["scene70_cut05"]
+        self.assertEqual(
+            scene70_cut4["cut_contract"]["motion_contract"][
+                "allowed_new_reveal_elements"
+            ],
+            ["質素な普段着へ戻ったシンデレラ"],
+        )
+        self.assertEqual(
+            scene70_cut4["video_generation"]["last_frame"],
+            "assets/scenes/scene70_cut05.png",
+        )
+        self.assertIn(
+            "時間制限の結果",
+            scene70_cut4["cut_contract"]["source_event_contract"][
+                "allowed_reveal_info_ids"
+            ],
+        )
+        self.assertNotIn(
+            "時間制限の結果",
+            scene70_cut4["cut_contract"]["source_event_contract"][
+                "forbidden_reveal_info_ids"
+            ],
+        )
+        scene70_cut5_start = scene70_cut5["cut_contract"]["first_frame_contract"][
+            "event_fact_visible_in_still"
+        ]
+        self.assertIn("ガラスの靴の三段下", scene70_cut5_start)
+        self.assertNotIn("靴の一段下", scene70_cut5_start)
+
+        scene70_cut7 = cuts["scene70_cut07"]
+        scene70_cut8 = cuts["scene70_cut08"]
+        self.assertIn(
+            "胸元まで一度だけ持ち上げる",
+            scene70_cut7["cut_contract"]["motion_contract"]["subject_motion"],
+        )
+        self.assertIn(
+            "片方のガラスの靴を胸元で支え",
+            scene70_cut8["cut_contract"]["first_frame_contract"][
+                "event_fact_visible_in_still"
+            ],
+        )
+        self.assertIn(
+            "片方のガラスの靴を胸元で持ち",
+            scene70_cut8["cut_contract"]["motion_contract"]["end_state"],
+        )
+        self.assertIn(
+            "gaze",
+            scene70_cut8["image_generation"]["first_frame_visual_plan"][
+                "character_state_gate"
+            ],
+        )
+        scene70_cut5_character_states = scene70_cut5["image_generation"][
+            "first_frame_visual_plan"
+        ]["character_state_gate"]["character_states"]
+        self.assertEqual(
+            scene70_cut5_character_states,
+            [
+                {
+                    "character_id": profile["protagonist_post_midnight_asset_id"],
+                    "character_name": profile["protagonist_name"],
+                    "appearance_continuity": {
+                        "costume_state": "魔法が解けた後の質素な衣装",
+                        "forbidden_costume_states": ["舞踏会ドレス"],
+                    },
+                }
+            ],
+        )
+        expected_source_hand_state = {
+            "scene70_cut06": "片手が身体の横で止まっている",
+            "scene70_cut07": "ガラスの靴の踵に触れている",
+            "scene70_cut08": "ガラスの靴を胸元で支えている",
+        }
+        for selector in ("scene70_cut06", "scene70_cut07", "scene70_cut08"):
+            source_state = cuts[selector]["cut_contract"]["source_event_contract"][
+                "source_concrete_events"
+            ][0]["visible_character_state"]
+            self.assertIn(
+                expected_source_hand_state[selector],
+                source_state["hands"],
+                selector,
+            )
+            character_names = [
+                binding["target_character_name"]
+                for binding in cuts[selector]["image_generation"][
+                    "first_frame_visual_plan"
+                ]["reference_binding"]["character_references"]
+            ]
+            self.assertFalse(
+                any("シンデレラ" in name for name in character_names),
+                selector,
+            )
+        self.assertIn(
+            "片方のガラスの靴",
+            cuts["scene80_cut01"]["cut_contract"]["first_frame_contract"][
+                "event_fact_visible_in_still"
+            ],
+        )
+        self.assertIn(
+            "義姉の足に入らないガラスの靴",
+            cuts["scene80_cut02"]["cut_contract"]["motion_contract"][
+                "subject_motion"
+            ],
+        )
+        scene80_cut5_gate = cuts["scene80_cut05"]["image_generation"][
+            "first_frame_visual_plan"
+        ]["character_state_gate"]
+        self.assertIn("両肩をまだわずかに上げ", scene80_cut5_gate["pose"])
+        scene80_cut6_gate = cuts["scene80_cut06"]["image_generation"][
+            "first_frame_visual_plan"
+        ]["character_state_gate"]
+        self.assertIn("gaze", scene80_cut6_gate)
+        self.assertIn("踵まで隙間なく合", scene80_cut6_gate["foot_position"])
+
+    def test_cinderella_video_cut_projection_uses_authored_local_causal_actions(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="video-local-causal-actions",
+            ),
+            target_duration_seconds=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        cuts = {
+            cut["selector"]: cut
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        }
+        self.assertFalse(
+            any(
+                str(cut["cut_contract"]["cut_function"]).startswith("duration_")
+                or str(
+                    cut["cut_contract"]["viewer_contract"][
+                        "anti_redundancy_key"
+                    ]
+                ).startswith("scene_event.event_sequence")
+                and "duration_" in str(
+                    cut["cut_contract"]["viewer_contract"][
+                        "anti_redundancy_key"
+                    ]
+                )
+                for cut in cuts.values()
+            )
+        )
+
+        motion = lambda selector: cuts[selector]["cut_contract"]["motion_contract"][
+            "subject_motion"
+        ]
+        end = lambda selector: cuts[selector]["cut_contract"]["motion_contract"][
+            "end_state"
+        ]
+        start = lambda selector: cuts[selector]["cut_contract"][
+            "first_frame_contract"
+        ]["event_fact_visible_in_still"]
+
+        self.assertIn("裏口を庭側から閉じる", motion("scene20_cut04"))
+        self.assertIn("月明かりの庭", end("scene20_cut04"))
+        self.assertIn(end("scene20_cut04"), start("scene20_cut05"))
+        self.assertIn("庭の奥へ二歩", motion("scene20_cut05"))
+
+        self.assertIn("月光の外から一歩", motion("scene30_cut01"))
+        self.assertIn("文字盤", motion("scene30_cut02"))
+        self.assertNotIn("ドレス", motion("scene30_cut02"))
+        self.assertIn("ドレス、ガラスの靴、馬車の形へ変える", motion("scene30_cut03"))
+        self.assertEqual(
+            cuts["scene30_cut03"]["video_generation"]["last_frame"],
+            "assets/scenes/scene30_cut04.png",
+        )
+        self.assertIn(end("scene30_cut03"), start("scene30_cut04"))
+        self.assertIn("ガラスの靴を履いた足元", motion("scene30_cut04"))
+        self.assertIn("馬車扉へ一歩", motion("scene30_cut05"))
+        self.assertIn("扉枠へ片手", motion("scene30_cut06"))
+
+        self.assertIn("かぼちゃの馬車", motion("scene40_cut05"))
+        self.assertNotIn("シンデレラがシンデレラの手元", motion("scene40_cut05"))
+        self.assertIn("宮殿の灯り", motion("scene40_cut06"))
+        self.assertNotIn("シンデレラの手元との距離", end("scene40_cut06"))
+
+        self.assertIn("王子が", motion("scene50_cut04"))
+        self.assertIn("シンデレラへ顔", motion("scene50_cut04"))
+        self.assertIn("大広間の内側へ二歩", motion("scene50_cut05"))
+        self.assertNotIn("宮殿の階段の中景", end("scene50_cut05"))
+
+        self.assertIn("二人が半回転", motion("scene60_cut04"))
+        self.assertIn("壁時計", motion("scene60_cut05"))
+
+        self.assertIn("画面外へ出る", motion("scene70_cut05"))
+        self.assertIn("シンデレラは画面内にいない", end("scene70_cut05"))
+        self.assertIn("三段だけ下り", motion("scene70_cut06"))
+        self.assertIn("片手を一度だけ伸ばす", motion("scene70_cut07"))
+        self.assertIn("胸元まで一度だけ持ち上げる", motion("scene70_cut08"))
+
+        self.assertIn("椅子へ腰を下ろ", motion("scene80_cut03"))
+        self.assertNotIn("踵まで入れる", motion("scene80_cut03"))
+        self.assertIn("ガラスの靴へ踵まで入れる", motion("scene80_cut04"))
+        self.assertIn("足首を一度だけ", motion("scene80_cut05"))
+        self.assertIn("王宮の使者が", motion("scene80_cut06"))
+        self.assertIn("一度うなずく", motion("scene80_cut06"))
+
     def test_scaffold_prompt_compiler_omits_unbound_character_and_object_sections(self) -> None:
         module = load_frontend_run_module()
         first_frame_visual_plan = {
@@ -799,7 +1974,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 },
                 {
                     "source_field": "viewer_contract.must_show",
-                    "must_be_drawn_as": "人物を囲む配置",
+                    "must_be_drawn_as": "人物同士の距離と出入口への位置関係",
                 },
                 {
                     "source_field": "viewer_contract.visual_evidence",
@@ -807,6 +1982,104 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 },
             ],
         )
+
+    def test_scaffold_multi_object_proof_uses_readable_depth_instead_of_extreme_closeup(self) -> None:
+        module = load_frontend_run_module()
+
+        shot = module._scaffold_shot_design(
+            cut_number=3,
+            cut_blueprint={"cut_function": "proof"},
+            cut_uses_artifact=True,
+            object_ids=["carriage", "glass_slipper"],
+        )
+
+        self.assertEqual(shot["shot_role"], "object_proof")
+        self.assertEqual(shot["shot_scale"], "medium_wide")
+
+    def test_scaffold_artifact_payoff_keeps_character_and_witnesses_in_frame(self) -> None:
+        module = load_frontend_run_module()
+
+        shot = module._scaffold_shot_design(
+            cut_number=3,
+            cut_blueprint={"cut_function": "payoff"},
+            cut_uses_artifact=True,
+            object_ids=["glass_slipper"],
+        )
+
+        self.assertEqual(shot["shot_role"], "object_proof")
+        self.assertEqual(shot["shot_scale"], "medium_wide")
+
+    def test_transformation_handoff_keeps_named_carriage_reference(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            profile = module._story_profile("シンデレラ", "シンデレラ")
+        drawable_evidence: list[dict[str, str]] = []
+
+        object_ids = module._supporting_object_ids_for_cut(
+            profile,
+            drawable_evidence,
+            cut_plan={
+                "obligation_id": "causal_handoff",
+                "primary_event_beat_id": "transformation_turn",
+            },
+            scene_event={
+                "event_sequence": [
+                    {
+                        "beat_id": "transformation_turn",
+                        "what_happens": "かぼちゃの馬車とガラスの靴を整える",
+                        "concrete_event": {
+                            "what_happens": "シンデレラが馬車で出発できる状態になる",
+                        },
+                    }
+                ]
+            },
+        )
+
+        self.assertIn("pumpkin_carriage", object_ids)
+        self.assertIn("馬車", [item["must_be_drawn_as"] for item in drawable_evidence])
+
+    def test_scaffold_handoff_visible_behavior_uses_post_action_hands(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._story_profile("桃太郎", "桃太郎", variant_seed="handoff-hands")
+
+        behavior = module._visible_behavior_from_cut(
+            profile=profile,
+            cut_plan={"screen_direction": "出口方向"},
+            cut_blueprint={
+                "cut_function": "handoff",
+                "action_completion_state": "handoff_state",
+                "first_frame_brief": "主人公は行動後の姿勢で出口へ重心を移している",
+            },
+            location_name="村の門前",
+            object_ids=[],
+        )
+
+        self.assertNotIn("行為直前", behavior["hands"])
+        self.assertIn("直前の動きが終わった位置", behavior["hands"])
+        self.assertNotIn("主要な視覚証拠", " ".join(behavior.values()))
+        self.assertNotIn("まだ結果へ到達していない", behavior["feet"])
+        self.assertIn("行動後の位置", behavior["feet"])
+
+    def test_scaffold_payoff_visible_behavior_uses_resolved_face_and_feet(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._story_profile("桃太郎", "桃太郎", variant_seed="payoff-state")
+
+        behavior = module._visible_behavior_from_cut(
+            profile=profile,
+            cut_plan={"screen_direction": "終結位置"},
+            cut_blueprint={
+                "cut_function": "payoff",
+                "action_completion_state": "handoff_state",
+                "first_frame_brief": "主人公の肩から緊張が抜け、前景の痕跡のそばに立つ",
+            },
+            location_name="村の広場",
+            object_ids=[],
+        )
+
+        self.assertNotIn("主要な視覚証拠", " ".join(behavior.values()))
+        self.assertIn("安堵", behavior["face"])
+        self.assertNotIn("まだ結果へ到達していない", behavior["feet"])
+        self.assertIn("重心は安定", behavior["feet"])
 
     def test_same_topic_runs_use_story_specific_cinderella_without_fixed_scaffold_ids(self) -> None:
         module = load_frontend_run_module()
@@ -849,7 +2122,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertIn("靴合わせ", combined)
         self.assertIn("舞踏会", combined)
         self.assertIn("王子", combined)
-        self.assertIn("灰と家事に縛られたシンデレラは、舞踏会の知らせへ顔を上げられるか", combined)
+        self.assertIn("灰と家事に縛られたシンデレラは、家の中で尊厳を失わずにいられるか", combined)
         self.assertRegex(
             asset_request_a,
             r"(?s)asset_id: `[a-z0-9_]+_transformed_fullbody`.*?references:\n\s+- `人物参照画像1`: `assets/characters/[a-z0-9_]+_protagonist_fullbody\.png`",
@@ -958,13 +2231,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
-            self.assertEqual(state["slot.p650.status"], "done")
             self.assertNotIn("slot.p660.status", state)
             self.assertNotIn("slot.p680.status", state)
             self.assertEqual(state["review.image.status"], "pending")
             self.assertEqual(state["gate.image_review"], "required")
             self.assertEqual(state["review.image_prompt.judgment.status"], "pending")
-            self.assertEqual(state["review.semantic.asset_plan.entry_count"], "14")
+            self.assertEqual(state["slot.p650.status"], "pending")
+            self.assertEqual(state["review.image_prompt.request_freeze.status"], "draft")
+            for stage in ("scene_implementation_hard", "scene_implementation_judgment"):
+                self.assertEqual(state[f"eval.{stage}.loop.status"], "pending")
+                self.assertFalse((run_dir / f"logs/eval/{stage}/round_01/critic_1.md").exists())
+            self.assertEqual(state["review.semantic.asset_plan.entry_count"], "20")
             for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
                 self.assertEqual(state[f"review.semantic.{stage}.status"], "pending")
                 self.assertIn(f"review.semantic.{stage}.entry_count", state)
@@ -1020,6 +2297,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("主要人物、全身ポートレート", asset_request_text)
             self.assertIn("pumpkin_carriage", asset_request_text)
             self.assertIn("prince_dance_partner", asset_request_text)
+            self.assertIn("cinderella_stepmother_fullbody", asset_request_text)
+            self.assertIn("cinderella_stepsisters_fullbody", asset_request_text)
+            self.assertIn("cinderella_helper_fullbody", asset_request_text)
+            self.assertIn("cinderella_royal_envoy_fullbody", asset_request_text)
             self.assertIn("cinderella_transformed_fullbody", asset_request_text)
             self.assertIn("cinderella_post_midnight_fullbody", asset_request_text)
             self.assertIn("参照画像が渡される場合は、その人物の顔・髪・体格・年齢感を同一人物として維持", asset_request_text)
@@ -1158,32 +2439,45 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("reveal_protection", manifest_text)
             self.assertIn("time_or_deadline_pressure", manifest_text)
             scene70_text = scene_request_text.split("## scene70_cut1", 1)[1].split("## scene80_cut1", 1)[0]
-            post_loss_scene70 = scene_request_text.split("## scene70_cut8", 1)[1].split("## scene80_cut1", 1)[0]
             self.assertIn("ガラスの靴", scene70_text)
             self.assertIn("脱げ", scene70_text)
             self.assertIn("階段に残ったガラスの靴", scene70_text)
-            self.assertIn("証拠", scene70_text)
+            self.assertIn("片方のガラスの靴を胸元で支え", scene70_text)
             self.assertIn("逃走", scene70_text)
+            post_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
-            pre_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
+            pre_loss_scene70 = scene_request_text.split("## scene70_cut4", 1)[1].split("## scene70_cut5", 1)[0]
             self.assertIn("cinderella_transformed_fullbody", pre_loss_scene70)
-            self.assertIn("衣装は、舞踏会ドレス姿を維持し、質素な普段着へ戻さない。", pre_loss_scene70)
-            self.assertIn("衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", post_loss_scene70)
+            self.assertIn("シンデレラの衣装は、舞踏会ドレス姿を維持し、質素な普段着には変えない。", pre_loss_scene70)
+            self.assertIn("シンデレラの衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスには変えない。", post_loss_scene70)
             scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
             self.assertIn("source_event_contract:", scene70_manifest)
             self.assertIn("event_context_for_cut:", scene70_manifest)
             self.assertIn("cut_contract.source_event_contract", scene70_manifest)
 
             transformation_scene = scene_request_text.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
-            self.assertIn("reference_count: `2`", transformation_scene)
+            self.assertIn("reference_count: `3`", transformation_scene)
+            self.assertIn("cinderella_helper_fullbody", transformation_scene)
             self.assertNotIn("glass_slipper", transformation_scene)
+            transformation_threshold = scene_request_text.split("## scene30_cut2", 1)[1].split("## scene30_cut3", 1)[0]
+            self.assertIn("reference_count: `3`", transformation_threshold)
+            self.assertIn("cinderella_helper_fullbody", transformation_threshold)
+            self.assertNotIn("glass_slipper", transformation_threshold)
+            self.assertIn("魔法の助力者", transformation_threshold)
             transformation_reveal = scene_request_text.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
             transformation_reveal_api_prompt = re.search(r"```api_prompt\n(?P<body>.*?)\n```", transformation_reveal, re.DOTALL).group("body")
+            self.assertIn("reference_count: `4`", transformation_reveal)
+            self.assertNotIn("cinderella_helper_fullbody", transformation_reveal)
+            self.assertIn("pumpkin_carriage", transformation_reveal)
             self.assertIn("glass_slipper", transformation_reveal)
             self.assertNotIn("object_visibility:", transformation_reveal_api_prompt)
             self.assertIn("[小道具 / 舞台装置]", transformation_reveal_api_prompt)
             self.assertIn("ガラスの靴は", transformation_reveal_api_prompt)
             self.assertIn("cinderella_transformed_fullbody", transformation_reveal)
+            deterministic_review = (run_dir / "image_prompt_story_review.md").read_text(encoding="utf-8")
+            self.assertIn("- status: `PASS`", deterministic_review)
+            self.assertIn("- hard_findings: `0`", deterministic_review)
+            self.assertNotIn("足音が明確に見える", scene_request_text)
 
             departure_scene = scene_request_text.split("## scene40_cut1", 1)[1].split("## scene50_cut1", 1)[0]
             self.assertIn("pumpkin_carriage", departure_scene)
@@ -1215,6 +2509,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("舞踏会の大広間", ballroom_scene)
             self.assertIn("location_06", ballroom_scene)
             self.assertIn("prince_dance_partner", ballroom_scene)
+            self.assertNotIn("cinderella_stepmother_fullbody", ballroom_scene)
+            self.assertNotIn("cinderella_helper_fullbody", ballroom_scene)
             self.assertNotIn("location_02", ballroom_scene)
             ballroom_pressure = scene_request_text.split("## scene60_cut1", 1)[1].split("## scene60_cut2", 1)[0]
             self.assertNotIn("glass_slipper", ballroom_pressure)
@@ -1235,7 +2531,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_post_midnight_fullbody", final_scene_requests)
             self.assertNotIn("cinderella_transformed_fullbody", final_scene_requests)
             self.assertNotIn("背景に次の場所へ続く導線", final_scene_requests)
-            self.assertIn("衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスへ戻さない。", final_scene_requests)
+            self.assertIn("シンデレラの衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスには変えない。", final_scene_requests)
             final_scene_api_prompts = "\n".join(re.findall(r"```api_prompt\n(.*?)\n```", final_scene_requests, re.DOTALL))
             self.assertNotIn("object_visibility:", final_scene_api_prompts)
             self.assertIn("[小道具 / 舞台装置]", final_scene_api_prompts)
@@ -1245,8 +2541,13 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("月光、ガラス、階段", final_scene_requests)
 
             video_request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
-            self.assertIn("cut_contract:", video_request_text)
-            self.assertIn("motion_brief:", video_request_text)
+            self.assertIn("video_prompt_ir:", video_request_text)
+            self.assertIn("projection_review_contract:", video_request_text)
+            self.assertIn(
+                "cut.cut_contract.motion_contract.motion_brief",
+                video_request_text,
+            )
+            self.assertIn("```video_prompt", video_request_text)
 
             prompt_text = (run_dir / "logs/eval/asset/round_01/prompts/critic_1.prompt.md").read_text(encoding="utf-8")
             self.assertIn("You are critic_1 in the ToC Asset Eval/Improve Loop", prompt_text)
@@ -1302,11 +2603,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cut_character_emotion_transition:", request_text)
             self.assertIn("cut_film_grammar_contract:", request_text)
             self.assertIn("cut_state_progression:", request_text)
-            self.assertIn("[人物の見える演技]", request_text)
+            self.assertIn("[登場人物]", request_text)
             self.assertIn("表情は、", request_text)
             self.assertIn("視線は、", request_text)
             self.assertIn("姿勢は、", request_text)
-            self.assertIn("人物と圧力源の距離は、", request_text)
+            self.assertIn("足元は、", request_text)
             self.assertNotIn("観客理解の増分:", request_text)
             self.assertNotIn("因果の証明:", request_text)
             self.assertNotIn("静止画ルール:", request_text)
@@ -1315,6 +2616,30 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("glass_slipper", request_text)
             self.assertNotIn("シンデレラ", request_text)
 
+            manifest_text = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            manifest = yaml.safe_load(manifest_text.split("```yaml", 1)[1].split("```", 1)[0])
+            object_scenes = []
+            for scene in manifest["scenes"]:
+                has_object_dependency = any(
+                    ((cut.get("cut_contract") or {}).get("asset_dependency") or {}).get(
+                        "object_ids_required"
+                    )
+                    for cut in scene.get("cuts") or []
+                )
+                if not has_object_dependency:
+                    continue
+                object_scenes.append(scene)
+                required_insert = (
+                    ((scene.get("scene_film_coverage_plan") or {}).get("shot_mix") or {})
+                    .get("required_coverage", {})
+                    .get("insert")
+                )
+                self.assertTrue(required_insert, f"scene {scene.get('scene_id')} object coverage")
+            self.assertTrue(object_scenes)
+
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
-            self.assertEqual(state["stage.scene_implementation.grounding.status"], "ready")
+            # `materialize_run()` only authors the run. Grounding is the next
+            # orchestration step (`prepare_grounding()`), exercised by the CLI
+            # and backend create-route tests rather than this profile test.
+            self.assertNotIn("stage.scene_implementation.grounding.status", state)
