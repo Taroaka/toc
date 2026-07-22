@@ -12,9 +12,9 @@ source_scene:
   selector: "scene1"
   scene_intent_snapshot:
     importance: "medium" # low|medium|high|critical
-    target_duration_seconds: 24
+    target_duration_seconds: 6
     dramatic_question: ""
-    scene_spine: "setup -> pressure -> turn -> payoff -> handoff"
+    scene_spine: "scene 固有の authored event progression。候補ラベルを固定順で埋めない"
     value_shift:
       from: ""
       to: ""
@@ -49,62 +49,8 @@ source_scene:
     start_situation: ""
     source_story_beat_ids: []
     event_sequence:
-      - beat_id: "scene1_event_setup"
-        beat_function: "setup"
-        what_happens: ""
-        visible_action: ""
-        visible_reaction: ""
-        immediate_consequence: ""
-        emotional_pressure: ""
-        required_visual_evidence: []
-        primary_subject: ""
-        required_roles: []
-        visible_character_state:
-          posture: ""
-          gaze: ""
-          expression: ""
-          hands: ""
-          feet: ""
-        motion_brief: ""
-        motion_end_state: ""
-      - beat_id: "scene1_event_pressure"
-        beat_function: "pressure"
-        what_happens: ""
-        visible_action: ""
-        visible_reaction: ""
-        immediate_consequence: ""
-        emotional_pressure: ""
-        required_visual_evidence: []
-        primary_subject: ""
-        required_roles: []
-        visible_character_state:
-          posture: ""
-          gaze: ""
-          expression: ""
-          hands: ""
-          feet: ""
-        motion_brief: ""
-        motion_end_state: ""
       - beat_id: "scene1_event_turn"
         beat_function: "turn"
-        what_happens: ""
-        visible_action: ""
-        visible_reaction: ""
-        immediate_consequence: ""
-        emotional_pressure: ""
-        required_visual_evidence: []
-        primary_subject: ""
-        required_roles: []
-        visible_character_state:
-          posture: ""
-          gaze: ""
-          expression: ""
-          hands: ""
-          feet: ""
-        motion_brief: ""
-        motion_end_state: ""
-      - beat_id: "scene1_event_payoff"
-        beat_function: "payoff"
         what_happens: ""
         visible_action: ""
         visible_reaction: ""
@@ -126,23 +72,22 @@ source_scene:
       causal_turn_ref: "scene_intent.causal_turn"
     end_situation:
       value_shift_to_ref: "scene_intent.value_shift.to"
-      visible_evidence_refs: ["scene1_event_payoff"]
+      visible_evidence_refs: ["scene1_event_turn"]
     forbidden_event_changes: []
 
 scene_cut_coverage_plan:
   coverage_strategy: "reverse_from_scene_event"
   source_schema_version: "scene_event_v1"
   min_cut_count:
-    by_importance: 3
-    by_duration: 3
-    by_event_beats: 4
-    selected: 4
-    exception_reason: ""
+    # duration / importance は cut floor に使わない。同じ意味の obligation は既存 cut へまとめる。
+    by_distinct_semantic_obligations: 1
+    by_event_beats: 1
+    selected: 1
   event_beat_inventory:
-    - beat_id: "scene1_event_setup"
-      beat_function: "setup"
+    - beat_id: "scene1_event_turn"
+      beat_function: "turn"
       must_be_seen: true
-      assigned_cut_ids: []
+      assigned_cut_ids: ["scene1_cut1"]
   candidate_function_labels:
     - setup
     - pressure
@@ -152,33 +97,20 @@ scene_cut_coverage_plan:
     - handoff
     - custom
   scene_obligations:
-    - source: dramatic_question
-      evidence: ""
-    - source: value_shift.visible_evidence
-      evidence: []
-    - source: causal_turn
-      evidence: ""
-    - source: story_event_obligations_legacy_projection
-      evidence:
-        - event_id: ""
-          source_events: []
-          audience_knowledge_delta: ""
-          causal_proof: ""
-          visual_evidence: []
-          required_roles: []
-    - source: reveal_constraints
-      evidence: []
-    - source: handoff_to_next_scene
-      evidence: ""
+    - obligation_id: "scene1_turn_proof_01"
+      source: "causal_turn"
+      evidence: "この scene の不可逆な turn を示す可視証拠"
+      assigned_cut_ids: ["scene1_cut1"]
   cut_assignments:
     - cut_index: 1
-      obligation_id: ""
-      cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+      cut_selector: "scene1_cut1"
+      obligation_ids: ["scene1_turn_proof_01"]
+      cut_function: "turn"
       event_assignment:
         source_event_contract:
-          primary_event_beat_id: ""
-          source_event_beat_ids: []
-      target_beat: ""
+          primary_event_beat_id: "scene1_event_turn"
+          source_event_beat_ids: ["scene1_event_turn"]
+      target_beat: "不可逆な turn が画面上で成立する"
       visual_proof: ""
       audience_knowledge_delta: ""
       causal_proof: ""
@@ -193,10 +125,10 @@ cuts:
     cut_contract:
       schema_version: "3.0"
       source_event_contract:
-        primary_event_beat_id: "scene1_event_setup"
-        source_event_beat_ids: ["scene1_event_setup"]
-        event_beat_function: "setup"
-        event_time_position: "before_trigger"
+        primary_event_beat_id: "scene1_event_turn"
+        source_event_beat_ids: ["scene1_event_turn"]
+        event_beat_function: "turn"
+        event_time_position: "at_trigger"
         source_event_summary: ""
         source_visible_action: ""
         source_visible_reaction: ""
@@ -207,13 +139,13 @@ cuts:
         forbidden_reveal_info_ids: []
         must_not_change: []
       cut_role: "main" # main|sub|transition|reaction|visual_payoff
-      cut_function: "setup" # setup|pressure|threshold|turn|payoff|reaction|handoff
+      cut_function: "turn" # setup|pressure|threshold|turn|payoff|reaction|handoff
       intent_budget:
         primary_intent: ""
         secondary_intents_allowed: []
         forbidden_combined_intents:
           - "new_location_establishing + major_reveal + next_scene_handoff"
-        assigned_obligation_ids: []
+        assigned_obligation_ids: ["scene1_turn_proof_01"]
         overload_exception_reason: ""
         custom_function_reason: ""
       duration_intent: "short" # short|standard|hold
@@ -312,7 +244,7 @@ cuts:
       first_frame_contract:
         imageable: true
         image_role: "video_first_frame_candidate"
-        source_event_beat_id: "scene1_event_setup"
+        source_event_beat_id: "scene1_event_turn"
         event_time_position: "before_trigger"
         event_fact_visible_in_still: ""
         not_yet_happened_in_still: []
@@ -341,7 +273,7 @@ cuts:
         still_done_when: []
       motion_contract:
         movable: true
-        source_event_beat_id: "scene1_event_setup"
+        source_event_beat_id: "scene1_event_turn"
         starts_from_first_frame: true
         must_not_advance_to_event_beat_ids: []
         must_not_resolve_scene_turn_unless_primary_event_is_turn: true
@@ -357,7 +289,7 @@ cuts:
       narration_contract:
         schema_version: "narration_contract_v2"
         speakable_or_silent: true
-        source_event_beat_ids: ["scene1_event_setup"]
+        source_event_beat_ids: ["scene1_event_turn"]
         allowed_info_ids: []
         forbidden_info_ids: []
         must_not_advance_to_event_beat_ids: []

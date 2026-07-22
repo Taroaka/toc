@@ -22,12 +22,16 @@ ASSET_CATEGORY_USAGE_KEYS = {
 }
 ASSET_REVIEW_RUBRICS = {
     "characters": [
+        "subject_contract matches the intended number of distinct people and never collapses an ensemble into one person",
+        "appearance_contract makes social position, role, occasion/state, silhouette, material, condition, and palette drawable rather than generic",
         "identity remains consistent across all referenced selectors",
         "age/body/clothing details match the story role and visual_spec",
         "full-body reference requirements are present when required",
         "forbidden props or later-story objects are not accidentally attached",
     ],
     "character": [
+        "subject_contract matches the intended number of distinct people and never collapses an ensemble into one person",
+        "appearance_contract makes social position, role, occasion/state, silhouette, material, condition, and palette drawable rather than generic",
         "identity remains consistent across all referenced selectors",
         "age/body/clothing details match the story role and visual_spec",
         "full-body reference requirements are present when required",
@@ -44,11 +48,15 @@ ASSET_REVIEW_RUBRICS = {
         "object is not used as a location, character, or ambient decoration",
     ],
     "locations": [
+        "reuse_contract explicitly declares a neutral anchor or a derived time/state variant",
+        "neutral reusable locations contain no scene-specific morning/day/evening/night lighting",
         "space, era, geography, and mood match the scene context",
         "location is used as an environment reference rather than a character/object",
         "recurring spatial details remain stable across selectors",
     ],
     "location": [
+        "reuse_contract explicitly declares a neutral anchor or a derived time/state variant",
+        "neutral reusable locations contain no scene-specific morning/day/evening/night lighting",
         "space, era, geography, and mood match the scene context",
         "location is used as an environment reference rather than a character/object",
         "recurring spatial details remain stable across selectors",
@@ -116,6 +124,8 @@ def collect_entries(stage: str, run_dir: Path, manifest: Optional[dict[str, Any]
             run_dir=run_dir,
             usage_events=usage_events_for_entry,
         )
+        if request:
+            entry["request_metadata"] = request
         if stage == ASSET_OUTPUT_STAGE:
             outputs = _output_refs(run_dir, plan_entry=plan_entry, request=request, manifest_item=manifest_item)
             entry.update(
@@ -244,11 +254,20 @@ def _source_paths(run_dir: Path, names: list[str]) -> list[str]:
 def _semantic_contract(entry: dict[str, Any], inventory_item: dict[str, Any]) -> dict[str, Any]:
     explicit = entry.get("semantic_contract")
     if isinstance(explicit, dict):
-        return _normalize_semantic_contract(explicit, entry)
-    contract: dict[str, Any] = {}
-    for key in ("story_purpose", "visual_spec", "source_script_selectors", "asset_type"):
+        contract: dict[str, Any] = dict(explicit)
+    else:
+        contract = {}
+    for key in (
+        "story_purpose",
+        "visual_spec",
+        "source_script_selectors",
+        "asset_type",
+        "subject_contract",
+        "appearance_contract",
+        "reuse_contract",
+    ):
         if key in entry:
-            contract[key] = entry[key]
+            contract.setdefault(key, entry[key])
     if inventory_item:
         contract["inventory"] = {
             key: inventory_item.get(key)
@@ -310,7 +329,7 @@ def _entry_from_plan(
         "aliases": _aliases_for_entry(entry, inventory_item),
         "category": category,
         "asset_type": _clean(entry.get("asset_type") or inventory_item.get("recommended_asset_type")),
-        "source_paths": _source_paths(run_dir, ["asset_inventory.md", "asset_plan.md", "video_manifest.md"]),
+        "source_paths": _source_paths(run_dir, ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "asset_generation_request_snapshot.json", "video_manifest.md"]),
         "source_script_selectors": [_clean(item) for item in _as_list(entry.get("source_script_selectors")) if _clean(item)],
         "story_purpose": _clean(entry.get("story_purpose") or inventory_item.get("story_purpose")),
         "semantic_contract": semantic_contract,

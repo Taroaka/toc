@@ -51,12 +51,14 @@ asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに
 
 - やること: p520 の inventory を `asset_plan.md` に構造化し、生成前 review に出せる状態にする。
 - ゴール: 各 asset について、何を固定するか、どこで使うか、参照画像が必要か、どの output に保存するかが明確であること。
+- character asset は `subject_contract`（`individual|ensemble`、人数、member IDs）と `appearance_contract`（身分、役割、場面状態、silhouette、素材、手入れ状態、配色、禁止衣装）を持つ。複数人物を一つの asset にする場合、人数と各 identity を明示し、「人物1人」の共通 prompt へ縮退させない。
+- reusable asset は `reuse_contract.mode` を `neutral_anchor|time_variant|state_variant` から明示する。`neutral_anchor` に朝・昼・夕・夜の光を焼き込まない。`time_variant` は `time_of_day` と `derived_from_asset_id`、`state_variant` は `derived_from_asset_id` を必須にする。
 - character asset: 原則として全身が見える参照を作り、front / side / back の 3 面図を required views に含める。派生 character variant は main の front / side / back を参照して同一人物性を保つ。
 - object / location / setpiece / reusable still: 単体 still を基本にし、同じ場所や同じ物体の状態差分だけ `derived_from_asset_id` と `reference_inputs[]` を使う。
 
 #### p540 asset review / fix loop
 
-- やること: review agent が `asset_plan.md` を監査し、漏れや矛盾があれば担当 `p500` L2 supervisor が修正し、再度 review agent が確認する cycle を回す。
+- やること: review agent が `asset_plan.md` と、同じ revision から compile した `asset_generation_requests.md` / snapshot を一緒に監査する。抽象設計だけが正しく、最終 provider prompt の人数・衣装・時間帯が誤っている状態は合格にしない。漏れや矛盾があれば担当 `p500` L2 supervisor が正本を修正し、再 compile 後に review agent が確認する cycle を回す。
 - 標準 loop: 最大 1 round。round は複数 critic と aggregator を使い、aggregator が `passed|changes_requested` と unresolved findings を返す。
 - review 観点:
   - この物語の登場人物・物語固有アイテム・使用場所が漏れていないか

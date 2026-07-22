@@ -239,7 +239,7 @@ class TestSemanticReview(unittest.TestCase):
 
             self.assertTrue(result.passed)
 
-    def test_image_prompt_accepts_legacy_pass_when_generic_alias_is_stale_pending(self) -> None:
+    def test_image_prompt_rejects_legacy_pass_when_canonical_review_is_pending(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)
             write_review_pack(run_dir, status="passed")
@@ -247,8 +247,8 @@ class TestSemanticReview(unittest.TestCase):
 
             result = check_image_prompt_judgment(run_dir)
 
-            self.assertTrue(result.passed)
-            self.assertEqual(result.status, "passed")
+            self.assertFalse(result.passed)
+            self.assertEqual(result.status, "pending")
 
     def test_all_semantic_stages_have_producer_repair_targets(self) -> None:
         self.assertEqual(SEMANTIC_REVIEW_STAGES, set(SEMANTIC_REVIEW_PRODUCER_TARGETS))
@@ -383,6 +383,9 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("open, non-empty string", prompt)
             self.assertIn("do not infer it from location or image-prompt prose", prompt)
             self.assertIn("historical `story_metadata.time`", prompt)
+            self.assertIn("location.mode: sequence", prompt)
+            self.assertIn("every ordered `location.sequence[]` item", prompt)
+            self.assertIn("Do not invent a transition", prompt)
 
     def test_semantic_repair_defaults_to_two_review_attempts(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):

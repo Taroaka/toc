@@ -50,9 +50,11 @@
 
 `location.segments[]` は場所ごとの物語事実を正本とし、完成した画像・動画 prompt を保持しない。標準値で足りる segment では次の map を空のまま省略できる。
 
-- `primary_subject_by_function: {}`: `setup | pressure | turn | payoff` を key に、その event beat で最初に読む主体だけを切り替える
-- `beat_overrides: {}`: 同じ4 function を key に、その beat の具体的な action / reaction / evidence / roles / character state / motion boundary を上書きする
+- `primary_subject_by_function: {}`: `scene_event.event_sequence[]` に authored された任意の非空 `beat_function` を key に、その event beat で最初に読む主体だけを切り替える
+- `beat_overrides: {}`: 同じ authored `beat_function` を key に、その beat の具体的な action / reaction / evidence / roles / character state / motion boundary を上書きする。`setup` / `pressure` / `turn` / `payoff` / `threshold` / `custom` は候補例であり、固定 ladder ではない
 - `beat_overrides.<function>.obligation_overrides.<obligation_id>`: 同じ beat から複数 cut 責務が作られる場合に、その obligation の cut だけを具体化する。scene 全体や同 function の別 cut を変更しない
+
+必須 coverage は function 名ではなく、`scene_cut_coverage_plan.event_beat_inventory[].beat_id` が `scene_event.event_sequence[].beat_id` の ordered nonblank list と exact に一致することで判定する。inventory は `must_be_seen: false` を含む全 authored ID と順序を保ち、そのうち `must_be_seen != false` の beat だけを cut assignment へ投影する。独自 function の1 beatだけを authored した scene も、固定 function がないことだけを理由に reject しない。
 
 `obligation_overrides.<obligation_id>` で使う値は、次の描画・motion 設計 key に限定する。
 
@@ -62,16 +64,19 @@
 - `visible_character_state`（`posture / gaze / expression / hands / feet`）
 - `motion_brief` / `motion_end_state` / `motion_attention_target`
 - `environment_motion` / `emotional_change`
+- `location`（`location.sequence[]` に宣言済みの一場所。function 全体または exact obligation の担当場所を選ぶ）
 - `retain_carried_character_subjects`（既定 `true`。`false` は前 cut から自動継承された人物を今回の主被写体群から外すが、`required_roles` や物語事実を削除する権限は持たない）
 - `allowed_new_reveal_elements[]`（主動作によって開始画像から新しく現れてよい、具体的な人物状態・小道具・舞台要素の正の allowlist）
 - `allowed_reveal_info_ids[]`（この cut だけで開示してよい canonical reveal 情報 ID）
-- `use_next_cut_first_frame_as_last_frame: boolean`（現在 cut の到達境界を同じ場所にある次 cut の承認済み first frame へ束縛する）
+- `use_next_cut_first_frame_as_last_frame: boolean`（現在 cut の到達境界を次 cut の承認済み first frame へ束縛する）
+- `first_frame_character_asset_overrides`（同一人物の既知variantだけを開始画像へ使う）
+- `first_frame_excluded_object_ids[]`（motion途中で初めて現れる既知objectを開始画像の全positive prose / dependency / referenceから除外する）
 
 解決順は cut 固有から広い値へ、`obligation override -> beat override -> primary_subject_by_function / segment既定値 -> scene既定値` とする。空 map は継承を意味し、空文字や抽象 placeholder で上位値を消さない。各値は人物・物・位置・姿勢・視線として一つに確定し、`または` のような未解決候補を残さない。
 
-上記3つの reveal / boundary key は `beat_overrides.<function>.obligation_overrides.<obligation_id>` の **exact obligation entry だけ**に置く。segment root や function rootへ広げて sibling cut まで一括許可しない。`allowed_new_reveal_elements[]` は非空・一意の具体語を最大8件とし、各要素が同じ obligation の `motion_brief` または `motion_end_state` に明示され、`must_not_add` と交差しないことを検証する。`allowed_reveal_info_ids[]` は canonical reveal inventory に存在し、同じ cut の forbidden reveal からだけ除外されることを検証する。どちらも空なら従来どおり新規 reveal を許可しない。
+reveal / boundary key と first-frame policy は `beat_overrides.<function>.obligation_overrides.<obligation_id>` の **exact obligation entry だけ**に置く。segment root や function rootへ広げて sibling cut まで一括許可しない。`allowed_new_reveal_elements[]` は非空・一意の具体語を最大8件とし、各要素が同じ obligation の `motion_brief` または `motion_end_state` に明示され、`must_not_add` と交差しないことを検証する。`allowed_reveal_info_ids[]` は canonical reveal inventory に存在し、同じ cut の forbidden reveal からだけ除外されることを検証する。どちらも空なら従来どおり新規 reveal を許可しない。first-frame policy は未知ID、別人物、空要素、scalar入力を拒否し、除外対象を開始画像の別proseへ残さない。
 
-`use_next_cut_first_frame_as_last_frame: true` は次 cut が存在し、両 cut の location が同一で、現在 cut の `motion_end_state` と許可済み reveal が次 cut の first-frame contract に現れる場合だけ有効にする。これは `allowed_new_reveal_elements` や `allowed_reveal_info_ids` の代用ではなく、許可済み変化の到達画像を固定する境界指定である。
+`use_next_cut_first_frame_as_last_frame: true` は次 cut が存在し、両 cut の location が同一、または遷移先が `scene.location.sequence[]` と現在 obligation の `allowed_new_reveal_elements[]` の双方に exact 宣言されている場合に限る。いずれも現在 cut の `motion_end_state` と許可済み reveal が次 cut の first-frame contract に一致し、次画像の承認済みbytes/hashがcurrentでなければならない。これは `allowed_new_reveal_elements` や `allowed_reveal_info_ids` の代用ではなく、許可済み変化の到達画像を固定する境界指定である。
 
 下流は `segment -> event beat -> cut obligation -> first_frame_visual_plan / motion_contract -> prompt compiler` の一方向で投影する。設計 key、function 名、obligation ID、map 全体を provider prompt へ連結せず、その cut に必要な描画可能な現在状態と一つの motion fragment だけを送る。
 
@@ -98,7 +103,7 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - 各 scene は `time_of_day_visual_basis` で光源・明るさ・影・色温度を説明でき、複数場所の場合は順序付き location contract と場所別 segment contract を持つ
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
 - 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
-- 後続の `scene_event` では、抽象的な `dramatic_question / value_shift / causal_turn` を残しつつ、各 event beat が `abstract_function / concrete_event / story_grounding` を持つ前提で source story を渡す
+- 後続の `scene_event` では、各 event beat が任意の非空 `beat_function` を持ち、coverage inventory でも同じ値を exact に保つ。これとは別に、抽象的な `dramatic_question / value_shift / causal_turn` を残しつつ、各 beat が意味根拠用の `abstract_function / concrete_event / story_grounding` を持つ前提で source story を渡す
 - 後続の scene 生成では `scene_authoring_context / scene_prompt_payload / scene_debug_prompt_source / scene_generation_contract` を分離し、実行正本は `scenes[].scene_generation.scene_prompt_payload.prompt` とする
 - `scene_prompt_payload` は scene 正本生成だけに使い、first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。cut/image/video は `scene_event` と `scene_cut_coverage_plan` から逆算する
 - `concrete_event` は人物・場所・関係性・小道具・ルール・視覚証拠のうち、その物語で置換できない要素へ接地する。抽象表現は禁止しないが、抽象だけで終わる scene は不可
@@ -549,8 +554,8 @@ accuracy_checklist:
 運用ルール:
 
 - 価値パートは原則として動画全体の `20% - 80%` に置く
-- 1価値パートは `4-6` カット
-- 各カットは `4` 秒
+- 1価値パートの cut 数は、`must_be_seen != false` の authored beat と distinct semantic obligation から導く。1 beat / 1 obligation を十分に担う場合は1 cutを許容し、固定の `4-6` cut を要求しない
+- 各 cut の duration は映像上の責務と provider / model / input mode capability から決め、固定4秒や目標尺だけを理由に filler cut を追加しない
 - ナレーションは入れず、映像だけで満足感を作る
 - 文字説明ではなく、形 / 光 / 動き / 機構 / ショー性で価値を伝える
 

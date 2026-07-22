@@ -105,6 +105,131 @@ def _story_reference_diagnostics(research: dict[str, Any], scenes: list[dict[str
     }
 
 
+_REQUIRED_LOCATION_SEGMENT_TEXT_FIELDS = (
+    "responsibility",
+    "primary_subject",
+    "visible_action",
+    "motion_brief",
+    "motion_end_state",
+)
+_REQUIRED_LOCATION_SEGMENT_LIST_FIELDS = (
+    "required_visual_evidence",
+    "required_roles",
+)
+
+
+def _scene_location_route_status(scene: dict[str, Any], index: int) -> dict[str, Any]:
+    """Summarize whether an authored multi-location route is cut-design ready.
+
+    Missing legacy location data stays distinguishable from a malformed declared
+    route. Once `location.mode: sequence` (or a multi-item sequence) is authored,
+    every location must have one ordered, drawable segment; downstream review
+    must not infer the missing transition from scene prose.
+    """
+
+    result: dict[str, Any] = {"scene_id": scene.get("scene_id", index)}
+    if "location" not in scene:
+        result["status"] = "undeclared"
+        return result
+    raw_location = scene.get("location")
+    if not isinstance(raw_location, dict):
+        result.update({"status": "invalid", "errors": ["location_invalid_type"]})
+        return result
+
+    mode = _text(raw_location.get("mode"))
+    raw_sequence = raw_location.get("sequence")
+    sequence = [_text(value) for value in _list(raw_sequence)]
+    raw_segments = raw_location.get("segments")
+    segments = [item for item in _list(raw_segments) if isinstance(item, dict)]
+    segment_locations = [_text(item.get("location")) for item in segments]
+    result.update(
+        {
+            "mode": mode,
+            "sequence": sequence,
+            "segment_locations": segment_locations,
+        }
+    )
+
+    sequence_route_declared = mode == "sequence" or len(sequence) > 1
+    if not sequence_route_declared:
+        errors: list[str] = []
+        if mode not in {"", "single"}:
+            errors.append("location_mode_invalid")
+        if raw_sequence is not None and not isinstance(raw_sequence, list):
+            errors.append("location_sequence_invalid_type")
+        if any(not value for value in sequence):
+            errors.append("location_sequence_blank")
+        result["status"] = "invalid" if errors else "valid_single"
+        if errors:
+            result["errors"] = errors
+        return result
+
+    errors = []
+    if mode != "sequence":
+        errors.append("location_mode_must_be_sequence")
+    if not isinstance(raw_sequence, list):
+        errors.append("location_sequence_invalid_type")
+    if not sequence or any(not value for value in sequence):
+        errors.append("location_sequence_missing_or_blank")
+    if len(set(sequence)) != len(sequence):
+        errors.append("location_sequence_duplicate")
+    if not isinstance(raw_segments, list):
+        errors.append("location_segments_invalid_type")
+    if len(segments) != len(_list(raw_segments)):
+        errors.append("location_segment_invalid_type")
+
+    missing_locations = [value for value in sequence if value not in segment_locations]
+    extra_locations = [value for value in segment_locations if value not in sequence]
+    duplicate_locations = sorted(
+        {value for value in segment_locations if value and segment_locations.count(value) > 1}
+    )
+    if missing_locations:
+        errors.append("location_segments_missing_locations")
+    if extra_locations:
+        errors.append("location_segments_extra_locations")
+    if duplicate_locations:
+        errors.append("location_segments_duplicate_locations")
+    if segment_locations != sequence:
+        errors.append("location_segments_order_mismatch")
+
+    malformed_segments: list[dict[str, Any]] = []
+    for segment_index, segment in enumerate(segments, start=1):
+        missing_fields = [
+            field
+            for field in _REQUIRED_LOCATION_SEGMENT_TEXT_FIELDS
+            if not _text(segment.get(field))
+        ]
+        missing_fields.extend(
+            field
+            for field in _REQUIRED_LOCATION_SEGMENT_LIST_FIELDS
+            if not [value for value in _list(segment.get(field)) if _text(value)]
+        )
+        if missing_fields:
+            malformed_segments.append(
+                {
+                    "segment_index": segment_index,
+                    "location": _text(segment.get("location")),
+                    "missing_fields": missing_fields,
+                }
+            )
+    if malformed_segments:
+        errors.append("location_segment_drawable_contract_missing")
+
+    result.update(
+        {
+            "status": "invalid" if errors else "valid",
+            "missing_segment_locations": missing_locations,
+            "extra_segment_locations": extra_locations,
+            "duplicate_segment_locations": duplicate_locations,
+            "segment_order_matches_sequence": segment_locations == sequence,
+            "malformed_segments": malformed_segments,
+        }
+    )
+    if errors:
+        result["errors"] = errors
+    return result
+
+
 def _research_entry(run_dir: Path) -> dict[str, Any]:
     data = _load(run_dir / "research.md")
     return {
@@ -147,6 +272,10 @@ def _story_entry(run_dir: Path) -> dict[str, Any]:
         elif status == "invalid_type":
             item["raw_value"] = raw_time_of_day
         scene_time_of_day_statuses.append(item)
+    scene_location_route_statuses = [
+        _scene_location_route_status(scene, index)
+        for index, scene in enumerate(scenes, start=1)
+    ]
     return {
         "id": "story:foundation",
         "stage": "story",
@@ -155,6 +284,7 @@ def _story_entry(run_dir: Path) -> dict[str, Any]:
         "story_time": story_metadata.get("time"),
         "time_of_day_contract_declared": time_of_day_contract_declared,
         "scene_time_of_day_statuses": scene_time_of_day_statuses,
+        "scene_location_route_statuses": scene_location_route_statuses,
         "target_duration_seconds": target_duration,
         "research_baseline": _research_core(research),
         "selection": story.get("selection"),

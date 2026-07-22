@@ -220,6 +220,131 @@ class TestStageGrounding(unittest.TestCase):
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["stage.research.audit.status"], "passed")
 
+    def test_audit_rejects_obsolete_report_and_readset_contract_versions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0003c"
+            grounding_dir = run_dir / "logs" / "grounding"
+            grounding_dir.mkdir(parents=True, exist_ok=True)
+            legacy_stage_docs = [
+                "docs/video-generation.md",
+                "docs/implementation/video-prompting.md",
+            ]
+            report = {
+                "contract_version": 3,
+                "stage": "video_generation",
+                "canonical_stage": "video_generation",
+                "flow": "toc-run",
+                "status": "ready",
+                "resolved_paths": {
+                    "docs": [
+                        {"path": path, "exists": True}
+                        for path in legacy_stage_docs
+                    ],
+                },
+            }
+            readset = {
+                "contract_version": 3,
+                "stage": "video_generation",
+                "canonical_stage": "video_generation",
+                "flow": "toc-run",
+                "verified_before_edit": True,
+                "global_docs": [
+                    {"path": "docs/system-architecture.md", "exists": True},
+                ],
+                "stage_docs": [
+                    {"path": path, "exists": True}
+                    for path in legacy_stage_docs
+                ],
+            }
+            (grounding_dir / "video_generation.json").write_text(
+                json.dumps(report),
+                encoding="utf-8",
+            )
+            (grounding_dir / "video_generation.readset.json").write_text(
+                json.dumps(readset),
+                encoding="utf-8",
+            )
+
+            result = _run_audit(run_dir, "video_generation")
+
+            self.assertEqual(result.returncode, 1)
+            audit = json.loads(
+                (grounding_dir / "video_generation.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(audit["status"], "failed")
+            checks = {entry["id"]: entry for entry in audit["checks"]}
+            self.assertFalse(checks["video_generation.audit.report_contract_current"]["passed"])
+            self.assertFalse(checks["video_generation.audit.readset_contract_current"]["passed"])
+            self.assertIn(
+                "workflow/playbooks/video-generation/kling.md",
+                audit["missing_stage_docs"],
+            )
+
+    def test_audit_uses_current_stage_contract_instead_of_saved_report_docs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0003d"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(_run_grounding(run_dir, "research").returncode, 0)
+            grounding_dir = run_dir / "logs" / "grounding"
+            report = json.loads(
+                (grounding_dir / "research.json").read_text(encoding="utf-8")
+            )
+            readset = json.loads(
+                (grounding_dir / "research.readset.json").read_text(encoding="utf-8")
+            )
+            report["resolved_paths"]["docs"] = []
+            readset["stage_docs"] = []
+            (grounding_dir / "research.json").write_text(
+                json.dumps(report),
+                encoding="utf-8",
+            )
+            (grounding_dir / "research.readset.json").write_text(
+                json.dumps(readset),
+                encoding="utf-8",
+            )
+
+            result = _run_audit(run_dir, "research")
+
+            self.assertEqual(result.returncode, 1)
+            audit = json.loads(
+                (grounding_dir / "research.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(audit["status"], "failed")
+            self.assertEqual(
+                audit["missing_stage_docs"],
+                ["docs/information-gathering.md"],
+            )
+
+    def test_grounding_validation_rejects_obsolete_artifacts_without_reaudit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0003e"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(_run_grounding(run_dir, "research").returncode, 0)
+            grounding_dir = run_dir / "logs" / "grounding"
+            report_path = grounding_dir / "research.json"
+            readset_path = grounding_dir / "research.readset.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            readset = json.loads(readset_path.read_text(encoding="utf-8"))
+            report["contract_version"] = 3
+            readset["contract_version"] = 3
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            readset_path.write_text(json.dumps(readset), encoding="utf-8")
+
+            validation = grounding_validation(run_dir, "research")
+
+            self.assertTrue(validation["audit_exists"])
+            self.assertEqual(validation["audit"]["status"], "passed")
+            self.assertFalse(validation["audit_passed"])
+            self.assertFalse(validation["audit_current_contract_passed"])
+            current_checks = {
+                entry["id"]: entry
+                for entry in validation["current_contract_audit"]["checks"]
+            }
+            self.assertFalse(current_checks["research.audit.report_contract_current"]["passed"])
+            self.assertFalse(current_checks["research.audit.readset_contract_current"]["passed"])
+
     def test_run_stage_grounding_marks_failed_after_retry(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0004"

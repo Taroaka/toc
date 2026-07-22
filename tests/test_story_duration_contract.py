@@ -13,10 +13,10 @@ from toc.story_duration import (
 class StoryDurationContractTests(unittest.TestCase):
     def test_approved_duration_plans(self) -> None:
         expected = {
-            300: (8, 25, 210, 240.0),
-            600: (15, 50, 420, 480.0),
-            900: (23, 75, 630, 720.0),
-            1200: (30, 100, 840, 960.0),
+            300: (8, 210, 240.0),
+            600: (15, 420, 480.0),
+            900: (23, 630, 720.0),
+            1200: (30, 840, 960.0),
         }
 
         for target_seconds, values in expected.items():
@@ -25,11 +25,19 @@ class StoryDurationContractTests(unittest.TestCase):
                 self.assertEqual(
                     (
                         plan.minimum_scene_count,
-                        plan.minimum_cut_count,
                         plan.minimum_narration_seconds,
                         plan.minimum_effective_seconds,
                     ),
                     values,
+                )
+                self.assertEqual(
+                    set(plan.to_dict()),
+                    {
+                        "target_seconds",
+                        "minimum_scene_count",
+                        "minimum_narration_seconds",
+                        "minimum_effective_seconds",
+                    },
                 )
 
     def test_target_defaults_and_bounds(self) -> None:

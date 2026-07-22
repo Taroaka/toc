@@ -15,6 +15,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot
+from toc.grounding import (
+    build_stage_grounding_audit,
+    build_stage_grounding_readset,
+    canonical_stage_name,
+    global_required_docs,
+    load_grounding_contract,
+    stage_contract,
+)
 from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
 
 VERIFY_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify-pipeline.py"
@@ -479,19 +487,66 @@ def _resolve_ready_p300_grounding(run_dir: Path, *, flow: str) -> None:
 
 
 def _write_ready_grounding_artifacts(run_dir: Path, stage: str = "asset") -> None:
+    contract = load_grounding_contract()
+    canonical_stage = canonical_stage_name(stage, contract)
+    spec = stage_contract(canonical_stage, contract)
+
+    def resolved_entries(paths: list[str]) -> list[dict[str, object]]:
+        return [
+            {
+                "path": path,
+                "resolved_path": str((REPO_ROOT / path).resolve()),
+                "exists": (REPO_ROOT / path).exists(),
+            }
+            for path in paths
+        ]
+
+    report = {
+        "status": "ready",
+        "contract_version": contract.get("contract_version"),
+        "stage": canonical_stage,
+        "canonical_stage": canonical_stage,
+        "flow": "immersive",
+        "run_dir": str(run_dir.resolve()),
+        "resolved_paths": {
+            "global_docs": resolved_entries(global_required_docs(contract)),
+            "docs": resolved_entries(
+                [str(path) for path in spec.get("required_docs", [])]
+            ),
+            "templates": resolved_entries(
+                [str(path) for path in spec.get("required_templates", [])]
+            ),
+            "inputs": [],
+            "optional_playbooks": [],
+        },
+    }
+    readset = build_stage_grounding_readset(report, stage=canonical_stage)
+    audit = build_stage_grounding_audit(
+        run_dir=run_dir,
+        stage=canonical_stage,
+        report=report,
+        readset=readset,
+        contract=contract,
+    )
     grounding_dir = run_dir / "logs" / "grounding"
     grounding_dir.mkdir(parents=True, exist_ok=True)
-    (grounding_dir / f"{stage}.json").write_text(json.dumps({"status": "ready"}), encoding="utf-8")
-    (grounding_dir / f"{stage}.readset.json").write_text(json.dumps({"verified_before_edit": True}), encoding="utf-8")
-    (grounding_dir / f"{stage}.audit.json").write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    (grounding_dir / f"{canonical_stage}.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
+    (grounding_dir / f"{canonical_stage}.readset.json").write_text(
+        json.dumps(readset), encoding="utf-8"
+    )
+    (grounding_dir / f"{canonical_stage}.audit.json").write_text(
+        json.dumps(audit), encoding="utf-8"
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
-            f"stage.{stage}.grounding.status": "ready",
-            f"stage.{stage}.grounding.report": f"logs/grounding/{stage}.json",
-            f"stage.{stage}.readset.report": f"logs/grounding/{stage}.readset.json",
-            f"stage.{stage}.audit.status": "passed",
-            f"stage.{stage}.audit.report": f"logs/grounding/{stage}.audit.json",
+            f"stage.{canonical_stage}.grounding.status": "ready",
+            f"stage.{canonical_stage}.grounding.report": f"logs/grounding/{canonical_stage}.json",
+            f"stage.{canonical_stage}.readset.report": f"logs/grounding/{canonical_stage}.readset.json",
+            f"stage.{canonical_stage}.audit.status": str(audit["status"]),
+            f"stage.{canonical_stage}.audit.report": f"logs/grounding/{canonical_stage}.audit.json",
         },
     )
 
@@ -1107,7 +1162,7 @@ def _valid_scene_generation_dict(topic: str, scene_idx: int) -> dict:
             "prompt": (
                 f"物語『{topic}』の scene{scene_idx} を設計する。目的は絵を直接描くことではなく、"
                 "この scene が物語内で何を成立させるかを正本化すること。"
-                "source beat を setup / pressure / turn / payoff の具体出来事へ接地し、"
+                "source beat の一意なIDと任意の非空functionを、具体出来事へ接地し、"
                 "scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, "
                 "scene_cut_coverage_plan, forbidden_event_changes を出力する。"
                 "後段の画像・音声・動画実行情報は含めない。"
@@ -1129,7 +1184,7 @@ def _valid_scene_generation_dict(topic: str, scene_idx: int) -> dict:
             "source_story_beat_ids": [f"story_scene{scene_idx}_departure"],
             "source_beats": [f"{topic}が村道を越えて旅立つ"],
             "source_origin": "canonical_reference",
-            "adaptation_choices": ["source beat を setup / pressure / turn / payoff の可視出来事へ分解する"],
+            "adaptation_choices": ["source beat のauthored ID/functionを保った可視出来事へ分解する"],
             "excluded_from_payload": ["後段の画像生成詳細", "後段の動画生成詳細", "後段の音声生成詳細"],
             "forbidden_event_changes_source": "scene_event.forbidden_event_changes",
         },
@@ -1463,7 +1518,14 @@ def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[
         "coverage_strategy": "reverse_from_scene_event",
         "source_schema_version": "scene_event_v1",
         "minimum_cut_count": len(selectors),
-        "min_cut_count": {"by_importance": 3, "by_duration": len(selectors), "by_event_beats": len(selectors), "selected": len(selectors), "exception_reason": ""},
+        "min_cut_count": {
+            "by_distinct_semantic_obligations": len(obligation_ids),
+            "by_importance": 0,
+            "by_duration": 0,
+            "by_event_beats": len(event_functions),
+            "selected": max(len(obligation_ids), len(event_functions)),
+            "exception_reason": "",
+        },
         "scene_obligations": [
             {
                 "obligation_id": "dramatic_question_01",
@@ -1489,6 +1551,15 @@ def _verify_scene_cut_coverage_plan(scene_idx: int, topic: str, selectors: list[
                 "evidence": f"scene {scene_idx} の受け渡し",
                 "assigned_cut_ids": selectors[-1:],
             },
+        ],
+        "event_beat_inventory": [
+            {
+                "beat_id": f"scene{scene_idx}_event_{event_function}",
+                "beat_function": event_function,
+                "must_be_seen": True,
+                "assigned_cut_ids": [selectors[index]],
+            }
+            for index, event_function in enumerate(event_functions)
         ],
         "cut_assignments": [
             {
@@ -1593,6 +1664,8 @@ def _verify_cut_contract(
     )
     visible_behavior = _visible_behavior_for_verify(topic, event_record["visible_action"])
     reaction_required = event_function in {"turn", "payoff"}
+    motion_brief = f"{topic}が第{cut_idx}段階として前方の位置{cut_idx}へ一歩進む"
+    motion_end_state = f"{topic}が第{cut_idx}段階の前方位置{cut_idx}で止まる"
     return {
         "schema_version": "3.0",
         "source_event_contract": {
@@ -1825,10 +1898,11 @@ def _verify_cut_contract(
             "source_event_beat_id": event_beat_id,
             "starts_from_first_frame": True,
             "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
-            "motion_brief": f"{topic}が前へ進む",
+            "motion_brief": motion_brief,
+            "subject_motion": motion_brief,
             "start_from_visible_state": "first_frame_contract.visible_start_state",
-            "end_state": f"{topic}が次へ向く",
-            "end_frame_brief": f"{topic}が次へ向く",
+            "end_state": motion_end_state,
+            "end_frame_brief": motion_end_state,
             "must_not_add": ["新しい人物"],
         },
         "narration_contract": {
@@ -1879,9 +1953,9 @@ def _verify_cut_contract(
                 "must_not_caption_visible_content": True,
             },
             "p800_video": {
-                "motion_requirements": [f"{topic}が前へ進む"],
+                "motion_requirements": [motion_brief],
                 "start_state": "歩く前",
-                "last_frame_or_end_state": f"{topic}が次へ向く",
+                "last_frame_or_end_state": motion_end_state,
                 "must_not_add": ["新しい人物"],
             },
             "carries_to_next_cut": [topic],
@@ -2063,7 +2137,12 @@ def _write_verify_ready_p400_pair(run_dir: Path, *, topic: str = "桃太郎", si
     }
     manifest_data = {
         "manifest_phase": "production",
-        "video_metadata": {"topic": topic, "experience": "cinematic_story", "target_duration_seconds": 300},
+        "video_metadata": {
+            "topic": topic,
+            "experience": "cinematic_story",
+            "target_duration_seconds": 300,
+            "minimum_cut_count": scene_count * cut_count,
+        },
         "canonical_event_coverage_matrix": script_data["canonical_event_coverage_matrix"],
         "scenes": manifest_scenes,
     }
@@ -2416,7 +2495,18 @@ class TestVerifyPipeline(unittest.TestCase):
                 cwd=REPO_ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=(
+                    result.stderr
+                    or (
+                        (run_dir / "eval_report.json").read_text(encoding="utf-8")
+                        if (run_dir / "eval_report.json").exists()
+                        else result.stdout
+                    )
+                ),
+            )
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
             self.assertTrue(payload["overall"]["passed"], msg=payload)
             self.assertEqual(payload["stage_target"], "p330")
@@ -3054,7 +3144,18 @@ assets:
                 cwd=REPO_ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=(
+                    result.stderr
+                    or (
+                        (run_dir / "eval_report.json").read_text(encoding="utf-8")
+                        if (run_dir / "eval_report.json").exists()
+                        else result.stdout
+                    )
+                ),
+            )
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
             checks = {check["id"]: check for check in payload["stages"]["visual_value"]["checks"]}
             self.assertTrue(checks["visual_value.scene_coverage"]["passed"])
@@ -3339,10 +3440,20 @@ assets:
                 cwd=REPO_ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertTrue((run_dir / "eval_report.json").exists())
             self.assertTrue((run_dir / "run_report.md").exists())
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
+            failed_checks = [
+                (stage_name, check.get("id"), check.get("message"))
+                for stage_name, stage_payload in payload.get("stages", {}).items()
+                for check in stage_payload.get("checks", [])
+                if not check.get("passed")
+            ]
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr or repr(failed_checks) or result.stdout,
+            )
             self.assertIn("overall", payload)
             self.assertTrue(payload["overall"]["passed"])
 
@@ -3519,8 +3630,18 @@ assets:
                 cwd=REPO_ROOT,
             )
 
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
             payload = json.loads((run_dir / "eval_report.json").read_text(encoding="utf-8"))
+            failed_checks = [
+                (stage_name, check.get("id"), check.get("message"))
+                for stage_name, stage_payload in payload.get("stages", {}).items()
+                for check in stage_payload.get("checks", [])
+                if not check.get("passed")
+            ]
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=result.stderr or repr(failed_checks) or result.stdout,
+            )
             self.assertTrue(payload["overall"]["passed"], msg=payload)
 
     def test_verify_pipeline_standard_rejects_silent_cut_without_contract(self) -> None:

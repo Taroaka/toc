@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from toc.semantic_pack_image import collect_entries, collect_image_prompt_entries, load_manifest
+from toc.semantic_pack_image import (
+    _coverage_minimum_cut_count,
+    collect_entries,
+    collect_image_prompt_entries,
+    load_manifest,
+)
 
 
 def write_manifest(run_dir: Path) -> None:
@@ -55,19 +60,46 @@ def write_manifest(run_dir: Path) -> None:
                 "    scene_cut_coverage_plan:",
                 "      coverage_strategy: reverse_from_scene_event",
                 "      source_schema_version: scene_event_v1",
-                "      min_cut_count: {by_importance: 2, by_duration: 2, by_event_beats: 2, selected: 2}",
+                "      min_cut_count: {by_distinct_semantic_obligations: 2, by_importance: 2, by_duration: 2, by_event_beats: 2, selected: 2}",
                 "      minimum_cut_count: 2",
                 "      selected_cut_count: 2",
+                "      event_beat_inventory:",
+                "        - beat_id: scene10_event_pressure",
+                "          must_be_seen: true",
+                "          assigned_cut_ids: [scene10_cut01]",
+                "        - beat_id: scene10_event_turn",
+                "          must_be_seen: true",
+                "          assigned_cut_ids: [scene10_cut02]",
                 "      scene_obligations:",
-                "        - source: dramatic_question",
+                "        - obligation_id: scene_pressure",
+                "          source: dramatic_question",
                 "          evidence: 灰の台所で何が始まるか",
+                "          assigned_cut_ids: [scene10_cut01]",
+                "        - obligation_id: scene_turn",
+                "          source: causal_turn",
+                "          evidence: 希望を保つ",
+                "          assigned_cut_ids: [scene10_cut02]",
                 "      cut_assignments:",
                 "        - cut_index: 1",
                 "          cut_selector: scene10_cut01",
                 "          obligation_id: scene_pressure",
                 "          cut_function: pressure",
                 "          source: dramatic_question",
+                "          event_assignment:",
+                "            source_event_contract:",
+                "              primary_event_beat_id: scene10_event_pressure",
+                "              source_event_beat_ids: [scene10_event_pressure]",
                 "          target_beat: 灰の台所の導入",
+                "        - cut_index: 2",
+                "          cut_selector: scene10_cut02",
+                "          obligation_id: scene_turn",
+                "          cut_function: turn",
+                "          source: causal_turn",
+                "          event_assignment:",
+                "            source_event_contract:",
+                "              primary_event_beat_id: scene10_event_turn",
+                "              source_event_beat_ids: [scene10_event_turn]",
+                "          target_beat: 希望を保つ",
                 "    scene_film_coverage_plan:",
                 "      shot_mix:",
                 "        actual_shots:",
@@ -291,6 +323,85 @@ def write_asset_plan(run_dir: Path) -> None:
 
 
 class TestSemanticPackImage(unittest.TestCase):
+    def test_scene_composite_floor_uses_distinct_authored_obligation_and_event_ids(self) -> None:
+        plan = {
+            "minimum_cut_count": 12,
+            "min_cut_count": {
+                "by_distinct_semantic_obligations": 1,
+                "by_importance": 7,
+                "by_duration": 12,
+                "by_event_beats": 1,
+                "selected": 12,
+            },
+            "event_beat_inventory": [
+                {
+                    "beat_id": "scene1_event_turn",
+                    "must_be_seen": True,
+                    "assigned_cut_ids": [f"scene1_cut{index}" for index in range(1, 13)],
+                }
+            ],
+            "cut_assignments": [
+                {
+                    "cut_selector": f"scene1_cut{index}",
+                    "obligation_ids": ["turn_01" if index == 1 else f"duration_turn_{index:02d}"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_turn",
+                            "source_event_beat_ids": ["scene1_event_turn"],
+                        }
+                    },
+                }
+                for index in range(1, 13)
+            ],
+        }
+
+        self.assertEqual(_coverage_minimum_cut_count(plan), 1)
+
+    def test_scene_composite_floor_cannot_underdeclare_authored_ids(self) -> None:
+        plan = {
+            "min_cut_count": {
+                "by_distinct_semantic_obligations": 1,
+                "by_event_beats": 1,
+                "selected": 1,
+            },
+            "event_beat_inventory": [
+                {"beat_id": "scene1_event_setup", "must_be_seen": True, "assigned_cut_ids": ["scene1_cut1"]},
+                {"beat_id": "scene1_event_turn", "must_be_seen": True, "assigned_cut_ids": ["scene1_cut1"]},
+            ],
+            "cut_assignments": [
+                {"cut_selector": "scene1_cut1", "obligation_ids": ["question_01"]},
+                {"cut_selector": "scene1_cut1", "obligation_ids": ["turn_01"]},
+            ],
+        }
+
+        self.assertEqual(_coverage_minimum_cut_count(plan), 2)
+
+    def test_scene_composite_floor_ignores_declared_only_counts_and_assignment_event_refs(self) -> None:
+        declared_only = {
+            "min_cut_count": {
+                "by_distinct_semantic_obligations": 7,
+                "by_event_beats": 7,
+                "selected": 7,
+            }
+        }
+        assignment_refs_without_inventory = {
+            "cut_assignments": [
+                {
+                    "cut_selector": "scene1_cut1",
+                    "obligation_ids": ["duration_hold_01"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_setup",
+                            "source_event_beat_ids": ["scene1_event_setup", "scene1_event_turn"],
+                        }
+                    },
+                }
+            ]
+        }
+
+        self.assertEqual(_coverage_minimum_cut_count(declared_only), 0)
+        self.assertEqual(_coverage_minimum_cut_count(assignment_refs_without_inventory), 0)
+
     def test_collect_image_prompt_entries_keeps_judgment_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_semantic_pack_image_") as td:
             run_dir = Path(td)
@@ -391,6 +502,7 @@ class TestSemanticPackImage(unittest.TestCase):
             self.assertEqual(composite["scene_contract"]["time_of_day"], "夜")
             self.assertEqual(composite["cut_count"], 2)
             self.assertEqual(composite["scene_cut_coverage_plan"]["selected_cut_count"], 2)
+            self.assertEqual(composite["scene_composite_gate"]["minimum_cut_count"], 2)
             self.assertEqual(composite["story_event_obligations"][0]["event_id"], "scene01_story_event")
             self.assertEqual(composite["role_coverage"]["required_roles"], ["protagonist", "opponent"])
             self.assertNotIn("scene_event", composite["scene_contract"])

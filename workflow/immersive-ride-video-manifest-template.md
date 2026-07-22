@@ -11,12 +11,11 @@ video_metadata:
   target_duration_seconds: 300  # frontend request の 300-1200 秒を保持する
   minimum_duration_seconds: 240 # target * 0.8。下限のみで上限なし
   minimum_scene_count: 8        # ceil(target / 40)
-  minimum_cut_count: 25         # ceil(target / 12)
+  minimum_cut_count: 0          # 各 scene の semantic/event floor の合計から materialize。target duration からは導かない
   minimum_narration_seconds: 210 # ceil(target * 0.70)
   duration_plan:
     target_seconds: 300
     minimum_scene_count: 8
-    minimum_cut_count: 25
     minimum_narration_seconds: 210
     minimum_effective_seconds: 240
   duration_seconds: 0   # ナレーション生成後に埋める（任意）

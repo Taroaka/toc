@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -119,11 +120,6 @@ STAGE_RUBRIC_THRESHOLDS = {
     },
 }
 
-CINEMATIC_SCENE_MIN_CUTS = 3
-CINEMATIC_LOW_IMPORTANCE_MIN_CUTS = 2
-CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS = 5
-CINEMATIC_CRITICAL_IMPORTANCE_MIN_CUTS = 7
-CINEMATIC_SECONDS_PER_CUT_TARGET = 8
 GENERIC_SCENE_TEMPLATE_PHRASES: tuple[str, ...] = (
     "主人公は前進できるか",
     "次へ進む理由が生まれる",
@@ -188,7 +184,6 @@ TRIANGULATION_REQUIRED_KEYS: tuple[str, ...] = (
     "continuity_preserved",
     "handoff_visible_or_audible",
 )
-REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS: tuple[str, ...] = ("setup", "pressure", "turn", "payoff")
 STORY_GROUNDING_SOURCE_ORIGINS: tuple[str, ...] = (
     "user_input",
     "script",
@@ -339,6 +334,66 @@ def scene_time_of_day_contract_marker(data: dict[str, Any], *, artifact: str) ->
     if not isinstance(metadata, dict) or "scene_time_of_day_contract" not in metadata:
         return False, True
     return True, metadata.get("scene_time_of_day_contract") == "required_v1"
+
+
+def scene_time_of_day_visual_basis_contract_marker(
+    data: dict[str, Any], *, artifact: str
+) -> tuple[bool, bool]:
+    """Require the visual-basis marker whenever the scene daypart contract is active."""
+
+    metadata_key_by_artifact = {
+        "story": "story_metadata",
+        "script": "script_metadata",
+        "manifest": "video_metadata",
+    }
+    metadata_key = metadata_key_by_artifact.get(artifact)
+    if metadata_key is None:
+        raise ValueError(f"Unsupported scene time artifact: {artifact}")
+    metadata = data.get(metadata_key)
+    if not isinstance(metadata, dict):
+        return False, True
+    declared = (
+        "scene_time_of_day_contract" in metadata
+        or "scene_time_of_day_visual_basis_contract" in metadata
+    )
+    if not declared:
+        return False, True
+    return (
+        True,
+        metadata.get("scene_time_of_day_visual_basis_contract") == "required_v1",
+    )
+
+
+def scene_time_of_day_visual_basis_issues(
+    data: dict[str, Any], *, artifact: str
+) -> list[str] | None:
+    """Return scene-local omissions from the required lighting evidence contract."""
+
+    declared, _valid = scene_time_of_day_visual_basis_contract_marker(
+        data, artifact=artifact
+    )
+    if not declared:
+        return None
+    scenes = (
+        as_list(nested_get(data, ["script", "scenes"], []))
+        if artifact == "story"
+        else as_list(data.get("scenes"))
+        or as_list(nested_get(data, ["script", "scenes"], []))
+    )
+    issues: list[str] = []
+    required_dimensions = ("光源", "明るさ", "影", "色温度")
+    for index, scene in enumerate(scenes, start=1):
+        scene_id = str(scene.get("scene_id") or index) if isinstance(scene, dict) else str(index)
+        value = scene.get("time_of_day_visual_basis") if isinstance(scene, dict) else None
+        if not isinstance(value, str) or not value.strip():
+            issues.append(f"{scene_id}:missing")
+            continue
+        missing_dimensions = [
+            dimension for dimension in required_dimensions if dimension not in value
+        ]
+        if missing_dimensions:
+            issues.append(f"{scene_id}:missing-{'+'.join(missing_dimensions)}")
+    return issues
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -1543,6 +1598,27 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
             + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
             kind="rubric",
         )
+    basis_contract_declared, basis_contract_valid = (
+        scene_time_of_day_visual_basis_contract_marker(data, artifact="story")
+    )
+    if basis_contract_declared:
+        add_check(
+            checks,
+            "story.scene_time_of_day_visual_basis_contract",
+            basis_contract_valid,
+            "story_metadata.scene_time_of_day_visual_basis_contract is required_v1",
+            kind="rubric",
+        )
+    basis_issues = scene_time_of_day_visual_basis_issues(data, artifact="story")
+    if basis_issues is not None:
+        add_check(
+            checks,
+            "story.scene_time_of_day_visual_basis",
+            not basis_issues,
+            "all newly authored story scenes define lighting evidence for 光源, 明るさ, 影, 色温度"
+            + (f" (issues: {', '.join(basis_issues[:8])})" if basis_issues else ""),
+            kind="rubric",
+        )
 
     research_refs_missing = [
         str(scene.get("scene_id") or index + 1)
@@ -2206,10 +2282,6 @@ def _scene_event_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
     sequence = _scene_event_sequence(scene)
     if not sequence:
         issues["sequence_complete"].append(f"scene{scene_id}:scene_event.event_sequence")
-    functions = {_scene_event_beat_function(beat) for beat in sequence}
-    for required in REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS:
-        if required not in functions:
-            issues["sequence_complete"].append(f"scene{scene_id}:scene_event.event_sequence.{required}")
 
     beat_ids: list[str] = []
     source_story_beat_ids = set(_scene_event_source_story_beat_refs(event))
@@ -2415,7 +2487,16 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
         ref_beats = [beat_by_id[ref] for ref in refs if ref in beat_by_id]
         primary_beat = beat_by_id.get(primary)
         expected_facts = {str(beat.get("what_happens") or "").strip() for beat in ref_beats if str(beat.get("what_happens") or "").strip()}
-        declared_preserve = {str(item).strip() for item in as_list(source_contract.get("event_facts_to_preserve")) if str(item).strip()}
+        canonical_preserve = source_contract.get("canonical_event_facts_to_preserve")
+        declared_preserve = {
+            str(item).strip()
+            for item in as_list(
+                canonical_preserve
+                if isinstance(canonical_preserve, list)
+                else source_contract.get("event_facts_to_preserve")
+            )
+            if str(item).strip()
+        }
         if expected_facts and not expected_facts.issubset(declared_preserve):
             issues["source_event_preservation"].append(f"{selector}:source_event_contract.event_facts_to_preserve.mismatch")
         expected_not_invent = forbidden_event_changes
@@ -2424,10 +2505,24 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
             issues["source_event_preservation"].append(f"{selector}:source_event_contract.event_facts_not_to_invent.mismatch")
         if primary_beat:
             expected_action = str(primary_beat.get("visible_action") or "").strip()
-            if expected_action and str(source_contract.get("source_visible_action") or "").strip() != expected_action:
+            declared_action = str(
+                source_contract.get("canonical_source_visible_action")
+                or source_contract.get("source_visible_action")
+                or ""
+            ).strip()
+            if expected_action and declared_action != expected_action:
                 issues["source_event_preservation"].append(f"{selector}:source_event_contract.source_visible_action.mismatch")
             expected_evidence = {str(item).strip() for item in as_list(primary_beat.get("required_visual_evidence")) if str(item).strip()}
-            declared_evidence = {str(item).strip() for item in as_list(source_contract.get("source_required_visual_evidence")) if str(item).strip()}
+            canonical_evidence = source_contract.get("canonical_source_required_visual_evidence")
+            declared_evidence = {
+                str(item).strip()
+                for item in as_list(
+                    canonical_evidence
+                    if isinstance(canonical_evidence, list)
+                    else source_contract.get("source_required_visual_evidence")
+                )
+                if str(item).strip()
+            }
             if expected_evidence and not expected_evidence.issubset(declared_evidence):
                 issues["source_event_preservation"].append(f"{selector}:source_event_contract.source_required_visual_evidence.mismatch")
         first_frame = as_dict(contract.get("first_frame_contract"))
@@ -2514,7 +2609,7 @@ def _cut_event_ref_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]:
                 issues["event_context_ready"].append(f"{selector}:event_context_for_cut.forbidden_event_changes")
         covered.update(ref for ref in refs if ref in beat_ids)
 
-    required_beats = {beat_id for beat_id, function in beat_functions.items() if function in set(REQUIRED_SCENE_EVENT_BEAT_FUNCTIONS)}
+    required_beats = _coverage_authored_event_beat_ids(_scene_cut_coverage_plan(scene))
     missing_required = sorted(required_beats - covered)
     if missing_required:
         issues["sequence_covered"].extend(f"scene{scene_id}:{beat_id}.uncovered" for beat_id in missing_required)
@@ -2869,19 +2964,6 @@ def _cut_has_blueprint(cut: dict[str, Any]) -> bool:
     )
 
 
-def _scene_target_duration_seconds(scene: dict[str, Any]) -> float:
-    for key in ("target_duration_seconds", "estimated_duration_seconds"):
-        value = scene.get(key)
-        if isinstance(value, (int, float)) and value > 0:
-            return float(value)
-    intent = scene.get("scene_intent") if isinstance(scene.get("scene_intent"), dict) else {}
-    for key in ("target_duration_seconds", "estimated_duration_seconds"):
-        value = intent.get(key)
-        if isinstance(value, (int, float)) and value > 0:
-            return float(value)
-    return 0.0
-
-
 def _scene_importance(scene: dict[str, Any]) -> str:
     value = scene.get("importance")
     if not value and isinstance(scene.get("scene_intent"), dict):
@@ -2893,20 +2975,67 @@ def _scene_cut_coverage_plan(scene: dict[str, Any]) -> dict[str, Any]:
     return as_dict(scene.get("scene_cut_coverage_plan"))
 
 
+def _coverage_identifier(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _coverage_assignment_obligation_ids(assignment: dict[str, Any]) -> set[str]:
+    obligation_ids = {
+        identifier
+        for value in as_list(assignment.get("obligation_ids"))
+        if (identifier := _coverage_identifier(value))
+        and not identifier.lower().startswith("duration_")
+    }
+    single_obligation_id = _coverage_identifier(assignment.get("obligation_id"))
+    if single_obligation_id and not single_obligation_id.lower().startswith("duration_"):
+        obligation_ids.add(single_obligation_id)
+    return obligation_ids
+
+
+def _coverage_assignment_event_beat_ids(assignment: dict[str, Any]) -> set[str]:
+    event_assignment = as_dict(assignment.get("event_assignment"))
+    source_event_contract = as_dict(event_assignment.get("source_event_contract"))
+    event_beat_ids = {
+        identifier
+        for value in as_list(source_event_contract.get("source_event_beat_ids"))
+        if (identifier := _coverage_identifier(value))
+    }
+    primary_event_beat_id = _coverage_identifier(
+        source_event_contract.get("primary_event_beat_id")
+    )
+    if primary_event_beat_id:
+        event_beat_ids.add(primary_event_beat_id)
+    return event_beat_ids
+
+
+def _coverage_authored_obligation_ids(plan: dict[str, Any]) -> set[str]:
+    obligation_ids: set[str] = set()
+    for assignment in as_list(plan.get("cut_assignments")):
+        if isinstance(assignment, dict):
+            obligation_ids.update(_coverage_assignment_obligation_ids(assignment))
+    return obligation_ids
+
+
+def _coverage_authored_event_beat_ids(plan: dict[str, Any]) -> set[str]:
+    return {
+        beat_id
+        for event_beat in as_list(plan.get("event_beat_inventory"))
+        if isinstance(event_beat, dict)
+        and event_beat.get("must_be_seen") is not False
+        and (beat_id := _coverage_identifier(event_beat.get("beat_id")))
+    }
+
+
 def _coverage_minimum_cut_count(plan: dict[str, Any]) -> int:
     if not isinstance(plan, dict):
-        return 2
-    direct = as_int(plan.get("minimum_cut_count"))
-    if direct and direct > 0:
-        return direct
-    min_cut_count = as_dict(plan.get("min_cut_count"))
-    selected = as_int(min_cut_count.get("selected"))
-    if selected and selected > 0:
-        return selected
-    by_importance = as_int(min_cut_count.get("by_importance")) or 0
-    by_duration = as_int(min_cut_count.get("by_duration")) or 0
-    by_event_beats = as_int(min_cut_count.get("by_event_beats")) or 0
-    return max(by_importance, by_duration, by_event_beats, 2)
+        return 0
+    # Declared/legacy counters are audit metadata only. Only concrete authored
+    # IDs can create a floor, so stale duration-derived values cannot authorize
+    # filler cuts and missing inventories cannot be hidden by a claimed count.
+    return max(
+        len(_coverage_authored_obligation_ids(plan)),
+        len(_coverage_authored_event_beat_ids(plan)),
+    )
 
 
 def _scene_cut_selector(scene_id: str, cut: dict[str, Any]) -> str:
@@ -2920,20 +3049,9 @@ def _scene_cut_selector(scene_id: str, cut: dict[str, Any]) -> str:
 
 
 def _cinematic_min_cuts_for_scene(scene: dict[str, Any]) -> int:
-    importance = _scene_importance(scene)
-    if importance == "critical":
-        base_min = CINEMATIC_CRITICAL_IMPORTANCE_MIN_CUTS
-    elif importance == "high":
-        base_min = CINEMATIC_HIGH_IMPORTANCE_MIN_CUTS
-    elif importance == "low":
-        base_min = CINEMATIC_LOW_IMPORTANCE_MIN_CUTS
-    else:
-        base_min = CINEMATIC_SCENE_MIN_CUTS
+    """Return the authored semantic/event floor; duration is audited separately."""
 
-    duration = _scene_target_duration_seconds(scene)
-    if duration > 0:
-        base_min = max(base_min, int((duration + CINEMATIC_SECONDS_PER_CUT_TARGET - 1) // CINEMATIC_SECONDS_PER_CUT_TARGET))
-    return base_min
+    return _coverage_minimum_cut_count(_scene_cut_coverage_plan(scene))
 
 
 def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cuts: list[dict[str, Any]]) -> list[str]:
@@ -2950,12 +3068,36 @@ def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cut
         issues.append(f"scene{scene_id}:cut_count_below_coverage_plan:{actual_cut_count}<{selected_min}")
 
     min_cut_count = as_dict(plan.get("min_cut_count"))
-    by_importance = as_int(min_cut_count.get("by_importance")) or 0
-    by_duration = as_int(min_cut_count.get("by_duration")) or 0
-    by_event_beats = as_int(min_cut_count.get("by_event_beats")) or 0
-    selected = as_int(min_cut_count.get("selected")) or as_int(plan.get("minimum_cut_count")) or 0
-    if selected and selected < max(by_importance, by_duration, by_event_beats):
+    declared_semantic_count = as_int(min_cut_count.get("by_distinct_semantic_obligations"))
+    authored_semantic_count = len(_coverage_authored_obligation_ids(plan))
+    if declared_semantic_count is None:
+        issues.append(f"scene{scene_id}:coverage_plan_distinct_semantic_obligations_missing")
+    elif declared_semantic_count < authored_semantic_count:
+        issues.append(f"scene{scene_id}:coverage_plan_distinct_semantic_obligations_below_authored")
+    elif declared_semantic_count > authored_semantic_count:
+        issues.append(
+            f"scene{scene_id}:coverage_plan_distinct_semantic_obligations_mismatch:"
+            f"{declared_semantic_count}!={authored_semantic_count}"
+        )
+    declared_event_count = as_int(min_cut_count.get("by_event_beats"))
+    authored_event_count = len(_coverage_authored_event_beat_ids(plan))
+    if declared_event_count is None:
+        issues.append(f"scene{scene_id}:coverage_plan_event_beats_missing")
+    elif declared_event_count < authored_event_count:
+        issues.append(f"scene{scene_id}:coverage_plan_event_beats_below_authored")
+    elif declared_event_count > authored_event_count:
+        issues.append(
+            f"scene{scene_id}:coverage_plan_event_beats_mismatch:"
+            f"{declared_event_count}!={authored_event_count}"
+        )
+    selected = as_int(min_cut_count.get("selected"))
+    if selected is None:
+        issues.append(f"scene{scene_id}:coverage_plan_selected_missing")
+    elif selected < selected_min:
         issues.append(f"scene{scene_id}:coverage_plan_selected_below_floor")
+        issues.append(f"scene{scene_id}:coverage_plan_selected_mismatch:{selected}!={selected_min}")
+    elif selected > selected_min:
+        issues.append(f"scene{scene_id}:coverage_plan_selected_mismatch:{selected}!={selected_min}")
     strategy = str(plan.get("coverage_strategy") or "").strip()
     if strategy and strategy != "reverse_from_scene_event":
         issues.append(f"scene{scene_id}:coverage_strategy")
@@ -2967,46 +3109,168 @@ def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cut
     if not obligations:
         issues.append(f"scene{scene_id}:scene_obligations")
     obligation_ids: set[str] = set()
-    scene_obligation_assigned_selectors: set[str] = set()
+    obligation_declared_selectors: dict[str, set[str]] = {}
     for index, obligation in enumerate(obligations, start=1):
         if not isinstance(obligation, dict):
             issues.append(f"scene{scene_id}:scene_obligations[{index}]")
             continue
-        obligation_id = str(obligation.get("obligation_id") or "").strip()
-        if obligation_id:
+        obligation_id = _coverage_identifier(obligation.get("obligation_id"))
+        label = obligation_id or str(index)
+        if not obligation_id:
+            issues.append(f"scene{scene_id}:scene_obligations[{index}].obligation_id")
+        elif obligation_id.lower().startswith("duration_"):
+            issues.append(f"scene{scene_id}:scene_obligations[{obligation_id}].duration_only")
+        elif obligation_id in obligation_ids:
+            issues.append(f"scene{scene_id}:scene_obligations[{obligation_id}].duplicate")
+        else:
             obligation_ids.add(obligation_id)
-        assigned = [str(item).strip() for item in as_list(obligation.get("assigned_cut_ids")) if str(item).strip()]
-        scene_obligation_assigned_selectors.update(assigned)
-        if not assigned:
-            issues.append(f"scene{scene_id}:scene_obligations[{obligation_id or index}].assigned_cut_ids")
-        for selector in assigned:
-            if selector not in actual_selectors:
-                issues.append(f"scene{scene_id}:scene_obligations[{obligation_id or index}].unknown_cut:{selector}")
+        raw_assigned_cut_ids = obligation.get("assigned_cut_ids")
+        invalid_assigned_cut_ids = not isinstance(raw_assigned_cut_ids, list) or any(
+            not _coverage_identifier(item) for item in as_list(raw_assigned_cut_ids)
+        )
+        assigned = {
+            selector
+            for item in as_list(raw_assigned_cut_ids)
+            if (selector := _coverage_identifier(item))
+        }
+        if obligation_id:
+            obligation_declared_selectors.setdefault(obligation_id, set()).update(assigned)
+        if invalid_assigned_cut_ids or not assigned:
+            issues.append(f"scene{scene_id}:scene_obligations[{label}].assigned_cut_ids")
+        for selector in sorted(assigned - actual_selectors):
+            issues.append(f"scene{scene_id}:scene_obligations[{label}].unknown_cut:{selector}")
 
     assignments = as_list(plan.get("cut_assignments"))
+    assignment_event_ids = {
+        beat_id
+        for assignment in assignments
+        if isinstance(assignment, dict)
+        for beat_id in _coverage_assignment_event_beat_ids(assignment)
+    }
+    event_inventory = as_list(plan.get("event_beat_inventory"))
+    if (
+        declared_event_count
+        or authored_event_count
+        or assignment_event_ids
+        or _scene_event_beat_ids(scene)
+    ) and not event_inventory:
+        issues.append(f"scene{scene_id}:event_beat_inventory")
+    seen_event_beat_ids: set[str] = set()
+    required_event_beat_ids: set[str] = set()
+    event_declared_selectors: dict[str, set[str]] = {}
+    for index, event_beat in enumerate(event_inventory, start=1):
+        if not isinstance(event_beat, dict):
+            issues.append(f"scene{scene_id}:event_beat_inventory[{index}]")
+            continue
+        beat_id = _coverage_identifier(event_beat.get("beat_id"))
+        label = beat_id or str(index)
+        if not beat_id:
+            issues.append(f"scene{scene_id}:event_beat_inventory[{index}].beat_id")
+        elif beat_id in seen_event_beat_ids:
+            issues.append(f"scene{scene_id}:event_beat_inventory[{beat_id}].duplicate")
+        else:
+            seen_event_beat_ids.add(beat_id)
+            if event_beat.get("must_be_seen") is not False:
+                required_event_beat_ids.add(beat_id)
+        raw_assigned_cut_ids = event_beat.get("assigned_cut_ids")
+        invalid_assigned_cut_ids = not isinstance(raw_assigned_cut_ids, list) or any(
+            not _coverage_identifier(item) for item in as_list(raw_assigned_cut_ids)
+        )
+        assigned = {
+            selector
+            for item in as_list(raw_assigned_cut_ids)
+            if (selector := _coverage_identifier(item))
+        }
+        if beat_id:
+            event_declared_selectors.setdefault(beat_id, set()).update(assigned)
+        if invalid_assigned_cut_ids or (
+            event_beat.get("must_be_seen") is not False and not assigned
+        ):
+            issues.append(f"scene{scene_id}:event_beat_inventory[{label}].assigned_cut_ids")
+        for selector in sorted(assigned - actual_selectors):
+            issues.append(f"scene{scene_id}:event_beat_inventory[{label}].unknown_cut:{selector}")
+    for beat_id in sorted(set(_scene_event_beat_ids(scene)) - seen_event_beat_ids):
+        issues.append(f"scene{scene_id}:event_beat_inventory[{beat_id}].missing")
+    for beat_id in sorted(seen_event_beat_ids - set(_scene_event_beat_ids(scene))):
+        issues.append(f"scene{scene_id}:event_beat_inventory[{beat_id}].unknown_scene_event")
+
     if not assignments:
         issues.append(f"scene{scene_id}:cut_assignments")
+    assignment_obligation_selectors: dict[str, set[str]] = {}
+    assignment_event_selectors: dict[str, set[str]] = {}
     for index, assignment in enumerate(assignments, start=1):
         if not isinstance(assignment, dict):
             issues.append(f"scene{scene_id}:cut_assignments[{index}]")
             continue
-        cut_selector_value = str(assignment.get("cut_selector") or "").strip()
-        if not cut_selector_value:
-            cut_index = as_int(assignment.get("cut_index"))
-            if cut_index:
-                cut_selector_value = make_scene_cut_selector(scene_id, f"{cut_index:02d}")
+        cut_selector_value = _coverage_identifier(assignment.get("cut_selector"))
         if cut_selector_value not in actual_selectors:
             issues.append(f"scene{scene_id}:cut_assignments[{index}].cut_selector")
-        assignment_obligations = [
-            str(item).strip()
-            for item in as_list(assignment.get("obligation_ids"))
-            if str(item).strip()
-        ]
-        single_obligation = str(assignment.get("obligation_id") or "").strip()
-        if single_obligation:
-            assignment_obligations.append(single_obligation)
-        if obligation_ids and not any(obligation_id in obligation_ids for obligation_id in assignment_obligations) and cut_selector_value not in scene_obligation_assigned_selectors:
+
+        raw_obligation_value = assignment.get("obligation_ids")
+        raw_obligation_ids = list(as_list(raw_obligation_value))
+        invalid_obligation_ids = (
+            "obligation_ids" in assignment and not isinstance(raw_obligation_value, list)
+        ) or any(not _coverage_identifier(value) for value in raw_obligation_ids)
+        if "obligation_id" in assignment:
+            single_raw_obligation_id = assignment.get("obligation_id")
+            raw_obligation_ids.append(single_raw_obligation_id)
+            invalid_obligation_ids = (
+                invalid_obligation_ids or not _coverage_identifier(single_raw_obligation_id)
+            )
+        duration_only_ids = {
+            identifier
+            for value in raw_obligation_ids
+            if (identifier := _coverage_identifier(value))
+            and identifier.lower().startswith("duration_")
+        }
+        assignment_obligations = _coverage_assignment_obligation_ids(assignment)
+        if duration_only_ids:
+            issues.append(f"scene{scene_id}:cut_assignments[{index}].duration_only_obligation_ids")
+        if invalid_obligation_ids or not assignment_obligations:
             issues.append(f"scene{scene_id}:cut_assignments[{index}].obligation_ids")
+        elif assignment_obligations - obligation_ids:
+            issues.append(f"scene{scene_id}:cut_assignments[{index}].obligation_ids")
+        for obligation_id in assignment_obligations:
+            assignment_obligation_selectors.setdefault(obligation_id, set()).add(cut_selector_value)
+            if cut_selector_value not in obligation_declared_selectors.get(obligation_id, set()):
+                issues.append(f"scene{scene_id}:cut_assignments[{index}].obligation_ids")
+
+        event_assignment = as_dict(assignment.get("event_assignment"))
+        source_event_contract = as_dict(event_assignment.get("source_event_contract"))
+        raw_source_event_ids = source_event_contract.get("source_event_beat_ids")
+        invalid_event_ids = (
+            "source_event_beat_ids" in source_event_contract
+            and not isinstance(raw_source_event_ids, list)
+        ) or any(
+            not _coverage_identifier(value)
+            for value in as_list(raw_source_event_ids)
+        )
+        if "primary_event_beat_id" in source_event_contract:
+            invalid_event_ids = invalid_event_ids or not _coverage_identifier(
+                source_event_contract.get("primary_event_beat_id")
+            )
+        event_ids = _coverage_assignment_event_beat_ids(assignment)
+        if invalid_event_ids:
+            issues.append(f"scene{scene_id}:cut_assignments[{index}].event_assignment")
+        if not event_ids:
+            issues.append(
+                f"scene{scene_id}:cut_assignments[{index}].event_assignment.source_event_contract"
+            )
+        for beat_id in sorted(event_ids):
+            assignment_event_selectors.setdefault(beat_id, set()).add(cut_selector_value)
+            if beat_id not in seen_event_beat_ids:
+                issues.append(
+                    f"scene{scene_id}:cut_assignments[{index}].unknown_event_beat:{beat_id}"
+                )
+            elif cut_selector_value not in event_declared_selectors.get(beat_id, set()):
+                issues.append(f"scene{scene_id}:cut_assignments[{index}].event_assignment")
+
+    for obligation_id in sorted(obligation_ids):
+        if assignment_obligation_selectors.get(obligation_id, set()) != obligation_declared_selectors.get(obligation_id, set()):
+            issues.append(f"scene{scene_id}:scene_obligations[{obligation_id}].assignment_mismatch")
+    for beat_id in sorted(required_event_beat_ids):
+        if assignment_event_selectors.get(beat_id, set()) != event_declared_selectors.get(beat_id, set()):
+            issues.append(f"scene{scene_id}:event_beat_inventory[{beat_id}].assignment_mismatch")
 
     if as_list(plan.get("unassigned_obligations")):
         issues.append(f"scene{scene_id}:unassigned_obligations")
@@ -3021,6 +3285,28 @@ def _scene_cut_coverage_plan_issues(scene: dict[str, Any], *, scene_id: str, cut
     return issues
 
 
+def _canonical_redundancy_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _motion_end_state_signature(cut: dict[str, Any]) -> tuple[tuple[str, str], str] | None:
+    contract = _node_cut_contract(cut, allow_legacy=False)
+    motion_contract = as_dict(contract.get("motion_contract"))
+    # `movable: false` is the cut-local contract for an intentional static hold.
+    # Missing or non-boolean values do not authorize an exception.
+    if motion_contract.get("movable") is False:
+        return None
+    subject_motion = _canonical_redundancy_text(motion_contract.get("subject_motion"))
+    motion_brief = _canonical_redundancy_text(motion_contract.get("motion_brief"))
+    end_state = _canonical_redundancy_text(motion_contract.get("end_state"))
+    if not end_state or not (subject_motion or motion_brief):
+        return None
+    return (subject_motion, motion_brief), end_state
+
+
 def _scene_cut_redundancy_issues(scene: dict[str, Any], *, scene_id: str, cuts: list[dict[str, Any]]) -> list[str]:
     issues: list[str] = []
     plan = _scene_cut_coverage_plan(scene)
@@ -3030,7 +3316,12 @@ def _scene_cut_redundancy_issues(scene: dict[str, Any], *, scene_id: str, cuts: 
         if isinstance(item, dict) and non_empty(item.get("prompt_reinforcement_reason") or item.get("reinforcement_reason"))
     }
     seen: dict[str, str] = {}
-    for cut in cuts:
+    active_cuts = [
+        cut
+        for cut in cuts
+        if str(cut.get("cut_status") or "").strip().lower() != "deleted"
+    ]
+    for cut in active_cuts:
         selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "cut")
         contract = _node_cut_contract(cut, allow_legacy=False)
         key = _contract_string(contract, "viewer_contract.anti_redundancy_key", "anti_redundancy_key")
@@ -3040,6 +3331,17 @@ def _scene_cut_redundancy_issues(scene: dict[str, Any], *, scene_id: str, cuts: 
         if key in seen and key not in allowed_duplicate_keys:
             issues.append(f"{selector}:duplicate_anti_redundancy_key:{key}")
         seen.setdefault(key, selector)
+    for previous_cut, cut in zip(active_cuts, active_cuts[1:]):
+        previous_signature = _motion_end_state_signature(previous_cut)
+        if previous_signature is None or previous_signature != _motion_end_state_signature(cut):
+            continue
+        previous_selector = _scene_cut_selector(scene_id, previous_cut) or str(
+            previous_cut.get("cut_id") or "cut"
+        )
+        selector = _scene_cut_selector(scene_id, cut) or str(cut.get("cut_id") or "cut")
+        issues.append(
+            f"{selector}:duplicate_adjacent_motion_end_state:{previous_selector}"
+        )
     return issues
 
 
@@ -3310,7 +3612,7 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
                 emotion_film_issues.setdefault(key, []).extend(values)
     scene_event_checks = (
         ("script.scene_event_exists", "exists", "all scenes include canonical scene_event with scene_event_v1 fields"),
-        ("script.scene_event_sequence_complete", "sequence_complete", "scene_event.event_sequence includes setup, pressure, turn, payoff beats with source story refs"),
+        ("script.scene_event_sequence_complete", "sequence_complete", "scene_event.event_sequence contains authored beats with source story refs; function labels are scene-specific"),
         ("script.scene_event_visible_actions_complete", "visible_actions_complete", "each scene_event beat declares what happens, visible action/reaction, consequence, pressure, and visual evidence"),
         ("script.scene_event_story_specific_grounding_complete", "story_grounding_complete", "each scene_event beat separates abstract_function, concrete_event, and source-grounded story_grounding with non-replaceable elements"),
         ("script.scene_event_concrete_story_function_complete", "concrete_story_function_complete", "concrete story elements and asset usage declare story functions instead of decorative detail"),
@@ -3348,7 +3650,7 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         ("script.event_motion_boundary", "motion_boundary", "motion_contract starts from the first frame and does not cross forbidden event beat boundaries"),
         ("script.event_narration_boundary", "narration_boundary", "narration_contract stays within allowed event and reveal boundaries"),
         ("script.event_context_for_cut_ready", "event_context_ready", "event_context_for_cut is a non-editable derived projection matching source_event_contract"),
-        ("script.cuts_cover_scene_event_sequence", "sequence_covered", "cuts cover every required scene_event setup/pressure/turn/payoff beat"),
+        ("script.cuts_cover_scene_event_sequence", "sequence_covered", "cuts cover every must-be-seen event_beat_inventory beat"),
         ("script.turn_and_payoff_event_beats_have_cuts", "turn_payoff_have_cuts", "turn and payoff event beats are assigned to at least one cut"),
     )
     for check_id, issue_key, message in cut_event_checks:
@@ -3447,7 +3749,7 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         checks,
         "script.scene_readiness_contract",
         not readiness_issues,
-        "all scenes declare importance, target/estimated duration, handoff, coverage review, and importance-based cut count"
+        "all scenes declare importance, target/estimated duration, handoff, coverage review, and authored semantic/event cut coverage"
         + (f" (issues: {', '.join(readiness_issues[:8])})" if readiness_issues else ""),
         kind="rubric",
     )
@@ -3487,6 +3789,27 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
             not missing_time_of_day,
             "all newly authored script scenes include non-empty time_of_day"
             + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
+            kind="rubric",
+        )
+    basis_contract_declared, basis_contract_valid = (
+        scene_time_of_day_visual_basis_contract_marker(data, artifact="script")
+    )
+    if basis_contract_declared:
+        add_check(
+            checks,
+            "script.scene_time_of_day_visual_basis_contract",
+            basis_contract_valid,
+            "script_metadata.scene_time_of_day_visual_basis_contract is required_v1",
+            kind="rubric",
+        )
+    basis_issues = scene_time_of_day_visual_basis_issues(data, artifact="script")
+    if basis_issues is not None:
+        add_check(
+            checks,
+            "script.scene_time_of_day_visual_basis",
+            not basis_issues,
+            "all newly authored script scenes define lighting evidence for 光源, 明るさ, 影, 色温度"
+            + (f" (issues: {', '.join(basis_issues[:8])})" if basis_issues else ""),
             kind="rubric",
         )
     flattened = body_text
@@ -3590,6 +3913,7 @@ def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[
 
 def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | None = None) -> list[str]:
     issues: list[str] = []
+    semantic_floor_sum = 0
     for index, scene in enumerate(as_list(manifest.get("scenes")), start=1):
         if not isinstance(scene, dict):
             issues.append(f"scene[{index}]:invalid")
@@ -3607,14 +3931,42 @@ def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | N
             issues.append(f"scene{scene_id}:cut_count_below_calculated_floor:{len(cuts)}<{scene_min}")
         plan = _scene_cut_coverage_plan(scene)
         planned_min = _coverage_minimum_cut_count(plan) if plan else 0
+        semantic_floor_sum += planned_min
         if planned_min and len(cuts) < planned_min:
             issues.append(f"scene{scene_id}:cut_count_below_coverage_plan:{len(cuts)}<{planned_min}")
         min_cut_count = as_dict(plan.get("min_cut_count")) if plan else {}
-        selected = as_int(min_cut_count.get("selected")) or as_int(plan.get("minimum_cut_count")) or 0
-        by_importance = as_int(min_cut_count.get("by_importance")) or 0
-        by_duration = as_int(min_cut_count.get("by_duration")) or 0
-        if selected and selected < max(by_importance, by_duration):
+        authored_semantic_count = len(_coverage_authored_obligation_ids(plan)) if plan else 0
+        authored_event_count = len(_coverage_authored_event_beat_ids(plan)) if plan else 0
+        declared_semantic_count = as_int(min_cut_count.get("by_distinct_semantic_obligations"))
+        declared_event_count = as_int(min_cut_count.get("by_event_beats"))
+        if plan and declared_semantic_count != authored_semantic_count:
+            issues.append(
+                f"scene{scene_id}:coverage_plan_distinct_semantic_obligations_mismatch:"
+                f"{declared_semantic_count}!={authored_semantic_count}"
+            )
+        if plan and declared_event_count != authored_event_count:
+            issues.append(
+                f"scene{scene_id}:coverage_plan_event_beats_mismatch:"
+                f"{declared_event_count}!={authored_event_count}"
+            )
+        selected = as_int(min_cut_count.get("selected"))
+        if plan and selected is None:
+            issues.append(f"scene{scene_id}:coverage_plan_selected_missing")
+        elif selected is not None and selected < planned_min:
             issues.append(f"scene{scene_id}:coverage_plan_selected_below_floor")
+            issues.append(f"scene{scene_id}:coverage_plan_selected_mismatch:{selected}!={planned_min}")
+        elif selected is not None and selected > planned_min:
+            issues.append(f"scene{scene_id}:coverage_plan_selected_mismatch:{selected}!={planned_min}")
+    video_metadata = as_dict(manifest.get("video_metadata"))
+    if video_metadata:
+        declared_aggregate = as_int(video_metadata.get("minimum_cut_count"))
+        if declared_aggregate is None:
+            issues.append("video_metadata.minimum_cut_count_missing")
+        elif declared_aggregate != semantic_floor_sum:
+            issues.append(
+                "video_metadata.minimum_cut_count_mismatch:"
+                f"{declared_aggregate}!={semantic_floor_sum}"
+            )
     return issues
 
 
@@ -4106,6 +4458,27 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
             kind="rubric",
         )
+    basis_contract_declared, basis_contract_valid = (
+        scene_time_of_day_visual_basis_contract_marker(data, artifact="manifest")
+    )
+    if basis_contract_declared:
+        add_check(
+            checks,
+            f"{path_label}.scene_time_of_day_visual_basis_contract",
+            basis_contract_valid,
+            "video_metadata.scene_time_of_day_visual_basis_contract is required_v1",
+            kind="rubric",
+        )
+    basis_issues = scene_time_of_day_visual_basis_issues(data, artifact="manifest")
+    if basis_issues is not None:
+        add_check(
+            checks,
+            f"{path_label}.scene_time_of_day_visual_basis",
+            not basis_issues,
+            "all newly authored manifest scenes define lighting evidence for 光源, 明るさ, 影, 色温度"
+            + (f" (issues: {', '.join(basis_issues[:8])})" if basis_issues else ""),
+            kind="rubric",
+        )
 
     if profile == "standard":
         add_check(checks, f"{path_label}.no_todo", not has_todo(body_text), f"{path_label} does not contain TODO/TBD markers", kind="rubric")
@@ -4202,7 +4575,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             checks,
             f"{path_label}.minimum_scene_cuts",
             not minimum_cut_issues,
-            "immersive manifest gives every production scene enough cuts for cinematic density"
+            "immersive manifest covers each authored semantic/event cut obligation without duration-only filler"
             + (f" (issues: {', '.join(minimum_cut_issues[:8])})" if minimum_cut_issues else ""),
             kind="rubric",
         )
@@ -4273,7 +4646,7 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
                 checks,
                 f"{path_label}.scene_cut_redundancy",
                 not redundancy_issues,
-                "anti_redundancy_key is present and unique within each scene"
+                "anti_redundancy_key is present and unique, and adjacent movable cuts do not repeat canonical motion plus end state"
                 + (f" (issues: {', '.join(redundancy_issues[:8])})" if redundancy_issues else ""),
                 kind="rubric",
             )

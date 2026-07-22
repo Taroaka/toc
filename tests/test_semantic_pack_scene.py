@@ -306,6 +306,27 @@ scenes:
         self.assertIn("scene_time_of_day_statuses[].status", story_guidance)
         self.assertIn("time_of_day_contract_declared", story_guidance)
 
+    def test_semantic_prompt_reviews_exact_authored_event_inventory_without_fixed_ladder(self) -> None:
+        builder = load_pack_builder()
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_prompt_") as td:
+            run_dir = Path(td)
+            prompt = builder.render_prompt(
+                stage="cut_blueprint",
+                run_dir=run_dir,
+                collection_path=run_dir / "collection.md",
+                scope_path=run_dir / "scope.json",
+                report_path=run_dir / "report.md",
+            )
+
+        self.assertIn("exact authored `event_beat_inventory`", prompt)
+        self.assertIn("mirrors every ordered nonblank beat ID", prompt)
+        self.assertIn("matches its corresponding source beat whether assigned or not", prompt)
+        self.assertIn("must_be_seen != false", prompt)
+        self.assertIn("arbitrary nonblank `beat_function`", prompt)
+        self.assertIn("valid one-beat scene", prompt)
+        self.assertIn("Recommend more cuts only when a distinct authored beat or semantic obligation is uncovered", prompt)
+        self.assertNotIn("event_sequence setup/pressure/turn/payoff beats", prompt)
+
     def test_cut_blueprint_entry_uses_event_context_without_full_scene_event(self) -> None:
         fixture = """# Script
 

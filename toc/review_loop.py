@@ -49,8 +49,8 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
         ),
         3: (
             "duration_density",
-            "Verify whether scene count, target duration, importance, and planned cut density are sufficient for the target video length. "
-            "Decide where scene splitting is better than cut thickening.",
+            "Verify duration risk against scene count, target duration, provider capability, and distinct semantic obligations without deriving a cut-count floor from importance or duration. "
+            "Decide where a distinct scene responsibility warrants splitting and where an existing cut should be thickened.",
         ),
         4: (
             "visual_production",
@@ -65,11 +65,11 @@ SCENE_REVIEW_CRITIC_FOCUS: dict[str, dict[int, tuple[str, str]]] = {
     "scene_detail": {
         1: (
             "scene_detail_structure",
-            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, independent dramatic question/value shift/causal turn, scene_event setup/pressure/turn/payoff sequence, scene_generation prompt separation, and story-specific concrete grounding within the maximal scene set.",
+            "Verify this scene's necessity, non-compressible beat, promotion reason, internal logic, independent dramatic question/value shift/causal turn, exact authored event_beat_inventory / scene_event.event_sequence beat IDs, arbitrary nonblank beat_function values, scene_generation prompt separation, and story-specific concrete grounding within the maximal scene set. Treat setup, pressure, turn, payoff, threshold, and custom as examples only; a valid one-beat custom scene does not require the other labels.",
         ),
         2: (
             "scene_detail_density",
-            "Verify this scene's cut count, target duration, emotional weight, and whether to add cuts or split the scene.",
+            "Verify this scene's target duration and emotional weight against provider capability and distinct semantic obligations. Add or split only for a new obligation; a fully covered one-beat scene may remain one cut.",
         ),
         3: (
             "scene_detail_handoff",
@@ -148,7 +148,7 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
     ),
     2: (
         "scene_event_coverage",
-        "Verify that cuts cover scene_event.event_sequence by visual necessity through cut_contract.source_event_contract, not top-level legacy refs or a fixed cut_function sequence.",
+        "Verify that the exact authored event_beat_inventory mirrors the ordered scene_event.event_sequence nonblank beat IDs and that cuts cover every beat marked must_be_seen != false by visual necessity through cut_contract.source_event_contract. Verify that each arbitrary nonblank beat_function matches its source beat, not top-level legacy refs or a fixed cut_function sequence. A valid one-beat scene must not fail for omitting example labels such as setup, pressure, turn, payoff, threshold, or custom.",
     ),
     3: (
         "first_frame_motion_readiness",
@@ -160,7 +160,7 @@ CUT_BLUEPRINT_CRITIC_FOCUS: dict[int, tuple[str, str]] = {
     ),
     5: (
         "duration_density_and_handoff",
-        "Verify cut count, duration intent, importance-based density, continuity between cuts, final-cut handoff, downstream handoff readiness for p500/p600/p700/p800, and that duplicate story meaning thickens prompts instead of adding redundant cuts.",
+        "Verify duration intent against provider capability and distinct semantic obligations, continuity between cuts, final-cut handoff, downstream handoff readiness for p500/p600/p700/p800, and that importance or duplicate story meaning never creates filler cuts.",
     ),
 }
 
@@ -418,11 +418,12 @@ def review_guidance_for_stage(stage: str) -> str:
             - Cut thickening is preferred only when the added material supports the same scene question/value shift/causal turn.
             - Judge whether the proposed cut count can carry this scene in a final 5-10 minute video.
             - Estimate the scene's needed duration from total scene count, scene importance, reveal weight, and emotional weight.
-            - Treat one cut as roughly 4-15 seconds; explicitly flag that a one-cut scene can only carry about 4-15 seconds.
+            - Evaluate cut duration against the selected provider/model/input-mode capability and semantic density. Do not derive a cut-count floor from a fixed seconds-per-cut estimate.
             - Check whether every piece of content that must be shown in this scene is represented by planned cuts.
+            - A valid one-beat scene may remain one cut when event_beat_inventory mirrors all authored IDs and its must_be_seen != false beat plus distinct visual obligations are fully covered; importance alone does not require filler cuts.
             - Semantic QA: verify that the scene's location, time, subject state, object visibility, and reveal order match the story/script meaning rather than merely using valid ids.
             - Review the next scene as context. Decide whether the current scene's final cut connects to the next scene.
-            - If the final cut does not connect, recommend either adding one more cut or thickening the final cut.
+            - If the final cut does not connect, add a cut only for a distinct handoff obligation; otherwise thicken the existing final cut.
             - Return concrete add/thicken/delete recommendations that main can auto-apply.
             """
         ).strip()
@@ -432,7 +433,7 @@ def review_guidance_for_stage(stage: str) -> str:
             Stage-specific review criteria:
             - Apply the cut density contract after p410 scenes are approved: every production scene must have enough cuts to make its scene_spine visible.
             - One cut must carry one intent only (one viewer-facing intent). If a cut contains location change, reveal, emotional reversal, explanation, reaction, and next-scene handoff together, return changes_requested.
-            - Important beats such as transformation, discovery, confrontation, emotional reversal, and proof reveal must be split into setup / pressure or threshold / turn or payoff / reaction / handoff as appropriate.
+            - Split important beats such as transformation, discovery, confrontation, emotional reversal, and proof reveal only when the exact authored event_beat_inventory or distinct visual obligations require separate cuts. Preserve each arbitrary nonblank beat_function from its source beat. setup, pressure, turn, payoff, threshold, custom, reaction, and handoff are example labels, not a required ladder; a valid one-beat scene may keep one custom function.
             - Require a coverage plan that maps scene obligations to cuts: dramatic_question, value_shift.visible_evidence, causal_turn, reveal constraints, audience information, and handoff_to_next_scene.
             - Semantic QA: every cut must preserve the scene meaning it claims to carry. Block cuts whose visual beat, asset dependency hint, narration role, or first-frame contract points to a different place, time, subject, or story object than the target beat.
             - first_frame_contract must describe a startable still just before motion begins; it must not be a completed action or production metadata.
@@ -448,9 +449,9 @@ def review_guidance_for_stage(stage: str) -> str:
             Stage-specific review criteria:
             - This p435 council runs after p430 script review and before p440 human changes / narration sync.
             - Structure Auditor: inspect story structure, scene order, causality, setup/payoff, scene-to-scene flow, and whether the script skeleton breaks before production.
-            - Duration Auditor: estimate runtime from scene and cut counts for a 5-10 minute video, using one cut as roughly 4-15 seconds; identify undersized scenes or missing cuts.
+            - Duration Auditor: estimate runtime from scene/cut plans and selected provider/model/input-mode capability for a 5-10 minute video; identify duration risk without deriving a cut-count floor from a fixed seconds-per-cut estimate.
             - Duration Auditor must compare `video_manifest.md.video_metadata.target_duration_seconds` with the sum of production cut durations. Do not defer this judgment to p700.
-            - Quality Auditor: propose quality improvements, new scenes, new cuts, thicker final cuts, clearer visuals, and stronger production handoffs when duration or structure findings reveal weak spots.
+            - Quality Auditor: propose a new scene or cut only for a distinct semantic obligation or authored event beat; otherwise prefer duration allocation, thicker existing cuts, clearer visuals, and stronger production handoffs.
             - Orchestrator: chair the discussion, reconcile Structure/Duration/Quality opinions, and return one prioritized recommendation set.
             - The Orchestrator and all auditors are advisory only. They must not edit canonical artifacts or downstream design artifacts.
             - The Design Owner is the only agent allowed to edit downstream design artifacts in this p435 process.
@@ -625,7 +626,10 @@ def render_aggregator_prompt(*, run_dir: Path, stage: str, round_number: int) ->
                 {roles}
                 For p420 cut review, do not pass until the cut blueprint gate is explicit:
                 each cut has one intent, every cut references scene_event beat ids,
-                cuts cover setup/pressure/turn/payoff through cut_contract.source_event_contract,
+                the exact authored event_beat_inventory mirrors the ordered scene_event.event_sequence nonblank beat ids,
+                cuts cover every beat marked must_be_seen != false through cut_contract.source_event_contract, every arbitrary nonblank
+                beat_function matches its source beat, and a valid one-beat scene is not rejected for
+                omitting example labels such as setup, pressure, turn, payoff, threshold, or custom,
                 no cut invents unapproved events, story_event_obligations are legacy projection only,
                 audience_knowledge_delta and causal_proof are concrete, required roles are not
                 collapsed into protagonist-only imagery, anti-redundancy is checked, first_frame_contract
@@ -747,10 +751,10 @@ def render_aggregated_review(
                 "## Scene Detail Gate",
                 "",
                 "- scene_necessity: each scene owns a non-compressible beat within the approved scene set",
-                "- internal_pressure: each scene has visible pressure that escalates before the turn",
+                "- internal_pressure: evaluate visible pressure escalation only when the authored scene semantics require it; do not infer required pressure/turn beat_function labels",
                 "- value_shift_visibility: value_shift.from/to is proven by visible evidence",
                 "- causal_turn_visibility: the irreversible turn is visible or audibly grounded",
-                "- scene_event_sequence: scene_event has setup, pressure, turn, and payoff as concrete story events",
+                "- scene_event_sequence: scene_event and event_beat_inventory contain the same exact ordered authored nonblank beat IDs, only beats with must_be_seen != false require cut assignment, each arbitrary nonblank beat_function is preserved, and a valid one-beat custom scene is not required to add setup, pressure, turn, payoff, or threshold labels",
                 "- scene_generation_prompt_separation: scene_generation.scene_prompt_payload.prompt is the canonical scene authoring prompt and does not include downstream execution fields, image directing terms, or fixed cut counts",
                 "- scene_generation_debug_source: scene_debug_prompt_source explains source beats, adaptation choices, excluded payload details, and forbidden changes without being sent to the agent",
                 "- scene_generation_contract: scene_generation_contract requires scene_intent, scene_event, scene_character_state_timeline, scene_film_coverage_plan, scene_cut_coverage_plan, and forbidden_event_changes",
@@ -773,7 +777,7 @@ def render_aggregated_review(
                 "## Cut Blueprint Gate",
                 "",
                 "- cut_intent_isolation: each cut has one viewer-facing intent",
-                "- scene_event_coverage: scene_event beats are assigned from visual necessity through source_event_contract",
+                "- scene_event_coverage: event_beat_inventory mirrors every exact ordered nonblank scene_event beat ID and beat_function, while only beats with must_be_seen != false require assignment from visual necessity through source_event_contract",
                 "- event_beat_reference_integrity: primary_event_beat_id, source_event_beat_ids, event_beat_function, and event_time_position match scene_event",
                 "- first_frame_motion_readiness: first_frame_contract is static p600 evidence and motion_contract remains p800-only",
                 "- event_first_frame_alignment: first_frame_contract.source_event_beat_id and event_fact_visible_in_still match the primary event beat",
@@ -787,12 +791,12 @@ def render_aggregated_review(
                 "- role_coverage: protagonist, opponent, helper, witness, and community roles are covered when the scene event requires them",
                 "- audience_knowledge_delta_coverage: each cut states what the audience newly understands",
                 "- anti_redundancy_gate: repeated story meaning is handled by prompt reinforcement instead of duplicate cuts",
-                "- duration_density_and_handoff: cut count, duration density, and final handoff are sufficient",
+                "- duration_density_and_handoff: provider-capable duration, distinct semantic-obligation coverage, and final handoff are sufficient without an importance- or duration-derived cut floor",
                 "- coverage_plan_complete: scene_cut_coverage_plan maps obligations to cuts",
                 "- continuity_contract_complete: continuity states and carry-forward items are concrete",
                 "- character_emotion_continuity_complete: cut_character_emotion_transition has transition_mode, trigger beat ref, visible behavior, and no final-emotion jump",
                 "- film_grammar_contract_complete: cut_film_grammar_contract separates required_modules and conditional_modules and keeps audience_emotion_target separate from character emotion",
-                "- action_reaction_and_eyeline_complete: turn/reveal/payoff cuts include reaction contracts, edit motivation, eyeline/attention continuity, and motivated screen direction",
+                "- action_reaction_and_eyeline_complete: authored beats whose semantics require a reaction (for example turn, reveal, or payoff) include reaction contracts, edit motivation, eyeline/attention continuity, and motivated screen direction; those function names are not required",
                 "- narration_contract_complete: narration role or silence reason is concrete",
                 "- downstream_handoff_complete: p500/p600/p700/p800 requirements are present",
                 "- triangulation_review_ready: cut contract can be checked across image, narration, motion, and scene composite review",

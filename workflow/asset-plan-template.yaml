@@ -26,6 +26,23 @@ assets:
       asset_type: "character_reference"
       source_script_selectors: ["scene1_cut1", "scene2_cut3"]
       story_purpose: "主人公の基準参照"
+      subject_contract:
+        identity_scope: "individual|ensemble"
+        subject_count: 1
+        member_ids: []
+      appearance_contract:
+        social_position: "string"
+        occupation_or_role: "string"
+        occasion_or_state: "string"
+        silhouette: "string"
+        materials: "string"
+        condition: "string"
+        palette: "string"
+        must_avoid: []
+      reuse_contract:
+        mode: "neutral_anchor|time_variant|state_variant"
+        time_of_day: ""
+        derived_from_asset_id: ""
       visual_spec:
         identity: ["string"]
         fixed_details: ["string"]
@@ -50,6 +67,10 @@ assets:
       asset_type: "object_reference"
       source_script_selectors: ["scene14_cut1", "scene15_cut1"]
       story_purpose: "禁忌の贈与"
+      reuse_contract:
+        mode: "neutral_anchor|time_variant|state_variant"
+        time_of_day: ""
+        derived_from_asset_id: ""
       visual_spec:
         identity: ["string"]
         fixed_details: ["string"]
@@ -73,6 +94,10 @@ assets:
       asset_type: "location_anchor"
       source_script_selectors: ["scene3.5_cut4", "scene6_cut2"]
       story_purpose: "海底神殿の再利用アンカー"
+      reuse_contract:
+        mode: "neutral_anchor|time_variant|state_variant"
+        time_of_day: ""
+        derived_from_asset_id: ""
       visual_spec:
         identity: ["string"]
         fixed_details: ["string"]
@@ -123,4 +148,6 @@ assets:
 # - execution_lane は既定で standard。reference_inputs が空で、かつ bootstrap_allowed=true のときだけ bootstrap_builtin を使ってよい
 # - bootstrap_builtin という lane 名は互換のため維持するが、repo 全体では no-reference built-in image lane を意味する
 # - derived_from_asset_id がある asset は常に standard
+# - neutral_anchor の prompt に scene 固有の朝/昼/夕/夜、空、影、色温度を入れない
+# - time_variant は reuse_contract.time_of_day と reuse_contract.derived_from_asset_id を必須にする
 # - p550 の prompt 本文では `物語「<topic>」の sceneXX` / `sceneXX_cutYY` ではなく、具体的に見える人物・場所・道具・行為を書く

@@ -15,8 +15,9 @@ from toc.video_prompt_projection_registry import (
 
 
 VIDEO_API_PROMPT_POLICY_VERSION = "video_api_prompt_v1"
-VIDEO_PROMPT_COMPILER_VERSION = "conditional_video_prompt_compiler_v4"
+VIDEO_PROMPT_COMPILER_VERSION = "conditional_video_prompt_compiler_v5"
 VIDEO_PROMPT_IR_SCHEMA_VERSION = "video_prompt_ir_v2"
+_MISSING = object()
 
 VIDEO_REFERENCE_ROLE_INSTRUCTIONS = {
     "start_state_visual_anchor": "参照画像{image_index}は開始状態の基準として使う。",
@@ -126,20 +127,27 @@ _CAMERA_ENUM_INSTRUCTIONS = {
 
 def compose_video_render_unit_contract(
     source_contracts: Sequence[Mapping[str, Any]],
+    *,
+    unit_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose the canonical boundary contract for a multi-cut render unit.
 
-    A one-cut unit inherits that cut exactly.  A multi-cut unit keeps the first
-    visible boundary, the last visible end state, and the union of continuity
-    and prohibitions.  Its single primary motion remains an explicit unit-level
-    authoring source; individual cut actions are not concatenated.
+    A one-cut unit without an explicit unit override inherits that cut exactly.
+    A multi-cut unit keeps the first visible boundary, the last visible end
+    state, and the union of continuity and prohibitions.  Its single primary
+    motion remains an explicit unit-level authoring source; individual cut
+    actions and reveal allowlists are not concatenated.  Whenever a unit
+    contract is supplied, its reveal allowlist must cover every source reveal.
     """
 
-    contracts = [dict(contract) for contract in source_contracts if contract]
+    contracts = [dict(contract) for contract in source_contracts]
     if not contracts:
-        return {}
+        return dict(unit_contract or {})
     if len(contracts) == 1:
-        return contracts[0]
+        return _compose_single_cut_render_unit_contract(
+            contracts[0],
+            unit_contract=unit_contract,
+        )
 
     first_contract = contracts[0]
     last_contract = contracts[-1]
@@ -148,24 +156,18 @@ def compose_video_render_unit_contract(
     )
     last_motion = _mapping(last_contract.get("motion_contract"))
     must_not_add: list[Any] = []
-    allowed_new_reveal_elements: list[Any] = []
     carry_forward: list[Any] = []
     for contract in contracts:
         motion = _mapping(contract.get("motion_contract"))
         continuity = _mapping(contract.get("continuity_contract"))
         must_not_add.extend(_sequence(motion.get("must_not_add")))
-        allowed_new_reveal_elements.extend(
-            _validated_reveal_allowlist(
-                motion.get("allowed_new_reveal_elements")
-            )
-        )
         carry_forward.extend(
             _sequence(continuity.get("carry_forward_to_next_cut"))
         )
-    if _dedupe(allowed_new_reveal_elements):
-        raise ValueError(
-            "video_render_unit_requires_explicit_reveal_authorization"
-        )
+    source_reveal_elements = _canonical_render_unit_reveal_elements(
+        contracts,
+        unit_contract=unit_contract,
+    )
 
     motion_contract = {
         "end_state": last_motion.get("end_state"),
@@ -175,7 +177,7 @@ def compose_video_render_unit_contract(
     continuity_contract = {
         "carry_forward_to_next_cut": list(_dedupe(carry_forward)),
     }
-    return {
+    composed_contract = {
         "first_frame_contract": first_frame_contract,
         "motion_contract": {
             key: value for key, value in motion_contract.items() if value
@@ -184,6 +186,95 @@ def compose_video_render_unit_contract(
             key: value for key, value in continuity_contract.items() if value
         },
     }
+    if unit_contract:
+        normalized_unit_contract = dict(unit_contract)
+        explicit_unit_motion = dict(
+            _mapping(normalized_unit_contract.get("motion_contract"))
+        )
+        if "allowed_new_reveal_elements" in explicit_unit_motion:
+            explicit_unit_motion["allowed_new_reveal_elements"] = list(
+                source_reveal_elements
+            )
+            normalized_unit_contract["motion_contract"] = explicit_unit_motion
+        return resolve_video_prompt_contract(
+            {},
+            cut_contract=normalized_unit_contract,
+            scene_contract=composed_contract,
+        )
+    return composed_contract
+
+
+def _compose_single_cut_render_unit_contract(
+    source_contract: Mapping[str, Any],
+    *,
+    unit_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    source = dict(source_contract)
+    if not unit_contract:
+        return source
+
+    source_reveal_elements = _source_reveal_elements((source,))
+    comparison_unit = dict(unit_contract)
+    comparison_motion = dict(_mapping(comparison_unit.get("motion_contract")))
+    if "allowed_new_reveal_elements" in comparison_motion:
+        unit_reveal_elements = _validated_reveal_allowlist(
+            comparison_motion.pop("allowed_new_reveal_elements")
+        )
+        if unit_reveal_elements and (
+            set(unit_reveal_elements) != set(source_reveal_elements)
+        ):
+            raise ValueError("single_cut_contract_must_match_source")
+        comparison_unit["motion_contract"] = comparison_motion
+
+    source_effective = resolve_video_prompt_contract(
+        {},
+        cut_contract=source,
+        scene_contract=None,
+    )
+    overlaid_effective = resolve_video_prompt_contract(
+        {},
+        cut_contract=comparison_unit,
+        scene_contract=source,
+    )
+    if overlaid_effective != source_effective:
+        raise ValueError("single_cut_contract_must_match_source")
+    return source
+
+
+def _canonical_render_unit_reveal_elements(
+    source_contracts: Sequence[Mapping[str, Any]],
+    *,
+    unit_contract: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    source_reveal_elements = _source_reveal_elements(source_contracts)
+    explicit_unit_motion = _mapping(_mapping(unit_contract).get("motion_contract"))
+    explicit_unit_reveal_elements = (
+        _validated_reveal_allowlist(
+            explicit_unit_motion.get("allowed_new_reveal_elements")
+        )
+        if "allowed_new_reveal_elements" in explicit_unit_motion
+        else ()
+    )
+    if set(source_reveal_elements) != set(explicit_unit_reveal_elements):
+        raise ValueError(
+            "video_render_unit_requires_explicit_reveal_authorization"
+        )
+    return source_reveal_elements
+
+
+def _source_reveal_elements(
+    source_contracts: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    return _dedupe(
+        element
+        for contract in source_contracts
+        for element in _validated_reveal_allowlist(
+            _mapping(contract.get("motion_contract")).get(
+                "allowed_new_reveal_elements",
+                _MISSING,
+            )
+        )
+    )
 
 
 def compile_video_api_prompt_v1(
@@ -212,6 +303,7 @@ def compile_video_api_prompt_v1(
     scene_location_mode: str = "",
     scene_location_sequence: Sequence[Any] = (),
     scene_location_segments: Sequence[Mapping[str, Any]] = (),
+    scene_visualizable_action: Any = None,
     prefix: str = "",
     suffix: str = "",
 ) -> dict[str, Any]:
@@ -260,6 +352,20 @@ def compile_video_api_prompt_v1(
     direction = _dedupe([*direction_notes, *_sequence(vg.get("direction_notes")), prefix, suffix])
     continuity = _dedupe([*continuity_notes, *_sequence(vg.get("continuity_notes"))])
     parsed_source = _parse_source_prompt(raw_source)
+    contract = _normalized_contract(
+        cut_contract=cut_contract,
+        scene_contract=scene_contract,
+    )
+    _validate_cut_local_location(
+        contract,
+        scene_location_sequence=scene_location_sequence,
+    )
+    first_frame_plan_start_values = _dedupe(
+        _first_frame_plan_start_values(first_frame_visual_plan)
+    )
+    normalized_review_only_dependencies = _normalized_digest_source(
+        dict(review_only_dependencies or {})
+    )
 
     projection = build_video_prompt_projection(
         manifest={"video_metadata": {"time": story_time}},
@@ -273,6 +379,7 @@ def compile_video_api_prompt_v1(
                 for item in scene_location_segments or ()
                 if isinstance(item, Mapping)
             ],
+            "visualizable_action": scene_visualizable_action,
         },
         cut={"cut_contract": dict(cut_contract or scene_contract or {})},
         video_generation={
@@ -290,10 +397,14 @@ def compile_video_api_prompt_v1(
         },
         cut_contract=cut_contract,
         scene_contract=scene_contract,
+        first_frame_visual_plan=first_frame_visual_plan,
         normalized_authoring_groups=parsed_source,
     )
+    if normalized_review_only_dependencies:
+        projection["review_only_dependencies"] = (
+            normalized_review_only_dependencies
+        )
 
-    contract = _normalized_contract(cut_contract=cut_contract, scene_contract=scene_contract)
     motion = _mapping(contract.get("motion_contract"))
     first_contract = _mapping(contract.get("first_frame_contract"))
     continuity_contract = _mapping(contract.get("continuity_contract"))
@@ -302,17 +413,12 @@ def compile_video_api_prompt_v1(
     reveal_allowlist_source = (
         motion.get("allowed_new_reveal_elements")
         if "allowed_new_reveal_elements" in motion
-        else vg_motion.get("allowed_new_reveal_elements")
+        else vg_motion.get("allowed_new_reveal_elements", _MISSING)
     )
     allowed_new_reveal_elements = _validated_reveal_allowlist(
         reveal_allowlist_source
     )
-    if len(allowed_new_reveal_elements) > 8:
-        raise ValueError("video_reveal_allowlist_exceeds_limit")
 
-    first_frame_plan_start_values = _dedupe(
-        _first_frame_plan_start_values(first_frame_visual_plan)
-    )
     authored_start_values = first_frame_plan_start_values or _dedupe(
         [
             motion.get("start_from_visible_state"),
@@ -375,29 +481,30 @@ def compile_video_api_prompt_v1(
             continuity_contract.get("end_state"),
         ]
     )
-    end_values = authored_end_values or _dedupe(
+    structured_end_values = _dedupe(
         [
             vg_motion.get("handoff_state"),
             vg_motion.get("end_state"),
-            *parsed_source["end_state"],
         ]
+    )
+    parsed_end_values = _dedupe(parsed_source["end_state"])
+    end_values = (
+        authored_end_values
+        or structured_end_values
+        or parsed_end_values
     )
     end_lines = _sentences(end_values, limit=2)
     if last:
         end_lines.append("最後は指定された終了画像の人物、構図、物の位置、光へ自然に一致させる。")
 
-    authored_continuity = _dedupe(
-        _sequence(continuity_contract.get("carry_forward_to_next_cut"))
+    structured_continuity = _dedupe(
+        _sequence(vg_motion.get("must_preserve"))
     )
-    fallback_continuity = _dedupe(
-        [
-            *_sequence(vg_motion.get("must_preserve")),
-            *parsed_source["continuity"],
-        ]
-    )
+    parsed_continuity = _dedupe(parsed_source["continuity"])
+    stable_continuity = structured_continuity or parsed_continuity
     continuity_values = _dedupe(
         [
-            *(authored_continuity or fallback_continuity),
+            *stable_continuity,
             *continuity,
             *direction,
         ]
@@ -434,19 +541,44 @@ def compile_video_api_prompt_v1(
         continuity_lines.append("顔、髪、衣装、体格、重要な小道具、画面内の位置関係、光源方向を一貫させる。")
 
     authored_forbidden = _dedupe(_sequence(motion.get("must_not_add")))
-    fallback_forbidden = _dedupe(
+    structured_forbidden = _dedupe(
         [
             *_sequence(vg_motion.get("must_not_add")),
             *_sequence(vg_motion.get("must_avoid")),
             *_sequence(vg_motion.get("forbidden_additions")),
-            *parsed_source["constraints"],
         ]
     )
+    parsed_forbidden = _dedupe(parsed_source["constraints"])
+    fallback_forbidden = structured_forbidden or parsed_forbidden
     forbidden = authored_forbidden or fallback_forbidden
-    if set(allowed_new_reveal_elements) & set(forbidden):
+    additional_negative = _clean_text(additional_negative_prompt)
+    forbidden_conflict_values = (*forbidden, additional_negative)
+    if any(
+        element.casefold() in forbidden_value.casefold()
+        for element in allowed_new_reveal_elements
+        for forbidden_value in forbidden_conflict_values
+        if forbidden_value
+    ):
         raise ValueError("video_reveal_allowlist_conflicts_with_forbidden")
+    raw_cut_motion = _mapping(_mapping(cut_contract).get("motion_contract"))
+    cut_owns_reveal_allowlist = "allowed_new_reveal_elements" in raw_cut_motion
+    contract_evidence_motion = (
+        raw_cut_motion if cut_owns_reveal_allowlist else motion
+    )
+    contract_evidence_keys = (
+        ("motion_brief", "end_state", "end_frame_brief")
+        if cut_owns_reveal_allowlist
+        else ("motion_brief", "subject_motion", "end_state", "end_frame_brief")
+    )
+    reveal_evidence_values = (
+        [contract_evidence_motion.get(key) for key in contract_evidence_keys]
+        if _mapping(cut_contract)
+        else [primary, *end_values]
+    )
     reveal_evidence_text = " ".join(
-        [primary, *end_values]
+        text
+        for value in reveal_evidence_values
+        if (text := _clean_text(value))
     )
     if any(
         element not in reveal_evidence_text
@@ -485,7 +617,6 @@ def compile_video_api_prompt_v1(
             "終了フレームを到達境界として扱い、途中でフェードしない、カットしない、別ショットへ切り替えない。"
         )
 
-    additional_negative = _clean_text(additional_negative_prompt)
     negative_prompt_mode = "inline" if _is_seedance(provider) else "separate"
     if additional_negative and negative_prompt_mode == "inline":
         constraint_lines.append(_ensure_sentence(additional_negative))
@@ -613,7 +744,15 @@ def compile_video_api_prompt_v1(
                 "direction_notes": direction,
                 "continuity_notes": continuity,
                 "first_frame_visual_plan": first_frame_visual_plan,
-                "review_only_dependencies": review_only_dependencies,
+                "review_only_dependencies": normalized_review_only_dependencies,
+                "explicit_empty_authoring_fields": (
+                    ["motion_contract.allowed_new_reveal_elements"]
+                    if (
+                        "allowed_new_reveal_elements" in motion
+                        and not allowed_new_reveal_elements
+                    )
+                    else []
+                ),
                 "scene_time_of_day_visual_basis": scene_time_of_day_visual_basis,
                 "scene_location_mode": scene_location_mode,
                 "scene_location_sequence": list(scene_location_sequence or ()),
@@ -622,6 +761,7 @@ def compile_video_api_prompt_v1(
                     for item in scene_location_segments or ()
                     if isinstance(item, Mapping)
                 ],
+                "scene_visualizable_action": scene_visualizable_action,
                 "reference_roles": list(reference_role_bindings),
             }
         ),
@@ -712,6 +852,39 @@ def _normalized_contract(
     )
 
 
+def _validate_cut_local_location(
+    contract: Mapping[str, Any],
+    *,
+    scene_location_sequence: Sequence[Any],
+) -> None:
+    route = {
+        str(value).strip()
+        for value in scene_location_sequence
+        if str(value or "").strip()
+    }
+    if not route:
+        return
+
+    cut_locations: list[str] = []
+    top_level_location = str(contract.get("location") or "").strip()
+    if top_level_location:
+        cut_locations.append(top_level_location)
+    source_event = _mapping(contract.get("source_event_contract"))
+    raw_events = source_event.get("source_concrete_events")
+    if isinstance(raw_events, (list, tuple)):
+        cut_locations.extend(
+            location
+            for raw_event in raw_events
+            if isinstance(raw_event, Mapping)
+            if (location := str(raw_event.get("where") or "").strip())
+        )
+
+    if not cut_locations:
+        raise ValueError("video_cut_location_missing_for_scene_location_sequence")
+    if any(location not in route for location in _dedupe_raw_strings(cut_locations)):
+        raise ValueError("video_cut_location_not_in_scene_location_sequence")
+
+
 def _render_prompt(fragments: list[dict[str, str]]) -> str:
     labels = {
         "start_state": "開始状態",
@@ -766,7 +939,18 @@ def _strip_first_frame_meta(value: Any) -> str:
 
 def _first_frame_plan_start_values(plan: Mapping[str, Any] | None) -> list[Any]:
     temporal = _mapping(_mapping(plan).get("temporal_boundary"))
-    return [temporal.get("event_fact_visible_in_still"), temporal.get("first_visible_moment")]
+    normalized: list[str] = []
+    for key in ("event_fact_visible_in_still", "first_visible_moment"):
+        if key not in temporal:
+            continue
+        raw = temporal.get(key)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        text = _clean_text(raw) if isinstance(raw, str) else ""
+        if not text:
+            raise ValueError("video_first_frame_visual_plan_start_state_invalid")
+        normalized.append(text)
+    return normalized
 
 
 def _flatten_preferred(value: Mapping[str, Any]) -> list[Any]:
@@ -960,16 +1144,23 @@ def _sequence(value: Any) -> list[Any]:
 
 
 def _validated_reveal_allowlist(value: Any) -> tuple[str, ...]:
-    if value is None or value == "":
+    if value is _MISSING:
         return ()
-    if not isinstance(value, (list, tuple, set)):
+    if not isinstance(value, (list, tuple)):
         raise ValueError("video_reveal_allowlist_requires_sequence")
+    if len(value) > 8:
+        raise ValueError("video_reveal_allowlist_exceeds_limit")
     normalized: list[str] = []
+    seen: set[str] = set()
     for item in value:
-        if not isinstance(item, str) or not _clean_text(item):
+        text = _clean_text(item) if isinstance(item, str) else ""
+        if not text:
             raise ValueError("video_reveal_allowlist_requires_nonempty_strings")
-        normalized.append(_clean_text(item))
-    return _dedupe(normalized)
+        if text in seen:
+            raise ValueError("video_reveal_allowlist_requires_unique_items")
+        seen.add(text)
+        normalized.append(text)
+    return tuple(normalized)
 
 
 def _dedupe(values: Iterable[Any]) -> tuple[str, ...]:

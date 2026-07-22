@@ -1,4 +1,4 @@
-contract_version: 3
+contract_version: 4
 
 global_required_docs:
   - docs/system-architecture.md
@@ -140,14 +140,17 @@ stages:
     required_docs:
       - docs/video-generation.md
       - docs/implementation/video-prompting.md
+      # The grounding contract has no provider-conditional required-playbook selector.
+      # Treat the Kling execution playbook as an unconditional stage document
+      # so every Kling request is present in the verified grounding readset.
+      - workflow/playbooks/video-generation/kling.md
     required_templates:
       - workflow/video-manifest-template.md
     required_inputs:
       - video_manifest.md
     optional_playbooks:
-      - workflow/playbooks/video-generation/kling.md
       - workflow/playbooks/video-generation/first-last-frame-chained.md
-      - workflow/playbooks/video-generation/first-last-frame-continuity.md
+      - workflow/playbooks/scene-production/first-last-frame-continuity.md
     requires_approved_input:
       - path: video_manifest.md
         review_key: review.image.status

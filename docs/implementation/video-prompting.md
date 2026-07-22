@@ -52,7 +52,7 @@ compiler は canonical source を優先し、値がない場合だけ旧形式�
 
 ## Projection Registry
 
-code source of truth は `toc/video_prompt_projection_registry.py`、version は `video_prompt_projection_registry_v3`。
+code source of truth は `toc/video_prompt_projection_registry.py`、version は `video_prompt_projection_registry_v5`。
 
 ### 3 axes
 
@@ -81,7 +81,7 @@ provider fragment の順序は固定する。空の optional group は出力し�
 | 7 | `continuity` | 人物、衣装、小道具、空間、方向、光、時代、時間帯の維持 |
 | 8 | `constraints` | 新規人物・重要物・reveal・別 shot 化など高リスクな追加の禁止 |
 
-registry 出力は `groups`、`active_rules`、`inactive_rules`、`excluded`、`review_only_sources`、`shadowed_sources` を持つ。`must_not_surface / review_only` の source が存在するとき、`review_only_sources[]` は `source_key` だけでなく正規化前の **exact `value`** を保持する。この exact value は `source_digest` と semantic reviewer の入力へ含める一方、provider prompt 本文へは出さない。reviewer は raw source の自己申告ではなく、この projection trace と compiled prompt の対応を検査する。
+registry 出力は `groups`、`active_rules`、`inactive_rules`、`excluded`、`review_only_sources`、`shadowed_sources` を持つ。`must_not_surface / review_only` の source が存在するとき、`review_only_sources[]` は `source_key` だけでなく正規化前の **exact `value`** を保持する。この exact value は `source_digest` と semantic reviewer の入力へ含める一方、provider prompt 本文へは出さない。caller の `review_only_dependencies` mapping が digest normalization 後に非空なら、string trim と空 descendant 除去後の mapping を `projection_review_contract.review_only_dependencies` に exact review metadata として返す。未指定または正規化後に空ならこの field は出さない。reviewer は raw source の自己申告ではなく、この projection trace と compiled prompt の対応を検査する。
 
 自由文 authoring source は compiler が一度だけ group 別に parse し、`compiler_normalized.authoring_source.<group>` として registry へ渡す。たとえば `camera:` 行を `camera_motion` に採用した場合、raw 自由文を同時に `primary_motion` として active trace へ残さない。`authoring_source_normalization` はこの正規化前後の対応を review 用に保持する。
 
@@ -90,32 +90,45 @@ registry 出力は `groups`、`active_rules`、`inactive_rules`、`excluded`、`
 - `cut_contract.motion_contract.motion_brief` は `primary_motion` へ `derive`
 - `cut_contract.motion_contract.camera_motion` は `camera_motion` へ条件付き `derive`
 - `cut_contract.viewer_contract.target_beat` と event / reveal ID は `review_only` かつ `must_not_surface`
+- `scene.visualizable_action` / `scene.review_only_visualizable_action` は scene 全体を確認する review input であり、cut-local な motion へ再分解してから使う。元の場面要約は `review_only` かつ `must_not_surface`
 - image prompt と narration prose は動画 motion の authoring source にせず、`review_only` かつ `must_not_surface`
+- `first_frame_visual_plan` 全体は derived artifact として exact value を `review_only / must_not_surface` trace に残す。そのうち `temporal_boundary.event_fact_visible_in_still` / `first_visible_moment` だけを `start_state` 候補へ投影し、存在する場合は generic `cut_contract.first_frame_contract` prose より優先する
 - `video_metadata.time` と `scene.time_of_day` は `continuity` へ条件付き `derive`
 - `scene.time_of_day_visual_basis` は daypart 設計を検査する `review_only / must_not_surface`。provider prose は canonical `scene.time_of_day` から一度だけ作る
-- `scene.location_mode` / `scene.location_sequence` / `scene.location_segments` は scene routing の `review_only / must_not_surface`。一つの video clip は担当 cut の一場所だけを使う
+- `scene.location_mode` / `scene.location_sequence[]` / `scene.location_segments[]` は scene routing の `review_only / must_not_surface`。一つの video clip は担当 cut の一つの departure location を使い、別 location は後述の exact authorization を満たす arrival boundary としてだけ許可する
 - `video_generation.references` は provider binding path として `review_only / must_not_surface`、`video_generation.reference_roles` は path を出さず参照順の意味だけを `continuity` へ投影する
 - `cut_contract.motion_contract.allowed_new_reveal_elements` は、主動作で新しく現れてよい具体要素だけを `constraints` へ条件付き `derive` する正の allowlist
 - `cut_contract.source_event_contract.allowed_reveal_info_ids` と upstream の `use_next_cut_first_frame_as_last_frame` は review / boundary 解決用で provider prose へ出さない。後者は解決後の `provider_request_binding.last_frame` としてのみ効く
 
+scene / cut scaffold では、場所や人物外見が主動作の途中で変わる場合も開始状態と終了状態を混ぜない。
+
+- `beat_overrides.<function>.location` / `obligation_overrides.<id>.location`: その beat / cut の **開始画像** が属する場所。exact `scene.location_sequence[]` に宣言済みであること
+- `first_frame_character_asset_overrides`: 変身・衣装変化の直前 cut が使う開始人物 asset の明示対応
+- `first_frame_excluded_object_ids[]`: 動画中に初めて現れる小道具を開始画像の dependency / reference から除外する境界
+- `allowed_new_reveal_elements[]`: 動画中に現れてよい終了側の人物状態・小道具・場所
+
+これらは provider prompt を直接書く key ではない。画像 compiler は開始側だけ、動画 compiler は開始→主動作→終了と許可済み reveal だけを投影する。
+
+`motion_attention_target` は upstream cut authoring の判断補助である。現行 registry / compiler はこの field を独立 projection source / trace / provider fragment にしないため、review が必要なら upstream artifact を直接確認する。cut contract に保持された値は normalized design source の一部として `source_digest` を変え得るが、prompt fragment の採用根拠にはしない。provider に必要な視線・手・身体動作の対象は `motion_brief`、`emotional_change`、`end_state` など登録済み canonical field に具体化する。
+
 ## Compiler Contract
 
-`compile_video_api_prompt_v1` は deterministic に `video_api_prompt_v1` payload を返す。compiler version は `conditional_video_prompt_compiler_v3`、IR schema は `video_prompt_ir_v2`。
+`compile_video_api_prompt_v1` は deterministic に `video_api_prompt_v1` payload を返す。compiler version は `conditional_video_prompt_compiler_v5`、IR schema は `video_prompt_ir_v2`。
 
 ```yaml
 api_prompt_payload:
   policy_version: "video_api_prompt_v1"
-  compiler_version: "conditional_video_prompt_compiler_v3"
-  projection_registry_version: "video_prompt_projection_registry_v3"
+  compiler_version: "conditional_video_prompt_compiler_v5"
+  projection_registry_version: "video_prompt_projection_registry_v5"
   provider: "kling_3_0"
-  mode: "text_to_video|image_to_video|first_last_frame|reference_to_video"
+  mode: "image_to_video"
   provider_policy:
     one_clip_one_intent: true
     max_camera_instructions: 2
     single_continuous_shot: true
     first_last_frame_boundary: false
     multimodal_reference: false
-    negative_prompt_mode: "separate|inline"
+    negative_prompt_mode: "separate"
   provider_request_binding:
     duration_seconds: 8
     quality: "1080p"
@@ -123,24 +136,30 @@ api_prompt_payload:
     first_frame: "assets/scenes/scene01_cut01.png"
     last_frame: ""
     references: []
-    reference_roles: []
+    # reference_roles は references が非空のときだけ同数・同順で出す
     execution_options:
       backend: "kling"
       model: "kling-3.0"
-      extra_payload: {}
+      # extra_payload は承認対象の provider option が非空のときだけ出す
       reference_content_sha256:
         assets/scenes/scene01_cut01.png: "<sha256-of-reference-bytes>"
   prompt: "<exact provider-facing motion prompt>"
   negative_prompt: "<compiled high-risk constraints>"
   source_digest: "<sha256-of-normalized-compilation-source>"
   sha256: "<sha256-of-exact-prompt-utf8>"
-  included_fragments:
+  included_fragments: &video_prompt_fragments
+    - group: "start_state"
+      text: "<approved first-frame visible state>"
     - group: "primary_motion"
       text: "<provider-facing sentence>"
-  omitted_groups: []
+    - group: "continuity"
+      text: "<story time / time-of-day / subject and spatial continuity>"
+    - group: "constraints"
+      text: "<new-element and shot-transition constraints>"
+  omitted_groups: [camera_motion, environment_motion, emotional_change, end_state]
   quality_issues: []
   projection_review_contract:
-    registry_version: "video_prompt_projection_registry_v3"
+    registry_version: "video_prompt_projection_registry_v5"
     group_order: [start_state, primary_motion, camera_motion, environment_motion, emotional_change, end_state, continuity, constraints]
     groups: {}
     active_rules: []
@@ -150,6 +169,10 @@ api_prompt_payload:
     shadowed_sources: []
     provider: "kling_3_0"
     mode: "image_to_video"
+    authoring_source_normalization:
+      applied: true
+      groups:
+        primary_motion: ["<normalized fallback candidate>"]
   video_prompt_ir:
     schema_version: "video_prompt_ir_v2"
     provider: "kling_3_0"
@@ -159,11 +182,12 @@ api_prompt_payload:
       time_of_day: "夜明け"
       has_first_frame: true
       has_last_frame: false
+      has_references: false
       duration_seconds: 8
       reference_roles: []
       required_groups: [start_state, primary_motion, continuity, constraints]
-    included_fragments: []
-    omitted_groups: []
+    included_fragments: *video_prompt_fragments
+    omitted_groups: [camera_motion, environment_motion, emotional_change, end_state]
     quality_issues: []
 ```
 
@@ -188,7 +212,7 @@ api_prompt_payload:
 
 materializer は first / last / references のうち現在読める file bytes も `reference_content_sha256` として execution options に含める。同じ path の画像を差し替えても `source_digest` が変わる。CLI は last-frame 有効/無効、reference strip を含む実効値を先に解決してから materialize し、review 後に別の frame 構成へ書き換えない。前clipから新しいchain frameを抽出する場合は、その生成後に次clipを再materialize・再review・再approveする。provider実行中の動的chain flagは使わない。
 
-`provider_request_binding.references` は順序付き path identity、`provider_request_binding.reference_roles` は同じ順序の意味 binding、`execution_options.reference_content_sha256` は materialize 時点で存在する first / last / auxiliary reference の file bytes identity である。実行時は path、role、hash をすべて照合する。server worker は承認済み bytes を private snapshot へ複写して再検証し、その snapshot を provider に渡す。materialize 時点でまだ存在しない chain output は勝手な placeholder hash を作らず、producer / path binding を保持し、実在 bytes を束縛できる段階で再 materialize / 再承認する。
+`provider_request_binding.references` は順序付き path identity、非空 references にだけ付く `provider_request_binding.reference_roles` は同じ件数・順序の意味 binding、`execution_options.reference_content_sha256` は materialize 時点で存在する first / last / auxiliary reference の file bytes identity である。`execution_options.extra_payload` も非空の承認済み option がある場合だけ保存し、空 object の placeholder は出さない。実行時は path、role、hash、provider option をすべて照合する。server worker は承認済み bytes を private snapshot へ複写して再検証し、その snapshot を provider に渡す。materialize 時点でまだ存在しない chain output は勝手な placeholder hash を作らず、producer / path binding を保持し、実在 bytes を束縛できる段階で再 materialize / 再承認する。
 
 review-only の event 境界が変わり provider text が同じ場合、`sha256` は同じでも `source_digest` は変わり得る。実行可否は prompt hash だけで判断しない。
 
@@ -227,10 +251,10 @@ segment root や function rootへ置いて sibling obligation を一括許可し
 - 各許可要素が exact obligation の `motion_brief` または `motion_end_state` に文字列として接地する
 - 許可要素と `must_not_add` が交差しない
 - `allowed_reveal_info_ids` が canonical reveal inventory に存在し、当該 cut の forbidden reveal からだけ除外される
-- next-frame binding は次 cut が存在し、同じ location で、current end state と許可済み reveal が next first-frame contract に一致する
+- next-frame binding は次 cut が存在し、current end state と許可済み reveal が next first-frame contract の開始状態に exact match する。同一場所はその一致を必須とし、cross-location はさらに exact destination が `scene.location_sequence[]` と current exact obligation の `allowed_new_reveal_elements[]` の双方に同じ文字列で存在する場合だけ許可する
 - next first-frame image が approved/current で、その path・bytes hash が current request の last-frame binding に含まれる
 
-`use_next_cut_first_frame_as_last_frame` は reveal authorization ではない。新しい画面要素には `allowed_new_reveal_elements`、新しい物語情報には `allowed_reveal_info_ids` が別途必要である。複数 cut render unit は source cut の allowlist を自動合成せず、unit-level の明示的な reveal authorization がなければ拒否する。
+`use_next_cut_first_frame_as_last_frame` は reveal authorization ではない。新しい画面要素には `allowed_new_reveal_elements`、新しい物語情報には `allowed_reveal_info_ids` が別途必要である。複数 cut render unit で source reveal union が非空なら unit-level の明示的な `allowed_new_reveal_elements` を必須とし、source cut 順に stable dedupe した union と normalized member set が exact 一致しなければ拒否する。出力順は stable source order に正規化し、欠落だけでなく superset による新 reveal の発明も許可しない。source reveal union が空なら explicit unit allowlist は absent または空でなければならない。
 
 allowlist が非空なら positive prompt の `constraints` に「主動作によって新しく現れてよいもの」と許可要素を出し、その直後に「承認済み要素以外」の追加禁止を置く。`negative_prompt_mode: separate` では正の allowlist 文と許可要素名を separate `negative_prompt` から除外し、残余禁止だけを送る。`negative_prompt_mode: inline` では保存 `negative_prompt` は空で、allowlist と残余禁止の両方を positive constraints に保持する。内部 `allowed_reveal_info_ids` はどちらの provider prose にも出さない。
 
@@ -278,9 +302,13 @@ duration と reference 数は共通上限ではなく、承認対象に束縛し
 
 negative channel も adapter 能力に合わせる。Kling 等の separate channel 対応 provider は `negative_prompt_mode: separate` とし、exact `negative_prompt` を送る。現在の Seedance adapter は separate negative field を持たないため `negative_prompt_mode: inline` とし、追加禁止を compiled positive prompt の `constraints` fragment へ入れ、保存する `negative_prompt` は空文字にする。承認した禁止指示を未送信 field にだけ残してはならない。
 
+### Cut count と duration の境界
+
+目標尺は cut の責務を発明する根拠にしない。追加 cut は `scene_event.event_sequence[]` または明示的な coverage obligation に、既存 cut と異なる原因・反応・物証・場所遷移・期限・終了状態がある場合だけ作る。`duration_*` のような時間調整専用 obligation と、同じ動作を言い換えただけの filler motion は禁止する。尺が余る場合は、既存 cut の許容 duration、scene 構成、provider capability を見直す。
+
 ## Blocking Motion Quality Issues
 
-video compiler v3 は syntax が成立しても動画指示として確定していない状態を `quality_issues[]` に出す。各 item は `code`、`blocking: true`、`group`、`message`、`value` を持ち、`api_prompt_payload` と `video_prompt_ir` の双方へ同じ値を保存する。
+video compiler v5 は syntax が成立しても動画指示として確定していない状態を `quality_issues[]` に出す。各 item は `code`、`blocking: true`、`group`、`message`、`value` を持ち、`api_prompt_payload` と `video_prompt_ir` の双方へ同じ値を保存する。
 
 | code | 意味 | 修正先 |
 |---|---|---|
@@ -290,6 +318,7 @@ video compiler v3 は syntax が成立しても動画指示として確定して
 | `video_motion_abstract_end_state` | 終了状態が「変化点」「物証」等の抽象ラベルで、静止画として確認できない | `motion_contract.end_state` / `end_frame_brief` |
 | `video_motion_duplicate_environment` | environment motion が primary motion の複製で、補助情報になっていない | `motion_contract.environment_motion` |
 | `video_motion_duplicate_emotion` | emotional change が primary motion の複製で、可視感情差分になっていない | `motion_contract.emotional_change` |
+| `video_motion_sequential_overview` | `→` / `⇒` / `->` / `=>` で複数段階を並べた scene overview が start / motion / environment / emotion / end に混入している | scene overview を review-only に戻し、当該 cut の単一開始状態・単一主動作・単一終了状態へ分解する |
 
 blocking issue が一件でもある target は semantic review で合格にせず、canonical field を修正して再 compile / 再 materialize する。fallback 文や compiled prompt の直接編集で issue を隠さない。
 
@@ -302,12 +331,28 @@ scene composite review は cut 単体の `quality_issues` に加え、同一 sce
 - `unit_id` は scene 内で一意、`source_cut_ids[]` は非空で canonical cut 順を保つ
 - active cut は scene 内のいずれか一つの render unit に exactly once 所属し、重複・欠落・deleted cut 参照を許さない
 - unit の `video_generation.duration_seconds` は `source_cut_ids[]` の cut duration 合計と一致させる。provider / model / input mode の duration 上限を超える前に unit を分割する（現在の Seedance 1.0 reference-image mode は最大12秒）
-- 1 cut unit の effective contract は source cut contract を exact 継承する
+- 1 cut unit の effective contract は source cut contract を exact 継承する。explicit unit `cut_contract` は field を省略でき、空値は no-op として扱う。非空で指定した各 field は対応する source value と一致しなければならない（非空 allowlist は normalized member set で比較する）。異なる値は拒否し、出力は常に source contract そのものとする
 - 複数 cut unit は、先頭 cut の `first_frame_contract`、末尾 cut の `motion_contract.end_state` / `end_frame_brief`、全 source cut の continuity / `must_not_add` の和集合を境界 contract とする
 - 個別 cut の主動作を連結して一つの長い prompt にしない。複数 cut unit は unit-level `cut_contract.motion_contract` または `prompt_authoring_source` に、clip 全体を代表する **一つ**の primary motion を明示する
 - unit に explicit `cut_contract` がある場合は derived boundary contract を補完元とし、同じ group の explicit 値を優先する
+- 複数 cut unit の explicit `motion_contract.allowed_new_reveal_elements` は例外的に自由な override ではない。source cut の allowlist を source 順に stable dedupe した union と normalized member set が exact 一致しなければならず、欠落・追加のどちらも拒否する。出力順は stable source order に正規化する。source union が非空なら explicit allowlist は必須、空なら absent または空だけを許可する
 
-`source_cut_ids[]` と source cut contract の ordered set は provider prompt 本文へ出さず、`review_only_dependencies` として `source_digest` に束縛する。したがって prompt text が偶然同じでも source cut の順序・event 境界・continuity が変われば再 review が必要になる。
+`source_cut_ids[]` と source cut contract の ordered set は caller の `review_only_dependencies` に `render_unit_source_cut_ids` / `render_unit_source_cut_contracts` として渡す。compiler は string trim と空 descendant 除去後の exact normalized mapping を `source_digest` に束縛し、正規化後に非空なら `projection_review_contract.review_only_dependencies` へ同値で返す。`prompt`、`negative_prompt`、top-level / IR の `included_fragments`、その他の `video_prompt_ir` fragment へは投影しない。したがって prompt text が偶然同じでも source cut の順序・event 境界・continuity が変われば再 review が必要になる。
+
+```yaml
+projection_review_contract:
+  review_only_dependencies:
+    render_unit_source_cut_ids: ["1", "2"]
+    render_unit_source_cut_contracts:
+      - motion_contract:
+          motion_brief: "<source cut 1 exact motion>"
+          end_state: "<source cut 1 exact end state>"
+      - motion_contract:
+          motion_brief: "<source cut 2 exact motion>"
+          end_state: "<source cut 2 exact end state>"
+```
+
+この subtree は review metadata であり、同じ ID / contract を provider 文や `video_prompt_ir.included_fragments` に複写しない。
 
 ## Materialization / Execution Gate
 
@@ -324,16 +369,16 @@ materialization では少なくとも次を保存する。
 
 - exact `prompt`
 - `policy_version` / `compiler_version` / `projection_registry_version`
-- `source_digest` / prompt `sha256`
-- `video_prompt_ir` / `projection_review_contract`（`review_only_sources[].value` を含む）
+- `source_digest` / payload `sha256`（review / state では同じ値を `prompt_sha256` として束縛）
+- `video_prompt_ir` / `projection_review_contract`（`review_only_sources[].value` と、caller dependency が正規化後に非空なら exact `review_only_dependencies` を含む）
 - `quality_issues[]`。blocking issue がある target は approval へ進めない
 - provider / mode / duration / tool / quality / aspect ratio
 - first frame / last frame / ordered references / ordered `reference_roles` と、materialize 時点で読める各 reference bytes の hash
 - provider mode に応じた exact `negative_prompt` とその hash。`inline` mode では空文字とその hash
-- model / backend / provider extra JSON などの execution options
+- model / backend と、非空の場合だけ provider extra JSON を含む execution options
 - `video_generation_requests.md` の target ごとの exact section hash
 
-`video_generation_requests.md` は positive prompt を exact `video_prompt` fence、negative prompt を exact `negative_prompt` fence に保存する。各 section の `negative_prompt_sha256` は後者の UTF-8 hash であり、`request_section_sha256` は heading、metadata、両 fence を含む materializer が書いた target section の exact bytes hash である。空の negative prompt でも fence と空文字 hash を省略しない。
+`video_generation_requests.md` は positive prompt を exact `video_prompt` fence、negative prompt を exact `negative_prompt` fence に保存する。各 section の `prompt_sha256` は positive fence の UTF-8 hash で `api_prompt_payload.sha256` と一致し、`negative_prompt_sha256` は negative fence の UTF-8 hash である。`request_section_sha256` は heading、metadata、両 fence を含む materializer が書いた target section の exact bytes hash とする。空の negative prompt でも fence と空文字 hash を省略しない。
 
 materialize しただけの target は `pending` であり生成できない。明示的な生成操作は create request に `approve_for_generation: true` を付け、target ごとに次の approval identity と audit metadata を `state.txt` へ保存する。
 
@@ -341,7 +386,7 @@ approval identity:
 
 - `review.video_prompt.item.<item_id>.status=approved`
 - `request_section_sha256`
-- prompt `sha256`
+- `prompt_sha256`（exact `api_prompt_payload.prompt` の hash。`api_prompt_payload.sha256` と同値）
 - `source_digest`
 
 audit metadata:

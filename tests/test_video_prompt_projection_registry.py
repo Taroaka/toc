@@ -108,6 +108,18 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 "derive",
                 "projection",
             ),
+            "video_generation.motion_contract.motion_brief": (
+                "primary_motion",
+                "required",
+                "derive",
+                "projection",
+            ),
+            "video_generation.motion_contract.action_intent": (
+                "primary_motion",
+                "required",
+                "derive",
+                "projection",
+            ),
             "cut.cut_contract.motion_contract.end_state": (
                 "end_state",
                 "required",
@@ -125,6 +137,12 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 "conditional",
                 "derive",
                 "projection",
+            ),
+            "cut.cut_contract.continuity_contract.carry_forward_to_next_cut": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
             ),
             "compiler_normalized.authoring_source.primary_motion": (
                 "primary_motion",
@@ -156,6 +174,72 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 "must_not_surface",
                 "review_only",
             ),
+            "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still": (
+                "start_state",
+                "required",
+                "derive",
+                "projection",
+            ),
+            "cut.cut_contract.source_event_contract.allowed_reveal_info_ids": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_contract.use_next_cut_first_frame_as_last_frame": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_contract.continuity_contract.location_ids": (
+                None,
+                "required",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_contract.first_frame_contract.visible_start_state.spatial_state": (
+                "start_state",
+                "required",
+                "derive",
+                "projection",
+            ),
+            "cut.cut_contract.first_frame_character_asset_overrides": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_blueprint.first_frame_character_asset_overrides": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_blueprint.first_frame_excluded_object_ids": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
+            "cut.cut_contract.first_frame_excluded_object_ids": (
+                None,
+                "conditional",
+                "must_not_surface",
+                "review_only",
+            ),
         }
 
         for source_key, expected in expectations.items():
@@ -174,6 +258,175 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 )
                 self.assertTrue(rule.transform)
                 self.assertTrue(rule.semantic_checks)
+
+    def test_first_frame_visual_plan_outranks_generic_contract_start_in_projection_trace(self) -> None:
+        plan_start = "主人公の片手が灰の床で止まり、顔は継母の足元へ向いている"
+        plan = {
+            "schema_version": "first_frame_visual_plan_v1",
+            "source_grounding": {"cut_id": "scene1_cut01_internal"},
+            "temporal_boundary": {
+                "event_fact_visible_in_still": plan_start,
+            },
+        }
+        projection = build_video_prompt_projection(
+            cut_contract={
+                "first_frame_contract": {
+                    "visible_start_state": {
+                        "character_state": "汎用の人物状態",
+                        "spatial_state": "汎用の場所",
+                    }
+                },
+                "motion_contract": {"motion_brief": "主人公が顔を扉へ向ける"},
+            },
+            first_frame_visual_plan=plan,
+        )
+
+        self.assertEqual(_group_values(projection, "start_state"), (plan_start,))
+        active_sources = {
+            str(item.get("source_key") or "")
+            for item in projection["active_rules"]
+        }
+        self.assertIn(
+            "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still",
+            active_sources,
+        )
+        self.assertNotIn(
+            "cut.cut_contract.first_frame_contract.visible_start_state",
+            active_sources,
+        )
+        traced = {
+            item["source_key"]: item["value"]
+            for item in projection["review_only_sources"]
+        }
+        self.assertEqual(traced["first_frame_visual_plan"], plan)
+
+    def test_boundary_and_first_frame_provenance_are_review_only(self) -> None:
+        contract = {
+            "location": "大階段",
+            "source_event_contract": {
+                "allowed_reveal_info_ids": ["reveal_midnight_limit_internal"],
+                "source_concrete_events": [{"where": "大階段"}],
+            },
+            "continuity_contract": {
+                "location_ids": ["location_palace_stairs_internal"],
+            },
+            "first_frame_contract": {
+                "visible_start_state": {"spatial_state": "大階段"},
+            },
+            "first_frame_character_asset_overrides": {
+                "主人公": "character_transformed_internal",
+            },
+            "first_frame_excluded_object_ids": ["object_glass_slipper_internal"],
+            "use_next_cut_first_frame_as_last_frame": True,
+            "cut_handoff": {
+                "delivers_to_next": {
+                    "visible_or_audible_form": "階段下方へ続く進路",
+                    "binds_video_last_frame_to_next_first_frame": True,
+                }
+            },
+            "motion_contract": {
+                "motion_brief": "主人公が階段を一段だけ下りる",
+            },
+        }
+
+        projection = build_video_prompt_projection(
+            cut={
+                "cut_blueprint": {
+                    "first_frame_asset_policy": {
+                        "character_asset_overrides": {
+                            "主人公": "character_transformed_blueprint_internal",
+                        },
+                        "excluded_object_ids": [
+                            "object_glass_slipper_blueprint_internal"
+                        ],
+                    }
+                }
+            },
+            cut_contract=contract,
+        )
+        traced = {
+            item["source_key"]: item["value"]
+            for item in projection["review_only_sources"]
+        }
+        expected = {
+            "cut.cut_contract.location": "大階段",
+            "cut.cut_contract.source_event_contract.allowed_reveal_info_ids": [
+                "reveal_midnight_limit_internal"
+            ],
+            "cut.cut_contract.source_event_contract.source_concrete_events": [
+                {"where": "大階段"}
+            ],
+            "cut.cut_contract.continuity_contract.location_ids": [
+                "location_palace_stairs_internal"
+            ],
+            "cut.cut_contract.first_frame_character_asset_overrides": {
+                "主人公": "character_transformed_internal"
+            },
+            "cut.cut_contract.first_frame_excluded_object_ids": [
+                "object_glass_slipper_internal"
+            ],
+            "cut.cut_contract.use_next_cut_first_frame_as_last_frame": True,
+            "cut.cut_contract.cut_handoff.delivers_to_next.binds_video_last_frame_to_next_first_frame": True,
+            "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides": {
+                "主人公": "character_transformed_blueprint_internal"
+            },
+            "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids": [
+                "object_glass_slipper_blueprint_internal"
+            ],
+        }
+        for source_key, value in expected.items():
+            with self.subTest(source_key=source_key):
+                self.assertEqual(traced[source_key], value)
+
+        self.assertIn("大階段", _group_text(projection, "start_state"))
+
+        provider_group_text = "\n".join(
+            _group_text(projection, group) for group in VIDEO_PROMPT_GROUP_ORDER
+        )
+        for forbidden in (
+            "reveal_midnight_limit_internal",
+            "location_palace_stairs_internal",
+            "character_transformed_internal",
+            "object_glass_slipper_internal",
+            "character_transformed_blueprint_internal",
+            "object_glass_slipper_blueprint_internal",
+            "True",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, provider_group_text)
+
+    def test_explicit_empty_canonical_allowlist_shadows_flat_legacy_trace(self) -> None:
+        projection = build_video_prompt_projection(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女がその場で一度だけ振り返る",
+                    "allowed_new_reveal_elements": [],
+                }
+            },
+            video_generation={
+                "motion_contract": {
+                    "allowed_new_reveal_elements": ["flat入力のガラスの靴"],
+                }
+            },
+        )
+
+        self.assertNotIn("flat入力のガラスの靴", _group_text(projection, "constraints"))
+        active_sources = {
+            str(item.get("source_key") or "")
+            for item in projection["active_rules"]
+        }
+        self.assertNotIn(
+            "video_generation.motion_contract.allowed_new_reveal_elements",
+            active_sources,
+        )
+        shadowed_sources = {
+            str(item.get("source_key") or "")
+            for item in projection["shadowed_sources"]
+        }
+        self.assertIn(
+            "video_generation.motion_contract.allowed_new_reveal_elements",
+            shadowed_sources,
+        )
 
     def test_scene_visualizable_action_is_review_only_and_never_provider_projection(self) -> None:
         overview = "家族が去る→助力者が現れる→衣装が変わる"
@@ -358,7 +611,7 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
         self.assertIn("手を伸ばす直前で止まる", _group_text(projection, "end_state"))
 
         continuity = _group_text(projection, "continuity")
-        self.assertIn("主人公の顔と衣装", continuity)
+        self.assertNotIn("主人公の顔と衣装", continuity)
         self.assertIn("架空王朝の第七紀", continuity)
         self.assertIn("暁前の青い薄明", continuity)
         self.assertNotIn(
@@ -418,12 +671,25 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
             },
         )
 
-        compared_groups = ("primary_motion", "end_state", "continuity", "constraints")
+        compared_groups = ("primary_motion", "end_state", "constraints")
         for group in compared_groups:
             with self.subTest(group=group):
                 expected = _group_values(canonical, group)
                 self.assertEqual(_group_values(legacy_video_generation, group), expected)
                 self.assertEqual(_group_values(legacy_scene_contract, group), expected)
+
+        self.assertEqual(_group_values(canonical, "continuity"), ())
+        self.assertEqual(_group_values(legacy_scene_contract, "continuity"), ())
+        self.assertEqual(
+            _group_values(legacy_video_generation, "continuity"),
+            tuple(preserve),
+        )
+        for projection in (canonical, legacy_scene_contract):
+            review_only = {
+                item["source_key"]: item["value"]
+                for item in projection["review_only_sources"]
+            }
+            self.assertIn(preserve, review_only.values())
 
     def test_reveal_allowlist_flat_alias_matches_canonical_constraint_projection(self) -> None:
         allowlist = ["ガラスの靴", "かぼちゃの馬車"]

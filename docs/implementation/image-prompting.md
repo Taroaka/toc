@@ -52,7 +52,7 @@ scene image prompt は、scene の説明文ではなく、**cut の映像が始�
 6. compiler が candidate の `api_prompt_payload.prompt` を自然文へレンダリングする。`script.md.scene_intent` と narration は補助参照に留める。
 7. contextless image-prompt reviewer が candidate と設計根拠を比較し、cut ごとに `include / omit / add / replace` を判断する。
 8. fail 時は producer が `first_frame_visual_plan` と cut-local dependencies/references を修正し、compiler が payload を再生成する。payload 本文、request Markdown、snapshot を手編集しない。
-9. request Markdown と draft snapshot を同じ revision から再 materialize し、asset 生成後の参照 bytes を hash 束縛して provider-ready revision にする。その revision から semantic pack を作って再 review する。pass 後の freeze は snapshot を書き換えず、review 済み revision の strict validation と state 遷移だけを行って p650 を完了させる。
+9. request Markdown と draft snapshot を同じ revision から再 materialize する。media generation を無効にした materialize-only 経路でも、scene_set / scene_detail / cut_blueprint / asset_plan / image_prompt の semantic review は省略せず、参照 bytes 未束縛の `reviewed_draft` として停止する。asset 生成後は参照 bytes を hash 束縛して provider-ready revision にし、その revision を再 review する。pass 後の freeze は snapshot を書き換えず、review 済み revision の strict validation と state 遷移だけを行って p650 を完了させる。
 
 `motion_brief` は p800 動画生成の入力であり、p600 の画像 prompt 作成では参照しない。
 画像生成 provider に渡すのは、動画開始前に見えている状態までである。
@@ -102,7 +102,7 @@ compiler groupを増やしたのにregistryへ登録していない変更は、r
 
 `scenes[].time_of_day_visual_basis` は canonical `time_of_day` から導いた光源・明るさ・影・色温度の review evidence として分類し、第二の provider-prompt authoring root にはしない。`story.script.scenes[].visualizable_action` は単一場所でも複数beatをまたぐscene overviewなのでreview-onlyとし、positive evidenceへ直接コピーしない。`scenes[].location_sequence` と `location_segments` は scene review に使うが、一枚の prompt は担当 cut の primary event beat に対応する一つの segment / location dependency だけを投影する。route 全体の prose、`A → B → C` の出来事列、別場所名、`または` などの未解決選択、`変化点` / `変化の証拠` などの設計 placeholder が positive drawable fragment に残る場合は compile を失敗させる。
 
-人物 reference は path の順番だけでなく `reference_binding.character_references[]` の `target_character_name` と `role_in_frame` へ束縛する。provider prompt には path や内部 ID を出さず、`人物参照画像1（人物名）` のように対象だけを明示する。canonical `time_of_day` と素材文の明白な正反対の光条件も、semantic review 前に deterministic error とする。
+人物 reference は path の順番だけでなく `reference_binding.character_references[]` の `target_character_name` と `role_in_frame` へ束縛する。provider prompt には path や内部 ID を出さず、`人物参照画像1（人物名）` のように対象だけを明示する。参照画像から保つのは identity / 固定構造であり、構図・状態・光は常に現在の cut 記述を優先する。canonical `time_of_day` と素材文の明白な正反対の光条件も、semantic review 前に deterministic error とする。
 
 `image_api_prompt_v2` で固定6ブロック／11ブロックを要求してはならない。`image_api_prompt_v1` は既存 artifact の読み込み用にのみ許容し、v2 compilation failure 時に暗黙 fallback しない。
 
@@ -553,7 +553,7 @@ review では次を blocker とする。
   - canonical reason key: `prompt_lacks_attention_hierarchy`
 - still が行為の完了後を描き、p800 で自然に動き出せない。
   - canonical reason key: `prompt_finishes_action_in_still`
-- cut が setup / pressure / turn / payoff / reaction / handoff のどれを担当するか不明。
+- cut が参照する authored event beat と、その cut 固有の viewer-facing intent が不明。`setup` / `pressure` / `turn` / `payoff` / `reaction` / `handoff` は候補例であり、固定集合ではない。
   - canonical reason key: `prompt_missing_cut_function`
 - prompt が `motion_brief` の後続動作を先読みして、静止画に未来の出来事や完了状態を入れている。
   - canonical reason key: `prompt_leaks_motion_brief`

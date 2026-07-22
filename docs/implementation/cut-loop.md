@@ -11,7 +11,7 @@ p420 is complete only when every production scene has:
 - a `scene_cut_coverage_plan` that assigns `scene_event.event_sequence[]` beats and scene-intent obligations to concrete cuts;
 - every cut referencing its event beat through `cut_contract.source_event_contract`;
 - `event_context_for_cut` generated as a downstream projection from `scene_event` and `source_event_contract`, not hand-authored;
-- enough cuts for the scene importance and duration;
+- enough cuts to cover every distinct authored semantic obligation and required event beat;
 - one viewer-facing intent per cut;
 - a concrete `audience_knowledge_delta`, `causal_proof`, role coverage, and anti-redundancy key per cut;
 - a startable first-frame still for p600 that proves the cut in a static image;
@@ -21,21 +21,15 @@ p420 is complete only when every production scene has:
 
 ## Cut Count
 
-Use the larger of the importance floor, duration floor, and event-beat floor.
+Derive the floor only from authored semantic/event responsibilities after grouping obligations that prove the same story fact.
 
 ```text
-min_by_importance:
-  low: 2
-  medium: 3
-  high: 5
-  critical: 7
-
-min_by_duration = ceil(target_duration_seconds / 8)
-min_by_event_beats = required visible scene_event beats plus required splits for turn/payoff/reaction/handoff density
-min_cut_count = max(min_by_importance, min_by_duration, min_by_event_beats)
+by_distinct_semantic_obligations = count(unique non-duration cut_assignments[].obligation_id(s))
+by_event_beats = count(unique event_beat_inventory[].beat_id where must_be_seen is not false)
+selected = max(by_distinct_semantic_obligations, by_event_beats)
 ```
 
-Reference stills, title cards, and pure transitions may use fewer cuts only with an explicit exception reason. A cut longer than 12 seconds needs a `duration_exception.reason`.
+`importance`, `target_duration_seconds`, legacy `by_importance`, and legacy `by_duration` are review context only and must not raise `selected`. Do not create `duration_*` obligations or duplicate generic action to fill time. Meet total duration through semantically justified cut durations, narration/silence, or a revised scene structure. A cut longer than 12 seconds still needs a `duration_exception.reason`.
 
 Do not choose a cut count by a fixed template. First list the scene's visual obligations, then group similar obligations into one cut when they prove the same story fact. Add a cut only when an obligation would otherwise be unassigned or overloaded. Transformation, spectacle, proof reveal, confrontation, and emotional reversal often need more cuts, but labels such as `setup`, `pressure`, `threshold`, `turn`, `payoff`, `reaction`, and `handoff` are optional names, not a required sequence.
 
@@ -50,26 +44,32 @@ scene_cut_coverage_plan:
   coverage_strategy: "reverse_from_scene_event"
   source_schema_version: "scene_event_v1"
   min_cut_count:
-    by_importance: 3
-    by_duration: 3
-    by_event_beats: 4
-    selected: 3
-    exception_reason: ""
+    by_distinct_semantic_obligations: 1
+    by_event_beats: 1
+    selected: 1
   event_beat_inventory:
     - beat_id: "scene1_event_turn"
       beat_function: "turn"
       must_be_seen: true
-      assigned_cut_ids: []
+      assigned_cut_ids: ["scene1_cut1"]
+  scene_obligations:
+    - obligation_id: "scene1_turn_proof_01"
+      source: "causal_turn"
+      evidence: "the visible proof that makes the turn irreversible"
+      assigned_cut_ids: ["scene1_cut1"]
   cut_assignments:
     - cut_index: 1
-      obligation_id: ""
-      cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+      cut_selector: "scene1_cut1"
+      obligation_ids: ["scene1_turn_proof_01"]
+      cut_function: "turn"
       event_assignment:
         source_event_contract:
-          primary_event_beat_id: ""
-          source_event_beat_ids: []
-      target_beat: ""
+          primary_event_beat_id: "scene1_event_turn"
+          source_event_beat_ids: ["scene1_event_turn"]
+      target_beat: "the irreversible visible turn"
 ```
+
+Repeat the inventory, obligation, and assignment rows for every authored ID; the three counters must equal the unique IDs materialized in those rows.
 
 The important question is not "which of the standard slots is this cut?" but "what must be visible for this scene to exist as a scene?" If the answer is already proven by an existing cut, thicken that cut's prompt and contract instead of adding a duplicate cut.
 

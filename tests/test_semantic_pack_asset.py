@@ -23,6 +23,15 @@ asset_inventory:
       category: "character"
       source_script_selectors: ["scene01_cut01"]
       story_purpose: "舞踏会前後で同一人物として見えるための基準参照"
+      subject_contract:
+        identity_scope: "individual"
+        subject_count: 1
+        member_ids: []
+      appearance_contract:
+        social_position: "屋敷で働く若い女性"
+        materials: "粗い麻布"
+      reuse_contract:
+        mode: "neutral_anchor"
       reusable_reason: "Cinderella の visual identity を固定する"
       recommended_asset_type: "character_reference"
     - item_id: "glass_slipper"
@@ -50,6 +59,15 @@ assets:
       asset_type: "character_reference"
       source_script_selectors: ["scene01_cut01"]
       story_purpose: "舞踏会前後で同一人物として見えるための基準参照"
+      subject_contract:
+        identity_scope: "individual"
+        subject_count: 1
+        member_ids: []
+      appearance_contract:
+        social_position: "屋敷で働く若い女性"
+        materials: "粗い麻布"
+      reuse_contract:
+        mode: "neutral_anchor"
       semantic_contract:
         must_match_story_role: "灰かぶりから舞踏会へ向かう主人公"
         must_not_include: ["ガラスの靴を常時手に持つ"]
@@ -186,7 +204,7 @@ class TestSemanticPackAsset(unittest.TestCase):
             cinderella = entries[0]
             self.assertEqual(cinderella["category"], "characters")
             self.assertEqual(cinderella["asset_type"], "character_reference")
-            self.assertEqual(cinderella["source_paths"], ["asset_inventory.md", "asset_plan.md", "video_manifest.md"])
+            self.assertEqual(cinderella["source_paths"], ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "video_manifest.md"])
             self.assertEqual(cinderella["used_by_selectors"], ["scene01_cut01"])
             self.assertEqual(cinderella["semantic_contract"]["must_match_story_role"], "灰かぶりから舞踏会へ向かう主人公")
             self.assertEqual(cinderella["canonical_asset_id"], "cinderella_fullbody")
@@ -195,6 +213,10 @@ class TestSemanticPackAsset(unittest.TestCase):
             self.assertEqual(cinderella["semantic_contract"]["must_appear_in_selectors"], ["scene01_cut01"])
             self.assertEqual(cinderella["semantic_contract"]["must_not_appear_in_selectors"], ["scene03_cut02"])
             self.assertEqual(cinderella["semantic_contract"]["allowed_contexts"], ["作業着の全身参照"])
+            self.assertEqual(cinderella["semantic_contract"]["subject_contract"]["subject_count"], 1)
+            self.assertEqual(cinderella["semantic_contract"]["appearance_contract"]["materials"], "粗い麻布")
+            self.assertEqual(cinderella["semantic_contract"]["reuse_contract"], {"mode": "neutral_anchor"})
+            self.assertEqual(cinderella["request_metadata"]["asset_id"], "cinderella_fullbody")
             self.assertIn("forbidden props or later-story objects are not accidentally attached", cinderella["review_rubric"])
             self.assertFalse(cinderella["planned_but_unused"])
             self.assertFalse(cinderella["used_but_unplanned"])

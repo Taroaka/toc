@@ -778,6 +778,27 @@ scenes:
                         **kwargs,
                     )
 
+    def test_broken_particle_join_is_rejected_before_provider_prompt(self) -> None:
+        plan = _environment_plan()
+        plan["temporal_boundary"]["event_fact_visible_in_still"] = (
+            "指先がガラスの靴をの手前で止まっている"
+        )
+
+        with self.assertRaisesRegex(ValueError, "drawable_prompt_broken_japanese_join"):
+            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+
+    def test_reference_uses_current_cut_plan_for_composition_and_state(self) -> None:
+        plan = _environment_plan()
+
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan,
+            reference_images=["assets/locations/room.png"],
+            scene_time_of_day="朝",
+        )
+
+        self.assertIn("構図と状態はこの場面の記述を優先する", payload["prompt"])
+        self.assertNotIn("構図と状態はこの画像の描写に合わせる", payload["prompt"])
+
     def test_minimal_cut_omits_unprovided_subject_and_composition_without_filler(self) -> None:
         plan = {
             "temporal_boundary": {

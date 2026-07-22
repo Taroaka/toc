@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
-VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v4"
+VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v5"
 VIDEO_PROMPT_GROUP_ORDER = (
     "start_state",
     "primary_motion",
@@ -127,13 +127,28 @@ _RULES = (
         exclusion_reason="story/scene overview; cut-local event state owns provider motion prose",
     ),
     VideoPromptProjectionRule(
+        ("first_frame_visual_plan",),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "retain_exact_first_frame_visual_plan_for_review",
         (
-            "cut.cut_contract.first_frame_contract.visible_start_state",
-            "cut.cut_contract.first_frame_contract.first_frame_brief",
+            "provider開始状態が承認済みfirst_frame_visual_planの時間境界と一致するか",
+        ),
+        exclusion_reason="derived visual-plan metadata; selected temporal leaves are projected separately",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still",
+            "first_frame_visual_plan.temporal_boundary.first_visible_moment",
             "cut.cut_contract.motion_contract.start_from_visible_state",
+            "cut.cut_contract.first_frame_contract.visible_start_state.character_state",
+            "cut.cut_contract.first_frame_contract.visible_start_state.prop_state",
+            "cut.cut_contract.first_frame_contract.visible_start_state.spatial_state",
+            "cut.cut_contract.first_frame_contract.visible_start_state.emotional_state",
+            "cut.cut_contract.first_frame_contract.visible_start_state.gaze_or_attention",
+            "cut.cut_contract.first_frame_contract.first_frame_brief",
             "compiler_normalized.authoring_source.start_state",
-            "video_generation.first_frame",
-            "video_generation.input_image",
         ),
         "required",
         "derive",
@@ -144,12 +159,27 @@ _RULES = (
     ),
     VideoPromptProjectionRule(
         (
+            "video_generation.first_frame",
+            "video_generation.input_image",
+            "video_generation.last_frame",
+        ),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "bind_frame_paths_without_rendering_paths",
+        ("開始・終了frame pathがprovider_request_bindingと一致するか",),
+        exclusion_reason="provider binding paths; boundary instructions are rendered without paths",
+    ),
+    VideoPromptProjectionRule(
+        (
             "cut.cut_contract.motion_contract.motion_brief",
             "cut.cut_contract.motion_contract.subject_motion",
             "cut_contract.motion_contract.motion_brief",
             "scene_contract.motion_brief",
             "video_generation.motion_contract.motion_intent",
             "video_generation.motion_contract.intent",
+            "video_generation.motion_contract.motion_brief",
+            "video_generation.motion_contract.action_intent",
             "compiler_normalized.authoring_source.primary_motion",
             "video_generation.prompt_authoring_source",
             "video_generation.source_motion_prompt",
@@ -215,7 +245,6 @@ _RULES = (
             "video_generation.motion_contract.handoff_state",
             "video_generation.motion_contract.end_state",
             "compiler_normalized.authoring_source.end_state",
-            "video_generation.last_frame",
         ),
         "required",
         "derive",
@@ -226,9 +255,6 @@ _RULES = (
     ),
     VideoPromptProjectionRule(
         (
-            "cut.cut_contract.continuity_contract.carry_forward_to_next_cut",
-            "cut_contract.continuity_contract.carry_forward_to_next_cut",
-            "cut.cut_contract.cut_handoff",
             "video_generation.motion_contract.must_preserve",
             "video_generation.continuity_notes",
             "video_generation.direction_notes",
@@ -240,6 +266,56 @@ _RULES = (
         "preserve_face_outfit_props_geography_direction_and_light",
         ("人物、衣装、重要物、進行方向、camera高、光源がclip内でdriftしないか",),
         "continuity",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "cut.cut_contract.continuity_contract.carry_forward_to_next_cut",
+            "cut_contract.continuity_contract.carry_forward_to_next_cut",
+            "cut.cut_contract.cut_handoff.receives_from_previous.visible_or_audible_form",
+            "cut.cut_contract.cut_handoff.delivers_to_next.visible_or_audible_form",
+        ),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "review_downstream_handoff_without_constraining_current_clip",
+        (
+            "current clipの終了状態と下流handoffを区別し、到達後の状態をclip全体へ逆投影していないか",
+        ),
+        exclusion_reason="downstream handoff evidence; current clip continuity uses stable preserve inputs only",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "cut.cut_contract.location",
+            "cut.cut_contract.continuity_contract.location_ids",
+            "cut.cut_contract.asset_dependency.location_ids_required",
+            "cut.cut_contract.source_event_contract.source_concrete_events",
+        ),
+        "required",
+        "must_not_surface",
+        "review_only",
+        "review_cut_local_location_provenance",
+        (
+            "cutの開始場所がscene route内の担当場所と一致し、sibling場所を混ぜていないか",
+        ),
+        exclusion_reason="cut-local location provenance; visible spatial state is projected separately",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "cut.cut_contract.first_frame_character_asset_overrides",
+            "cut.cut_contract.first_frame_excluded_object_ids",
+            "cut.cut_blueprint.first_frame_character_asset_overrides",
+            "cut.cut_blueprint.first_frame_excluded_object_ids",
+            "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides",
+            "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids",
+        ),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "review_first_frame_asset_boundary_policy",
+        (
+            "開始人物assetと除外objectが終了側revealを開始画像へ先取りさせていないか",
+        ),
+        exclusion_reason="first-frame asset dependency policy; provider motion prose uses the approved frame",
     ),
     VideoPromptProjectionRule(
         ("video_generation.reference_roles",),
@@ -273,6 +349,33 @@ _RULES = (
             "主動作が因果的に生成する要素だけが許可され、開始画像との矛盾を作っていないか",
         ),
         "constraints",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "cut.cut_contract.source_event_contract.allowed_reveal_info_ids",
+            "cut_contract.source_event_contract.allowed_reveal_info_ids",
+        ),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "review_allowed_reveal_information_boundary",
+        ("許可IDがcanonical reveal inventoryと当該cutのevent境界に一致するか",),
+        exclusion_reason="opaque reveal identifiers",
+    ),
+    VideoPromptProjectionRule(
+        (
+            "cut.cut_contract.use_next_cut_first_frame_as_last_frame",
+            "cut_contract.use_next_cut_first_frame_as_last_frame",
+            "cut.cut_contract.cut_handoff.delivers_to_next.binds_video_last_frame_to_next_first_frame",
+        ),
+        "conditional",
+        "must_not_surface",
+        "review_only",
+        "review_resolved_next_first_frame_boundary_binding",
+        (
+            "next first-frame境界が同一または明示許可された場所とrevealに一致するか",
+        ),
+        exclusion_reason="boundary-resolution metadata; only the resolved last-frame binding reaches the provider",
     ),
     VideoPromptProjectionRule(
         (
@@ -337,6 +440,32 @@ _RULES = (
     ),
 )
 
+_REQUIRED_REGISTRY_SOURCE_KEYS = (
+    "scene.visualizable_action",
+    "first_frame_visual_plan",
+    "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still",
+    "first_frame_visual_plan.temporal_boundary.first_visible_moment",
+    "cut.cut_contract.first_frame_contract.visible_start_state.spatial_state",
+    "video_generation.motion_contract.motion_brief",
+    "video_generation.motion_contract.action_intent",
+    "cut.cut_contract.location",
+    "cut.cut_contract.continuity_contract.carry_forward_to_next_cut",
+    "cut.cut_contract.continuity_contract.location_ids",
+    "cut.cut_contract.asset_dependency.location_ids_required",
+    "cut.cut_contract.source_event_contract.source_concrete_events",
+    "cut.cut_contract.source_event_contract.allowed_reveal_info_ids",
+    "cut.cut_contract.use_next_cut_first_frame_as_last_frame",
+    "cut.cut_contract.cut_handoff.delivers_to_next.binds_video_last_frame_to_next_first_frame",
+    "cut.cut_contract.cut_handoff.receives_from_previous.visible_or_audible_form",
+    "cut.cut_contract.cut_handoff.delivers_to_next.visible_or_audible_form",
+    "cut.cut_contract.first_frame_character_asset_overrides",
+    "cut.cut_contract.first_frame_excluded_object_ids",
+    "cut.cut_blueprint.first_frame_character_asset_overrides",
+    "cut.cut_blueprint.first_frame_excluded_object_ids",
+    "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides",
+    "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids",
+)
+
 
 def projection_rules() -> tuple[VideoPromptProjectionRule, ...]:
     return _RULES
@@ -374,6 +503,9 @@ def video_projection_registry_issues() -> list[str]:
             if source_key in seen_keys:
                 issues.append(f"duplicate_source_key:{source_key}")
             seen_keys.add(source_key)
+    for source_key in _REQUIRED_REGISTRY_SOURCE_KEYS:
+        if source_key not in seen_keys:
+            issues.append(f"missing_required_source_key:{source_key}")
     return issues
 
 
@@ -394,6 +526,7 @@ def build_video_prompt_projection(
     duration_seconds: int | float | None = None,
     direction_notes: Sequence[Any] = (),
     continuity_notes: Sequence[Any] = (),
+    first_frame_visual_plan: Mapping[str, Any] | None = None,
     normalized_authoring_groups: Mapping[str, Any] | None = None,
     compact: bool = False,
 ) -> dict[str, Any]:
@@ -462,6 +595,7 @@ def build_video_prompt_projection(
         "cut": cut_data,
         "video_generation": video_data,
         "compiler_normalized": {"authoring_source": normalized_groups},
+        "first_frame_visual_plan": dict(first_frame_visual_plan or {}),
     }
     groups: dict[str, list[dict[str, Any]]] = {group: [] for group in VIDEO_PROMPT_GROUP_ORDER}
     active_rules: list[dict[str, Any]] = []
@@ -469,6 +603,15 @@ def build_video_prompt_projection(
     excluded: list[dict[str, Any]] = []
     review_only_sources: list[dict[str, Any]] = []
     shadowed_sources: list[dict[str, Any]] = []
+    canonical_motion = _mapping(canonical_contract.get("motion_contract"))
+    authoritative_empty_source_keys = set()
+    if (
+        "allowed_new_reveal_elements" in canonical_motion
+        and not _is_present(canonical_motion.get("allowed_new_reveal_elements"))
+    ):
+        authoritative_empty_source_keys.add(
+            "cut.cut_contract.motion_contract.allowed_new_reveal_elements"
+        )
 
     for rule in _RULES:
         present_sources = [
@@ -495,12 +638,25 @@ def build_video_prompt_projection(
                         }
                     review_only_sources.append(item)
             continue
-        selected_sources, shadowed = _select_rule_sources(rule, present_sources)
+        explicit_empty_source = next(
+            (
+                source_key
+                for source_key in rule.source_keys
+                if source_key in authoritative_empty_source_keys
+            ),
+            "",
+        )
+        if explicit_empty_source:
+            selected_sources, shadowed = [], present_sources
+            shadow_reason = "higher_priority_design_source_explicitly_empty"
+        else:
+            selected_sources, shadowed = _select_rule_sources(rule, present_sources)
+            shadow_reason = "higher_priority_design_source_present"
         shadowed_sources.extend(
             {
                 "source_key": source_key,
                 "target_group": rule.target_group,
-                "reason": "higher_priority_design_source_present",
+                "reason": shadow_reason,
             }
             for source_key, _value in shadowed
         )
@@ -586,6 +742,11 @@ def _select_rule_sources(
         return present_sources, []
 
     canonical = [item for item in present_sources if item[0].startswith("cut.cut_contract.")]
+    visual_plan = [
+        item
+        for item in present_sources
+        if item[0].startswith("first_frame_visual_plan.")
+    ]
     flat = [item for item in present_sources if item[0].startswith("video_generation.motion_contract.")]
     free_text = [
         item
@@ -612,13 +773,7 @@ def _select_rule_sources(
         authored = canonical or flat or normalized
         selected = [*authored, *[item for item in boundary if item not in authored]]
     elif rule.target_group == "start_state":
-        reference = [
-            item
-            for item in present_sources
-            if item[0] in {"video_generation.first_frame", "video_generation.input_image"}
-        ]
-        authored = canonical or normalized
-        selected = [*authored, *[item for item in reference if item not in authored]]
+        selected = visual_plan or canonical or normalized or present_sources
     elif rule.target_group == "continuity":
         supplementary = [
             item
@@ -653,7 +808,8 @@ def resolve_video_prompt_contract(
 
     Higher-priority contracts override conflicts, while a partial canonical
     object does not erase unrelated fields from a lower compatibility source.
-    Empty placeholder values never suppress a populated lower-priority value.
+    Empty placeholder values normally do not suppress populated lower-priority
+    values. An explicit empty reveal allowlist is authoritative and fail-closed.
     """
 
     resolved: dict[str, Any] = {}
@@ -693,6 +849,9 @@ def _overlay_present_values(
 ) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
+        if key == "allowed_new_reveal_elements":
+            merged[key] = value
+            continue
         if not _is_present(value):
             continue
         current = merged.get(key)

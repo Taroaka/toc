@@ -382,7 +382,12 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
         return [rel for rel in foundation_sources[stage] if (run_dir / rel).exists()]
     common = ["story.md", "script.md", "video_manifest.md"]
     by_stage = {
-        "asset_plan": ["asset_inventory.md", "asset_plan.md"],
+        "asset_plan": [
+            "asset_inventory.md",
+            "asset_plan.md",
+            "asset_generation_requests.md",
+            "asset_generation_request_snapshot.json",
+        ],
         "image_prompt": [
             "asset_inventory.md",
             "asset_plan.md",
@@ -465,15 +470,25 @@ def _stage_specific_review_instructions(stage: str) -> list[str]:
             "Treat scene `time_of_day` as an open string daypart, separate from historical `story_metadata.time`. The required contract is declared only by `story_metadata.scene_time_of_day_contract: required_v1`. Read the aggregate story entry's `time_of_day_contract_declared` and each `scene_time_of_day_statuses[].status`; do not look for a top-level per-scene `time_of_day_status` in this entry.",
             "When the contract is declared, fail a scene_time_of_day_statuses item whose status is missing, blank, or invalid_type. Do not fail an undeclared legacy story solely for this newer key.",
             "When valid, require causal daypart progression and a visualizable basis for sky brightness, natural/artificial light, shadow, and color temperature without changing historical clothing, architecture, materials, or technology.",
+            "Review every `scene_location_route_statuses[]` item. `undeclared` is legacy/no-route evidence, but an authored `location.mode: sequence` must be `valid`: its ordered `location.sequence[]` must be covered exactly once and in the same order by `location.segments[]`, and every segment must contain drawable responsibility, primary subject, visible action, evidence/roles, motion brief, and motion end state.",
+            "Fail an `invalid` route instead of inferring a missing transition from scene-wide prose. A semantic story review must not pass when the later cut compiler would have to invent which action occurs at which location.",
             "Check timeline, characters and motivations, conflict escalation/resolution, important-event coverage, distinct scene responsibility, internal research_refs, historical time context, and duration-aware scene allocation.",
             "For `historical_time_context`, require `story_metadata.time` to be a string. Existing classics, folklore, legends, and adaptations must use a concrete `〇〇時代` value supported by the run-local research/story context; user-created original stories may use an empty string.",
-            "Fail if story order contradicts research, character state changes without cause, a current-contract scene lacks a valid time_of_day or its daypart progression contradicts the events, every scene repeats the same conflict or turn, important events are unassigned, internal refs do not resolve, a non-original story lacks its historical time, or scenes are too generic/duplicative to split into cuts.",
+            "Fail if story order contradicts research, character state changes without cause, a current-contract scene lacks a valid time_of_day or its daypart progression contradicts the events, a declared multi-location route is incomplete or unordered, every scene repeats the same conflict or turn, important events are unassigned, internal refs do not resolve, a non-original story lacks its historical time, or scenes are too generic/duplicative to split into cuts.",
             "Do not impose a fixed scene count. Judge semantic coverage against target_duration_seconds and the story's own meaningful scene responsibilities.",
             "Do not browse or validate external URLs, editions, translations, rights, or factual fidelity. External source authenticity is outside this gate.",
-            "Use reason keys such as story_baseline_mismatch, story_timeline_mismatch, story_character_continuity_mismatch, story_conflict_progression_weak, story_historical_time_missing, scene_time_of_day_missing, scene_time_of_day_invalid_type, scene_time_of_day_continuity_mismatch, story_event_unassigned, story_scene_allocation_generic, story_scene_duplicate_responsibility, or internal_reference_unresolved.",
+            "Use reason keys such as story_baseline_mismatch, story_timeline_mismatch, story_character_continuity_mismatch, story_conflict_progression_weak, story_historical_time_missing, scene_time_of_day_missing, scene_time_of_day_invalid_type, scene_time_of_day_continuity_mismatch, scene_location_route_incomplete, scene_location_route_order_mismatch, scene_location_segment_not_drawable, story_event_unassigned, story_scene_allocation_generic, story_scene_duplicate_responsibility, or internal_reference_unresolved.",
         ]
     if stage in {"scene_set", "scene_detail"}:
         return scene_time_of_day_instructions
+    if stage == "asset_plan":
+        return [
+            "Review the compiled final asset-generation request as well as the asset plan; approving an abstract plan while its provider prompt is wrong is a failure.",
+            "For every character, require subject_contract to preserve the intended cardinality. An ensemble must name and retain each distinct member; a plural role must not compile to one person.",
+            "Require appearance_contract to make social position, role, occasion/state, silhouette, materials, condition, palette, and exclusions concrete enough to draw. Reject generic lifestyle clothing that does not distinguish the role.",
+            "For every reusable asset, require reuse_contract. A neutral_anchor must contain no scene-specific morning/day/evening/night sky, moonlight, sunlight, shadows, or color temperature. A time_variant must name its daypart and derived neutral asset; a state_variant must name its derived asset.",
+            "Use reason keys such as asset_subject_cardinality_mismatch, asset_appearance_contract_missing, asset_appearance_too_generic, asset_reuse_contract_missing, asset_neutral_time_leak, or asset_variant_source_missing.",
+        ]
     if stage == "image_prompt":
         return [
             "Treat api_prompt_payload.prompt as a candidate provider prompt and first_frame_visual_plan / source contracts as review evidence; do not assume every upstream key belongs in the final prompt.",
@@ -570,9 +585,9 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "For planning stages (`research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
             "Flag round-robin references, always-on story objects in unrelated entries, mismatched location/character/object references, missing semantic contracts, and outputs that do not support the contract.",
             "For entries whose review_scope is `scene_composite`, this is a gate, not advice: judge the scene as a whole across its split cuts.",
-            "A scene_composite passes only when scene_cut_coverage_plan.scene_obligations and scene_event.event_sequence setup/pressure/turn/payoff beats are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
-            "Do not require a fixed setup/turn/handoff order or a fixed cut count; judge whether the cuts were reverse-designed from the scene's actual visual obligations.",
-            "If the scene meaning cannot be conveyed by the listed cuts, fail the gate and state whether it needs more cuts, stronger per-cut prompts, or a different scene split.",
+            "A scene_composite passes only when the exact authored `event_beat_inventory` mirrors every ordered nonblank beat ID from `scene_event.event_sequence`, every inventory beat's arbitrary nonblank `beat_function` matches its corresponding source beat whether assigned or not, every inventory beat with `must_be_seen != false` and every required scene_cut_coverage_plan.scene_obligation are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
+            "Do not require a fixed beat-function ladder, order, or cut count. Labels such as setup, pressure, turn, payoff, threshold, and custom are examples only. A valid one-beat scene with a custom function must not fail solely because fixed function names are absent; judge whether the cuts were reverse-designed from the scene's exact authored beats and actual visual obligations.",
+            "If the scene meaning cannot be conveyed by the listed cuts, fail the gate. Recommend more cuts only when a distinct authored beat or semantic obligation is uncovered; otherwise require a stronger existing per-cut prompt or a different scene split without duplicating an obligation.",
             *stage_specific_instructions,
             *foundation_criteria_lines,
             "",
@@ -590,7 +605,7 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
                 if stage in FOUNDATION_SEMANTIC_CRITERIA
                 else []
             ),
-            "reason_keys: [research_baseline_too_thin|research_timeline_incoherent|research_character_model_incomplete|research_conflict_unresolved_for_story|story_baseline_mismatch|story_timeline_mismatch|story_character_continuity_mismatch|story_conflict_progression_weak|story_event_unassigned|story_scene_allocation_generic|story_scene_duplicate_responsibility|internal_reference_unresolved|semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|scene_time_of_day_missing|scene_time_of_day_invalid_type|scene_time_of_day_continuity_mismatch|image_prompt_time_of_day_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
+            "reason_keys: [research_baseline_too_thin|research_timeline_incoherent|research_character_model_incomplete|research_conflict_unresolved_for_story|story_baseline_mismatch|story_timeline_mismatch|story_character_continuity_mismatch|story_conflict_progression_weak|story_event_unassigned|story_scene_allocation_generic|story_scene_duplicate_responsibility|internal_reference_unresolved|semantic_contract_missing|semantic_subject_mismatch|semantic_location_mismatch|semantic_object_mismatch|semantic_reference_mismatch|semantic_timeline_mismatch|scene_time_of_day_missing|scene_time_of_day_invalid_type|scene_time_of_day_continuity_mismatch|scene_location_route_incomplete|scene_location_route_order_mismatch|scene_location_segment_not_drawable|image_prompt_time_of_day_mismatch|semantic_reveal_order_mismatch|semantic_output_mismatch|scene_cut_coverage_insufficient|scene_cut_prompt_too_similar|scene_meaning_not_visualized_across_cuts|scene_video_handoff_weak|scene_requires_more_cuts|cut_prompt_requires_reinforcement|story_event_obligation_unassigned|audience_knowledge_delta_missing|causal_proof_weak|role_coverage_missing|static_first_frame_not_imageable|scene_cut_redundancy_excessive|...]",
             "notes: [...]",
             "",
             f"Run dir: `{run_dir.resolve()}`",

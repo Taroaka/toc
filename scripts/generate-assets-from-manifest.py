@@ -53,7 +53,6 @@ from toc.video_prompt_compiler import (
     compile_video_api_prompt_v1,
     compose_video_render_unit_contract,
 )
-from toc.video_prompt_projection_registry import resolve_video_prompt_contract
 from toc.video_provider_capabilities import resolve_video_provider_capabilities
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
@@ -225,6 +224,7 @@ class SceneSpec:
     scene_location_mode: str = ""
     scene_location_sequence: list[Any] = field(default_factory=list)
     scene_location_segments: list[dict[str, Any]] = field(default_factory=list)
+    scene_visualizable_action: Any = None
     video_prompt_authoring_source: str | None = None
     video_api_prompt_payload: dict[str, Any] = field(default_factory=dict)
     video_references: list[str] = field(default_factory=list)
@@ -1374,6 +1374,13 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
             )
             if isinstance(value, dict)
         ]
+        scene_visualizable_action = deepcopy(
+            _contract_value(
+                raw_scene,
+                "visualizable_action",
+                "scene_intent.review_only_visualizable_action",
+            )
+        )
         scene_kind = _as_opt_str(raw_scene.get("kind"))
         reference_id = _as_opt_str(raw_scene.get("reference_id")) or _as_opt_str(raw_scene.get("character_reference_id"))
         scene_duration_seconds = _canonical_video_duration_seconds(raw_scene)
@@ -1555,6 +1562,9 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         scene_location_mode=scene_location_mode,
                         scene_location_sequence=list(scene_location_sequence),
                         scene_location_segments=deepcopy(scene_location_segments),
+                        scene_visualizable_action=deepcopy(
+                            scene_visualizable_action
+                        ),
                         video_reference_roles=[
                             dict(value)
                             for value in _list_value(vg.get("reference_roles"))
@@ -1731,6 +1741,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 scene_location_mode=scene_location_mode,
                 scene_location_sequence=list(scene_location_sequence),
                 scene_location_segments=deepcopy(scene_location_segments),
+                scene_visualizable_action=deepcopy(scene_visualizable_action),
                 video_reference_roles=[
                     dict(value)
                     for value in _list_value(vg.get("reference_roles"))
@@ -7258,23 +7269,20 @@ def _video_api_prompt_payload_for_scene(
         scene_location_mode=scene.scene_location_mode,
         scene_location_sequence=scene.scene_location_sequence,
         scene_location_segments=scene.scene_location_segments,
+        scene_visualizable_action=scene.scene_visualizable_action,
         prefix=prefix,
         suffix=suffix,
     )
 
 
 def _video_contract_for_target(target: VideoRenderTargetSpec) -> dict[str, Any]:
-    composed = compose_video_render_unit_contract(
+    return compose_video_render_unit_contract(
         [
             source.cut_contract
             for source in target.source_scenes
             if isinstance(source.cut_contract, dict)
-        ]
-    )
-    return resolve_video_prompt_contract(
-        {},
-        cut_contract=target.video_cut_contract,
-        scene_contract=composed,
+        ],
+        unit_contract=target.video_cut_contract,
     )
 
 
@@ -7374,6 +7382,9 @@ def _video_api_prompt_payload_for_target(
         ),
         scene_location_segments=(
             first_source.scene_location_segments if first_source else []
+        ),
+        scene_visualizable_action=(
+            first_source.scene_visualizable_action if first_source else None
         ),
         review_only_dependencies=(
             {

@@ -90,11 +90,15 @@ from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.video_prompt_compiler import (
     VIDEO_API_PROMPT_POLICY_VERSION,
     VIDEO_PROMPT_COMPILER_VERSION,
+    VIDEO_PROMPT_IR_SCHEMA_VERSION,
     VIDEO_REFERENCE_ROLE_INSTRUCTIONS,
     compile_video_api_prompt_v1,
     compose_video_render_unit_contract,
 )
-from toc.video_prompt_projection_registry import resolve_video_prompt_contract
+from toc.video_prompt_projection_registry import (
+    VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+    resolve_video_prompt_contract,
+)
 from toc.video_provider_capabilities import resolve_video_provider_capabilities
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
@@ -1064,6 +1068,9 @@ def _project_asset_plan_from_manifest(
                     # explicit prompt from an older asset-plan revision bypass
                     # newly reviewed fixed prompts or visual subjects.
                     entry.pop("generation_prompt", None)
+                for contract_key in ("subject_contract", "appearance_contract", "reuse_contract"):
+                    if isinstance(node.get(contract_key), dict):
+                        entry[contract_key] = deepcopy(node[contract_key])
                 projected.append(entry)
 
     append_nodes(
@@ -1407,7 +1414,7 @@ def _validate_created_run(run_id: str) -> None:
         raise RuntimeError(f"ToC run was not scaffolded: missing {', '.join(missing)}")
 
 
-def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3) -> tuple[list[str], set[str]]:
+def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 1) -> tuple[list[str], set[str]]:
     issues: list[str] = []
     required_outputs: set[str] = set()
     scenes = data.get("scenes")
@@ -1424,6 +1431,62 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 3)
         if not isinstance(cuts, list) or len(cuts) < min_cuts_per_scene:
             issues.append(f"scene {scene_id}: requires at least {min_cuts_per_scene} cuts")
             continue
+        coverage = scene.get("scene_cut_coverage_plan")
+        if isinstance(coverage, dict):
+            minimums = coverage.get("min_cut_count")
+            if not isinstance(minimums, dict):
+                issues.append(
+                    f"scene {scene_id}: scene_cut_coverage_plan.min_cut_count must be a mapping"
+                )
+            else:
+                distinct_minimum = minimums.get(
+                    "by_distinct_semantic_obligations"
+                )
+                event_minimum = minimums.get("by_event_beats")
+                selected_minimum = minimums.get("selected")
+                semantic_values = (
+                    distinct_minimum,
+                    event_minimum,
+                    selected_minimum,
+                )
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    for value in semantic_values
+                ):
+                    issues.append(
+                        f"scene {scene_id}: semantic cut minimums must be non-negative integers"
+                    )
+                else:
+                    expected_minimum = max(distinct_minimum, event_minimum)
+                    if selected_minimum != expected_minimum:
+                        issues.append(
+                            f"scene {scene_id}: semantic cut minimum selected "
+                            f"{selected_minimum} != {expected_minimum}"
+                        )
+                    if len(cuts) < selected_minimum:
+                        issues.append(
+                            f"scene {scene_id}: {len(cuts)} cuts do not cover semantic "
+                            f"minimum {selected_minimum}"
+                        )
+                for legacy_dimension in ("by_importance", "by_duration"):
+                    legacy_value = minimums.get(legacy_dimension, 0)
+                    if (
+                        isinstance(legacy_value, bool)
+                        or not isinstance(legacy_value, int)
+                        or legacy_value != 0
+                    ):
+                        issues.append(
+                            f"scene {scene_id}: {legacy_dimension} must be 0; "
+                            "cut count is semantic-only"
+                        )
+            selected_cut_count = coverage.get("selected_cut_count")
+            if selected_cut_count is not None and selected_cut_count != len(cuts):
+                issues.append(
+                    f"scene {scene_id}: selected_cut_count {selected_cut_count} "
+                    f"!= actual cuts {len(cuts)}"
+                )
         for cut_index, cut in enumerate(cuts, start=1):
             if not isinstance(cut, dict):
                 issues.append(f"scene {scene_id} cut[{cut_index}]: invalid cut")
@@ -2136,8 +2199,12 @@ def _refresh_deterministic_image_prompt_review_if_stale(run_dir: Path) -> None:
         raise RuntimeError(detail or "deterministic image prompt review refresh failed")
 
 
-def _prepare_image_prompt_request_revision_for_review(run_dir: Path) -> str:
-    """Bind the provider-ready revision before building the semantic pack."""
+def _prepare_image_prompt_request_revision_for_review(
+    run_dir: Path,
+    *,
+    provider_ready: bool = True,
+) -> str:
+    """Prepare the exact draft or provider-ready revision for semantic review."""
 
     snapshot_path = run_dir / "image_generation_request_snapshot.json"
     try:
@@ -2146,6 +2213,17 @@ def _prepare_image_prompt_request_revision_for_review(run_dir: Path) -> str:
             run_dir=run_dir,
             verify_references=False,
         )
+        if not provider_ready:
+            _refresh_deterministic_image_prompt_review_if_stale(run_dir)
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.image_prompt.request_freeze.status": "draft",
+                    "review.image_prompt.request_freeze.semantic_input_mode": "deferred_references",
+                    "review.image_prompt.request_freeze.review_candidate_revision": draft_snapshot.request_revision,
+                },
+            )
+            return draft_snapshot.request_revision
         state = parse_state_file(run_dir / "state.txt")
         is_frozen = state.get("review.image_prompt.request_freeze.status") == "frozen"
         provider_snapshot = bind_request_snapshot_references(
@@ -2185,6 +2263,7 @@ def _validate_p650_run_core(
     run_id: str,
     *,
     require_downstream_semantic_reviews: bool,
+    require_provider_ready_freeze: bool,
     require_generated_asset_outputs: bool,
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
@@ -2225,7 +2304,7 @@ def _validate_p650_run_core(
     manifest_data = yaml.safe_load(_extract_manifest_yaml_text(manifest_text)) or {}
     if not isinstance(manifest_data, dict):
         raise RuntimeError("ToC run did not reach p650: video_manifest.md YAML root must be a mapping")
-    cut_issues, required_scene_outputs = _manifest_cut_contract(manifest_data, min_cuts_per_scene=3)
+    cut_issues, required_scene_outputs = _manifest_cut_contract(manifest_data)
     if cut_issues:
         raise RuntimeError(f"ToC run did not reach p650: invalid cut contract {', '.join(cut_issues)}")
 
@@ -2242,8 +2321,8 @@ def _validate_p650_run_core(
     image_prompt_request_revision = _validate_image_prompt_request_revision(
         run_dir,
         manifest_data,
-        require_resolved_references=require_downstream_semantic_reviews,
-        require_compiled_v2=require_downstream_semantic_reviews,
+        require_resolved_references=require_provider_ready_freeze,
+        require_compiled_v2=True,
     )
     _validate_semantic_reviews(run_dir, ("research", "story"))
     if require_downstream_semantic_reviews:
@@ -2262,17 +2341,17 @@ def _validate_p650_run_core(
 
     state = parse_state_file(run_dir / "state.txt")
     freeze_status = (state.get("review.image_prompt.request_freeze.status") or "").lower()
-    if require_downstream_semantic_reviews and freeze_status != "frozen":
+    if require_provider_ready_freeze and freeze_status != "frozen":
         raise RuntimeError(
             "ToC run did not reach p650: image prompt request freeze is not frozen"
         )
-    if require_downstream_semantic_reviews and state.get(
+    if require_provider_ready_freeze and state.get(
         "review.image_prompt.request_freeze.request_revision"
     ) != image_prompt_request_revision:
         raise RuntimeError(
             "ToC run did not reach p650: frozen image prompt request revision is stale"
         )
-    if not require_downstream_semantic_reviews and freeze_status not in {"draft", "frozen"}:
+    if not require_provider_ready_freeze and freeze_status not in {"reviewed_draft", "frozen"}:
         raise RuntimeError(
             "ToC run did not reach p650: image prompt request freeze state is missing"
         )
@@ -2289,7 +2368,7 @@ def _validate_p650_run_core(
         for slot in P650_FIXED_SLOTS
         if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
         and not (
-            not require_downstream_semantic_reviews
+            not require_provider_ready_freeze
             and slot == "p650"
             and (state.get("slot.p650.status") or "").lower() == "pending"
         )
@@ -2310,6 +2389,7 @@ def _validate_p650_run(run_id: str) -> None:
     _validate_p650_run_core(
         run_id,
         require_downstream_semantic_reviews=True,
+        require_provider_ready_freeze=True,
         require_generated_asset_outputs=True,
     )
 
@@ -2317,7 +2397,8 @@ def _validate_p650_run(run_id: str) -> None:
 def _validate_materialized_p650_run(run_id: str) -> None:
     _validate_p650_run_core(
         run_id,
-        require_downstream_semantic_reviews=False,
+        require_downstream_semantic_reviews=True,
+        require_provider_ready_freeze=False,
         require_generated_asset_outputs=False,
     )
 
@@ -2366,7 +2447,7 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
 
 
 def _validate_image_prompt_semantic_review(run_dir: Path) -> None:
-    result = check_image_prompt_judgment(run_dir)
+    result = check_semantic_review(run_dir, "image_prompt")
     if not result.passed:
         raise RuntimeError("image prompt semantic review incomplete: " + "; ".join(result.errors))
 
@@ -2374,7 +2455,10 @@ def _validate_image_prompt_semantic_review(run_dir: Path) -> None:
 def _validate_semantic_reviews(run_dir: Path, stages: Iterable[str]) -> None:
     errors: list[str] = []
     for stage in stages:
-        result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+        # The generic semantic report is the canonical review artifact.  The
+        # legacy image-prompt judgment may coexist during migration, but it
+        # must never mask a pending or failed canonical report.
+        result = check_semantic_review(run_dir, stage)
         if not result.passed:
             errors.append(f"{stage}: {'; '.join(result.errors)}")
     if errors:
@@ -3748,6 +3832,50 @@ def _validate_video_request_reference_paths(run_dir: Path, req: VideoGenerateIte
                 raise HTTPException(status_code=400, detail=f"{field}: {exc}") from exc
 
 
+def _video_prompt_contract_version_mismatches(payload: dict[str, Any]) -> list[str]:
+    video_prompt_ir = payload.get("video_prompt_ir")
+    ir_schema_version = (
+        str(video_prompt_ir.get("schema_version") or "")
+        if isinstance(video_prompt_ir, dict)
+        else ""
+    )
+    actual = {
+        "policy_version": str(payload.get("policy_version") or ""),
+        "compiler_version": str(payload.get("compiler_version") or ""),
+        "projection_registry_version": str(
+            payload.get("projection_registry_version") or ""
+        ),
+        "video_prompt_ir.schema_version": ir_schema_version,
+    }
+    expected = {
+        "policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
+        "compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
+        "projection_registry_version": (
+            VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION
+        ),
+        "video_prompt_ir.schema_version": VIDEO_PROMPT_IR_SCHEMA_VERSION,
+    }
+    return [
+        field
+        for field, expected_value in expected.items()
+        if actual[field] != expected_value
+    ]
+
+
+def _assert_current_video_prompt_contract_versions(
+    *,
+    selector: str,
+    payload: dict[str, Any],
+) -> None:
+    mismatches = _video_prompt_contract_version_mismatches(payload)
+    if mismatches:
+        raise ValueError(
+            "materialized video prompt is missing or uses obsolete contract versions: "
+            + ", ".join(f"{selector}.{field}" for field in mismatches)
+            + "; create video prompts before generation"
+        )
+
+
 def _materialized_video_generate_item(
     *,
     run_dir: Path,
@@ -3767,15 +3895,15 @@ def _materialized_video_generate_item(
     video_generation = _dict_value(node.get("video_generation"))
     payload = _dict_value(video_generation.get("api_prompt_payload"))
     prompt = str(payload.get("prompt") or "").strip()
-    if (
-        not prompt
-        or str(payload.get("policy_version") or "") != VIDEO_API_PROMPT_POLICY_VERSION
-        or str(payload.get("compiler_version") or "") != VIDEO_PROMPT_COMPILER_VERSION
-    ):
+    if not prompt:
         raise ValueError(
             "materialized video prompt is missing or uses an obsolete policy; "
             "create video prompts before generation"
         )
+    _assert_current_video_prompt_contract_versions(
+        selector=request.item_id,
+        payload=payload,
+    )
 
     prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     if str(payload.get("sha256") or "") != prompt_sha256:
@@ -3856,6 +3984,10 @@ def _materialized_video_generate_item(
             "materialized video prompt is stale for the current design; "
             "create video prompts again before generation"
         ) from exc
+    _assert_current_video_prompt_contract_versions(
+        selector=request.item_id,
+        payload=current_payload,
+    )
     _assert_video_prompt_quality_allows_provider_execution(
         selector=request.item_id,
         payload=current_payload,
@@ -3875,6 +4007,11 @@ def _materialized_video_generate_item(
     ):
         raise ValueError(
             "materialized video provider request binding is stale or changed; "
+            "create video prompts again before generation"
+        )
+    if current_payload != payload:
+        raise ValueError(
+            "materialized video prompt payload is stale or changed; "
             "create video prompts again before generation"
         )
 
@@ -4812,11 +4949,9 @@ def _video_contract_for_server_target(target: dict[str, Any]) -> dict[str, Any]:
         for cut_id in source_cut_ids
         if cut_id and cut_id in cuts_by_id
     ]
-    composed = compose_video_render_unit_contract(source_contracts)
-    return resolve_video_prompt_contract(
-        {},
-        cut_contract=explicit,
-        scene_contract=composed,
+    return compose_video_render_unit_contract(
+        source_contracts,
+        unit_contract=explicit or None,
     )
 
 
@@ -7656,6 +7791,19 @@ def _video_reference_content_sha256(
     return bindings
 
 
+def _scene_visualizable_action_for_video_review(scene: dict[str, Any]) -> Any:
+    """Return scene-wide action context for review, never provider prose."""
+
+    top_level = scene.get("visualizable_action")
+    if isinstance(top_level, str) and top_level.strip():
+        return top_level
+    if not isinstance(top_level, str) and top_level:
+        return top_level
+    return _dict_value(scene.get("scene_intent")).get(
+        "review_only_visualizable_action"
+    )
+
+
 def _compile_frontend_video_prompt_payload(
     *,
     data: dict[str, Any],
@@ -7746,6 +7894,9 @@ def _compile_frontend_video_prompt_payload(
             for value in _list_value(scene.get("location_segments"))
             if isinstance(value, dict)
         ],
+        scene_visualizable_action=(
+            _scene_visualizable_action_for_video_review(scene)
+        ),
     )
     return target, payload
 
@@ -8243,10 +8394,23 @@ def _video_prompt_approval_updates(
     *,
     approved: bool,
 ) -> dict[str, str]:
+    return _video_prompt_approval_updates_for_item_ids(
+        run_dir,
+        [item.item_id for item in items],
+        approved=approved,
+    )
+
+
+def _video_prompt_approval_updates_for_item_ids(
+    run_dir: Path,
+    item_ids: Iterable[str],
+    *,
+    approved: bool,
+) -> dict[str, str]:
     updates: dict[str, str] = {}
-    for item in items:
-        binding = _reviewed_video_request_binding(run_dir, item.item_id)
-        prefix = _video_prompt_approval_state_prefix(item.item_id)
+    for item_id in item_ids:
+        binding = _reviewed_video_request_binding(run_dir, item_id)
+        prefix = _video_prompt_approval_state_prefix(item_id)
         updates.update(
             {
                 f"{prefix}.status": "approved" if approved else "pending",
@@ -8259,6 +8423,8 @@ def _video_prompt_approval_updates(
                     "frontend_generation_action" if approved else ""
                 ),
                 f"{prefix}.approved_at": _now_stamp() if approved else "",
+                f"{prefix}.revoked_at": "",
+                f"{prefix}.revocation_reason": "",
             }
         )
     return updates
@@ -8305,6 +8471,184 @@ def _video_prompt_stage_approval_complete(
     return True
 
 
+def _video_prompt_item_materialization_is_current(
+    *,
+    run_dir: Path,
+    data: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    selector = str(target.get("selector") or "").strip()
+    if not selector:
+        return False
+    node = _dict_value(target.get("cut"))
+    generation = _dict_value(node.get("video_generation"))
+    payload = _dict_value(generation.get("api_prompt_payload"))
+    if _video_prompt_contract_version_mismatches(payload):
+        return False
+
+    first_reference = str(
+        generation.get("first_frame")
+        or generation.get("input_image")
+        or ""
+    ).strip()
+    last_reference = str(generation.get("last_frame") or "").strip()
+    references = [
+        str(value).strip()
+        for value in _list_value(generation.get("references"))
+        if str(value).strip()
+    ]
+    quality = str(generation.get("quality") or "1080p").strip()
+    aspect_ratio = str(generation.get("aspect_ratio") or "16:9").strip()
+    duration_seconds = int(generation.get("duration_seconds") or 8)
+    tool = str(generation.get("tool") or "kling_3_0").strip()
+    authoring_source = str(
+        generation.get("prompt_authoring_source")
+        or generation.get("source_motion_prompt")
+        or ""
+    ).strip()
+    item = FrontendReviewItem(
+        item_id=selector,
+        kind="scene",
+        video_prompt=authoring_source,
+        video_quality=quality,
+        video_aspect_ratio=aspect_ratio,
+        video_duration_seconds=duration_seconds,
+        video_first_reference=first_reference or None,
+        video_last_reference=last_reference or None,
+        video_references=references,
+        video_tool=tool,
+    )
+    _current_target, current_payload = _compile_frontend_video_prompt_payload(
+        data=data,
+        item=item,
+        run_dir=run_dir,
+    )
+    if _video_prompt_contract_version_mismatches(current_payload):
+        return False
+    for field in (
+        "policy_version",
+        "compiler_version",
+        "projection_registry_version",
+        "prompt",
+        "negative_prompt",
+        "sha256",
+        "source_digest",
+        "provider_request_binding",
+    ):
+        if payload.get(field) != current_payload.get(field):
+            return False
+    if payload != current_payload:
+        return False
+
+    binding = _reviewed_video_request_binding(run_dir, selector)
+    negative_prompt = str(payload.get("negative_prompt") or "")
+    expected_binding = {
+        "tool": tool,
+        "output": str(generation.get("output") or "").strip(),
+        "duration_seconds": str(duration_seconds),
+        "quality": quality,
+        "aspect_ratio": aspect_ratio,
+        "first_frame": first_reference,
+        "last_frame": last_reference,
+        "prompt_policy_version": str(payload.get("policy_version") or ""),
+        "compiler_version": str(payload.get("compiler_version") or ""),
+        "source_digest": str(payload.get("source_digest") or ""),
+        "prompt_sha256": str(payload.get("sha256") or ""),
+        "negative_prompt_sha256": hashlib.sha256(
+            negative_prompt.encode("utf-8")
+        ).hexdigest(),
+        "references_digest": sha256_canonical_json(references),
+        "prompt": str(payload.get("prompt") or "").strip(),
+        "negative_prompt": negative_prompt.strip(),
+    }
+    return all(
+        str(binding.get(field) or "") == expected_value
+        for field, expected_value in expected_binding.items()
+    )
+
+
+def _video_prompt_stage_materialization_complete(run_dir: Path) -> bool:
+    """Return true when every canonical target is recompiled and current."""
+
+    try:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+        targets = _manifest_video_targets(data)
+        canonical_ids = [str(target["selector"]) for target in targets]
+        request_path = run_dir / "video_generation_requests.md"
+        if not canonical_ids or not request_path.is_file():
+            return False
+        _prefix, sections = _split_video_request_sections(
+            request_path.read_text(encoding="utf-8")
+        )
+        section_ids = [title for title, _lines in sections]
+        if (
+            len(section_ids) != len(set(section_ids))
+            or set(section_ids) != set(canonical_ids)
+        ):
+            return False
+        return all(
+            _video_prompt_item_materialization_is_current(
+                run_dir=run_dir,
+                data=data,
+                target=target,
+            )
+            for target in targets
+        )
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _stale_video_prompt_approval_updates(
+    run_dir: Path,
+    *,
+    pending_updates: dict[str, str],
+) -> dict[str, str]:
+    """Revoke approvals whose retained materialization is no longer current."""
+
+    try:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+        targets = _manifest_video_targets(data)
+        state_path = run_dir / "state.txt"
+        current_state = {
+            **(parse_state_file(state_path) if state_path.is_file() else {}),
+            **pending_updates,
+        }
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return {}
+
+    updates: dict[str, str] = {}
+    for target in targets:
+        selector = str(target.get("selector") or "").strip()
+        prefix = _video_prompt_approval_state_prefix(selector)
+        if current_state.get(f"{prefix}.status") != "approved":
+            continue
+        try:
+            is_current = _video_prompt_item_materialization_is_current(
+                run_dir=run_dir,
+                data=data,
+                target=target,
+            )
+        except (FileNotFoundError, KeyError, TypeError, ValueError):
+            is_current = False
+        if is_current:
+            continue
+        updates.update(
+            {
+                f"{prefix}.status": "revoked",
+                f"{prefix}.request_section_sha256": "",
+                f"{prefix}.prompt_sha256": "",
+                f"{prefix}.source_digest": "",
+                f"{prefix}.approved_by": "",
+                f"{prefix}.approved_at": "",
+                f"{prefix}.revoked_at": _now_stamp(),
+                f"{prefix}.revocation_reason": (
+                    "materialized video prompt is stale for the current contract or design"
+                ),
+            }
+        )
+    return updates
+
+
 def _assert_video_materialization_current_for_approval(
     run_dir: Path,
     items: list[FrontendReviewItem],
@@ -8327,6 +8671,18 @@ def _assert_video_materialization_current_for_approval(
         node = _dict_value(target.get("cut"))
         video_generation = _dict_value(node.get("video_generation"))
         stored_payload = _dict_value(video_generation.get("api_prompt_payload"))
+        _assert_current_video_prompt_contract_versions(
+            selector=item.item_id,
+            payload=current_payload,
+        )
+        _assert_current_video_prompt_contract_versions(
+            selector=item.item_id,
+            payload=stored_payload,
+        )
+        _assert_video_prompt_quality_allows_provider_execution(
+            selector=item.item_id,
+            payload=stored_payload,
+        )
         for field in (
             "policy_version",
             "compiler_version",
@@ -8342,6 +8698,11 @@ def _assert_video_materialization_current_for_approval(
                     f"video prompt materialization changed during semantic review: "
                     f"{item.item_id}.{field}"
                 )
+        if stored_payload != current_payload:
+            raise ValueError(
+                "video prompt materialization changed during semantic review: "
+                f"{item.item_id}.api_prompt_payload"
+            )
 
         reviewed = _reviewed_video_request_binding(run_dir, item.item_id)
         expected = {
@@ -8432,16 +8793,7 @@ def _assert_video_prompt_quality_allows_provider_execution(
         )
 
 
-async def _run_video_prompt_semantic_review_before_approval(
-    *,
-    run_dir: Path,
-) -> None:
-    review_job_id = f"video-prompt-approval-{uuid.uuid4().hex}"
-    await _run_semantic_review(
-        review_job_id,
-        run_dir=run_dir,
-        stage="video_motion",
-    )
+def _assert_video_prompt_semantic_review_is_current(run_dir: Path) -> None:
     result = check_semantic_review(run_dir, "video_motion")
     if not result.passed:
         raise ValueError(
@@ -8452,6 +8804,20 @@ async def _run_video_prompt_semantic_review_before_approval(
         raise ValueError(
             "video motion semantic review became stale before approval"
         )
+
+
+async def _run_video_prompt_semantic_review_before_approval(
+    *,
+    run_dir: Path,
+) -> bool:
+    review_job_id = f"video-prompt-approval-{uuid.uuid4().hex}"
+    await _run_semantic_review(
+        review_job_id,
+        run_dir=run_dir,
+        stage="video_motion",
+    )
+    _assert_video_prompt_semantic_review_is_current(run_dir)
+    return True
 
 
 def _merge_video_request_sections(
@@ -8776,6 +9142,25 @@ def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list
     return path
 
 
+def _explicit_storyboard_render_unit_contract(
+    scene: dict[str, Any],
+    source_cut_ids: list[str],
+) -> dict[str, Any]:
+    """Resolve only an explicitly authored contract for the exact source set."""
+
+    for raw_unit in _list_value(scene.get("render_units")):
+        if not isinstance(raw_unit, dict):
+            continue
+        existing_source_ids = [
+            normalize_dotted_id(value)
+            for value in _list_value(raw_unit.get("source_cut_ids"))
+        ]
+        if existing_source_ids != source_cut_ids:
+            continue
+        return _dict_value(raw_unit.get("cut_contract"))
+    return {}
+
+
 def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
     manifest_path, original_text, data = _read_manifest_data(run_dir)
@@ -8908,8 +9293,15 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
                 scene_selector,
                 group_cuts,
             )
+            explicit_render_unit_contract = (
+                _explicit_storyboard_render_unit_contract(
+                    scene,
+                    group_source_ids,
+                )
+            )
             render_unit_contract = compose_video_render_unit_contract(
-                [_dict_value(cut.get("cut_contract")) for cut in group_cuts]
+                [_dict_value(cut.get("cut_contract")) for cut in group_cuts],
+                unit_contract=explicit_render_unit_contract or None,
             )
             execution_options = dict(storyboard_execution_options)
             reference_content_sha256 = _video_reference_content_sha256(
@@ -8963,6 +9355,9 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
                     for value in _list_value(scene.get("location_segments"))
                     if isinstance(value, dict)
                 ],
+                scene_visualizable_action=(
+                    _scene_visualizable_action_for_video_review(scene)
+                ),
             )
             video_generation = {
                 "tool": "seedance",
@@ -9014,16 +9409,27 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
     _backup_run_file(run_dir, "video_manifest.md", label="before_scene_storyboard_create")
     _write_manifest_data(manifest_path, original_text, data)
     request_path = _write_scene_storyboard_video_generation_requests(run_dir, units)
+    approval_updates = _video_prompt_approval_updates_for_item_ids(
+        run_dir,
+        [str(unit["request_id"]) for unit in units],
+        approved=False,
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
             "runtime.create_mode": CREATE_MODE_SCENE_STORYBOARD,
             "runtime.stage": "scene_storyboard_video_requests_ready",
             "review.frontend.storyboard.status": "ready",
+            "slot.p820.status": "pending",
+            "slot.p820.note": "materialized storyboard video prompts await contextless semantic review",
+            "slot.p830.status": "in_progress",
+            "slot.p830.note": "storyboard video prompts are materialized; semantic review remains",
+            "stage.video_generation.status": "in_progress",
             "review.video_prompt.status": "pending",
             "gate.video_prompt_review": "required",
             "artifact.scene_storyboards": ",".join(storyboard_paths),
             "artifact.video_generation_requests": str(request_path.resolve()),
+            **approval_updates,
         },
     )
     return {"storyboards": storyboard_paths, "videoRequestPath": request_path.relative_to(run_dir).as_posix(), "unitCount": len(units)}
@@ -9914,6 +10320,7 @@ def _project_image_prompt_reviews_to_p630_p640(
     run_dir: Path,
     *,
     request_revision: str,
+    provider_ready: bool = True,
 ) -> None:
     """Make legacy p630/p640 audit artifacts reflect the real review gates."""
 
@@ -9962,7 +10369,11 @@ def _project_image_prompt_reviews_to_p630_p640(
             f"request_revision: {request_revision}",
             f"source_review: {semantic_relpath.as_posix()}",
             "",
-            "provider-ready prompt の semantic review / repair / recompile / rereview が合格した。",
+            (
+                "provider-ready prompt の semantic review / repair / recompile / rereview が合格した。"
+                if provider_ready
+                else "deferred reference を含む draft prompt の semantic review / repair / recompile / rereview が合格した。media生成前にreference bytesを束縛して再確認する。"
+            ),
             "",
         ]
     )
@@ -10018,13 +10429,57 @@ def _project_image_prompt_reviews_to_p630_p640(
             "review.image_prompt.judgment.status": "passed",
             "review.image_prompt.judgment.error_count": "0",
             "slot.p630.status": "done",
-            "slot.p630.note": "deterministic image-prompt hard gate passed for frozen revision",
+            "slot.p630.note": (
+                "deterministic image-prompt hard gate passed for provider-ready revision"
+                if provider_ready
+                else "deterministic image-prompt hard gate passed for reviewed draft revision"
+            ),
             "slot.p640.status": "done",
-            "slot.p640.note": "semantic image-prompt review and repair loop passed for frozen revision",
+            "slot.p640.note": (
+                "semantic image-prompt review and repair loop passed for provider-ready revision"
+                if provider_ready
+                else "semantic image-prompt review and repair loop passed for reviewed draft revision"
+            ),
             "artifact.manifest_review": str((run_dir / "manifest_review.md").resolve()),
             "artifact.image_prompt_judgment_review": str(
                 (run_dir / "image_prompt_judgment_review.md").resolve()
             ),
+        },
+    )
+
+
+def _mark_image_prompt_draft_reviewed(run_dir: Path, *, request_revision: str) -> None:
+    """Record semantic approval without claiming provider-ready reference binding."""
+
+    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    if deterministic_errors:
+        raise RuntimeError(
+            "draft image prompt deterministic review failed: "
+            + "; ".join(deterministic_errors)
+        )
+    semantic_result = check_semantic_review(run_dir, "image_prompt")
+    if not semantic_result.passed:
+        raise RuntimeError(
+            "draft image prompt semantic review is not passed: "
+            + "; ".join(semantic_result.errors)
+        )
+    _project_image_prompt_reviews_to_p630_p640(
+        run_dir,
+        request_revision=request_revision,
+        provider_ready=False,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.image_prompt.request_freeze.status": "reviewed_draft",
+            "review.image_prompt.request_freeze.reviewed_request_revision": request_revision,
+            "review.image_prompt.request_freeze.semantic_input_mode": "deferred_references",
+            "review.image_prompt.request_freeze.semantic_report": str(
+                semantic_review_relpaths("image_prompt")["report"]
+            ),
+            "review.image_prompt.request_freeze.reviewed_at": now_iso(),
+            "slot.p650.status": "pending",
+            "slot.p650.note": "semantic prompt review passed; media generation and provider-ready reference freeze not requested",
         },
     )
 
@@ -10043,7 +10498,7 @@ def _mark_image_prompt_request_freeze_done(run_dir: Path) -> None:
             "ToC run did not reach p650: deterministic image prompt review failed: "
             + "; ".join(deterministic_errors)
         )
-    semantic_result = check_image_prompt_judgment(run_dir)
+    semantic_result = check_semantic_review(run_dir, "image_prompt")
     if not semantic_result.passed:
         raise RuntimeError(
             "ToC run did not reach p650: semantic image prompt review is not passed: "
@@ -10056,6 +10511,7 @@ def _mark_image_prompt_request_freeze_done(run_dir: Path) -> None:
     _project_image_prompt_reviews_to_p630_p640(
         run_dir,
         request_revision=request_revision,
+        provider_ready=True,
     )
     append_state_snapshot(
         run_dir / "state.txt",
@@ -11355,17 +11811,32 @@ async def _refresh_image_prompt_repair_assets_if_required(run_dir: Path) -> None
     )
 
 
-async def _prepare_image_prompt_repair_revision_for_rereview(run_dir: Path) -> None:
+async def _prepare_image_prompt_repair_revision_for_rereview(
+    run_dir: Path,
+    *,
+    provider_ready: bool = True,
+) -> None:
     """Synchronize a repair, refresh changed assets, then bind scene refs again."""
 
     _synchronize_image_prompt_repair_outputs(run_dir)
     state = parse_state_file(run_dir / "state.txt")
-    if state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
+    if provider_ready and state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
         await _refresh_image_prompt_repair_assets_if_required(run_dir)
         # Asset bytes are part of the immutable scene request revision. Rebuild
         # the scene snapshot after refresh and before the fresh semantic review.
         _synchronize_image_prompt_repair_outputs(run_dir)
-    _prepare_image_prompt_request_revision_for_review(run_dir)
+    elif state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
+                "review.semantic.image_prompt.repair.asset_refresh.note": "media generation disabled; refreshed asset bytes will be required before provider-ready freeze",
+            },
+        )
+    _prepare_image_prompt_request_revision_for_review(
+        run_dir,
+        provider_ready=provider_ready,
+    )
 
 
 async def _generate_scene_outputs_after_p650_preflight(
@@ -11780,17 +12251,34 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
 }
 
 
-async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_attempts: int | None = None) -> None:
+async def _run_semantic_review(
+    job_id: str,
+    *,
+    run_dir: Path,
+    stage: str,
+    max_attempts: int | None = None,
+    image_prompt_provider_ready: bool = True,
+) -> None:
     attempts = max(1, max_attempts or semantic_review_max_attempts())
     if stage == "image_prompt":
         # The semantic pack must review the exact provider-ready snapshot.
         # Freeze is validation/state only; it must not mutate a reviewed source.
-        _prepare_image_prompt_request_revision_for_review(run_dir)
+        image_prompt_request_revision = _prepare_image_prompt_request_revision_for_review(
+            run_dir,
+            provider_ready=image_prompt_provider_ready,
+        )
+    else:
+        image_prompt_request_revision = ""
     reusable_result = _reusable_passed_semantic_review(run_dir, stage)
     if reusable_result is not None:
         _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
-        if stage == "image_prompt":
+        if stage == "image_prompt" and image_prompt_provider_ready:
             _mark_image_prompt_request_freeze_done(run_dir)
+        elif stage == "image_prompt":
+            _mark_image_prompt_draft_reviewed(
+                run_dir,
+                request_revision=image_prompt_request_revision,
+            )
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="semantic_review",
@@ -11839,8 +12327,13 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 run_dir / "state.txt",
                 semantic_loop_state_updates(stage, status="passed", attempt=attempt, max_attempts=attempts, error_count=0),
             )
-            if stage == "image_prompt":
+            if stage == "image_prompt" and image_prompt_provider_ready:
                 _mark_image_prompt_request_freeze_done(run_dir)
+            elif stage == "image_prompt":
+                _mark_image_prompt_draft_reviewed(
+                    run_dir,
+                    request_revision=image_prompt_request_revision,
+                )
             return
         if attempt >= attempts:
             failure_updates = semantic_loop_state_updates(
@@ -11944,7 +12437,14 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                     error=f"TimeoutError: semantic producer repair no-progress timeout after {_semantic_repair_no_progress_timeout_seconds():.0f}s",
                 )
                 if stage == "image_prompt":
-                    await _prepare_image_prompt_repair_revision_for_rereview(run_dir)
+                    await _prepare_image_prompt_repair_revision_for_rereview(
+                        run_dir,
+                        provider_ready=image_prompt_provider_ready,
+                    )
+                    image_prompt_request_revision = _prepare_image_prompt_request_revision_for_review(
+                        run_dir,
+                        provider_ready=image_prompt_provider_ready,
+                    )
                 continue
             _record_semantic_repair_hard_timeout(
                 run_dir,
@@ -11983,7 +12483,14 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
                 f"{stage} semantic producer repair timed out after no observable progress"
             ) from exc
         if stage == "image_prompt":
-            await _prepare_image_prompt_repair_revision_for_rereview(run_dir)
+            await _prepare_image_prompt_repair_revision_for_rereview(
+                run_dir,
+                provider_ready=image_prompt_provider_ready,
+            )
+            image_prompt_request_revision = _prepare_image_prompt_request_revision_for_review(
+                run_dir,
+                provider_ready=image_prompt_provider_ready,
+            )
     if last_result is not None and not last_result.passed:
         raise RuntimeError(f"{stage} semantic review failed: " + "; ".join(last_result.errors))
 
@@ -11991,7 +12498,7 @@ async def _run_semantic_review(job_id: str, *, run_dir: Path, stage: str, max_at
 def _reusable_passed_semantic_review(run_dir: Path, stage: str) -> SemanticReviewStatus | None:
     if os.environ.get("TOC_SEMANTIC_REVIEW_REUSE_PASSED", "1").strip().lower() in {"0", "false", "no"}:
         return None
-    result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+    result = check_semantic_review(run_dir, stage)
     if not result.passed:
         return None
     if not _semantic_review_report_sources_are_current(run_dir, stage):
@@ -12697,7 +13204,7 @@ async def _run_semantic_review_once(
         await client.stop()
     if stage == "image_prompt" and report_path.exists():
         (run_dir / IMAGE_PROMPT_JUDGMENT_REPORT).write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
-    result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
+    result = check_semantic_review(run_dir, stage)
     state_updates = review_status_to_state(stage, result)
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
@@ -15972,9 +16479,9 @@ async def _create_video_prompts_locked(
                         if req.approve_for_generation
                         else "video prompts created; semantic review has not run"
                     ),
-                    "slot.p830.status": "awaiting_approval",
-                    "slot.p830.note": "video generation requests await semantic review and per-item approval",
-                    "stage.video_generation.status": "pending",
+                    "slot.p830.status": "in_progress",
+                    "slot.p830.note": "video generation requests are materialized; semantic review remains",
+                    "stage.video_generation.status": "in_progress",
                     "review.video_prompt.status": "pending",
                     "gate.video_prompt_review": "required",
                     "artifact.video_generation_requests": str(request_path.resolve()),
@@ -15987,6 +16494,7 @@ async def _create_video_prompts_locked(
                 run_dir=run_dir,
             )
             async with _serialized_run_write(run_dir, "run_artifacts"):
+                _assert_video_prompt_semantic_review_is_current(run_dir)
                 _assert_video_materialization_current_for_approval(
                     run_dir,
                     effective_items,
@@ -15996,15 +16504,30 @@ async def _create_video_prompts_locked(
                     effective_items,
                     approved=True,
                 )
-                stage_approval_complete = _video_prompt_stage_approval_complete(
-                    run_dir,
-                    effective_items,
-                    approval_updates=approval_updates,
+                materialization_complete = (
+                    _video_prompt_stage_materialization_complete(run_dir)
+                )
+                approval_updates.update(
+                    _stale_video_prompt_approval_updates(
+                        run_dir,
+                        pending_updates=approval_updates,
+                    )
+                )
+                stage_approval_complete = (
+                    materialization_complete
+                    and _video_prompt_stage_approval_complete(
+                        run_dir,
+                        effective_items,
+                        approval_updates=approval_updates,
+                    )
                 )
                 review_status = (
                     "approved_for_generation"
                     if stage_approval_complete
                     else "partially_approved_for_generation"
+                )
+                human_approval_is_only_remaining_gate = (
+                    materialization_complete and not stage_approval_complete
                 )
                 append_state_snapshot(
                     run_dir / "state.txt",
@@ -16015,20 +16538,28 @@ async def _create_video_prompts_locked(
                         "slot.p830.status": (
                             "done"
                             if stage_approval_complete
-                            else "awaiting_approval"
+                            else (
+                                "awaiting_approval"
+                                if human_approval_is_only_remaining_gate
+                                else "in_progress"
+                            )
                         ),
                         "slot.p830.note": (
                             "all materialized provider requests approved"
                             if stage_approval_complete
-                            else "selected provider requests approved; remaining items still require approval"
+                            else (
+                                "all provider requests are current; remaining items require only human approval"
+                                if human_approval_is_only_remaining_gate
+                                else "selected provider requests approved; remaining items require materialization or semantic review"
+                            )
                         ),
-                        "stage.video_generation.status": review_status,
+                        "stage.video_generation.status": (
+                            "awaiting_approval"
+                            if human_approval_is_only_remaining_gate
+                            else "in_progress"
+                        ),
                         "review.video_prompt.status": review_status,
-                        "gate.video_prompt_review": (
-                            "approved"
-                            if stage_approval_complete
-                            else "per_item_approval"
-                        ),
+                        "gate.video_prompt_review": "required",
                         **approval_updates,
                     },
                 )

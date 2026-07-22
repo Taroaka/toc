@@ -218,8 +218,6 @@ python scripts/generate-assets-from-manifest.py \
   --character-reference-views front,side,back \
   --character-reference-strip \
   --enable-last-frame \
-  --chain-first-frame-from-prev-video \
-  --chain-first-frame-seconds-from-end 0.042 \
   --video-negative-prompt "fade out, fade to black, crossfade, dissolve, cut, hard cut, montage, timelapse, jump cut, title card, subtitle text, on-screen text, watermark"
 
 require_frozen_narration_binding

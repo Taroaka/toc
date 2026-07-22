@@ -15,14 +15,12 @@ MAX_TARGET_DURATION_SECONDS = 1200
 MINIMUM_EFFECTIVE_RATIO = 0.80
 MINIMUM_NARRATION_RATIO = 0.70
 MAX_SECONDS_PER_SCENE = 40
-MAX_SECONDS_PER_CUT = 12
 
 
 @dataclass(frozen=True)
 class StoryDurationPlan:
     target_seconds: int
     minimum_scene_count: int
-    minimum_cut_count: int
     minimum_narration_seconds: int
     minimum_effective_seconds: float
 
@@ -295,7 +293,6 @@ def build_duration_plan(target_duration_seconds: Any = None) -> StoryDurationPla
     return StoryDurationPlan(
         target_seconds=target,
         minimum_scene_count=math.ceil(target / MAX_SECONDS_PER_SCENE),
-        minimum_cut_count=math.ceil(target / MAX_SECONDS_PER_CUT),
         minimum_narration_seconds=math.ceil(target * MINIMUM_NARRATION_RATIO),
         minimum_effective_seconds=target * MINIMUM_EFFECTIVE_RATIO,
     )

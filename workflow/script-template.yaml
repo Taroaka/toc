@@ -15,7 +15,6 @@ script_metadata:
   duration_plan:
     target_seconds: 300
     minimum_scene_count: 8
-    minimum_cut_count: 25
     minimum_narration_seconds: 210
     minimum_effective_seconds: 240
   aspect_ratio: "9:16"
@@ -164,7 +163,7 @@ scene_set_review:
       responsibility: "scene 追加/分割が reveal の早出し、欠落、順序破壊を起こしていないかを評価する"
       blocking_if: "後半で見せるべき情報が早出しされる、または重要 reveal が消える"
     - role: "duration_density"
-      responsibility: "目標尺、scene 重要度、cut 数から scene 追加と cut 増厚のどちらが品質に効くかを評価する"
+      responsibility: "目標尺と authored semantic obligation / event beat の密度から、scene 構成の見直しと意味のある cut の増厚のどちらが品質に効くかを評価する。importance や尺だけから cut floor を増やさない"
       blocking_if: "scene を増やすべき範囲で cut 増厚に逃げている、またはその逆"
     - role: "visual_production"
       responsibility: "追加 scene が p500/p600/p800 へ渡せる visible evidence、actor forces、道具/舞台装置の意味段階、visual thesis を持つかを評価する"
@@ -195,11 +194,11 @@ scene_detail_review:
     cut_duration_assumption_seconds: "4-15"
     required_checks:
       - "全体 scene 数と scene 重要度から、この scene に必要な尺を見積もる"
-      - "提案 cut 数だけで必要尺と内容を満たせるか判断する"
-      - "1 cut しかない場合は 4-15 秒程度にしかならないことを明示する"
+      - "distinct semantic obligation / required event beat が提案 cut に全て割り当てられているか判断する"
+      - "cut が少ないこと自体を blocking にせず、長い hold / silence / spectacle は duration_exception.reason と実効尺で評価する"
       - "この scene で見せるべき内容が cut に全て載っているか確認する"
       - "次 scene の内容も読み、最終 cut が次 scene につながるか判断する"
-      - "つながらない場合は cut 追加または最終 cut の増厚を要求する"
+      - "つながらない場合は、独立した handoff obligation があるときだけ cut 追加を提案し、それ以外は最終 cut の増厚または scene 構成の修正を要求する"
       - "この scene が最大化された scene set の中で独立した問い・価値変化・因果 turn を持つか確認する"
       - "この scene をさらに分割すべきか、または cut 設計を厚くすべきか判断する"
       - "この scene の非圧縮 beat、scene 昇格理由、固有責務、actor forces、道具/舞台装置の意味段階、concrete handoff、anti-template language を確認する"
@@ -207,7 +206,7 @@ scene_detail_review:
     - role: "scene_detail_structure"
       responsibility: "単一 scene の必要性、内部整合、独立した劇的変化を評価する"
     - role: "scene_detail_density"
-      responsibility: "scene 内の情報量と cut 数が重要度・尺に合っているかを評価する"
+      responsibility: "scene 内の authored semantic obligation / event beat が cut に割り当てられ、尺不足が cut 数とは別に解消されているかを評価する"
     - role: "scene_detail_handoff"
       responsibility: "前後 scene との因果接続と handoff が足りるかを評価する"
   review_policy:
@@ -258,7 +257,7 @@ cut_blueprint_review:
     - role: "multimodal_event_boundary_coverage"
       responsibility: "event_context_for_cut と各 contract だけで p600/p700/p800 へ渡せるか、motion_brief や scene_event 全体が p600 に漏れていないかを評価する"
     - role: "duration_density_and_handoff"
-      responsibility: "重要度・尺・cut数・最終cutのhandoffが十分かを評価する"
+      responsibility: "authored semantic obligation / event beat の coverage、独立した duration plan、最終 cut の handoff が十分かを評価する"
   review_policy:
     agent_review: "required"
     human_review: "required|optional|skipped"
@@ -291,10 +290,10 @@ production_readiness_review:
         responsibility: "script の骨格、因果、scene/cut 接続、破綻を評価する"
         may_edit_downstream_design_artifacts: false
       - role: "duration_auditor"
-        responsibility: "選択された 5-20 分の目標尺に対し、scene/cut/narration の設計量と実効尺の不足を特定する"
+        responsibility: "選択された 5-20 分の目標尺に対し、意味のある cut の duration、narration / silence、scene 構成から実効尺の不足を特定する。目標尺だけから最低 cut 数を作らない"
         may_edit_downstream_design_artifacts: false
       - role: "quality_auditor"
-        responsibility: "尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する"
+        responsibility: "尺/骨格の弱点から scene 構成、意味のある cut の増厚、narration / silence、映像品質改善を提案する。cut 追加は独立した semantic obligation / event beat を伴う場合に限る"
         may_edit_downstream_design_artifacts: false
       - role: "orchestrator"
         responsibility: "各 auditor の意見を統合し、Design Owner 向け patch brief にする"
@@ -351,48 +350,29 @@ scenes:
     scene_cut_coverage_plan:
       coverage_strategy: "reverse_from_scene_event"
       source_schema_version: "scene_event_v1"
-      min_cut_count: {by_importance: 3, by_duration: 3, by_event_beats: 4, selected: 4, exception_reason: ""}
+      # duration / importance は cut floor に使わない。同じ意味の obligation は既存 cut へまとめる。
+      min_cut_count: {by_distinct_semantic_obligations: 1, by_event_beats: 1, selected: 1}
       candidate_function_labels: ["setup", "pressure", "threshold", "turn", "payoff", "reaction", "handoff", "custom"]
       event_beat_inventory:
-        - beat_id: "scene1_event_setup"
-          beat_function: "setup"
+        - beat_id: "scene1_event_turn"
+          beat_function: "turn"
           must_be_seen: true
-          assigned_cut_ids: []
+          assigned_cut_ids: ["scene1_cut1"]
       scene_obligations:
-        - obligation_id: "dramatic_question_01"
-          source: dramatic_question
-          evidence: ""
-          assigned_cut_ids: []
-        - obligation_id: "story_event_obligations_01"
-          source: story_event_obligations
-          evidence: []
-          assigned_cut_ids: []
-        - obligation_id: "value_shift_01"
-          source: value_shift.visible_evidence
-          evidence: []
-          assigned_cut_ids: []
-        - obligation_id: "causal_turn_01"
+        - obligation_id: "scene1_turn_proof_01"
           source: causal_turn
-          evidence: ""
-          assigned_cut_ids: []
-        - obligation_id: "reveal_constraints_01"
-          source: reveal_constraints
-          evidence: []
-          assigned_cut_ids: []
-        - obligation_id: "handoff_01"
-          source: handoff_to_next_scene
-          evidence: ""
-          assigned_cut_ids: []
+          evidence: "この scene の不可逆な turn を示す可視証拠"
+          assigned_cut_ids: ["scene1_cut1"]
       cut_assignments:
         - cut_index: 1
           cut_selector: "scene1_cut1"
-          obligation_ids: []
-          cut_function: "pressure|threshold|reveal|reaction|payoff|handoff|custom"
+          obligation_ids: ["scene1_turn_proof_01"]
+          cut_function: "turn"
           event_assignment:
             source_event_contract:
-              primary_event_beat_id: "scene1_event_setup"
-              source_event_beat_ids: ["scene1_event_setup"]
-          target_beat: ""
+              primary_event_beat_id: "scene1_event_turn"
+              source_event_beat_ids: ["scene1_event_turn"]
+          target_beat: "不可逆な turn が画面上で成立する"
           visual_proof: ""
           audience_knowledge_delta: ""
           causal_proof: ""
@@ -445,7 +425,7 @@ scenes:
     scene_intent:
       story_purpose: "string"
       dramatic_question: "この scene の間、観客が追う問い"
-      scene_spine: "setup -> pressure -> turn -> payoff -> handoff の1文要約"
+      scene_spine: "scene 固有の authored event progression の1文要約。候補ラベルを固定順で埋めない"
       value_shift:
         from: "scene開始時の状態"
         to: "scene終了時の状態"
@@ -543,44 +523,14 @@ scenes:
       start_situation: "scene開始時に人物・場所・物・関係がどうなっているか"
       source_story_beat_ids: []
       event_sequence:
-        - beat_id: "scene1_event_setup"
-          beat_function: "setup"
+        - beat_id: "scene1_event_turn"
+          beat_function: "turn"
           source_story_beat_ids: []
           what_happens: "何が起きるか。camera/shot/lens/framing/prompt/cut_id を書かない"
           visible_action: "画面で確認できる行為"
           visible_reaction: "行為に対する人物/場/物の反応"
           immediate_consequence: "直後に何が変わるか"
           emotional_pressure: "出来事としての圧力"
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_pressure"
-          beat_function: "pressure"
-          source_story_beat_ids: []
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_turn"
-          beat_function: "turn"
-          source_story_beat_ids: []
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_payoff"
-          beat_function: "payoff"
-          source_story_beat_ids: []
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
           required_visual_evidence: []
           story_information_revealed_ids: []
       turning_event:
@@ -594,7 +544,7 @@ scenes:
         object_state: ""
         relationship_state: ""
         new_pressure: ""
-        visible_evidence_refs: ["scene1_event_payoff"]
+        visible_evidence_refs: ["scene1_event_turn"]
       offscreen_context: []
       forbidden_event_changes: []
     visual:
@@ -604,10 +554,10 @@ scenes:
         cut_contract:
           schema_version: "3.0"
           source_event_contract:
-            primary_event_beat_id: "scene1_event_setup"
-            source_event_beat_ids: ["scene1_event_setup"]
-            event_beat_function: "setup"
-            event_time_position: "before_trigger"
+            primary_event_beat_id: "scene1_event_turn"
+            source_event_beat_ids: ["scene1_event_turn"]
+            event_beat_function: "turn"
+            event_time_position: "at_trigger"
             source_event_summary: ""
             source_visible_action: ""
             source_visible_reaction: ""
@@ -617,8 +567,8 @@ scenes:
             allowed_reveal_info_ids: []
             forbidden_reveal_info_ids: []
           cut_role: "main|sub|transition|reaction|visual_payoff"
-          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-          duration_intent: "short|standard|hold"
+          cut_function: "turn"
+          duration_intent: "standard"
           target_duration_seconds: 8
           viewer_contract:
             target_beat: "この cut で観客に体験させる1つのこと"
@@ -654,8 +604,8 @@ scenes:
             done_when: []
           first_frame_contract:
             imageable: true
-            source_event_beat_id: "scene1_event_setup"
-            event_time_position: "before_trigger"
+            source_event_beat_id: "scene1_event_turn"
+            event_time_position: "at_trigger"
             event_fact_visible_in_still: ""
             not_yet_happened_in_still: []
             first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
@@ -664,7 +614,7 @@ scenes:
             must_be_static_evidence_not_motion: true
           motion_contract:
             movable: true
-            source_event_beat_id: "scene1_event_setup"
+            source_event_beat_id: "scene1_event_turn"
             starts_from_first_frame: true
             must_not_advance_to_event_beat_ids: []
             motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
@@ -673,7 +623,7 @@ scenes:
           narration_contract:
             schema_version: "narration_contract_v2"
             speakable_or_silent: true
-            source_event_beat_ids: ["scene1_event_setup"]
+            source_event_beat_ids: ["scene1_event_turn"]
             allowed_info_ids: []
             forbidden_info_ids: []
             must_not_advance_to_event_beat_ids: []

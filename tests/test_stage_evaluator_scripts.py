@@ -710,6 +710,7 @@ def _write_valid_immersive_p400_pair(
         "  topic: \"桃太郎\"",
         "  experience: \"cinematic_story\"",
         f"  target_duration_seconds: {target_duration}",
+        f"  minimum_cut_count: {scene_count * 4}",
         "canonical_event_coverage_matrix:",
         "  policy_version: \"canonical_event_coverage_matrix_v1\"",
         "  source: [\"test_fixture\"]",
@@ -733,7 +734,7 @@ def _write_valid_immersive_p400_pair(
             "    scene_cut_coverage_plan:",
             "      coverage_strategy: \"reverse_from_scene_event\"",
             "      source_schema_version: \"scene_event_v1\"",
-            "      min_cut_count: {by_importance: 3, by_duration: 4, by_event_beats: 4, selected: 4, exception_reason: \"\"}",
+            "      min_cut_count: {by_distinct_semantic_obligations: 4, by_importance: 3, by_duration: 4, by_event_beats: 4, selected: 4, exception_reason: \"\"}",
             "      event_beat_inventory:",
             f"        - {{beat_id: \"scene{scene_idx}_event_setup\", beat_function: \"setup\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut1\"]}}",
             f"        - {{beat_id: \"scene{scene_idx}_event_pressure\", beat_function: \"pressure\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut2\"]}}",
@@ -819,6 +820,9 @@ def _write_valid_immersive_p400_pair(
             ),
         }
         what_happens, visible_action, visible_reaction, visual_evidence = beat_data[beat_function]
+        subject_motion = visible_action
+        motion_brief = f"{visible_action}。{visible_reaction}"
+        motion_end_state = f"{visible_action}を終え、{visual_evidence[-1]}が見える"
         blocked_ids = [
             f"scene{scene_idx}_event_{function}"
             for function in ("turn", "payoff")
@@ -961,10 +965,11 @@ def _write_valid_immersive_p400_pair(
             "            reaches_event_position: \"early_action\"",
             f"            must_not_advance_to_event_beat_ids: {json.dumps(blocked_ids, ensure_ascii=False)}",
             "            must_not_resolve_scene_turn_unless_primary_event_is_turn: true",
-            "            motion_brief: \"桃太郎が前へ進む\"",
+            f"            subject_motion: {json.dumps(subject_motion, ensure_ascii=False)}",
+            f"            motion_brief: {json.dumps(motion_brief, ensure_ascii=False)}",
             "            start_from_visible_state: \"first_frame_contract.visible_start_state\"",
-            "            end_state: \"桃太郎が次へ向く\"",
-            "            end_frame_brief: \"桃太郎が次へ向く\"",
+            f"            end_state: {json.dumps(motion_end_state, ensure_ascii=False)}",
+            f"            end_frame_brief: {json.dumps(motion_end_state, ensure_ascii=False)}",
             "            must_not_add: [\"新しい人物\"]",
             "          narration_contract:",
             f"            source_event_beat_ids: [\"{beat_id}\"]",
@@ -1121,7 +1126,609 @@ def _write_manifest_yaml(run_dir: Path, data: dict) -> None:
     (run_dir / "video_manifest.md").write_text("```yaml\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
 
 
+def _semantic_duration_scene() -> dict:
+    selectors = ["scene1_cut1", "scene1_cut2"]
+    return {
+        "scene_id": 1,
+        "importance": "critical",
+        "target_duration_seconds": 96,
+        "estimated_duration_seconds": 96,
+        "terminal_resolution": "証拠を見て決断が確定する。",
+        "scene_event": {
+            "schema_version": "scene_event_v1",
+            "event_sequence": [
+                {"beat_id": "scene1_event_setup", "beat_function": "setup"},
+                {"beat_id": "scene1_event_turn", "beat_function": "turn"},
+            ],
+        },
+        "scene_cut_coverage_plan": {
+            "coverage_strategy": "reverse_from_scene_event",
+            "source_schema_version": "scene_event_v1",
+            "minimum_cut_count": 12,
+            "min_cut_count": {
+                "by_distinct_semantic_obligations": 2,
+                "by_importance": 7,
+                "by_duration": 12,
+                "by_event_beats": 2,
+                "selected": 2,
+                "exception_reason": "duration target does not authorize filler cuts",
+            },
+            "event_beat_inventory": [
+                {
+                    "beat_id": "scene1_event_setup",
+                    "beat_function": "setup",
+                    "must_be_seen": True,
+                    "assigned_cut_ids": [selectors[0]],
+                },
+                {
+                    "beat_id": "scene1_event_turn",
+                    "beat_function": "turn",
+                    "must_be_seen": True,
+                    "assigned_cut_ids": [selectors[1]],
+                },
+            ],
+            "scene_obligations": [
+                {
+                    "obligation_id": "question_01",
+                    "source": "dramatic_question",
+                    "evidence": "証拠は本物か。",
+                    "assigned_cut_ids": [selectors[0]],
+                },
+                {
+                    "obligation_id": "turn_01",
+                    "source": "causal_turn",
+                    "evidence": "証拠を見て決断する。",
+                    "assigned_cut_ids": [selectors[1]],
+                },
+            ],
+            "cut_assignments": [
+                {
+                    "cut_selector": selectors[0],
+                    "obligation_ids": ["question_01"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_setup",
+                            "source_event_beat_ids": ["scene1_event_setup"],
+                        }
+                    },
+                },
+                {
+                    "cut_selector": selectors[1],
+                    "obligation_ids": ["turn_01"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_turn",
+                            "source_event_beat_ids": ["scene1_event_turn"],
+                        }
+                    },
+                },
+            ],
+            "unassigned_obligations": [],
+            "overloaded_cuts": [],
+            "duplicate_meaning_risks": [],
+        },
+        "coverage_review": {
+            key: True for key in STAGE_EVALUATOR.SCENE_COVERAGE_REVIEW_REQUIRED_KEYS
+        },
+        "cuts": [
+            {"cut_id": 1, "selector": selectors[0]},
+            {"cut_id": 2, "selector": selectors[1]},
+        ],
+    }
+
+
+def _motion_redundancy_cut(
+    selector: str,
+    obligation_id: str,
+    *,
+    subject_motion: str,
+    motion_brief: str,
+    end_state: str,
+    movable: bool = True,
+    cut_status: str = "active",
+) -> dict:
+    return {
+        "cut_id": int(selector.rsplit("cut", 1)[-1]),
+        "selector": selector,
+        "cut_status": cut_status,
+        "cut_contract": {
+            "viewer_contract": {
+                "anti_redundancy_key": f"{selector}:{obligation_id}",
+            },
+            "intent_budget": {
+                "assigned_obligation_ids": [obligation_id],
+            },
+            "motion_contract": {
+                "movable": movable,
+                "subject_motion": subject_motion,
+                "motion_brief": motion_brief,
+                "end_state": end_state,
+            },
+        },
+    }
+
+
 class TestStageEvaluatorScripts(unittest.TestCase):
+    def test_adjacent_distinct_cuts_reusing_canonical_motion_and_end_state_are_redundant(self) -> None:
+        cuts = [
+            _motion_redundancy_cut(
+                "scene1_cut1",
+                "question_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+            ),
+            _motion_redundancy_cut(
+                "scene1_cut2",
+                "turn_01",
+                subject_motion="  Ａ HAND lifts\nTHE sealed letter  ",
+                motion_brief="the witness   OPENS the letter",
+                end_state="the broken seal rests on the table",
+            ),
+        ]
+
+        issues = STAGE_EVALUATOR._scene_cut_redundancy_issues(
+            {"scene_cut_coverage_plan": {}},
+            scene_id="1",
+            cuts=cuts,
+        )
+
+        self.assertIn(
+            "scene1_cut2:duplicate_adjacent_motion_end_state:scene1_cut1",
+            issues,
+        )
+
+    def test_adjacent_motion_redundancy_requires_full_motion_and_end_state_match(self) -> None:
+        variations = {
+            "subject_motion": {
+                "subject_motion": "The second hand lowers the letter",
+                "motion_brief": "The witness opens the letter",
+                "end_state": "The broken seal rests on the table",
+            },
+            "motion_brief": {
+                "subject_motion": "A hand lifts the sealed letter",
+                "motion_brief": "The witness reads the hidden name",
+                "end_state": "The broken seal rests on the table",
+            },
+            "end_state": {
+                "subject_motion": "A hand lifts the sealed letter",
+                "motion_brief": "The witness opens the letter",
+                "end_state": "The witness turns toward the doorway",
+            },
+        }
+        for label, second_motion in variations.items():
+            with self.subTest(label=label):
+                cuts = [
+                    _motion_redundancy_cut(
+                        "scene1_cut1",
+                        "question_01",
+                        subject_motion="A hand lifts the sealed letter",
+                        motion_brief="The witness opens the letter",
+                        end_state="The broken seal rests on the table",
+                    ),
+                    _motion_redundancy_cut(
+                        "scene1_cut2",
+                        "turn_01",
+                        **second_motion,
+                    ),
+                ]
+
+                issues = STAGE_EVALUATOR._scene_cut_redundancy_issues(
+                    {"scene_cut_coverage_plan": {}},
+                    scene_id="1",
+                    cuts=cuts,
+                )
+
+                self.assertFalse(
+                    any("duplicate_adjacent_motion_end_state" in issue for issue in issues),
+                    issues,
+                )
+
+    def test_explicit_non_movable_static_hold_is_not_motion_redundancy(self) -> None:
+        cuts = [
+            _motion_redundancy_cut(
+                "scene1_cut1",
+                "reaction_01",
+                subject_motion="The witness remains still",
+                motion_brief="Hold on the witness absorbing the news",
+                end_state="The witness remains fixed on the letter",
+                movable=False,
+            ),
+            _motion_redundancy_cut(
+                "scene1_cut2",
+                "silence_01",
+                subject_motion="The witness remains still",
+                motion_brief="Hold on the witness absorbing the news",
+                end_state="The witness remains fixed on the letter",
+                movable=False,
+            ),
+        ]
+
+        issues = STAGE_EVALUATOR._scene_cut_redundancy_issues(
+            {"scene_cut_coverage_plan": {}},
+            scene_id="1",
+            cuts=cuts,
+        )
+
+        self.assertFalse(
+            any("duplicate_adjacent_motion_end_state" in issue for issue in issues),
+            issues,
+        )
+
+    def test_deleted_cut_is_excluded_from_adjacent_motion_redundancy(self) -> None:
+        cuts = [
+            _motion_redundancy_cut(
+                "scene1_cut1",
+                "question_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+            ),
+            _motion_redundancy_cut(
+                "scene1_cut2",
+                "deleted_turn_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+                cut_status="deleted",
+            ),
+            _motion_redundancy_cut(
+                "scene1_cut3",
+                "handoff_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+            ),
+        ]
+
+        issues = STAGE_EVALUATOR._scene_cut_redundancy_issues(
+            {"scene_cut_coverage_plan": {}},
+            scene_id="1",
+            cuts=cuts,
+        )
+
+        self.assertFalse(
+            any("scene1_cut2" in issue for issue in issues),
+            issues,
+        )
+        self.assertIn(
+            "scene1_cut3:duplicate_adjacent_motion_end_state:scene1_cut1",
+            issues,
+        )
+
+    def test_adjacent_motion_redundancy_blocks_scene_and_manifest_readiness(self) -> None:
+        scene = _semantic_duration_scene()
+        scene["cuts"] = [
+            _motion_redundancy_cut(
+                "scene1_cut1",
+                "question_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+            ),
+            _motion_redundancy_cut(
+                "scene1_cut2",
+                "turn_01",
+                subject_motion="A hand lifts the sealed letter",
+                motion_brief="The witness opens the letter",
+                end_state="The broken seal rests on the table",
+            ),
+        ]
+
+        readiness_issues = STAGE_EVALUATOR._scene_readiness_issues([scene])
+        checks: list[dict] = []
+        STAGE_EVALUATOR._manifest_checks(
+            checks,
+            "No on-screen text",
+            {
+                "manifest_phase": "skeleton",
+                "video_metadata": {
+                    "experience": "cinematic_story",
+                    "minimum_cut_count": 2,
+                },
+                "scenes": [scene],
+            },
+            profile="standard",
+            flow="immersive",
+            path_label="manifest",
+        )
+        failed = {check["id"]: check["message"] for check in checks if not check["passed"]}
+
+        issue = "scene1_cut2:duplicate_adjacent_motion_end_state:scene1_cut1"
+        self.assertIn(issue, readiness_issues)
+        self.assertIn("manifest.scene_cut_redundancy", failed)
+        self.assertIn(issue, failed["manifest.scene_cut_redundancy"])
+
+    def test_duration_does_not_raise_cut_floor_above_authored_semantic_obligations(self) -> None:
+        scene = _semantic_duration_scene()
+
+        self.assertEqual(STAGE_EVALUATOR._cinematic_min_cuts_for_scene(scene), 2)
+        self.assertEqual(STAGE_EVALUATOR._minimum_cut_issues({"scenes": [scene]}), [])
+        readiness_cut_count_issues = [
+            issue
+            for issue in STAGE_EVALUATOR._scene_readiness_issues([scene])
+            if "cut_count" in issue or "calculated_floor" in issue
+        ]
+        self.assertEqual(readiness_cut_count_issues, [])
+
+    def test_authored_semantic_and_event_obligations_still_require_cut_assignments(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["scene_obligations"][1]["assigned_cut_ids"] = []
+        plan["event_beat_inventory"][1]["assigned_cut_ids"] = []
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:scene_obligations[turn_01].assigned_cut_ids", issues)
+        self.assertIn("scene1:event_beat_inventory[scene1_event_turn].assigned_cut_ids", issues)
+
+    def test_authored_event_floor_requires_auditable_event_inventory(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan.pop("event_beat_inventory")
+        plan["min_cut_count"].pop("by_event_beats")
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:event_beat_inventory", issues)
+
+    def test_legacy_duration_obligations_and_selector_fanout_do_not_raise_cut_floor(self) -> None:
+        selectors = [f"scene1_cut{index}" for index in range(1, 13)]
+        plan = {
+            "min_cut_count": {
+                "by_importance": 7,
+                "by_duration": 12,
+                "by_event_beats": 1,
+                "selected": 12,
+            },
+            "event_beat_inventory": [
+                {
+                    "beat_id": "scene1_event_turn",
+                    "must_be_seen": True,
+                    "assigned_cut_ids": selectors,
+                }
+            ],
+            "scene_obligations": [
+                {
+                    "obligation_id": "turn_01",
+                    "assigned_cut_ids": selectors,
+                }
+            ],
+            "cut_assignments": [
+                {
+                    "cut_selector": selector,
+                    "obligation_ids": ["turn_01" if index == 1 else f"duration_turn_{index:02d}"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_turn",
+                            "source_event_beat_ids": ["scene1_event_turn"],
+                        }
+                    },
+                }
+                for index, selector in enumerate(selectors, start=1)
+            ],
+        }
+
+        self.assertEqual(STAGE_EVALUATOR._coverage_minimum_cut_count(plan), 1)
+
+    def test_declared_counts_and_assignment_event_refs_do_not_create_a_cut_floor(self) -> None:
+        declared_only = {
+            "min_cut_count": {
+                "by_distinct_semantic_obligations": 7,
+                "by_event_beats": 7,
+                "selected": 7,
+            }
+        }
+        assignment_refs_without_inventory = {
+            "cut_assignments": [
+                {
+                    "cut_selector": "scene1_cut1",
+                    "obligation_ids": ["duration_hold_01"],
+                    "event_assignment": {
+                        "source_event_contract": {
+                            "primary_event_beat_id": "scene1_event_setup",
+                            "source_event_beat_ids": ["scene1_event_setup", "scene1_event_turn"],
+                        }
+                    },
+                }
+            ]
+        }
+
+        self.assertEqual(STAGE_EVALUATOR._coverage_minimum_cut_count(declared_only), 0)
+        self.assertEqual(STAGE_EVALUATOR._coverage_minimum_cut_count(assignment_refs_without_inventory), 0)
+
+    def test_scene_obligation_must_be_referenced_by_its_declared_cut_assignment(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["cut_assignments"][1]["obligation_ids"] = ["question_01"]
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:scene_obligations[turn_01].assignment_mismatch", issues)
+        self.assertIn("scene1:cut_assignments[2].obligation_ids", issues)
+
+    def test_event_inventory_must_match_assignment_event_refs(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        source_contract = plan["cut_assignments"][1]["event_assignment"]["source_event_contract"]
+        source_contract["primary_event_beat_id"] = "scene1_event_setup"
+        source_contract["source_event_beat_ids"] = ["scene1_event_setup"]
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:event_beat_inventory[scene1_event_turn].assignment_mismatch", issues)
+
+    def test_non_string_obligation_ids_are_not_counted_or_auditable(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["scene_obligations"] = [
+            {"obligation_id": None, "assigned_cut_ids": ["scene1_cut1"]}
+        ]
+        plan["cut_assignments"] = [
+            {"cut_selector": "scene1_cut1", "obligation_ids": [None]}
+        ]
+        plan["min_cut_count"] = {
+            "by_distinct_semantic_obligations": 0,
+            "by_event_beats": 2,
+            "selected": 2,
+        }
+
+        self.assertEqual(STAGE_EVALUATOR._coverage_authored_obligation_ids(plan), set())
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+        self.assertIn("scene1:scene_obligations[1].obligation_id", issues)
+        self.assertIn("scene1:cut_assignments[1].obligation_ids", issues)
+
+    def test_mixed_valid_and_non_string_assignment_ids_are_unauditable(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["cut_assignments"][0]["obligation_ids"] = ["question_01", None]
+        source_contract = plan["cut_assignments"][0]["event_assignment"]["source_event_contract"]
+        source_contract["source_event_beat_ids"] = ["scene1_event_setup", None]
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:cut_assignments[1].obligation_ids", issues)
+        self.assertIn("scene1:cut_assignments[1].event_assignment", issues)
+
+    def test_inventory_event_id_must_exist_in_scene_event(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["event_beat_inventory"][1]["beat_id"] = "scene1_event_invented"
+        source_contract = plan["cut_assignments"][1]["event_assignment"]["source_event_contract"]
+        source_contract["primary_event_beat_id"] = "scene1_event_invented"
+        source_contract["source_event_beat_ids"] = ["scene1_event_invented"]
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn(
+            "scene1:event_beat_inventory[scene1_event_invented].unknown_scene_event",
+            issues,
+        )
+
+    def test_selector_declarations_require_explicit_non_empty_strings(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["scene_obligations"][0]["assigned_cut_ids"] = ["scene1_cut1", None]
+        plan["event_beat_inventory"][0]["assigned_cut_ids"] = ["scene1_cut1", None]
+        plan["cut_assignments"][0].pop("cut_selector")
+        plan["cut_assignments"][0]["cut_index"] = 1
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:scene_obligations[question_01].assigned_cut_ids", issues)
+        self.assertIn("scene1:event_beat_inventory[scene1_event_setup].assigned_cut_ids", issues)
+        self.assertIn("scene1:cut_assignments[1].cut_selector", issues)
+
+    def test_one_authored_turn_beat_does_not_require_fixed_scene_event_ladder(self) -> None:
+        scene = _semantic_duration_scene()
+        scene["scene_event"]["event_sequence"] = [
+            {"beat_id": "scene1_event_turn", "beat_function": "turn"},
+            {"beat_id": "scene1_event_optional_context", "beat_function": "setup"},
+        ]
+        plan = scene["scene_cut_coverage_plan"]
+        plan["event_beat_inventory"] = [plan["event_beat_inventory"][1]]
+        plan["event_beat_inventory"][0]["assigned_cut_ids"] = ["scene1_cut1"]
+        plan["scene_obligations"] = [plan["scene_obligations"][1]]
+        plan["scene_obligations"][0]["assigned_cut_ids"] = ["scene1_cut1"]
+        plan["cut_assignments"] = [plan["cut_assignments"][1]]
+        plan["cut_assignments"][0]["cut_selector"] = "scene1_cut1"
+        plan["min_cut_count"] = {
+            "by_distinct_semantic_obligations": 1,
+            "by_event_beats": 1,
+            "selected": 1,
+        }
+        scene["cuts"] = scene["cuts"][:1]
+
+        scene_event_issues = STAGE_EVALUATOR._scene_event_issue_map(scene)
+        cut_event_issues = STAGE_EVALUATOR._cut_event_ref_issue_map(scene)
+
+        sequence_issues = scene_event_issues.get("sequence_complete", [])
+        self.assertFalse(any(issue.endswith((".setup", ".pressure", ".payoff")) for issue in sequence_issues))
+        self.assertEqual(
+            cut_event_issues.get("sequence_covered"),
+            ["scene1:scene1_event_turn.uncovered"],
+        )
+
+    def test_manifest_semantic_cut_aggregate_must_match_scene_floors(self) -> None:
+        scene = _semantic_duration_scene()
+        manifest = {
+            "video_metadata": {"minimum_cut_count": 99},
+            "scenes": [scene],
+        }
+
+        issues = STAGE_EVALUATOR._minimum_cut_issues(manifest)
+
+        self.assertIn("video_metadata.minimum_cut_count_mismatch:99!=2", issues)
+
+    def test_selected_semantic_floor_declaration_must_match_authored_floor(self) -> None:
+        scene = _semantic_duration_scene()
+        scene["scene_cut_coverage_plan"]["min_cut_count"]["selected"] = 12
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:coverage_plan_selected_mismatch:12!=2", issues)
+
+    def test_underdeclared_counters_cannot_erase_distinct_authored_obligations(self) -> None:
+        scene = _semantic_duration_scene()
+        plan = scene["scene_cut_coverage_plan"]
+        plan["min_cut_count"]["by_distinct_semantic_obligations"] = 1
+        plan["min_cut_count"]["by_event_beats"] = 1
+        plan["min_cut_count"]["selected"] = 1
+        for obligation in plan["scene_obligations"]:
+            obligation["assigned_cut_ids"] = ["scene1_cut1"]
+        for event_beat in plan["event_beat_inventory"]:
+            event_beat["assigned_cut_ids"] = ["scene1_cut1"]
+        for assignment in plan["cut_assignments"]:
+            assignment["cut_selector"] = "scene1_cut1"
+        scene["cuts"] = scene["cuts"][:1]
+
+        issues = STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+            scene,
+            scene_id="1",
+            cuts=scene["cuts"],
+        )
+
+        self.assertIn("scene1:cut_count_below_coverage_plan:1<2", issues)
+        self.assertIn("scene1:coverage_plan_distinct_semantic_obligations_below_authored", issues)
+        self.assertIn("scene1:coverage_plan_event_beats_below_authored", issues)
+        self.assertIn("scene1:coverage_plan_selected_below_floor", issues)
+
     def test_scene_time_of_day_contract_is_enforced_by_canonical_stage_evaluators(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_time_") as td:
             run_dir = Path(td)
@@ -1129,11 +1736,16 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             story["story_metadata"] = {
                 "time": "",
                 "scene_time_of_day_contract": "required_v1",
+                "scene_time_of_day_visual_basis_contract": "required_v1",
             }
             for scene in story["script"]["scenes"]:
                 scene["time_of_day"] = "朝"
+                scene["time_of_day_visual_basis"] = (
+                    "光源は朝の自然光。明るさは穏やか。影は長く、色温度は暖かい。"
+                )
             story["script"]["scenes"][0]["time_of_day"] = ""
             story["script"]["scenes"][1]["time_of_day"] = 12
+            story["script"]["scenes"][0]["time_of_day_visual_basis"] = ""
             (run_dir / "story.md").write_text(
                 "```yaml\n" + yaml.safe_dump(story, allow_unicode=True, sort_keys=False) + "```\n",
                 encoding="utf-8",
@@ -1145,6 +1757,10 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(story_checks["story.scene_time_of_day"]["passed"])
             self.assertEqual(story_stage["details"]["missing_time_of_day_scene_ids"], "1,2")
             self.assertTrue(story_checks["story.scene_time_of_day_contract"]["passed"])
+            self.assertTrue(
+                story_checks["story.scene_time_of_day_visual_basis_contract"]["passed"]
+            )
+            self.assertFalse(story_checks["story.scene_time_of_day_visual_basis"]["passed"])
 
             story["story_metadata"]["scene_time_of_day_contract"] = "optional_v1"
             (run_dir / "story.md").write_text(
@@ -1155,8 +1771,24 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             invalid_marker_checks = {check["id"]: check for check in invalid_marker_stage["checks"]}
             self.assertFalse(invalid_marker_checks["story.scene_time_of_day_contract"]["passed"])
 
+            story["story_metadata"]["scene_time_of_day_contract"] = "required_v1"
+            story["story_metadata"].pop("scene_time_of_day_visual_basis_contract")
+            (run_dir / "story.md").write_text(
+                "```yaml\n" + yaml.safe_dump(story, allow_unicode=True, sort_keys=False) + "```\n",
+                encoding="utf-8",
+            )
+            missing_basis_marker_stage, _ = STAGE_EVALUATOR.check_story(run_dir, "fast")
+            missing_basis_marker_checks = {
+                check["id"]: check for check in missing_basis_marker_stage["checks"]
+            }
+            self.assertFalse(
+                missing_basis_marker_checks[
+                    "story.scene_time_of_day_visual_basis_contract"
+                ]["passed"]
+            )
+
             (run_dir / "script.md").write_text(
-                "```yaml\nscript_metadata:\n  time: ''\n  scene_time_of_day_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 夜\n    phase: opening\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    phase: ending\n    cuts: []\n```\n",
+                "```yaml\nscript_metadata:\n  time: ''\n  scene_time_of_day_contract: required_v1\n  scene_time_of_day_visual_basis_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 夜\n    time_of_day_visual_basis: 光源は月光。明るさは暗い。影は明確で、色温度は冷たい。\n    phase: opening\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    time_of_day_visual_basis: 明るさだけを指定\n    phase: ending\n    cuts: []\n```\n",
                 encoding="utf-8",
             )
 
@@ -1165,9 +1797,10 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertFalse(script_checks["script.scene_time_of_day"]["passed"])
             self.assertIn("2", script_checks["script.scene_time_of_day"]["message"])
+            self.assertFalse(script_checks["script.scene_time_of_day_visual_basis"]["passed"])
 
             (run_dir / "video_manifest.md").write_text(
-                "```yaml\nmanifest_phase: production\nvideo_metadata:\n  topic: 桃太郎\n  time: ''\n  scene_time_of_day_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 朝\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    cuts: []\n```\n",
+                "```yaml\nmanifest_phase: production\nvideo_metadata:\n  topic: 桃太郎\n  time: ''\n  scene_time_of_day_contract: required_v1\n  scene_time_of_day_visual_basis_contract: required_v1\nscenes:\n  - scene_id: 1\n    time_of_day: 朝\n    time_of_day_visual_basis: 光源は朝日。明るさは穏やか。影は長く、色温度は暖かい。\n    cuts: []\n  - scene_id: 2\n    time_of_day: ''\n    time_of_day_visual_basis: ''\n    cuts: []\n```\n",
                 encoding="utf-8",
             )
 
@@ -1176,6 +1809,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertFalse(manifest_checks["manifest.scene_time_of_day"]["passed"])
             self.assertIn("2", manifest_checks["manifest.scene_time_of_day"]["message"])
+            self.assertFalse(manifest_checks["manifest.scene_time_of_day_visual_basis"]["passed"])
 
     def test_stage_evaluator_accepts_compact_grounded_research_pack(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_") as td:
@@ -1867,7 +2501,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(stage["passed"])
             self.assertIn("script.scene_debug_prompt_source_exists", stage["reason_keys"])
 
-    def test_script_evaluator_requires_complete_scene_event_sequence(self) -> None:
+    def test_script_evaluator_rejects_cut_refs_to_removed_authored_event_beat(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0014d"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -1882,8 +2516,8 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             stage, _ = STAGE_EVALUATOR.check_script_single(run_dir, "fast")
 
             self.assertFalse(stage["passed"])
-            self.assertIn("script.scene_event_sequence_complete", stage["reason_keys"])
             self.assertIn("script.cut_event_beat_refs_valid", stage["reason_keys"])
+            self.assertIn("script.event_beat_reference_integrity", stage["reason_keys"])
 
     def test_script_evaluator_requires_scene_event_story_grounding(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_scene_event_grounding_") as td:
@@ -3280,6 +3914,9 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            manifest = _read_manifest_yaml(run_dir)
+            manifest["scenes"][0]["scene_cut_coverage_plan"] = _semantic_duration_scene()["scene_cut_coverage_plan"]
+            _write_manifest_yaml(run_dir, manifest)
             _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
 
             result = subprocess.run(
@@ -3335,6 +3972,9 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            manifest = _read_manifest_yaml(run_dir)
+            manifest["scenes"][0]["scene_cut_coverage_plan"] = _semantic_duration_scene()["scene_cut_coverage_plan"]
+            _write_manifest_yaml(run_dir, manifest)
             _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
 
             result = subprocess.run(
@@ -3442,6 +4082,34 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertEqual(result.returncode, 1, msg=result.stderr)
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["eval.manifest.status"], "changes_requested")
+
+    def test_cinematic_min_cuts_uses_authored_semantic_obligation_floor(self) -> None:
+        scene = {
+            "importance": "medium",
+            "target_duration_seconds": 40,
+            "scene_cut_coverage_plan": {
+                "min_cut_count": {
+                    "by_importance": 3,
+                    "by_duration": 5,
+                    "by_distinct_semantic_obligations": 4,
+                    "by_event_beats": 4,
+                    "selected": 4,
+                },
+                "event_beat_inventory": [
+                    {"beat_id": f"scene1_event_{index}", "must_be_seen": True}
+                    for index in range(1, 5)
+                ],
+                "cut_assignments": [
+                    {
+                        "cut_selector": f"scene1_cut{index}",
+                        "obligation_ids": [f"semantic_obligation_{index}"],
+                    }
+                    for index in range(1, 5)
+                ],
+            },
+        }
+
+        self.assertEqual(STAGE_EVALUATOR._cinematic_min_cuts_for_scene(scene), 4)
 
     def test_manifest_evaluator_ignores_reference_scenes_for_narration_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_reference_") as td:

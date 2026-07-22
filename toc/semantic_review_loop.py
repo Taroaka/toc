@@ -276,6 +276,8 @@ def write_semantic_repair_prompt(
         story_time_of_day_repair = "" if stage == "research" else """
 - Restore every current-contract story scene `time_of_day` at its canonical `story.md` source as an open, non-empty string. Preserve authored causal transitions, and do not infer it from location or image-prompt prose.
 - Keep the scene daypart separate from historical `story_metadata.time`: daypart controls sky, natural/artificial light, shadow, and color temperature, while historical time controls clothing, architecture, materials, tools, and technology.
+- When a scene declares `location.mode: sequence`, restore one complete `location.segments[]` item for every ordered `location.sequence[]` item. Preserve exact location order and give each segment its own responsibility, primary subject, visible action, required evidence/roles, motion brief, and physical motion end state.
+- Do not invent a transition, merge two locations into one scene-wide action, or remove an authored route merely to pass validation. Repair only the missing or contradictory route fields at the canonical `story.md` scene.
 """
         stage_specific_repair = f"""
 ## Foundation Repair Boundary

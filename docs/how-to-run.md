@@ -297,7 +297,7 @@ python scripts/sync-narration-from-script.py \
     - narration review / TTS / duration gate に必要な最小構造
   - `manifest_phase: production`
     - image / video 実装 field を埋めた生成正本
-- production `video_manifest.md` では cinematic density contract を満たす。各 production scene は原則 3 cuts 以上、low importance だけ 2 cuts 以上、high は 5 cuts 以上、critical は 7 cuts 以上を基準にし、`target_duration_seconds / 8` を切り上げた cut 数も下回らない。scene直下の `image_generation` だけで 1 scene = 1 cut に潰した manifest や、medium 以上が 2 cuts だけで green になる manifest は p620/p650 review で差し戻す。
+- production `video_manifest.md` では semantic density contract を満たす。各 production scene の cut 数は distinct semantic obligation ID と可視化必須の authored event beat ID から逆算し、importance や `target_duration_seconds` だけでは増やさない。1 beat / 1 obligation を十分に証明する scene は 1 cut でもよい一方、複数の独立責務を scene 直下の `image_generation` 1件へ潰した manifest は p620/p650 review で差し戻す。尺不足は provider capability、意味のある cut の duration、narration / silence、scene 構成または target 調整で解決する。
 - `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
 
 - `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する

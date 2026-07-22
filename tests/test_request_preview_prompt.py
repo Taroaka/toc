@@ -651,6 +651,14 @@ def _preview_cut_contract(
         if 0 <= neighbor_index < len(event_records):
             neighboring_event_beats.append(event_records[neighbor_index])
     forbidden_event_changes = ["後続 cut の結末をこのsceneで起こさない"]
+    motion_brief = (
+        f"{label} の第{sequence_index}段階として、"
+        f"主対象が画面内の前方へ{sequence_index}歩分だけ進む"
+    )
+    motion_end_state = (
+        f"{label} の第{sequence_index}段階で、"
+        f"主対象が前方の位置{sequence_index}に止まる"
+    )
     concrete_event, story_grounding, non_replaceable_elements = _preview_source_projection_for_event(
         scene_id,
         event_record,
@@ -886,10 +894,11 @@ def _preview_cut_contract(
             "source_event_beat_id": event_beat_id,
             "starts_from_first_frame": True,
             "must_not_advance_to_event_beat_ids": blocked_future_event_beat_ids,
-            "motion_brief": f"{label} がゆっくり動く",
+            "motion_brief": motion_brief,
             "start_from_visible_state": "first_frame_contract.visible_start_state",
-            "end_state": f"{label} が次へ向く",
-            "end_frame_brief": f"{label} が次へ向く",
+            "subject_motion": motion_brief,
+            "end_state": motion_end_state,
+            "end_frame_brief": motion_end_state,
             "must_not_add": ["新しい人物"],
         },
         "narration_contract": {
@@ -924,7 +933,7 @@ def _preview_cut_contract(
             "p500_asset": {"required_asset_ids": [], "asset_candidates": [], "continuity_anchor_needed": False, "new_asset_needed": False, "reuse_allowed": True},
             "p600_image": {"prompt_requirements": [label], "reference_requirements": [], "first_frame_must_include": [label], "first_frame_must_avoid": []},
             "p700_narration": {"narration_requirements": ["補う"], "role": "emotion", "must_not_caption_visible_content": True},
-            "p800_video": {"motion_requirements": [f"{label} がゆっくり動く"], "start_state": "開始前", "last_frame_or_end_state": f"{label} が次へ向く", "must_not_add": ["新しい人物"]},
+            "p800_video": {"motion_requirements": [motion_brief], "start_state": "開始前", "last_frame_or_end_state": motion_end_state, "must_not_add": ["新しい人物"]},
             "carries_to_next_cut": [label],
             "carries_to_next_scene": [],
         },
@@ -949,23 +958,65 @@ def _preview_cut_contract(
     }
 
 
-def _preview_scene_cut_coverage_plan(scene_id: int | str, cut_count: int, *, label: str = "request preview", selectors: list[str] | None = None) -> dict:
+def _preview_scene_cut_coverage_plan(
+    scene_id: int | str,
+    cut_count: int,
+    *,
+    label: str = "request preview",
+    selectors: list[str] | None = None,
+    cut_ids: list[int | str] | None = None,
+) -> dict:
     selectors = selectors or [f"scene{scene_id}_cut{index}" for index in range(1, cut_count + 1)]
+    cut_ids = cut_ids or list(range(1, cut_count + 1))
+    if len(selectors) != cut_count or len(cut_ids) != cut_count:
+        raise ValueError("preview coverage selectors/cut_ids must match cut_count")
+    obligation_ids = [f"obligation_{cut_id}" for cut_id in cut_ids]
+    event_functions = ["setup", "pressure", "turn", "payoff"]
+    assigned_by_event = {
+        function: [
+            selector
+            for index, selector in enumerate(selectors)
+            if event_functions[min(index, len(event_functions) - 1)] == function
+        ]
+        for function in event_functions
+    }
     return {
         "coverage_strategy": "reverse_from_scene_event",
         "source_schema_version": "scene_event_v1",
-        "min_cut_count": {"by_importance": 3, "by_duration": min(4, max(3, cut_count)), "by_event_beats": min(4, max(3, cut_count)), "selected": min(4, max(3, cut_count)), "exception_reason": ""},
+        "min_cut_count": {
+            "by_distinct_semantic_obligations": cut_count,
+            "by_importance": 0,
+            "by_duration": 0,
+            "by_event_beats": len(event_functions),
+            "selected": max(cut_count, len(event_functions)),
+            "exception_reason": "",
+        },
         "scene_obligations": [
-            {"obligation_id": "dramatic_question_01", "source": "dramatic_question", "evidence": label, "assigned_cut_ids": selectors[:1]},
-            {"obligation_id": "value_shift_01", "source": "value_shift.visible_evidence", "evidence": [label], "assigned_cut_ids": selectors[1:2] or selectors[:1]},
-            {"obligation_id": "causal_turn_01", "source": "causal_turn", "evidence": label, "assigned_cut_ids": selectors[2:3] or selectors[:1]},
-            {"obligation_id": "handoff_01", "source": "handoff_to_next_scene", "evidence": label, "assigned_cut_ids": selectors[-1:]},
+            {
+                "obligation_id": obligation_id,
+                "source": "authored_preview_obligation",
+                "evidence": f"{label} の第{index}段階",
+                "assigned_cut_ids": [selector],
+            }
+            for index, (obligation_id, selector) in enumerate(
+                zip(obligation_ids, selectors, strict=True),
+                start=1,
+            )
+        ],
+        "event_beat_inventory": [
+            {
+                "beat_id": f"scene{scene_id}_event_{function}",
+                "beat_function": function,
+                "must_be_seen": True,
+                "assigned_cut_ids": assigned_by_event[function],
+            }
+            for function in event_functions
         ],
         "cut_assignments": [
             {
                 "cut_index": index,
                 "cut_selector": selector,
-                "obligation_ids": ["dramatic_question_01"] if index == 1 else ["value_shift_01"] if index == 2 else ["causal_turn_01"] if index == 3 else ["handoff_01"],
+                "obligation_ids": [obligation_ids[index - 1]],
                 "cut_function": "setup",
                 "event_assignment": {
                     "source_event_contract": {
@@ -1226,7 +1277,12 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "scene_event": _scene_event_dict(scene_id),
                 "scene_character_state_timeline": scene_character_state_timeline,
                 "scene_film_coverage_plan": scene_film_coverage_plan,
-                "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(scene_id, len(script_cuts), selectors=[str(item) for item in active_selectors]),
+                "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(
+                    scene_id,
+                    len(script_cuts),
+                    selectors=[str(item) for item in active_selectors],
+                    cut_ids=[cut["cut_id"] for cut in script_cuts],
+                ),
                 "agent_review": {"status": "passed"},
                 "cuts": script_cuts,
             }
@@ -1239,7 +1295,12 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scene["scene_event"] = _scene_event_dict(scene_id)
         scene["scene_character_state_timeline"] = scene_character_state_timeline
         scene["scene_film_coverage_plan"] = scene_film_coverage_plan
-        scene["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(scene_id, len(script_cuts), selectors=[str(item) for item in active_selectors])
+        scene["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(
+            scene_id,
+            len(script_cuts),
+            selectors=[str(item) for item in active_selectors],
+            cut_ids=[cut["cut_id"] for cut in script_cuts],
+        )
         scene["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
 
     filler_scene_id = 900
@@ -1336,6 +1397,17 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         [scene.get("scene_id", index + 1) for index, scene in enumerate(script_scenes) if isinstance(scene, dict)]
     )
     data["canonical_event_coverage_matrix"] = canonical_event_coverage_matrix
+    if isinstance(metadata, dict):
+        metadata["minimum_cut_count"] = sum(
+            int(plan.get("min_cut_count", {}).get("selected") or 0)
+            for scene in scenes
+            if isinstance(scene, dict)
+            for plan in [
+                scene.get("scene_cut_coverage_plan")
+                if isinstance(scene.get("scene_cut_coverage_plan"), dict)
+                else {}
+            ]
+        )
     manifest_path.write_text("```yaml\n" + MODULE.yaml.safe_dump(data, allow_unicode=True, sort_keys=False) + "```\n", encoding="utf-8")
     (run_dir / "script.md").write_text(
         "```yaml\n"
@@ -1408,7 +1480,7 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "- internal_pressure: pressure escalates before the turn\n"
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
-                "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- scene_event_sequence: authored event beats are present and assigned\n"
                 "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details\n"
                 "- scene_generation_debug_source: source beats and adaptation choices are recorded\n"
                 "- scene_generation_contract: required scene outputs are declared\n"
@@ -2129,6 +2201,7 @@ video_metadata:
   topic: "シンデレラ"
 scenes:
   - scene_id: 1
+    visualizable_action: "scene全体で王子が落とし主を探して宮殿へ向かう"
     cuts:
       - cut_id: 1
         cut_contract:
@@ -2236,10 +2309,27 @@ scenes:
 
         video_payload = MODULE._video_api_prompt_payload_for_scene(scene, prefix="", suffix="")
         self.assertEqual(video_payload["policy_version"], "video_api_prompt_v1")
-        self.assertEqual(video_payload["compiler_version"], "conditional_video_prompt_compiler_v3")
+        self.assertEqual(video_payload["compiler_version"], "conditional_video_prompt_compiler_v5")
         self.assertEqual(video_payload["prompt"], video_prompt)
         self.assertEqual(len(video_payload["sha256"]), 64)
-        self.assertIn("video_prompt_ir", video_payload)
+        self.assertEqual(
+            video_payload["video_prompt_ir"]["schema_version"],
+            "video_prompt_ir_v2",
+        )
+        review_only_sources = {
+            item["source_key"]: item["value"]
+            for item in video_payload["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(
+            review_only_sources["scene.visualizable_action"],
+            "scene全体で王子が落とし主を探して宮殿へ向かう",
+        )
+        self.assertNotIn(
+            "scene全体で王子が落とし主を探して宮殿へ向かう",
+            video_payload["prompt"],
+        )
 
     def test_sequential_cut_state_progression_shapes_api_prompt_without_internal_fields(self) -> None:
         manifest_yaml = """
@@ -3998,14 +4088,17 @@ video_metadata:
   topic: test
 scenes:
   - scene_id: 3
+    scene_intent:
+      review_only_visualizable_action: scene全体で主人公が銀の鍵を得て屋敷を出る
     cuts:
       - cut_id: 1
         cut_contract:
           first_frame_contract:
             first_frame_brief: 主人公が扉の前で立ち止まっている
           motion_contract:
-            motion_brief: 主人公が扉へ手を伸ばす
+            motion_brief: 主人公が扉へ手を伸ばすと銀の鍵が新しく現れる
             must_not_add: [新しい人物]
+            allowed_new_reveal_elements: [銀の鍵]
           continuity_contract:
             carry_forward_to_next_cut: [主人公の青い外套を変えない]
         video_generation:
@@ -4031,8 +4124,9 @@ scenes:
         source_cut_ids: [1, 2]
         cut_contract:
           motion_contract:
-            motion_brief: 主人公がためらいを越えて扉を開く
+            motion_brief: 主人公がためらいを越え、銀の鍵を手に扉を開く
             camera_motion: カメラは胸の高さで固定する
+            allowed_new_reveal_elements: [銀の鍵]
         video_generation:
           tool: seedance
           duration_seconds: 8
@@ -4053,7 +4147,7 @@ scenes:
         )
         self.assertEqual(
             contract["motion_contract"]["motion_brief"],
-            "主人公がためらいを越えて扉を開く",
+            "主人公がためらいを越え、銀の鍵を手に扉を開く",
         )
         self.assertEqual(
             contract["motion_contract"]["camera_motion"],
@@ -4071,6 +4165,170 @@ scenes:
             contract["continuity_contract"]["carry_forward_to_next_cut"],
             ["主人公の青い外套を変えない", "扉の木目を変えない"],
         )
+        self.assertEqual(
+            contract["motion_contract"]["allowed_new_reveal_elements"],
+            ["銀の鍵"],
+        )
+
+        payload = MODULE._video_api_prompt_payload_for_target(
+            targets[0],
+            prefix="",
+            suffix="",
+        )
+
+        self.assertIn("新しく現れてよいものは、銀の鍵", payload["prompt"])
+        review_only_sources = {
+            item["source_key"]: item["value"]
+            for item in payload["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(
+            review_only_sources["scene.visualizable_action"],
+            "scene全体で主人公が銀の鍵を得て屋敷を出る",
+        )
+        self.assertNotIn(
+            "scene全体で主人公が銀の鍵を得て屋敷を出る",
+            payload["prompt"],
+        )
+
+    def test_render_unit_rejects_source_reveal_without_explicit_unit_allowlist(self) -> None:
+        manifest = {
+            "video_metadata": {"topic": "test"},
+            "scenes": [
+                {
+                    "scene_id": 3,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "光の中で銀の鍵が新しく現れる",
+                                    "allowed_new_reveal_elements": ["銀の鍵"],
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 4,
+                                "motion_prompt": "光の中で銀の鍵が新しく現れる",
+                                "output": "assets/videos/scene03_cut01.mp4",
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "cut_contract": {},
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 4,
+                                "motion_prompt": "主人公が扉を開く",
+                                "output": "assets/videos/scene03_cut02.mp4",
+                            },
+                        },
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "光の中で銀の鍵が現れ、主人公が扉を開く",
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 8,
+                                "prompt_authoring_source": "光の中で銀の鍵が現れ、主人公が扉を開く",
+                                "output": "assets/videos/scene03_unit01.mp4",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        yaml_text = MODULE.yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False)
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        target = MODULE._build_video_render_targets(
+            manifest=manifest,
+            scenes=scenes,
+        )[0]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_requires_explicit_reveal_authorization",
+        ):
+            MODULE._video_contract_for_target(target)
+
+    def test_render_unit_explicit_empty_allowlist_does_not_inherit_source_allowlist(self) -> None:
+        manifest = {
+            "video_metadata": {"topic": "test"},
+            "scenes": [
+                {
+                    "scene_id": 3,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "光の中で銀の鍵が新しく現れる",
+                                    "allowed_new_reveal_elements": ["銀の鍵"],
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 4,
+                                "motion_prompt": "光の中で銀の鍵が新しく現れる",
+                                "output": "assets/videos/scene03_cut01.mp4",
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "主人公が扉を開く",
+                                    "end_state": "主人公が開いた扉の前で止まる",
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 4,
+                                "motion_prompt": "主人公が扉を開く",
+                                "output": "assets/videos/scene03_cut02.mp4",
+                            },
+                        },
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "主人公が扉を開く",
+                                    "allowed_new_reveal_elements": [],
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "duration_seconds": 8,
+                                "prompt_authoring_source": "主人公が扉を開く",
+                                "output": "assets/videos/scene03_unit01.mp4",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        yaml_text = MODULE.yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False)
+        _metadata, _guides, scenes = MODULE.parse_manifest_yaml_full(yaml_text)
+        target = MODULE._build_video_render_targets(
+            manifest=manifest,
+            scenes=scenes,
+        )[0]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_requires_explicit_reveal_authorization",
+        ):
+            MODULE._video_contract_for_target(target)
 
     def test_cut_video_duration_prefers_approved_render_then_generation_then_legacy(self) -> None:
         yaml_text = """

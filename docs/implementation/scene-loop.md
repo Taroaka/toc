@@ -86,14 +86,14 @@ scene ごとに次を固定する。
    - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する。
    - `dramatic_question` が scene 内で進むか、`value_shift` が画面で読めるか、`causal_turn` が次 scene を発生させるかを見る。
    - frontend で選択された 5-20 分の目標尺を使い、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる。
-   - 1 cut はおおよそ 4-15 秒であり、cut が 1 つしかない scene は 4-15 秒程度の尺しか持てないことを明示して評価する。
-   - medium 以上の scene が 2 cut だけで済んでいる場合は、情報量・感情変化・次 scene への接続のどれかを失っていないかを blocking finding として扱う。
+   - cut duration は選択 provider / model / input mode の capability と可視責務の密度で評価し、固定秒数から cut 数の下限を逆算しない。
+   - importance や cut 数だけでは blocking finding にしない。`event_beat_inventory[]` が全 authored beat ID を exact ordered list として保持し、`must_be_seen != false` beat と distinct semantic obligation が coverage されていれば、1 cut scene も有効とする。
    - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する。
-   - つながらない場合は、もう 1 cut 追加するか、最終 cut を厚くする修正案を出す。
+   - つながらない場合は、handoff が既存と異なる distinct semantic obligation なら cut 追加を提案し、同じ責務なら最終 cut を厚くする修正案を出す。
    - aggregator は `Scene Detail Gate` として scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、隣接 scene handoff を gate 化する。
 3. `scene_cinematic_gate`
    - scene が説明ではなく出来事になっているか確認する。
-   - `before_state → pressure → turn → after_state` が存在するか確認する。
+   - `before_state → pressure → turn → after_state` に相当する因果変化が scene 全体で読めるか確認する。これは意味上の観点であり、同名の `beat_function` や複数 beat を要求しない。
    - `visual_thesis` が p600 で描ける人物・場所・道具・光・構図に翻訳できるか確認する。
    - spectacle が物語上の誘惑/危険/報酬/喪失/発見のどれかに接続しているか確認する。
 
@@ -105,7 +105,7 @@ critic は canonical artifact を編集せず、担当観点の finding と修�
 
 - `critic_1 / scene_count_coverage`: 承認済み story の主要 beat が scene として最大限展開され、非圧縮 beat と scene 昇格理由が明示されているかを見る。独立 scene 化すべき beat が既存 scene に埋もれていれば blocking finding にする。
 - `critic_2 / dramatic_structure + reveal_order`: 各 scene が独立した `dramatic_question` / `value_shift` / `causal_turn` と固有責務を持つか、scene 追加/分割が reveal の早出し、欠落、順序破壊、テンプレ文への退行を起こしていないかを見る。
-- `critic_3 / duration_density`: 目標尺、scene 重要度、cut 数から、scene 追加と cut 増厚のどちらが品質に効くかを見る。
+- `critic_3 / duration_density`: 目標尺、provider capability、distinct semantic obligation から duration risk を見て、新しい scene 責務がある場合だけ scene 追加を提案し、同じ責務なら既存 cut の増厚を選ぶ。scene 重要度や尺から cut 数の下限を作らない。
 - `critic_4 / visual_production`: 追加 scene が p500 asset / p600 still / p800 motion に渡せる visible evidence、actor forces、道具/舞台装置の意味段階、visual thesis を持つかを見る。
 - `critic_5 / handoff_integrity`: scene 間の因果、問い、視線・音・道具などの concrete handoff が途切れていないかを見る。
 - `scene_set aggregator`: 各 critic の finding を統合し、`Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate` が説明できる場合だけ `approved` を返す。
@@ -123,14 +123,14 @@ critic は canonical artifact を編集せず、担当観点の finding と修�
 - reveal constraints が弱く、後半で見せるべき情報を早出ししている。
 - scene 数が圧縮され、独立 scene 化すべき主要 beat が既存 scene 内に埋もれている。
 - `story_specificity` の 7 項目が欠けている、または `主人公は前進できるか` / `次へ進む理由が生まれる` / `光が次の場面へ運ぶ` / `価値変化の兆し` / `場所の圧力` / `主人公の姿勢と視線` のようなテンプレ文で埋められている。
-- high scene に 5 cut 以上、critical scene に 7 cut 以上の pressure / reaction / handoff 設計がない。
+- `event_beat_inventory[]` が authored `event_sequence[]` の ordered nonblank beat ID を exact に保持していない。p410 は pre-cut gate なので、`must_be_seen != false` beat / distinct semantic obligation の cut assignment はここで要求せず p420 で判定する。
 
 ### p420 Cut Blueprint
 
 cut ごとに次を固定する。
 
 - `cut_role`
-- `cut_function: setup|pressure|threshold|turn|payoff|reaction|handoff`
+- `cut_function`（`setup` / `pressure` / `threshold` / `turn` / `payoff` / `reaction` / `handoff` / `custom` は候補。`beat_function` の必須集合を定義しない）
 - `duration_intent`
 - `target_beat`
 - `screen_question`
@@ -155,15 +155,14 @@ p600 image prompt / p800 motion prompt は、この設計を元に後続 stage �
 
 - 1 cut は 1 意図に限定する。
 - 1 cut の中で場所移動、reveal、感情反転、説明、反応を同時に背負わせない。
-- cinematic_story の production scene は原則 3 cut 以上。
-- low importance scene だけ 2 cut を許容する。
-- high scene は 5 cut 以上、critical scene は 7 cut 以上を目安にする。
-- `target_duration_seconds / 8` を切り上げた cut 数を下回ってはいけない。
-- 変身、発見、対決、感情反転、証拠 reveal のような spectacle beat は 1 cut に圧縮せず、setup / threshold / payoff / reaction / handoff へ分解する。
+- cut 数は `must_be_seen != false` の authored beat と、重複を除いた distinct semantic obligation の coverage から導く。importance / target duration / 固定秒数だけでは増やさない。
+- 1 authored beat と 1 distinct visual obligation を1 cutで十分に成立させられる scene は、importance に関係なく1 cutを許容する。
+- 目標尺は provider capability 内の cut duration、scene duration 配分、narration / intentional silence、target runtime の見直しで満たす。同じ責務の filler cut を追加しない。
+- 変身、発見、対決、感情反転、証拠 reveal のような spectacle beat は、異なる可視責務や authored event beat がある場合だけ複数 cut へ分ける。`setup` / `pressure` / `turn` / `payoff` / `threshold` / `custom` は `beat_function` の候補例であり、固定 ladder として要求しない。
 
 ### p420 cut review の観点
 
-- cut ごとの `target_beat` が重複していないか。
+- 同じ `target_beat` を持つ cut が同義の責務を重複していないか。同じ authored beat を複数 cut に分ける場合も、各 cut が異なる distinct semantic obligation を持てば有効とする。
 - cut 列が scene の `scene_spine` を実際に進めているか。
 - `first_frame_brief` が mid-action 完了絵ではなく、動画が動き出す直前の初期状態になっているか。
 - `motion_brief` が p800 専用入力として分離され、p600 image prompt authoring に漏れていないか。
@@ -176,10 +175,10 @@ p420 の cut blueprint review は、標準 5 critic + aggregator で gate 化す
 critic は canonical artifact を編集せず、担当観点の finding と修正方針だけを report に残す。
 
 - `critic_1 / cut_intent_isolation`: 1 cut = 1 intent を確認する。場所移動、reveal、感情反転、説明、反応を 1 cut に詰め込んでいれば blocking finding にする。
-- `critic_2 / scene_event_coverage`: cut_function の固定列ではなく、`scene_event.event_sequence[]` の setup / pressure / turn / payoff と追加 beat が `cut_contract.source_event_contract` に割り当てられ、未承認イベントを発明していないかを見る。
+- `critic_2 / scene_event_coverage`: `scene_cut_coverage_plan.event_beat_inventory[]` が `scene_event.event_sequence[]` の exact ordered nonblank `beat_id` list を保持し、そのうち `must_be_seen != false` の beat が `cut_contract.source_event_contract` に割り当てられ、任意の非空 `beat_function` が元 beat と一致し、未承認イベントを発明していないかを見る。cut_function の固定列は要求しない。`setup` / `pressure` / `turn` / `payoff` / `threshold` / `custom` は候補例にすぎず、独自 function の1 beat scene も有効である。
 - `critic_3 / first_frame_motion_readiness`: `first_frame_brief` が p600 still の入力として完結し、`motion_brief` が p800 専用入力として分離されているかを見る。
 - `critic_4 / multimodal_event_boundary_coverage`: `event_context_for_cut` と各 contract だけで p600 image、p700 narration、p800 motion に渡せるか、各 stage が event boundary を越えていないかを見る。
-- `critic_5 / duration_density_and_handoff`: scene 重要度、target_duration、cut 数、最終 cut の handoff が十分かを見る。
+- `critic_5 / duration_density_and_handoff`: provider capability、distinct semantic obligation、target_duration、最終 cut の handoff が十分かを見る。importance や duration だけを理由に cut を増やさない。
 - `aggregator`: 各 critic の finding を統合し、`Cut Blueprint Gate` の全項目が説明できる場合だけ `approved` を返す。
 
 ## Legacy Scene Plan（最小）

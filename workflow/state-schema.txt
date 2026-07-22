@@ -176,6 +176,22 @@
 #   stage.video_generation.subagent.prompt.generated_at=ISO8601
 #   stage.video_generation.playbooks.report=logs/grounding/video_generation.playbooks.json
 #   stage.video_generation.playbooks.selected_count=0
+#   review.video_prompt.status=pending|partially_approved_for_generation|approved_for_generation
+#   gate.video_prompt_review=required|optional|skipped  # policy only; approval progress は review.video_prompt.* に置く
+#   review.video_prompt.item.<item_id>.status=pending|approved|revoked
+#   review.video_prompt.item.<item_id>.request_section_sha256=<sha256>
+#   review.video_prompt.item.<item_id>.prompt_sha256=<sha256>
+#   review.video_prompt.item.<item_id>.source_digest=<sha256>
+#   review.video_prompt.item.<item_id>.approved_by=<actor-or-empty>
+#   review.video_prompt.item.<item_id>.approved_at=<ISO8601-or-empty>
+#   review.video_prompt.item.<item_id>.revoked_at=<ISO8601-or-empty>
+#   review.video_prompt.item.<item_id>.revocation_reason=<reason-or-empty>
+# materialize/re-materialize 後、semantic review 未完了の間は stage.video_generation.status=in_progress、
+# slot.p830.status=in_progress、item.status=pending とする。awaiting_approval は使わない。
+# semantic review が current で全 canonical item が materialize 済みとなり、人間承認だけが残る場合に限り
+# stage.video_generation.status=awaiting_approval、slot.p830.status=awaiting_approval とする。
+# 全 item の明示承認後は slot.p830.status=done。provider生成が残るため stage.video_generation.status は in_progress を維持する。
+# 明示的な approve_for_generation 後も、current request と上記3 identity binding が一致する item だけ実行可能。
 #   stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
 #   stage.narration.started_at=ISO8601
 #   stage.narration.finished_at=ISO8601
@@ -194,6 +210,7 @@
 #   gate.image_review=required|optional|skipped
 #   gate.narration_review=required|optional|skipped
 #     gate はpolicyであり cleared などの進捗値を書かない
+#   gate.video_prompt_review=required|optional|skipped
 #   gate.video_review=required|optional|skipped
 #   gate.hybridization_review=required|optional|skipped
 #   review.research.status=pending|reviewing|approved|changes_requested

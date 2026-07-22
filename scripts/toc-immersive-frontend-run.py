@@ -51,6 +51,7 @@ from toc.review_loop import (
 from toc.review_loop_runner import materialize_review_loop_round
 from toc.run_index import write_run_index
 from toc.semantic_review import check_semantic_review
+from toc.stage_evaluator import check_manifest_single
 from toc.story_duration import build_duration_plan, normalize_target_duration
 
 
@@ -106,7 +107,7 @@ DEFAULT_SCENE_TITLES = [
     "証が名を取り戻す場所",
 ]
 DEFAULT_SCENE_TIMES_OF_DAY = ["朝", "昼", "夕方", "夜", "夜", "夜", "真夜中", "翌朝"]
-CINDERELLA_SCENE_TIMES_OF_DAY = ["朝", "夕方", "夜", "夜", "夜", "夜", "真夜中", "昼"]
+CINDERELLA_SCENE_TIMES_OF_DAY = ["朝", "夜", "夜", "夜", "夜", "夜", "真夜中", "昼"]
 SCENE_TIME_OF_DAY_CONTRACT = "required_v1"
 SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT = "required_v1"
 PHASES = ["opening", "development", "development", "ordeal", "ordeal", "transformation", "transformation", "ending"]
@@ -196,7 +197,7 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
             "protagonist_asset_id": "cinderella_fullbody",
             "protagonist_transformed_asset_id": "cinderella_transformed_fullbody",
             "protagonist_post_midnight_asset_id": "cinderella_post_midnight_fullbody",
-            "protagonist_asset_subject": "シンデレラの変身前の全身参照。灰の台所で働く生活感のある衣装、自然な顔立ち、同じ髪と体格",
+            "protagonist_asset_subject": "シンデレラの変身前の全身参照。灰の台所で働く、粗い布で仕立てた使い込まれた質素な作業着。自然な顔立ち、同じ髪と体格",
             "protagonist_transformed_asset_subject": "シンデレラの変身後の全身参照。参照元の変身前シンデレラと同じ顔・髪・体格を維持し、舞踏会へ進めるドレス姿だけに変える、実写映画の礼装",
             "protagonist_post_midnight_asset_subject": "真夜中に魔法が解けた後のシンデレラの全身参照。参照元の変身前シンデレラと同じ顔・髪・体格を維持し、舞踏会ドレスではない質素な衣装だけに戻す、靴合わせの部屋へつながる実写映画の人物状態",
             "artifact_name": "ガラスの靴",
@@ -205,28 +206,28 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
             "carriage_asset_id": "pumpkin_carriage",
             "artifact_output_dir": "objects",
             "artifact_role": "身元を証明する主役級アイテム",
-            "artifact_visual": "透明なガラスの靴、月光反射、実物の質感",
-            "artifact_fixed_prompt": "透明なガラス、繊細な靴、月光の反射、読める文字なし",
+            "artifact_visual": "透明なガラスの靴、光を受ける実物の反射と屈折、実物の質感",
+            "artifact_fixed_prompt": "透明なガラス、繊細な靴、光源に応じた反射と屈折、読める文字なし",
             "places": ["灰の台所", "月明かりの庭", "宮殿", "大階段"],
             "scene_locations": [
                 "灰の台所",
-                "閉ざされた扉の前の暗い屋内",
+                "閉ざされた扉の前",
                 "月明かりの庭",
-                "馬車が待つ門前の道",
+                "馬車が待つ門前",
                 "宮殿の階段",
                 "舞踏会の大広間",
                 "真夜中の大階段",
-                "靴合わせが行われる部屋",
+                "靴合わせの部屋",
             ],
             "scene_location_sequences": [
                 ["灰の台所"],
-                ["閉ざされた扉の前の暗い屋内"],
+                ["閉ざされた扉の前", "屋敷の裏口", "月明かりの庭"],
                 ["月明かりの庭"],
-                ["馬車が待つ門前の道"],
-                ["宮殿の階段"],
+                ["馬車が待つ門前", "宮殿へ続く石畳"],
+                ["宮殿の階段", "舞踏会の大広間"],
                 ["舞踏会の大広間"],
                 ["真夜中の大階段"],
-                ["王宮の命令の間", "町の家々", "靴合わせが行われる部屋"],
+                ["王宮の命令の間", "町の家々", "靴合わせの部屋"],
             ],
             "scene_location_segments": [
                 [], [], [], [], [], [], [],
@@ -244,53 +245,58 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                     },
                     {
                         "location": "町の家々",
-                        "responsibility": "王宮の使者が家々を巡った末、義姉の足に入らないガラスの靴を確認し、継母の排除を退けてシンデレラにも試着を認める",
+                        "responsibility": "王宮の使者がガラスの靴を携えて町の家々を一軒ずつ巡り、不適合を確認して次の家へ移る探索過程を成立させる",
                         "primary_subject": "王宮の使者",
-                        "visible_action": "義姉が椅子に座り、足先は王宮の使者が支えるガラスの靴の入口で止まり、踵が靴に入っていない",
-                        "visible_reaction": "継母は奥のシンデレラを腕で遮り、王宮の使者の空いた片手はまだ身体の横にある",
-                        "required_visual_evidence": ["踵が入らない義姉の足", "ガラスの靴を支える王宮の使者", "シンデレラを腕で遮る継母", "床際の布張りの箱"],
-                        "required_roles": ["royal_envoy", "stepsisters", "stepmother", "protagonist"],
+                        "visible_action": "王宮の使者が一軒の玄関前でガラスの靴を布張りの箱へ戻し、次の家へ続く石畳へ身体を向けている",
+                        "visible_reaction": "背後の家人は首を横に振り、使者の泥の付いた靴と外套には複数の家を巡った移動の痕跡が残る",
+                        "required_visual_evidence": ["ガラスの靴を収める布張りの箱", "次の家へ続く石畳", "泥の付いた使者の靴と外套", "背後で首を横に振る家人"],
+                        "required_roles": ["royal_envoy"],
                         "visible_character_state": {
-                            "posture": "王宮の使者が床際でガラスの靴を支え、空いた片手を身体の横に置いた姿勢",
-                            "gaze": "靴に入らない義姉の足へ下ろした視線",
-                            "expression": "試着の不成立を確認した落ち着いた表情",
-                            "hands": "片手がガラスの靴を支え、もう片手が身体の横で止まっている",
-                            "feet": "両足が椅子とシンデレラの間で止まっている",
+                            "posture": "王宮の使者が玄関前で布張りの箱を閉じ、次の家へ身体を向けた姿勢",
+                            "gaze": "次の家へ続く石畳へ向けた視線",
+                            "expression": "探索を継続する落ち着いた表情",
+                            "hands": "片手がガラスの靴を収めた箱を支え、もう片手が外套を押さえている",
+                            "feet": "泥の付いた両足が次の家へ踏み出す直前で止まっている",
                         },
-                        "motion_attention_target": "奥に立つシンデレラ",
-                        "motion_brief": "王宮の使者が義姉の足に入らないガラスの靴を布張りの箱へ戻し、空いた片手をシンデレラへ向けて試着を促す",
-                        "motion_end_state": "ガラスの靴が布張りの箱に戻り、王宮の使者の空いた片手がシンデレラへ向き、継母の遮る腕が止まっている",
+                        "motion_attention_target": "次の家へ続く石畳",
+                        "motion_brief": "王宮の使者が不適合だった家の扉を背にし、ガラスの靴を収めた箱を持って石畳を渡り、次の家の玄関前まで進む",
+                        "motion_end_state": "王宮の使者が次の家の玄関前に立ち、ガラスの靴を収めた箱を両手で支えている",
                     },
                     {
-                        "location": "靴合わせが行われる部屋",
+                        "location": "靴合わせの部屋",
                         "responsibility": "王宮の使者が排除を退けてシンデレラにも試着させ、足に合うガラスの靴を証人の前で確認する",
                         "primary_subject": "シンデレラ",
                         "primary_subject_by_function": {"turn": "シンデレラ", "payoff": "シンデレラ"},
                         "beat_overrides": {
                             "turn": {
                                 "primary_subject": "シンデレラ",
-                                "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足を、王宮の使者が床際で支えるガラスの靴の数センチ手前に止めている",
-                                "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
-                                "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
+                                "visible_action": "シンデレラは椅子の横に立ち、薄い靴下を履いた片足を床に置いている",
+                                "visible_reaction": "王宮の使者はガラスの靴を床際で支え、周囲の証人はシンデレラと空いた椅子を見ている",
+                                "required_visual_evidence": ["空いた椅子の横に立つシンデレラ", "床際で靴を支える王宮の使者", "見守る証人"],
                                 "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
                                 "visible_character_state": {
-                                    "posture": "シンデレラが椅子に座り、片足だけをガラスの靴へ向けた姿勢",
+                                    "posture": "シンデレラが空いた椅子の横に立ち、身体を椅子へ向けた姿勢",
                                     "gaze": "床際のガラスの靴へ下ろした視線",
                                     "expression": "口元を閉じ、試着へ集中している表情",
-                                    "hands": "両手が膝の上で止まっている",
-                                    "feet": "薄い靴下を履いた片足がガラスの靴の数センチ手前で止まっている",
+                                    "hands": "片手が椅子の背もたれの手前で止まっている",
+                                    "feet": "薄い靴下を履いた両足が椅子の横の床に置かれている",
                                 },
-                                "motion_attention_target": "床際のガラスの靴",
-                                "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
-                                "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
+                                "motion_attention_target": "空いた椅子",
+                                "motion_brief": "シンデレラが空いた椅子へ腰を下ろし、薄い靴下を履いた片足をガラスの靴の数センチ手前まで一度だけ伸ばす",
+                                "motion_end_state": "シンデレラが椅子に座り、薄い靴下を履いた片足が王宮の使者の支えるガラスの靴の数センチ手前で止まっている",
                             },
                             "payoff": {
                                 "primary_subject": "シンデレラ",
                                 "obligation_overrides": {
                                     "symbolic_proof": {
+                                        "primary_subject": "シンデレラ",
+                                        "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足をガラスの靴の数センチ手前に止めている",
+                                        "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
+                                        "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
+                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
                                         "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
-                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
+                                        "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
+                                        "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
                                     },
                                     "reaction_after_change": {
                                         "visible_character_state": {
@@ -301,21 +307,24 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                                             "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
                                         },
                                         "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラが足に合うガラスの靴を見たまま、一度だけゆっくり息を吐いて肩を下げる",
-                                        "motion_end_state": "シンデレラの肩が下がり、視線が足に合うガラスの靴に残っている",
-                                        "emotional_change": "シンデレラの眉と口元の緊張だけがほどけ、安堵が表情に現れる",
+                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
+                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
+                                        "emotional_change": "王宮の使者と証人の視線が、ずれないガラスの靴へ集まる",
                                     },
                                     "terminal_resolution": {
+                                        "primary_subject": "王宮の使者",
                                         "visible_character_state": {
-                                            "posture": "シンデレラは椅子に座ったまま肩を下げ、顔を足元へ向けている",
+                                            "posture": "王宮の使者が床際で片膝を曲げ、シンデレラの足元へ身体を向けた姿勢",
                                             "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "安堵と確信が口元に現れた表情",
-                                            "hands": "両手が膝の上で止まっている",
-                                            "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
+                                            "expression": "適合を確認し、うなずく直前の落ち着いた表情",
+                                            "hands": "片手がガラスの靴の踵を支えている",
+                                            "feet": "両足がシンデレラの椅子の前で止まっている",
                                         },
-                                        "motion_attention_target": "画面内の証人",
-                                        "motion_brief": "シンデレラが足に合うガラスの靴から画面内の証人へ顔を一度だけゆっくり上げる",
-                                        "motion_end_state": "シンデレラの顔が画面内の証人を向き、足に合うガラスの靴は前景の同じ位置に残っている",
+                                        "required_visual_evidence": ["シンデレラの足に合うガラスの靴", "床際の王宮の使者", "見守る継母と義姉たち"],
+                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
+                                        "motion_attention_target": "シンデレラの顔",
+                                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
+                                        "motion_end_state": "シンデレラの足に靴が合ったまま、王宮の使者と証人の視線が彼女に集まっている",
                                     }
                                 },
                             },
@@ -401,10 +410,10 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
             ],
             "scene_location_sequences": [
                 ["灰の台所"],
-                ["閉ざされた扉の前"],
+                ["閉ざされた扉の前", "屋敷の裏口", "月明かりの庭"],
                 ["月明かりの庭"],
-                ["馬車が待つ門前"],
-                ["宮殿の階段"],
+                ["馬車が待つ門前", "宮殿へ続く石畳"],
+                ["宮殿の階段", "舞踏会の大広間"],
                 ["舞踏会の大広間"],
                 ["真夜中の大階段"],
                 ["王宮の命令の間", "町の家々", "靴合わせの部屋"],
@@ -425,22 +434,22 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                     },
                     {
                         "location": "町の家々",
-                        "responsibility": "王宮の使者が家々を巡った末、義姉の足に入らないガラスの靴を確認し、継母の排除を退けてシンデレラにも試着を認める",
+                        "responsibility": "王宮の使者がガラスの靴を携えて町の家々を一軒ずつ巡り、不適合を確認して次の家へ移る探索過程を成立させる",
                         "primary_subject": "王宮の使者",
-                        "visible_action": "義姉が椅子に座り、足先は王宮の使者が支えるガラスの靴の入口で止まり、踵が靴に入っていない",
-                        "visible_reaction": "継母は奥のシンデレラを腕で遮り、王宮の使者の空いた片手はまだ身体の横にある",
-                        "required_visual_evidence": ["踵が入らない義姉の足", "ガラスの靴を支える王宮の使者", "シンデレラを腕で遮る継母", "床際の布張りの箱"],
-                        "required_roles": ["royal_envoy", "stepsisters", "stepmother", "protagonist"],
+                        "visible_action": "王宮の使者が一軒の玄関前でガラスの靴を布張りの箱へ戻し、次の家へ続く石畳へ身体を向けている",
+                        "visible_reaction": "背後の家人は首を横に振り、使者の泥の付いた靴と外套には複数の家を巡った移動の痕跡が残る",
+                        "required_visual_evidence": ["ガラスの靴を収める布張りの箱", "次の家へ続く石畳", "泥の付いた使者の靴と外套", "背後で首を横に振る家人"],
+                        "required_roles": ["royal_envoy"],
                         "visible_character_state": {
-                            "posture": "王宮の使者が床際でガラスの靴を支え、空いた片手を身体の横に置いた姿勢",
-                            "gaze": "靴に入らない義姉の足へ下ろした視線",
-                            "expression": "試着の不成立を確認した落ち着いた表情",
-                            "hands": "片手がガラスの靴を支え、もう片手が身体の横で止まっている",
-                            "feet": "両足が椅子とシンデレラの間で止まっている",
+                            "posture": "王宮の使者が玄関前で布張りの箱を閉じ、次の家へ身体を向けた姿勢",
+                            "gaze": "次の家へ続く石畳へ向けた視線",
+                            "expression": "探索を継続する落ち着いた表情",
+                            "hands": "片手がガラスの靴を収めた箱を支え、もう片手が外套を押さえている",
+                            "feet": "泥の付いた両足が次の家へ踏み出す直前で止まっている",
                         },
-                        "motion_attention_target": "奥に立つシンデレラ",
-                        "motion_brief": "王宮の使者が義姉の足に入らないガラスの靴を布張りの箱へ戻し、空いた片手をシンデレラへ向けて試着を促す",
-                        "motion_end_state": "ガラスの靴が布張りの箱に戻り、王宮の使者の空いた片手がシンデレラへ向き、継母の遮る腕が止まっている",
+                        "motion_attention_target": "次の家へ続く石畳",
+                        "motion_brief": "王宮の使者が不適合だった家の扉を背にし、ガラスの靴を収めた箱を持って石畳を渡り、次の家の玄関前まで進む",
+                        "motion_end_state": "王宮の使者が次の家の玄関前に立ち、ガラスの靴を収めた箱を両手で支えている",
                     },
                     {
                         "location": "靴合わせの部屋",
@@ -450,28 +459,33 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                         "beat_overrides": {
                             "turn": {
                                 "primary_subject": "シンデレラ",
-                                "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足を、王宮の使者が床際で支えるガラスの靴の数センチ手前に止めている",
-                                "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
-                                "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
+                                "visible_action": "シンデレラは椅子の横に立ち、薄い靴下を履いた片足を床に置いている",
+                                "visible_reaction": "王宮の使者はガラスの靴を床際で支え、周囲の証人はシンデレラと空いた椅子を見ている",
+                                "required_visual_evidence": ["空いた椅子の横に立つシンデレラ", "床際で靴を支える王宮の使者", "見守る証人"],
                                 "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
                                 "visible_character_state": {
-                                    "posture": "シンデレラが椅子に座り、片足だけをガラスの靴へ向けた姿勢",
+                                    "posture": "シンデレラが空いた椅子の横に立ち、身体を椅子へ向けた姿勢",
                                     "gaze": "床際のガラスの靴へ下ろした視線",
                                     "expression": "口元を閉じ、試着へ集中している表情",
-                                    "hands": "両手が膝の上で止まっている",
-                                    "feet": "薄い靴下を履いた片足がガラスの靴の数センチ手前で止まっている",
+                                    "hands": "片手が椅子の背もたれの手前で止まっている",
+                                    "feet": "薄い靴下を履いた両足が椅子の横の床に置かれている",
                                 },
-                                "motion_attention_target": "床際のガラスの靴",
-                                "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
-                                "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
+                                "motion_attention_target": "空いた椅子",
+                                "motion_brief": "シンデレラが空いた椅子へ腰を下ろし、薄い靴下を履いた片足をガラスの靴の数センチ手前まで一度だけ伸ばす",
+                                "motion_end_state": "シンデレラが椅子に座り、薄い靴下を履いた片足が王宮の使者の支えるガラスの靴の数センチ手前で止まっている",
                             },
                             "payoff": {
                                 "primary_subject": "シンデレラ",
                                 "obligation_overrides": {
                                     "symbolic_proof": {
+                                        "primary_subject": "シンデレラ",
+                                        "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足をガラスの靴の数センチ手前に止めている",
+                                        "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
+                                        "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
+                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
                                         "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
-                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
+                                        "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
+                                        "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
                                     },
                                     "reaction_after_change": {
                                         "visible_character_state": {
@@ -482,21 +496,24 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                                             "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
                                         },
                                         "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラが足に合うガラスの靴を見たまま、一度だけゆっくり息を吐いて肩を下げる",
-                                        "motion_end_state": "シンデレラの肩が下がり、視線が足に合うガラスの靴に残っている",
-                                        "emotional_change": "シンデレラの眉と口元の緊張だけがほどけ、安堵が表情に現れる",
+                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
+                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
+                                        "emotional_change": "王宮の使者と証人の視線が、ずれないガラスの靴へ集まる",
                                     },
                                     "terminal_resolution": {
+                                        "primary_subject": "王宮の使者",
                                         "visible_character_state": {
-                                            "posture": "シンデレラは椅子に座ったまま肩を下げ、顔を足元へ向けている",
+                                            "posture": "王宮の使者が床際で片膝を曲げ、シンデレラの足元へ身体を向けた姿勢",
                                             "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "安堵と確信が口元に現れた表情",
-                                            "hands": "両手が膝の上で止まっている",
-                                            "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
+                                            "expression": "適合を確認し、うなずく直前の落ち着いた表情",
+                                            "hands": "片手がガラスの靴の踵を支えている",
+                                            "feet": "両足がシンデレラの椅子の前で止まっている",
                                         },
-                                        "motion_attention_target": "画面内の証人",
-                                        "motion_brief": "シンデレラが足に合うガラスの靴から画面内の証人へ顔を一度だけゆっくり上げる",
-                                        "motion_end_state": "シンデレラの顔が画面内の証人を向き、足に合うガラスの靴は前景の同じ位置に残っている",
+                                        "required_visual_evidence": ["シンデレラの足に合うガラスの靴", "床際の王宮の使者", "見守る継母と義姉たち"],
+                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
+                                        "motion_attention_target": "シンデレラの顔",
+                                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
+                                        "motion_end_state": "シンデレラの足に靴が合ったまま、王宮の使者と証人の視線が彼女に集まっている",
                                     }
                                 },
                             },
@@ -669,22 +686,49 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
         location_index = min(canonical_index - 1, len(canonical_locations) - 1)
         canonical_location_sequence = canonical_location_sequences[location_index]
         canonical_segments = canonical_location_segments[location_index]
-        if count > 1 and len(canonical_location_sequence) > 1:
-            sequence_index = min(
-                len(canonical_location_sequence) - 1,
-                (position - 1) * len(canonical_location_sequence) // count,
-            )
-            runtime_location_sequence = [canonical_location_sequence[sequence_index]]
-            runtime_location = runtime_location_sequence[0]
-            runtime_segments = [
-                deepcopy(segment)
-                for segment in canonical_segments
-                if segment["location"] == runtime_location
-            ]
-        else:
-            runtime_location_sequence = list(canonical_location_sequence)
-            runtime_location = canonical_locations[location_index]
-            runtime_segments = [deepcopy(segment) for segment in canonical_segments]
+        # Runtime duration expansion may distribute semantic functions across
+        # several authored scenes, but it must not narrow the canonical route.
+        # Otherwise exact obligation overrides that cross a location boundary
+        # become out-of-route only because the requested duration changed.
+        runtime_location_sequence = list(canonical_location_sequence)
+        runtime_location = canonical_locations[location_index]
+        beat_function_order = ("setup", "pressure", "turn", "payoff")
+        function_start = (position - 1) * len(beat_function_order) // count
+        function_end = position * len(beat_function_order) // count
+        allowed_segment_functions = set(
+            beat_function_order[function_start:function_end]
+            or [beat_function_order[min(function_start, len(beat_function_order) - 1)]]
+        )
+        runtime_segments: list[dict[str, Any]] = []
+        for segment_index, canonical_segment in enumerate(canonical_segments):
+            runtime_segment = deepcopy(canonical_segment)
+            segment_overrides = runtime_segment.get("beat_overrides")
+            if isinstance(segment_overrides, dict) and count > 1:
+                runtime_segment["beat_overrides"] = {
+                    function: deepcopy(override)
+                    for function, override in segment_overrides.items()
+                    if function in allowed_segment_functions
+                }
+            if count > 1:
+                segment_count = len(canonical_segments)
+                if segment_count <= 1 or segment_index == segment_count - 1:
+                    root_owner_functions = {"payoff"}
+                elif segment_index == 0:
+                    root_owner_functions = {"setup"}
+                else:
+                    middle_functions = ("pressure", "turn")
+                    middle_index = min(
+                        segment_index - 1,
+                        len(middle_functions) - 1,
+                    )
+                    root_owner_functions = {middle_functions[middle_index]}
+                runtime_segment["root_active_beat_functions"] = [
+                    function
+                    for function in beat_function_order
+                    if function in root_owner_functions
+                    and function in allowed_segment_functions
+                ]
+            runtime_segments.append(runtime_segment)
         runtime_locations.append(runtime_location)
         runtime_location_sequences.append(runtime_location_sequence)
         runtime_location_segments.append(runtime_segments)
@@ -717,6 +761,49 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
         }
     )
     return expanded
+
+
+def _allocate_scene_cut_durations(
+    *,
+    scene_target_seconds: int,
+    cut_count: int,
+) -> list[int]:
+    """Partition a scene target exactly across its authored semantic cuts."""
+
+    if (
+        isinstance(scene_target_seconds, bool)
+        or not isinstance(scene_target_seconds, int)
+        or scene_target_seconds <= 0
+    ):
+        raise RuntimeError("scene target duration must be a positive integer")
+    if isinstance(cut_count, bool) or not isinstance(cut_count, int) or cut_count <= 0:
+        raise RuntimeError("scene cut count must be a positive integer")
+    base_seconds, remainder = divmod(scene_target_seconds, cut_count)
+    durations = [
+        base_seconds + (1 if index < remainder else 0)
+        for index in range(cut_count)
+    ]
+    if any(seconds < 1 or seconds > 60 for seconds in durations):
+        raise RuntimeError(
+            "scene target cannot be partitioned within Kling duration range "
+            f"1-60 seconds: target={scene_target_seconds}, cuts={cut_count}"
+        )
+    return durations
+
+
+def _duration_exception_for_cut(cut_duration_seconds: int) -> dict[str, Any]:
+    """Declare when an authored semantic cut intentionally exceeds 12 seconds."""
+
+    enabled = cut_duration_seconds > 12
+    return {
+        "allowed": enabled,
+        "reason": (
+            "scene target durationをsemantic cut数へ厳密配分し、"
+            "durationだけを理由に未承認cutを増やさないため"
+            if enabled
+            else ""
+        ),
+    }
 
 
 def _md_yaml(title: str, data: dict[str, Any]) -> str:
@@ -991,7 +1078,13 @@ def _reviewed_story_duration_contract_errors(
     for index, scene in enumerate(scenes, start=1):
         scene_seconds = _positive_story_duration_seconds(scene.get("target_duration_seconds"))
         if scene_seconds is None:
-            errors.append(f"scene[{index}].target_duration_seconds must be positive")
+            errors.append(
+                f"scene[{index}].target_duration_seconds must be a positive integer"
+            )
+        elif not scene_seconds.is_integer():
+            errors.append(
+                f"scene[{index}].target_duration_seconds must be a positive integer"
+            )
         else:
             scene_target_seconds.append(scene_seconds)
         narration_seconds = _positive_story_duration_seconds(scene.get("narration_target_seconds"))
@@ -1000,10 +1093,13 @@ def _reviewed_story_duration_contract_errors(
         else:
             narration_target_seconds.append(narration_seconds)
 
-    if len(scene_target_seconds) == len(scenes) and sum(scene_target_seconds) < plan.target_seconds:
+    if (
+        len(scene_target_seconds) == len(scenes)
+        and sum(scene_target_seconds) != plan.target_seconds
+    ):
         errors.append(
-            "scene target duration sum below requested target "
-            f"({sum(scene_target_seconds):g}<{plan.target_seconds})"
+            "scene target duration sum must equal requested target "
+            f"({sum(scene_target_seconds):g}!={plan.target_seconds})"
         )
     if len(narration_target_seconds) == len(scenes) and sum(narration_target_seconds) < plan.minimum_narration_seconds:
         errors.append(
@@ -1149,17 +1245,20 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     unique_places = list(dict.fromkeys(str(place) for place in places))
     cinderella_subjects = {
-        "灰の台所": "灰の台所。薄暗い屋内、灰と布の質感、東向きの小窓から入る朝の低い自然光、人物なし",
+        "灰の台所": "灰の台所。灰と布、石床、作業台、小窓、狭い動線が読める屋内、人物なし",
         "閉ざされた扉の前の暗い屋内": "閉ざされた扉の前の暗い屋内。重い扉、狭い廊下、遮られた光、人物なし",
-        "月明かりの庭": "月明かりの庭。夜、月光、変身が起きる余白のある庭、人物なし",
-        "馬車が待つ門前の道": "馬車が待つ門前の道。深夜のみ、濃い青の月明かり、月が見える、宮殿へ向かう門前、馬車が通れる道幅、pumpkin_carriage と同じ時間帯に合う光、昼光なし、朝日なし、太陽なし、昼の空なし、人物なし",
-        "宮殿の階段": "宮殿の階段。夜の宮殿、舞踏会の光が漏れる階段、上方向の導線、人物なし",
-        "舞踏会の大広間": "舞踏会の大広間。夜の宮殿内、シャンデリア光、群衆や踊りを置ける広い床、人物なし",
-        "真夜中の大階段": "真夜中の大階段。夜、時計後の緊張、小道具を置ける空の段差と月光、人物なし、ガラスの靴なし、靴なし、物語アイテムなし",
-        "靴合わせが行われる部屋": "靴合わせが行われる部屋。室内、日中でも落ち着いた光、人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
-        "靴合わせの部屋": "靴合わせの部屋。室内、日中でも落ち着いた光、人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
-        "王宮の命令の間": "王宮の命令の間。日中の王宮内、命令を受け渡すための広さと権威ある調度、人物なし、読める文字なし",
-        "町の家々": "町の家々。日中、王宮の使者が順に訪ねられる複数の家の外観と戸口、人物なし、読める文字なし",
+        "閉ざされた扉の前": "閉ざされた正面扉と裏口のある屋敷内。重い木扉、掛け金、狭い廊下、遮られた光、人物なし",
+        "月明かりの庭": "屋敷の庭。植栽、園路、変身が起きる余白が読める空間、人物なし",
+        "馬車が待つ門前の道": "宮殿へ向かう門前の道。門、塀、馬車が通れる道幅が読める空間、人物なし、馬車なし",
+        "馬車が待つ門前": "屋敷の門前。門、塀、轍、馬車が通れる道幅と宮殿方向への出口が読める空間、人物なし、馬車なし",
+        "宮殿へ続く石畳": "屋敷の門から宮殿方向へ続く石畳。轍、道幅、遠方の宮殿の灯りが読める夜道、人物なし、馬車なし",
+        "宮殿の階段": "宮殿の階段。踊り場、手すり、上方向の導線、固定された照明器具が読める空間、人物なし",
+        "舞踏会の大広間": "宮殿の舞踏会用大広間。シャンデリアの構造、群衆や踊りを置ける広い床、出入口が読める空間、人物なし",
+        "真夜中の大階段": "宮殿の大階段。時計後の逃走を置ける段差、踊り場、手すりが読める空間、人物なし、ガラスの靴なし、靴なし、物語アイテムなし",
+        "靴合わせが行われる部屋": "靴合わせが行われる部屋。人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
+        "靴合わせの部屋": "靴合わせの部屋。人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
+        "王宮の命令の間": "王宮の命令の間。命令を受け渡すための広さと権威ある調度、人物なし、読める文字なし",
+        "町の家々": "王宮の使者が順に訪ねられる複数の家の外観と戸口、人物なし、読める文字なし",
     }
     for index, place in enumerate(unique_places, start=1):
         subject = cinderella_subjects.get(str(place), f"{place}の場所参照。人物なし")
@@ -1172,6 +1271,7 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 "story_purpose": f"{place}の空間・光・質感を固定する",
                 "reusable_reason": "同じ場所のcutで背景と空気感を保つ",
                 "visual_spec": {"subject": subject},
+                "reuse_contract": {"mode": "neutral_anchor"},
             }
         )
     return specs
@@ -1319,6 +1419,25 @@ def _normalize_location_segment(value: Any) -> dict[str, Any]:
             if str(item).strip()
         },
     }
+    if "root_active_beat_functions" in value:
+        raw_root_functions = value.get("root_active_beat_functions")
+        normalized["root_active_beat_functions"] = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (
+                    raw_root_functions
+                    if isinstance(raw_root_functions, list)
+                    else []
+                )
+                if str(item).strip()
+            )
+        )
+    for policy_key in (
+        "first_frame_character_asset_overrides",
+        "first_frame_excluded_object_ids",
+    ):
+        if policy_key in value:
+            normalized[policy_key] = deepcopy(value[policy_key])
     return normalized
 
 
@@ -1341,6 +1460,21 @@ def _scene_location_segments(
         if (segment := _normalize_location_segment(value))
         and (not allowed_locations or segment["location"] in allowed_locations)
     ]
+
+
+def _location_segment_root_is_active(
+    segment: dict[str, Any], beat_function: str | None = None
+) -> bool:
+    """Treat absent scope as canonical; explicit empty scope as route-only."""
+
+    if "root_active_beat_functions" not in segment:
+        return True
+    functions = {
+        str(item).strip()
+        for item in segment.get("root_active_beat_functions") or []
+        if str(item).strip()
+    }
+    return beat_function in functions if beat_function is not None else bool(functions)
 
 
 def _location_specs_for_scene_sequence(
@@ -1396,6 +1530,15 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
                     "costume_state": "舞踏会ドレス姿",
                     "forbidden_costume_states": ["質素な普段着"],
                 },
+                "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
+                "appearance_contract": {
+                    "social_position": "屋敷で酷使される若い女性",
+                    "occupation_or_role": "舞踏会へ向かう主人公",
+                    "occasion_or_state": "舞踏会ドレス姿",
+                    "materials": "物語時代に整合する上質な布、手仕事の装飾",
+                    "must_avoid": ["質素な普段着", "現代服"],
+                },
+                "reuse_contract": {"mode": "state_variant", "derived_from_asset_id": profile["protagonist_asset_id"]},
             }
         )
         specs.append(
@@ -1411,6 +1554,15 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
                     "costume_state": "魔法が解けた後の質素な衣装",
                     "forbidden_costume_states": ["舞踏会ドレス"],
                 },
+                "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
+                "appearance_contract": {
+                    "social_position": "屋敷で酷使される若い女性",
+                    "occupation_or_role": "魔法が解けた後の主人公",
+                    "occasion_or_state": "質素な作業着",
+                    "materials": "物語時代に整合する粗い布、使い込まれた仕立て",
+                    "must_avoid": ["舞踏会ドレス", "現代服"],
+                },
+                "reuse_contract": {"mode": "state_variant", "derived_from_asset_id": profile["protagonist_asset_id"]},
             }
         )
 
@@ -1467,6 +1619,17 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
             if isinstance(record.get("appearance_continuity"), dict)
             else {}
         )
+        raw_members = record.get("members") if isinstance(record.get("members"), list) else record.get("member_ids")
+        member_ids = [str(value).strip() for value in raw_members or [] if str(value).strip()]
+        plural_probe = f"{source_character_id} {record.get('name') or ''}".lower()
+        is_ensemble = bool(member_ids) or any(token in plural_probe for token in ("たち", "姉妹", "兄弟", "sisters", "brothers", "group"))
+        if is_ensemble and not member_ids:
+            member_ids = [f"{source_character_id}_1", f"{source_character_id}_2"]
+        subject_contract = {
+            "identity_scope": "ensemble" if is_ensemble else "individual",
+            "subject_count": len(member_ids) if is_ensemble else 1,
+            "member_ids": member_ids,
+        }
         role_probe = f"{source_character_id} {name} {role}".lower()
         role_tags: list[str] = []
         for terms, tag in (
@@ -1490,6 +1653,18 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
                 "scene_indices": list(dict.fromkeys(scene_indices)),
                 "story_purpose": role,
                 "visual_subject": f"{name}の全身参照。{role}。実写映画の同一人物として固定し、{period_clause}を守る",
+                "subject_contract": subject_contract,
+                "appearance_contract": {
+                    "social_position": str(record.get("social_position") or role).strip(),
+                    "occupation_or_role": role,
+                    "occasion_or_state": str(appearance_continuity.get("costume_state") or record.get("costume_state") or "物語内の通常状態").strip(),
+                    "silhouette": str(record.get("silhouette") or "役割と身分を他人物から判別できる輪郭").strip(),
+                    "materials": str(record.get("materials") or f"{period_clause}に整合する素材").strip(),
+                    "condition": str(record.get("condition") or "役割と生活状況が手入れの状態から読める").strip(),
+                    "palette": str(record.get("palette") or "他の主要人物と混同しない固有配色").strip(),
+                    "must_avoid": [str(value).strip() for value in record.get("must_avoid") or ["現代服", "役割と矛盾する身分表現"] if str(value).strip()],
+                },
+                "reuse_contract": {"mode": "neutral_anchor"},
                 **(
                     {
                         "identity_name": name,
@@ -1501,6 +1676,45 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
             }
         )
     return specs
+
+
+def _protagonist_appearance_contract(profile: dict[str, Any]) -> dict[str, Any]:
+    """Project reviewed role/appearance facts without inventing a costume."""
+
+    research = profile.get("reviewed_research")
+    materials = research.get("story_materials") if isinstance(research, dict) else {}
+    records = materials.get("characters") if isinstance(materials, dict) else []
+    protagonist_record = next(
+        (
+            item
+            for item in records or []
+            if isinstance(item, dict)
+            and str(item.get("character_id") or "").strip() == "protagonist"
+        ),
+        {},
+    )
+    role = str(protagonist_record.get("role") or "物語上の主人公").strip()
+    continuity = (
+        protagonist_record.get("appearance_continuity")
+        if isinstance(protagonist_record.get("appearance_continuity"), dict)
+        else {}
+    )
+    story_time = str(profile.get("story_time") or "").strip()
+    period_materials = f"{story_time}に整合する素材" if story_time else "物語世界に整合する素材"
+    return {
+        "social_position": str(protagonist_record.get("social_position") or role).strip(),
+        "occupation_or_role": role,
+        "occasion_or_state": str(continuity.get("costume_state") or protagonist_record.get("costume_state") or "物語冒頭の通常状態").strip(),
+        "silhouette": str(protagonist_record.get("silhouette") or "他の主要人物と混同しない主人公固有の輪郭").strip(),
+        "materials": str(protagonist_record.get("materials") or period_materials).strip(),
+        "condition": str(protagonist_record.get("condition") or "生活状況が衣装の手入れと摩耗から読める").strip(),
+        "palette": str(protagonist_record.get("palette") or "後続の状態variantと区別できる固有配色").strip(),
+        "must_avoid": [
+            str(value).strip()
+            for value in protagonist_record.get("must_avoid") or ["現代服", "後続場面でのみ現れる衣装"]
+            if str(value).strip()
+        ],
+    }
 
 
 def _protagonist_asset_for_cut(profile: dict[str, Any], scene_index: int, obligation_id: str) -> str:
@@ -1543,7 +1757,8 @@ def _supporting_object_asset_specs(profile: dict[str, Any]) -> list[dict[str, An
             "reference_images": [f"assets/objects/{profile.get('carriage_asset_id') or 'carriage'}.png"],
             "scene_indices": [4],
             "story_purpose": "門前から宮殿へ出発するための大型舞台装置",
-            "visual_subject": "実写映画の馬車。門前に停まる重厚な車体、車輪、扉、月光、読める文字なし",
+            "visual_subject": "実写映画の馬車。重厚な車体、車輪、扉、乗降口の構造が読める。背景なし、読める文字なし",
+            "reuse_contract": {"mode": "neutral_anchor"},
         }
     ]
 
@@ -1824,6 +2039,7 @@ def _character_asset_for_subject(
     scene_index: int,
     obligation_id: str,
     subject: str,
+    first_frame_asset_overrides: dict[str, str] | None = None,
 ) -> str:
     """Resolve a cut's focal subject to the matching character anchor."""
 
@@ -1834,6 +2050,25 @@ def _character_asset_for_subject(
         f"魔法が解けた後の{profile.get('protagonist_name') or ''}",
         "protagonist",
     }
+    overrides = {
+        str(key).strip(): str(value).strip()
+        for key, value in (
+            first_frame_asset_overrides
+            if isinstance(first_frame_asset_overrides, dict)
+            else {}
+        ).items()
+        if str(key).strip() and str(value).strip()
+    }
+    direct_override = overrides.get(normalized_subject)
+    if direct_override:
+        return direct_override
+    if normalized_subject in protagonist_names:
+        protagonist_override = (
+            overrides.get(str(profile.get("protagonist_name") or "").strip())
+            or overrides.get("protagonist")
+        )
+        if protagonist_override:
+            return protagonist_override
     if not normalized_subject or normalized_subject in protagonist_names:
         return _protagonist_asset_for_cut(profile, scene_index, obligation_id)
     for spec in _supporting_character_asset_specs(profile):
@@ -1881,6 +2116,346 @@ def _object_name_for_asset(profile: dict[str, Any], object_id: str) -> str:
         if str(spec.get("object_id") or "") == object_id:
             return str(spec.get("name") or object_id)
     return object_id
+
+
+_MISSING_POLICY_VALUE = object()
+
+
+def _character_identity_catalog(
+    profile: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Return asset→identity and alias→identities without merging ambiguity."""
+
+    identity_by_asset: dict[str, str] = {}
+    identities_by_alias: dict[str, set[str]] = {}
+
+    def register(identity: str, asset_id: str, aliases: set[str]) -> None:
+        if not identity or not asset_id:
+            return
+        identity_by_asset[asset_id] = identity
+        for alias in {asset_id, *aliases}:
+            normalized_alias = str(alias or "").strip()
+            if normalized_alias:
+                identities_by_alias.setdefault(normalized_alias, set()).add(identity)
+
+    protagonist_name = str(profile.get("protagonist_name") or "").strip()
+    protagonist_ids = {
+        str(profile.get("protagonist_asset_id") or "").strip(),
+        str(profile.get("protagonist_transformed_asset_id") or "").strip(),
+        str(profile.get("protagonist_post_midnight_asset_id") or "").strip(),
+    }
+    protagonist_ids.discard("")
+    protagonist_identity = (
+        f"protagonist:{str(profile.get('protagonist_asset_id') or protagonist_name)}"
+    )
+    protagonist_aliases = {
+        protagonist_name,
+        f"変身後の{protagonist_name}" if protagonist_name else "",
+        f"魔法が解けた後の{protagonist_name}" if protagonist_name else "",
+        f"質素な普段着へ戻った{protagonist_name}" if protagonist_name else "",
+        f"普段着の{protagonist_name}" if protagonist_name else "",
+        "protagonist",
+    }
+    for asset_id in protagonist_ids:
+        register(protagonist_identity, asset_id, protagonist_aliases)
+
+    for spec in _supporting_character_asset_specs(profile):
+        asset_id = str(spec.get("character_id") or "").strip()
+        if not asset_id:
+            continue
+        identity_name = str(spec.get("identity_name") or "").strip()
+        if asset_id in protagonist_ids:
+            identity = protagonist_identity
+        else:
+            identity = "supporting:" + str(
+                spec.get("source_character_id")
+                or identity_name
+                or spec.get("name")
+                or asset_id
+            ).strip()
+        register(
+            identity,
+            asset_id,
+            {
+                str(spec.get("source_character_id") or "").strip(),
+                str(spec.get("name") or "").strip(),
+                identity_name,
+            },
+        )
+    return identity_by_asset, identities_by_alias
+
+
+def _character_identities_in_text(
+    profile: dict[str, Any], value: Any
+) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    _identity_by_asset, identities_by_alias = _character_identity_catalog(profile)
+    return {
+        identity
+        for alias, identities in identities_by_alias.items()
+        if alias and alias in text
+        for identity in identities
+    }
+
+
+def _is_character_body_part_evidence(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(r"(?:手元|手|指先|指|腕|足元|足先|足|踵)", text)
+        and not re.search(r"(?:全身|身体|姿|立つ|座る|歩く|走る|を乗せた|と[^、。]+)", text)
+    )
+
+
+def _validate_first_frame_excluded_object_ids(
+    profile: dict[str, Any],
+    value: Any = _MISSING_POLICY_VALUE,
+    *,
+    context: str,
+) -> list[str]:
+    """Validate first-frame object exclusions without accepting unknown assets."""
+
+    if value is _MISSING_POLICY_VALUE:
+        return []
+    if not isinstance(value, list):
+        raise RuntimeError(
+            f"{context}: first_frame_excluded_object_ids must be a list"
+        )
+    known_ids = {
+        str(profile.get("artifact_asset_id") or "").strip(),
+        *(
+            str(spec.get("object_id") or "").strip()
+            for spec in _supporting_object_asset_specs(profile)
+        ),
+    }
+    known_ids.discard("")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise RuntimeError(
+                f"{context}: first_frame_excluded_object_ids must contain "
+                "non-blank strings"
+            )
+        object_id = item.strip()
+        if object_id not in known_ids:
+            raise RuntimeError(
+                f"{context}: unknown object asset id in "
+                f"first_frame_excluded_object_ids: {object_id}"
+            )
+        if object_id not in normalized:
+            normalized.append(object_id)
+    return normalized
+
+
+def _validate_first_frame_character_asset_overrides(
+    profile: dict[str, Any],
+    value: Any = _MISSING_POLICY_VALUE,
+    *,
+    context: str,
+) -> dict[str, str]:
+    """Allow overrides only between known variants of the same character."""
+
+    if value is _MISSING_POLICY_VALUE:
+        return {}
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"{context}: first_frame_character_asset_overrides must be an object"
+        )
+
+    identity_by_asset, identities_by_alias = _character_identity_catalog(profile)
+    known_ids = set(identity_by_asset)
+
+    normalized: dict[str, str] = {}
+    for raw_subject, raw_asset_id in value.items():
+        if (
+            not isinstance(raw_subject, str)
+            or not raw_subject.strip()
+            or not isinstance(raw_asset_id, str)
+            or not raw_asset_id.strip()
+        ):
+            raise RuntimeError(
+                f"{context}: first_frame_character_asset_overrides must map "
+                "non-blank strings to non-blank strings"
+            )
+        subject = raw_subject.strip()
+        asset_id = raw_asset_id.strip()
+        if asset_id not in known_ids:
+            raise RuntimeError(
+                f"{context}: first-frame override must reference a known "
+                f"character asset: {asset_id}"
+            )
+        subject_identities = identities_by_alias.get(subject)
+        if not subject_identities:
+            raise RuntimeError(
+                f"{context}: first-frame override subject is not a known "
+                f"character identity: {subject}"
+            )
+        if len(subject_identities) != 1:
+            raise RuntimeError(
+                f"{context}: first-frame override subject alias is ambiguous: "
+                f"{subject}"
+            )
+        if identity_by_asset[asset_id] != next(iter(subject_identities)):
+            raise RuntimeError(
+                f"{context}: first-frame override must stay within the same "
+                f"identity: {subject} -> {asset_id}"
+            )
+        normalized[subject] = asset_id
+    return normalized
+
+
+def _bind_character_reference_pairs(
+    *,
+    character_ids: list[str],
+    references: list[str],
+    context: str,
+) -> list[tuple[str, str]]:
+    """Bind each character reference to its asset id, never by list position."""
+
+    reference_by_character_id: dict[str, str] = {}
+    for raw_reference in references:
+        reference = str(raw_reference)
+        if "/characters/" not in reference:
+            continue
+        character_id = Path(reference).stem
+        if character_id in reference_by_character_id:
+            raise RuntimeError(
+                f"{context}: duplicate character reference binding for "
+                f"{character_id}"
+            )
+        reference_by_character_id[character_id] = reference
+
+    requested_ids = list(dict.fromkeys(str(item).strip() for item in character_ids))
+    if len(requested_ids) != len(character_ids) or any(not item for item in requested_ids):
+        raise RuntimeError(f"{context}: character ids must be unique non-blank asset ids")
+    if set(reference_by_character_id) != set(requested_ids):
+        missing = sorted(set(requested_ids) - set(reference_by_character_id))
+        unexpected = sorted(set(reference_by_character_id) - set(requested_ids))
+        raise RuntimeError(
+            f"{context}: character reference binding id mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return [
+        (character_id, reference_by_character_id[character_id])
+        for character_id in requested_ids
+    ]
+
+
+def _first_frame_exclusion_tokens(
+    profile: dict[str, Any], excluded_object_ids: list[str]
+) -> set[str]:
+    return {
+        token
+        for object_id in excluded_object_ids
+        for token in (object_id, _object_name_for_asset(profile, object_id))
+        if token
+    }
+
+
+def _sanitize_first_frame_prose(value: Any, *, excluded_tokens: set[str]) -> Any:
+    """Remove positive still-image clauses that name an excluded object."""
+
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_first_frame_prose(item, excluded_tokens=excluded_tokens)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        sanitized = [
+            _sanitize_first_frame_prose(item, excluded_tokens=excluded_tokens)
+            for item in value
+        ]
+        return [item for item in sanitized if item not in ("", None, [], {})]
+    if not isinstance(value, str) or not excluded_tokens:
+        return value
+    if not any(token in value for token in excluded_tokens):
+        return value
+    clauses = re.split(r"(?<=[。！？\n])", value)
+    kept = [
+        clause
+        for clause in clauses
+        if clause.strip()
+        and not any(token in clause for token in excluded_tokens)
+    ]
+    return "".join(kept).strip()
+
+
+def _abstract_non_primary_route_locations(
+    value: Any,
+    *,
+    primary_location: str,
+    route_locations: list[str],
+) -> Any:
+    """Keep route provenance exact while removing other location IDs from provider prose."""
+
+    if isinstance(value, dict):
+        return {
+            key: _abstract_non_primary_route_locations(
+                item,
+                primary_location=primary_location,
+                route_locations=route_locations,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _abstract_non_primary_route_locations(
+                item,
+                primary_location=primary_location,
+                route_locations=route_locations,
+            )
+            for item in value
+        ]
+    if not isinstance(value, str):
+        return value
+    projected = value
+    try:
+        primary_index = route_locations.index(primary_location)
+    except ValueError:
+        primary_index = -1
+    for location in sorted(route_locations, key=len, reverse=True):
+        if (
+            not location
+            or location == primary_location
+        ):
+            continue
+        try:
+            location_index = route_locations.index(location)
+        except ValueError:
+            location_index = primary_index
+        replacement = (
+            "次の場所へ続く導線"
+            if primary_index >= 0 and location_index > primary_index
+            else "前の場所へ続く導線"
+            if primary_index >= 0 and location_index < primary_index
+            else "画面内で別方向へ続く導線"
+        )
+        projected = projected.replace(location, replacement)
+    return projected
+
+
+def _validate_exact_obligation_string_list(
+    value: Any = _MISSING_POLICY_VALUE,
+    *,
+    field_name: str,
+    context: str,
+) -> list[str]:
+    if value is _MISSING_POLICY_VALUE:
+        return []
+    if not isinstance(value, list):
+        raise RuntimeError(f"{context}: {field_name} must be a list")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise RuntimeError(
+                f"{context}: {field_name} must contain non-blank strings"
+            )
+        if item.strip() not in normalized:
+            normalized.append(item.strip())
+    return normalized
 
 
 def _drawable_forbidden_reveal_names_for_scaffold(
@@ -2017,9 +2592,11 @@ def _is_cinderella_fitted_slipper_proof(profile: dict[str, Any], object_ids: lis
         term in joined
         for term in (
             "足にガラスの靴が合",
+            "足にガラスの靴が隙間なく合",
             "足に靴が合",
             "ガラスの靴を履いた足",
             "足に隙間なく合",
+            "踵まで隙間なく合",
         )
     )
 
@@ -2961,6 +3538,39 @@ def _first_frame_visual_plan_for_scaffold(
     character_state_bindings = _character_state_bindings_for_scaffold(
         profile, character_ids
     )
+    identity_by_asset, identities_by_alias = _character_identity_catalog(profile)
+    preferred_name_by_identity: dict[str, str] = {}
+    for character_id in character_ids:
+        identity = identity_by_asset.get(str(character_id).strip())
+        if identity and identity not in preferred_name_by_identity:
+            preferred_name_by_identity[identity] = _character_name_for_asset(
+                profile, character_id
+            )
+
+    def canonicalize_visible_character_name(value: Any) -> str:
+        text = str(value or "").strip()
+        identities = _character_identities_in_text(profile, text)
+        if len(identities) != 1:
+            return text
+        identity = next(iter(identities))
+        preferred = preferred_name_by_identity.get(identity, "")
+        if not preferred or preferred in text:
+            return text
+        matching_aliases = sorted(
+            (
+                alias
+                for alias, alias_identities in identities_by_alias.items()
+                if alias
+                and alias in text
+                and alias_identities == {identity}
+                and alias not in identity_by_asset
+            ),
+            key=len,
+            reverse=True,
+        )
+        if not matching_aliases:
+            return text
+        return text.replace(matching_aliases[0], preferred, 1)
 
     object_entries: list[dict[str, Any]] = []
     for object_index, object_id in enumerate(object_ids):
@@ -3000,6 +3610,97 @@ def _first_frame_visual_plan_for_scaffold(
     ).strip()
     if object_entries and shot_design["shot_role"] in {"insert", "object_proof"}:
         primary_subject_name = str(object_entries[0]["object_name"])
+    else:
+        primary_subject_name = canonicalize_visible_character_name(
+            primary_subject_name
+        )
+
+    primary_subject_identities = _character_identities_in_text(
+        profile, primary_subject_name
+    )
+    secondary_subject_names: list[str] = []
+    seen_subject_identities = set(primary_subject_identities)
+    seen_subject_names = {primary_subject_name}
+    for character_id in character_ids:
+        character_name = _character_name_for_asset(profile, character_id)
+        identity = identity_by_asset.get(str(character_id).strip())
+        if identity and identity in seen_subject_identities:
+            continue
+        if character_name and character_name not in seen_subject_names:
+            secondary_subject_names.append(character_name)
+            seen_subject_names.add(character_name)
+        if identity:
+            seen_subject_identities.add(identity)
+    for entry in object_entries:
+        object_name = str(entry.get("object_name") or "").strip()
+        if object_name and object_name not in seen_subject_names:
+            secondary_subject_names.append(object_name)
+            seen_subject_names.add(object_name)
+
+    spatial_background = _drawable_phrase_for_scaffold(
+        cut_plan.get("background") or location_name
+    )
+    spatial_midground = canonicalize_visible_character_name(
+        _drawable_phrase_for_scaffold(
+            cut_plan.get("midground") or geography.get("midground") or ""
+        )
+    )
+    midground_identities = _character_identities_in_text(
+        profile, spatial_midground
+    )
+    spatial_evidence = (
+        drawable_evidence
+        if drawable_evidence is not None
+        else _cut_specific_drawable_evidence_for_scaffold(viewer)
+    )
+    raw_foreground_candidates = [
+        cut_plan.get("foreground") or geography.get("foreground") or "",
+        *(entry.get("object_name") or "" for entry in object_entries),
+        *(
+            item.get("must_be_drawn_as") or ""
+            for item in spatial_evidence
+            if isinstance(item, dict)
+        ),
+    ]
+    spatial_foreground = ""
+    for raw_candidate in raw_foreground_candidates:
+        candidate = canonicalize_visible_character_name(
+            _drawable_phrase_for_scaffold(raw_candidate)
+        )
+        if (
+            not candidate
+            or candidate == spatial_background
+            or candidate == spatial_midground
+        ):
+            continue
+        candidate_identities = _character_identities_in_text(profile, candidate)
+        if (
+            candidate_identities.intersection(midground_identities)
+            and not _is_character_body_part_evidence(candidate)
+        ):
+            continue
+        spatial_foreground = candidate
+        break
+
+    subject_priority_order: list[str] = []
+    seen_priority_identities: set[str] = set()
+    seen_priority_names: set[str] = set()
+    for value in [
+        primary_subject_name,
+        *secondary_subject_names,
+        location_name,
+    ]:
+        name = str(value or "").strip()
+        identities = _character_identities_in_text(profile, name)
+        if (
+            not name
+            or name in seen_priority_names
+            or identities.intersection(seen_priority_identities)
+        ):
+            continue
+        subject_priority_order.append(name)
+        seen_priority_names.add(name)
+        seen_priority_identities.update(identities)
 
     character_state_gate: dict[str, Any] = {}
     if character_ids:
@@ -3062,11 +3763,41 @@ def _first_frame_visual_plan_for_scaffold(
             *(reveal_constraints.get("forbidden_until_later_scene") or []),
         ],
     )
+    motion_contract = (
+        cut_contract.get("motion_contract")
+        if isinstance(cut_contract.get("motion_contract"), dict)
+        else {}
+    )
+    motion_reveal_outcomes = [
+        _drawable_phrase_for_scaffold(item)
+        for item in motion_contract.get("allowed_new_reveal_elements") or []
+        if _drawable_phrase_for_scaffold(item)
+    ]
+    first_frame_asset_policy = (
+        cut_blueprint.get("first_frame_asset_policy")
+        if isinstance(cut_blueprint.get("first_frame_asset_policy"), dict)
+        else {}
+    )
+    excluded_object_names = [
+        _object_name_for_asset(profile, str(object_id).strip())
+        for object_id in first_frame_asset_policy.get("excluded_object_ids") or []
+        if str(object_id).strip()
+    ]
+    excluded_object_tokens = {
+        str(value).strip()
+        for value in [
+            *(first_frame_asset_policy.get("excluded_object_ids") or []),
+            *excluded_object_names,
+        ]
+        if str(value).strip()
+    }
     forbidden_future_outcomes = list(
         dict.fromkeys(
             [
                 *explicit_forbidden_future_outcomes,
                 *resolved_forbidden_reveal_names,
+                *motion_reveal_outcomes,
+                *excluded_object_names,
             ]
         )
     )
@@ -3090,6 +3821,20 @@ def _first_frame_visual_plan_for_scaffold(
         if part.strip()
         and not re.search(r"(?:人物|靴|ガラスの靴|物語アイテム)なし$", part.strip())
     )
+    location_texture = str(
+        _sanitize_first_frame_prose(
+            location_texture,
+            excluded_tokens=excluded_object_tokens,
+        )
+        or ""
+    ).strip()
+    location_light = str(
+        _sanitize_first_frame_prose(
+            _scaffold_location_light(location_spec, location_name),
+            excluded_tokens=excluded_object_tokens,
+        )
+        or f"{location_name}の空間構造が読める光"
+    ).strip()
     state_delta = _drawable_phrase_for_scaffold(
         progression.get("visible_state_delta_from_previous_cut")
     )
@@ -3178,15 +3923,7 @@ def _first_frame_visual_plan_for_scaffold(
         "subject_binding": {
             "primary_subject": {"name": primary_subject_name},
             "secondary_subjects": [
-                {"name": str(value)}
-                for value in (
-                    *(
-                        _character_name_for_asset(profile, character_id)
-                        for character_id in character_ids
-                    ),
-                    *(entry["object_name"] for entry in object_entries),
-                )
-                if str(value).strip() and str(value).strip() != primary_subject_name
+                {"name": value} for value in secondary_subject_names
             ],
             "background_subjects": [{"name": location_name}],
         },
@@ -3209,10 +3946,10 @@ def _first_frame_visual_plan_for_scaffold(
                     ),
                     "role_in_frame": character_role_in_frame(character_id),
                 }
-                for character_id, reference in zip(
-                    character_ids,
-                    references[: len(character_ids)],
-                    strict=True,
+                for character_id, reference in _bind_character_reference_pairs(
+                    character_ids=character_ids,
+                    references=references,
+                    context=selector,
                 )
             ],
             "object_references": [
@@ -3223,27 +3960,17 @@ def _first_frame_visual_plan_for_scaffold(
         "character_state_gate": character_state_gate,
         "object_visibility_gate": {"objects": object_entries},
         "spatial_composition": {
-            "foreground": _drawable_phrase_for_scaffold(
-                cut_plan.get("foreground") or geography.get("foreground") or ""
-            ),
-            "midground": _drawable_phrase_for_scaffold(
-                cut_plan.get("midground") or geography.get("midground") or ""
-            ),
-            "background": _drawable_phrase_for_scaffold(
-                cut_plan.get("background") or location_name
-            ),
-            "subject_priority_order": [
-                primary_subject_name,
-                *[entry["object_name"] for entry in object_entries if entry["object_name"] != primary_subject_name],
-                location_name,
-            ],
+            "foreground": spatial_foreground,
+            "midground": spatial_midground,
+            "background": spatial_background,
+            "subject_priority_order": subject_priority_order,
             "frame_edge_handoff": str(geography.get("screen_direction") or cut_plan.get("screen_direction") or ""),
             "shot_size": shot_design["shot_scale"],
             "camera_angle": str(geography.get("screen_direction") or cut_plan.get("screen_direction") or ""),
         },
         "scene_material_pack": {
             "time_of_day": str(scene_time_of_day or "").strip(),
-            "light_source": _scaffold_location_light(location_spec, location_name),
+            "light_source": location_light,
             "light_direction": f"{location_name}の奥から主被写体へ向く",
             "dominant_materials": [location_texture] if location_texture else [f"{location_name}の床、壁、衣服の実物質感"],
             "story_specific_texture": location_texture,
@@ -3733,6 +4460,43 @@ def _cinderella_segment_contract(
     }
 
 
+def _project_beat_overrides_to_segment_locations(
+    beat_overrides: dict[str, Any],
+    *,
+    allowed_locations: set[str],
+    allowed_functions: set[str],
+) -> dict[str, Any]:
+    """Project canonical multi-location overrides onto one duration segment."""
+
+    def project_override(value: Any) -> Any | None:
+        if not isinstance(value, dict):
+            return deepcopy(value)
+        explicit_location = str(value.get("location") or "").strip()
+        projected = deepcopy(value)
+        nested = projected.get("obligation_overrides")
+        projected_nested: dict[str, Any] = {}
+        if isinstance(nested, dict):
+            for obligation_id, obligation_override in nested.items():
+                projected_override = project_override(obligation_override)
+                if projected_override is not None:
+                    projected_nested[obligation_id] = projected_override
+            projected["obligation_overrides"] = projected_nested
+        if explicit_location and explicit_location not in allowed_locations:
+            if projected_nested:
+                return {"obligation_overrides": projected_nested}
+            return None
+        return projected
+
+    projected: dict[str, Any] = {}
+    for function, override in beat_overrides.items():
+        if function not in allowed_functions:
+            continue
+        projected_override = project_override(override)
+        if projected_override is not None:
+            projected[function] = projected_override
+    return projected
+
+
 def _scene_blueprint(
     *,
     profile: dict[str, Any],
@@ -3806,7 +4570,46 @@ def _scene_blueprint(
                 "payoff_focus": "開いた裏口と背後の閉ざされた扉",
                 "pressure": ["閉ざされた扉", "破れた衣装", "山積みの仕事"],
                 "beat_overrides": {
+                    "setup": {
+                        "location": "閉ざされた扉の前",
+                        "what_happens": "継母が舞踏会への参加を拒み、正面扉の前にシンデレラを残す",
+                        "obligation_overrides": {
+                            "scene_pressure": {
+                                "visible_action": "正面扉が開いたまま、シンデレラが山積みの仕事を抱えて継母の前に立っている",
+                                "visible_reaction": "継母は敷居で片腕を横へ伸ばし、義姉たちは招待状を持って扉の外にいる",
+                                "required_visual_evidence": ["開いた正面扉", "山積みの仕事を抱えたシンデレラ", "敷居で進路を遮る継母"],
+                                "required_roles": ["protagonist", "stepmother", "stepsisters"],
+                                "motion_attention_target": "敷居で進路を遮る継母の腕",
+                                "motion_brief": "シンデレラが抱えた仕事の上から片手を一度だけ継母へ伸ばす",
+                                "motion_end_state": "シンデレラの片手が継母の遮る腕の手前で止まり、正面扉はまだ開いている",
+                            }
+                        },
+                    },
+                    "pressure": {
+                        "location": "閉ざされた扉の前",
+                        "what_happens": "舞踏会の知らせを受けたシンデレラが参加を願い出るが、継母が破れた衣装と山積みの仕事を示して拒み、義姉たちと正面扉を閉じる",
+                        "primary_subject": "シンデレラ",
+                        "visible_action": "シンデレラが山積みの仕事を抱えて正面扉の内側に立ち、継母が開いた扉越しに片腕で進路を遮っている",
+                        "visible_reaction": "義姉たちは敷居の外で舞踏会の招待状を持ち、シンデレラは継母と閉じかけた扉を見ている",
+                        "required_visual_evidence": ["山積みの仕事を抱えたシンデレラ", "正面扉を閉じる継母", "敷居の外で招待状を持つ義姉たち"],
+                        "required_roles": ["protagonist", "stepmother", "stepsisters"],
+                        "motion_attention_target": "閉じかけた正面扉",
+                        "motion_brief": "継母が正面扉を閉じ、シンデレラが山積みの仕事を抱えたまま屋敷の奥へ続く廊下へ身体を向ける",
+                        "motion_end_state": "正面扉が閉まり、山積みの仕事を抱えたシンデレラの足先と視線が屋敷の奥の廊下を向いている",
+                        "obligation_overrides": {
+                            "visible_value_shift": {
+                                "visible_action": "シンデレラの片手が継母の遮る腕の手前で止まり、正面扉はまだ開いている",
+                                "visible_reaction": "継母が扉の取っ手を引き、義姉たちは敷居の外へ退いている",
+                                "required_visual_evidence": ["継母の腕の手前で止まった片手", "正面扉の取っ手を引く継母", "敷居の外の義姉たち"],
+                                "required_roles": ["protagonist", "stepmother", "stepsisters"],
+                                "motion_attention_target": "閉じる正面扉",
+                                "motion_brief": "継母が正面扉を閉じ、シンデレラが山積みの仕事を抱えたまま屋敷の奥へ続く廊下へ身体を向ける",
+                                "motion_end_state": "正面扉が閉まり、山積みの仕事を抱えたシンデレラの足先と視線が屋敷の奥の廊下を向いている",
+                            }
+                        },
+                    },
                     "turn": {
+                        "location": "屋敷の裏口",
                         "primary_subject": "シンデレラ",
                         "visible_action": "シンデレラが閉じた裏口の掛け金へ片手を添え、片足を敷居の手前に置いている",
                         "visible_reaction": "閉ざされた正面扉は背後に残り、裏口の隙間から低い月光が差している",
@@ -3815,10 +4618,15 @@ def _scene_blueprint(
                         "motion_attention_target": "裏口の敷居",
                         "motion_brief": "シンデレラが裏口の掛け金を外し、扉を身体一人分だけ開けて敷居を越え、両足で月明かりの庭へ出る",
                         "motion_end_state": "裏口が身体一人分だけ開き、シンデレラの両足が月明かりの庭に置かれ、閉ざされた正面扉は背後に残っている",
-                        "allowed_new_reveal_elements": ["月明かりの庭"],
-                        "use_next_cut_first_frame_as_last_frame": True,
+                        "obligation_overrides": {
+                            "causal_handoff": {
+                                "allowed_new_reveal_elements": ["月明かりの庭"],
+                                "use_next_cut_first_frame_as_last_frame": True,
+                            }
+                        },
                     },
                     "payoff": {
+                        "location": "月明かりの庭",
                         "primary_subject": "シンデレラ",
                         "obligation_overrides": {
                             "audience_context": {
@@ -3882,12 +4690,28 @@ def _scene_blueprint(
                         "motion_attention_target": "シンデレラと庭のかぼちゃ",
                         "motion_brief": "魔法の助力者が上げた片手を一度だけ振り下ろすと、光がシンデレラと庭のかぼちゃを包み、ドレス、ガラスの靴、馬車の形へ変える",
                         "motion_end_state": "変身後のシンデレラがガラスの靴で立ち、隣に完成したかぼちゃの馬車が扉を開いて止まり、魔法の助力者が同じ場所に立っている",
-                        "allowed_new_reveal_elements": [
-                            "変身後のシンデレラ",
-                            "ガラスの靴",
-                            "完成したかぼちゃの馬車",
-                        ],
-                        "use_next_cut_first_frame_as_last_frame": True,
+                        "obligation_overrides": {
+                            "causal_handoff": {
+                                "first_frame_character_asset_overrides": {
+                                    "シンデレラ": profile[
+                                        "protagonist_asset_id"
+                                    ],
+                                    "protagonist": profile[
+                                        "protagonist_asset_id"
+                                    ],
+                                },
+                                "first_frame_excluded_object_ids": [
+                                    profile["artifact_asset_id"],
+                                    profile["carriage_asset_id"],
+                                ],
+                                "allowed_new_reveal_elements": [
+                                    "変身後のシンデレラ",
+                                    "ガラスの靴",
+                                    "完成したかぼちゃの馬車",
+                                ],
+                                "use_next_cut_first_frame_as_last_frame": True,
+                            }
+                        },
                     },
                     "payoff": {
                         "primary_subject": "シンデレラ",
@@ -3931,7 +4755,36 @@ def _scene_blueprint(
                 "payoff_focus": "門を越えた馬車の車輪跡",
                 "pressure": ["馬車の扉", "門の境界", "宮殿の灯り"],
                 "beat_overrides": {
+                    "setup": {
+                        "location": "馬車が待つ門前",
+                        "obligation_overrides": {
+                            "scene_pressure": {
+                                "visible_action": "変身後のシンデレラが開いた馬車扉と家の門の間に立ち、両手を身体の横に下ろしている",
+                                "visible_reaction": "空の馬車客室と家へ戻る門が、シンデレラの左右に見えている",
+                                "required_visual_evidence": ["開いた馬車扉", "家へ戻る門", "両手を下ろした変身後のシンデレラ"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "開いた馬車扉",
+                                "motion_brief": "変身後のシンデレラが家の門から開いた馬車扉へ顔を一度だけ向ける",
+                                "motion_end_state": "変身後のシンデレラの顔と視線が開いた馬車扉を向き、両足と両手は門前の同じ位置に残っている",
+                            }
+                        },
+                    },
+                    "pressure": {
+                        "location": "馬車が待つ門前",
+                        "obligation_overrides": {
+                            "visible_value_shift": {
+                                "visible_action": "変身後のシンデレラが開いた馬車扉を向き、両足を門前の地面に置いている",
+                                "visible_reaction": "片手と扉枠の間にはまだ数センチの隙間があり、馬車客室は空いている",
+                                "required_visual_evidence": ["開いた馬車扉", "扉枠の手前にある片手", "門前に残る両足"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "馬車の扉枠",
+                                "motion_brief": "変身後のシンデレラが片手を開いた馬車の扉枠へ一度だけ伸ばす",
+                                "motion_end_state": "変身後のシンデレラの片手が馬車の扉枠に触れ、両足は門前の地面に残っている",
+                            }
+                        },
+                    },
                     "turn": {
+                        "location": "馬車が待つ門前",
                         "primary_subject": "シンデレラ",
                         "visible_action": "シンデレラが開いた馬車扉の前に立ち、片手を扉枠へ添えている",
                         "visible_reaction": "馬車の客室は空いており、家の門から宮殿方向へ続く道が背景に見える",
@@ -3940,21 +4793,37 @@ def _scene_blueprint(
                         "motion_attention_target": "馬車の客室",
                         "motion_brief": "シンデレラが片足を馬車の客室へ置き、身体を一度だけ客室内へ乗り入れる",
                         "motion_end_state": "シンデレラの身体が馬車の客室内に収まり、片手が内側の扉枠を支えている",
+                        "obligation_overrides": {
+                            "causal_handoff": {
+                                "visible_action": "変身後のシンデレラの片手が馬車の扉枠に触れ、両足は門前の地面に残っている",
+                                "visible_reaction": "空の馬車客室が正面に開き、家の門は背後に見えている",
+                                "required_visual_evidence": ["扉枠に触れた片手", "門前に残る両足", "空の馬車客室"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "馬車の客室",
+                                "motion_brief": "シンデレラが片足を馬車の客室へ置き、身体を一度だけ客室内へ乗り入れる",
+                                "motion_end_state": "シンデレラの身体が馬車の客室内に収まり、片手が内側の扉枠を支えている",
+                            }
+                        },
                     },
                     "payoff": {
+                        "location": "馬車が待つ門前",
                         "primary_subject": "シンデレラ",
                         "obligation_overrides": {
                             "audience_context": {
+                                "location": "馬車が待つ門前",
                                 "visible_action": "シンデレラを乗せたかぼちゃの馬車が家の門の手前で宮殿方向を向いている",
                                 "visible_reaction": "馬車の車輪は門の轍に揃い、門の先に宮殿方向へ続く道が見える",
                                 "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "家の門", "宮殿方向へ続く轍"],
                                 "required_roles": ["protagonist"],
                                 "motion_attention_target": "家の門の先へ続く道",
                                 "motion_brief": "シンデレラを乗せたかぼちゃの馬車が車輪を回し、家の門を一度だけ通過する",
-                                "motion_end_state": "かぼちゃの馬車の全体が家の門の外へ出て、車輪が宮殿方向の轍に載っている",
+                                "motion_end_state": "かぼちゃの馬車の全体が家の門の外へ出て、車輪が宮殿へ続く石畳の轍に載っている",
+                                "allowed_new_reveal_elements": ["宮殿へ続く石畳"],
+                                "use_next_cut_first_frame_as_last_frame": True,
                             },
                             "spatial_transition": {
-                                "primary_subject": "かぼちゃの馬車",
+                                "location": "宮殿へ続く石畳",
+                                "primary_subject": "シンデレラ",
                                 "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "門外の轍", "宮殿方向へ続く石畳"],
                                 "required_roles": ["protagonist"],
                                 "motion_attention_target": "宮殿方向へ続く石畳",
@@ -3962,7 +4831,8 @@ def _scene_blueprint(
                                 "motion_end_state": "かぼちゃの馬車が家の門から一台分離れ、車輪が宮殿方向へ続く石畳に揃っている",
                             },
                             "time_or_deadline_pressure": {
-                                "primary_subject": "かぼちゃの馬車",
+                                "location": "宮殿へ続く石畳",
+                                "primary_subject": "シンデレラ",
                                 "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "宮殿方向の石畳", "遠方の宮殿の灯り"],
                                 "required_roles": ["protagonist"],
                                 "motion_attention_target": "遠方の宮殿の灯り",
@@ -3986,20 +4856,64 @@ def _scene_blueprint(
                 "payoff_focus": "大広間の入口",
                 "pressure": ["宮殿の階段", "群衆の視線", "礼装の境界"],
                 "beat_overrides": {
+                    "setup": {
+                        "location": "宮殿の階段",
+                        "obligation_overrides": {
+                            "scene_pressure": {
+                                "visible_action": "変身後のシンデレラが宮殿の大階段の最下段前で両足を揃え、顔を伏せている",
+                                "visible_reaction": "階段上の礼装客はまだ広間側を向き、大階段の中央には空いた導線がある",
+                                "required_visual_evidence": ["最下段前の変身後のシンデレラ", "空いた大階段の中央", "広間側を向く礼装客"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "大階段の上端",
+                                "motion_brief": "変身後のシンデレラが伏せた顔を大階段の上端へ一度だけ上げる",
+                                "motion_end_state": "変身後のシンデレラの顔と視線が大階段の上端を向き、両足は最下段前の床に揃っている",
+                            }
+                        },
+                    },
+                    "pressure": {
+                        "location": "宮殿の階段",
+                        "obligation_overrides": {
+                            "visible_value_shift": {
+                                "visible_action": "変身後のシンデレラが大階段の上端を見上げ、両足を最下段前の床に揃えている",
+                                "visible_reaction": "階段上の礼装客が一人ずつ振り返り、視線を最下段へ向け始めている",
+                                "required_visual_evidence": ["最下段前に揃えた両足", "振り返る階段上の礼装客", "次の一段"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "大階段の最初の一段",
+                                "motion_brief": "変身後のシンデレラが片足を大階段の最初の一段へ一度だけ置く",
+                                "motion_end_state": "変身後のシンデレラの片足が最初の一段に載り、もう片足は最下段前の床に残っている",
+                            }
+                        },
+                    },
                     "turn": {
+                        "location": "宮殿の階段",
                         "primary_subject": "シンデレラ",
                         "visible_action": "シンデレラが宮殿の大階段の下段で上方を向き、片足を次の段へ置いている",
                         "visible_reaction": "階段上の礼装客が立ち止まり、視線を下段のシンデレラへ向けている",
                         "required_visual_evidence": ["次の段へ置いた片足", "階段上の礼装客", "大広間の入口"],
                         "required_roles": ["protagonist"],
                         "motion_attention_target": "大広間の入口",
-                        "motion_brief": "シンデレラが宮殿の大階段を二段だけ上り、その先の大広間の敷居を一歩で越える",
-                        "motion_end_state": "シンデレラが大広間の敷居の内側で立ち止まり、階段上の礼装客の視線が彼女に集まっている",
+                        "motion_brief": "シンデレラが宮殿の大階段を上り切り、その先の舞踏会の大広間の敷居を一歩で越える",
+                        "motion_end_state": "シンデレラが舞踏会の大広間の敷居の内側で立ち止まり、階段上の礼装客の視線が彼女に集まっている",
+                        "obligation_overrides": {
+                            "causal_handoff": {
+                                "visible_action": "変身後のシンデレラの片足が大階段の最初の一段に載り、もう片足は最下段前の床に残っている",
+                                "visible_reaction": "階段上の礼装客がシンデレラへ視線を向け、大広間の入口までの中央導線が空いている",
+                                "required_visual_evidence": ["最初の一段に載った片足", "シンデレラを見る礼装客", "大広間の入口までの導線"],
+                                "required_roles": ["protagonist"],
+                                "motion_attention_target": "大広間の入口",
+                                "motion_brief": "シンデレラが宮殿の大階段を上り切り、その先の舞踏会の大広間の敷居を一歩で越える",
+                                "motion_end_state": "シンデレラが舞踏会の大広間の敷居の内側で立ち止まり、階段上の礼装客の視線が彼女に集まっている",
+                                "allowed_new_reveal_elements": ["舞踏会の大広間"],
+                                "use_next_cut_first_frame_as_last_frame": True,
+                            }
+                        },
                     },
                     "payoff": {
+                        "location": "舞踏会の大広間",
                         "primary_subject": "王子",
                         "obligation_overrides": {
                             "audience_context": {
+                                "location": "舞踏会の大広間",
                                 "primary_subject": "王子",
                                 "required_visual_evidence": ["大広間の敷居の内側に立つシンデレラ", "広間中央の王子", "立ち止まった礼装客"],
                                 "required_roles": ["protagonist", "prince"],
@@ -4008,6 +4922,7 @@ def _scene_blueprint(
                                 "motion_end_state": "王子の顔と視線がシンデレラを向き、シンデレラは大広間の敷居の内側に立っている",
                             },
                             "spatial_transition": {
+                                "location": "舞踏会の大広間",
                                 "primary_subject": "シンデレラ",
                                 "required_visual_evidence": ["シンデレラ", "視線を向けた王子", "大広間の内側へ続く空いた導線"],
                                 "required_roles": ["protagonist", "prince"],
@@ -4143,6 +5058,14 @@ def _scene_blueprint(
                                 "motion_attention_target": "階段下方の出入口",
                                 "motion_brief": "シンデレラが階段を二段だけ下りる間に、舞踏会のドレスが質素な普段着へ戻る",
                                 "motion_end_state": "質素な普段着へ戻ったシンデレラがガラスの靴の三段下で階段下方を向いている",
+                                "first_frame_character_asset_overrides": {
+                                    "シンデレラ": profile[
+                                        "protagonist_transformed_asset_id"
+                                    ],
+                                    "protagonist": profile[
+                                        "protagonist_transformed_asset_id"
+                                    ],
+                                },
                                 "allowed_new_reveal_elements": [
                                     "質素な普段着へ戻ったシンデレラ"
                                 ],
@@ -4164,10 +5087,12 @@ def _scene_blueprint(
                                 },
                                 "motion_attention_target": "階段下方の出入口",
                                 "motion_brief": "質素な普段着へ戻ったシンデレラが大階段を三段だけ下り、そのまま階段下方の出入口から画面外へ出る",
-                                "motion_end_state": "階段に片方のガラスの靴が残り、王子が四段上から見下ろし、シンデレラは画面内にいない",
+                                "motion_end_state": "階段に片方のガラスの靴が残り、王子が四段上から見下ろし、階段下方の出入口は空いている",
                             },
                             "spatial_transition": {
                                 "primary_subject": "王子",
+                                "visible_action": "階段に片方のガラスの靴が残り、王子が四段上からその靴を見下ろしている",
+                                "visible_reaction": "階段下方の出入口は空き、王子の片手は身体の横で止まっている",
                                 "required_visual_evidence": ["階段に残った片方のガラスの靴", "四段上の王子", "空いた階段下方"],
                                 "required_roles": ["prince"],
                                 "retain_carried_character_subjects": False,
@@ -4233,7 +5158,21 @@ def _scene_blueprint(
         if canonical_index in scene_specifics:
             spec = dict(scene_specifics[canonical_index])
             segment_contract = _cinderella_segment_contract(canonical_index, segment_position, segment_count)
+            beat_overrides = deepcopy(spec.get("beat_overrides") or {})
             if segment_count > 1:
+                allowed_segment_locations = set(_scene_location_sequence(profile, idx))
+                beat_function_order = ("setup", "pressure", "turn", "payoff")
+                allowed_segment_functions = {
+                    beat_function_order[int(beat_id.rsplit("B", 1)[-1]) - 1]
+                    for beat_id in segment_contract["beat_ids"]
+                    if beat_id.rsplit("B", 1)[-1].isdigit()
+                    and 1 <= int(beat_id.rsplit("B", 1)[-1]) <= len(beat_function_order)
+                }
+                beat_overrides = _project_beat_overrides_to_segment_locations(
+                    beat_overrides,
+                    allowed_locations=allowed_segment_locations,
+                    allowed_functions=allowed_segment_functions,
+                )
                 segment_note = f"{segment_role}区間 {segment_position}/{segment_count}"
                 base_turn = spec["turn"]
                 base_payoff = spec["payoff"]
@@ -4269,7 +5208,7 @@ def _scene_blueprint(
                     "turn_motion_target", spec["pressure"][0]
                 ),
                 "payoff_focus": spec.get("payoff_focus", spec["pressure"][0]),
-                "beat_overrides": deepcopy(spec.get("beat_overrides") or {}),
+                "beat_overrides": beat_overrides,
                 "causal_turn": spec["turn"],
                 "payoff": spec["payoff"],
                 "handoff_anchor": spec["handoff"],
@@ -4393,7 +5332,7 @@ def _scene_generation_contract() -> dict[str, Any]:
         "must_preserve_order": ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan"],
         "scene_event_rules": [
             "scene_event は出来事の正本であり、演出語を入れない",
-            "event_sequence は setup / pressure / turn / payoff を含む",
+            "event_sequence は authored required event beats を列挙し、各 beat を可視出来事へ接地する",
             "scene_event.forbidden_event_changes を scene から downstream へ渡す",
         ],
         "payload_boundary": "scene_prompt_payload は scene 正本生成だけに使う。後段の画像、音声、動画の実行情報は含めない",
@@ -4430,6 +5369,11 @@ def _scene_generation_for_scene(
     time_of_day_visual_basis = _scene_time_of_day_visual_basis(profile, idx)
     location_sequence = _scene_location_sequence(profile, idx) or [location_name]
     location_segments = _scene_location_segments(profile, idx)
+    production_location_segments = [
+        segment
+        for segment in location_segments
+        if _location_segment_root_is_active(segment)
+    ]
     location_mode = "sequence" if len(location_sequence) > 1 else "single"
     required_outputs = list(SCENE_GENERATION_REQUIRED_OUTPUTS)
     scene_authoring_context = {
@@ -4500,10 +5444,10 @@ def _scene_generation_for_scene(
                     "場所別の責任: "
                     + " / ".join(
                         f"{segment['location']}={segment['responsibility']}"
-                        for segment in location_segments
+                        for segment in production_location_segments
                     )
                 ]
-                if location_segments
+                if production_location_segments
                 else []
             ),
             f"時間帯: {time_of_day}",
@@ -4550,7 +5494,7 @@ def _scene_generation_for_scene(
             "source_beats": source_events,
             "source_origin": _source_origin_for_profile(profile),
             "adaptation_choices": [
-                "source beat を setup / pressure / turn / payoff の可視出来事へ分解する",
+                "authored required event beats を列挙し、各 beat を可視出来事へ接地する",
                 "asset は名前の登場ではなく scene 内の story function で採用する",
             ],
             "excluded_from_payload": [
@@ -5144,6 +6088,9 @@ def _scene_intent_for_cut_design(
     )
     return {
         "story_purpose": blueprint["story_purpose"],
+        "review_only_visualizable_action": str(
+            blueprint.get("review_only_visualizable_action") or ""
+        ),
         "dramatic_question": blueprint["dramatic_question"],
         "scene_spine": blueprint["scene_spine"],
         "value_shift": {
@@ -5477,7 +6424,20 @@ def _scene_event_for_cut_design(
         consequence,
         pressure,
     ) in enumerate(beat_specs):
-        beat_location_name = location_sequence[min(beat_index, len(location_sequence) - 1)]
+        raw_function_override = (
+            raw_beat_overrides.get(function)
+            if isinstance(raw_beat_overrides.get(function), dict)
+            else {}
+        )
+        beat_location_name = str(
+            raw_function_override.get("location")
+            or location_sequence[min(beat_index, len(location_sequence) - 1)]
+        ).strip()
+        if beat_location_name not in location_spec_by_name:
+            raise RuntimeError(
+                f"scene{idx:02d} {function}: beat location is not declared in "
+                f"scene_location_sequence: {beat_location_name}"
+            )
         beat_location_spec = location_spec_by_name[beat_location_name]
         location_segment = location_segment_by_name.get(beat_location_name, {})
         location_beat_overrides = (
@@ -5485,60 +6445,63 @@ def _scene_event_for_cut_design(
             if isinstance(location_segment.get("beat_overrides"), dict)
             else {}
         )
-        beat_override = (
-            location_beat_overrides.get(function)
-            if isinstance(location_beat_overrides.get(function), dict)
-            else (
-                raw_beat_overrides.get(function)
-                if isinstance(raw_beat_overrides.get(function), dict)
+        beat_override = {
+            **raw_function_override,
+            **(
+                location_beat_overrides.get(function)
+                if isinstance(location_beat_overrides.get(function), dict)
                 else {}
+            ),
+        }
+        root_scope = location_segment.get("root_active_beat_functions")
+        root_is_active = (
+            "root_active_beat_functions" not in location_segment
+            or (
+                isinstance(root_scope, list)
+                and function in {str(item) for item in root_scope}
             )
         )
+        semantic_segment = location_segment if root_is_active else {}
         artifact_visible_in_beat = bool(
-            include_artifact and (location_segment or function in {"turn", "payoff"})
+            include_artifact
+            and (semantic_segment or beat_override or function in {"turn", "payoff"})
         )
-        if location_segment:
+        if semantic_segment or beat_override:
             what_happens = str(
                 beat_override.get("what_happens")
-                or location_segment.get("responsibility")
+                or semantic_segment.get("responsibility")
                 or what_happens
             )
             visible_action = str(
                 beat_override.get("visible_action")
-                or location_segment.get("visible_action")
+                or semantic_segment.get("visible_action")
                 or visible_action
             )
             visible_reaction = str(
                 beat_override.get("visible_reaction")
-                or location_segment.get("visible_reaction")
+                or semantic_segment.get("visible_reaction")
                 or visible_reaction
             )
-        elif beat_override:
-            what_happens = str(beat_override.get("what_happens") or what_happens)
-            visible_action = str(beat_override.get("visible_action") or visible_action)
-            visible_reaction = str(
-                beat_override.get("visible_reaction") or visible_reaction
-            )
         beat_id = f"scene{idx:02d}_event_{function}"
-        if location_segment:
+        if semantic_segment or beat_override:
             primary_subject_by_function = (
-                location_segment.get("primary_subject_by_function")
+                semantic_segment.get("primary_subject_by_function")
                 if isinstance(
-                    location_segment.get("primary_subject_by_function"), dict
+                    semantic_segment.get("primary_subject_by_function"), dict
                 )
                 else {}
             )
             primary_subject = str(
                 beat_override.get("primary_subject")
                 or primary_subject_by_function.get(function)
-                or location_segment.get("primary_subject")
+                or semantic_segment.get("primary_subject")
                 or protagonist
             )
             required_roles = [
                 str(item).strip()
                 for item in (
                     beat_override.get("required_roles")
-                    or location_segment.get("required_roles")
+                    or semantic_segment.get("required_roles")
                     or []
                 )
                 if str(item).strip()
@@ -5547,30 +6510,13 @@ def _scene_event_for_cut_design(
                 str(item).strip()
                 for item in (
                     beat_override.get("required_visual_evidence")
-                    or location_segment.get("required_visual_evidence")
+                    or semantic_segment.get("required_visual_evidence")
                     or []
                 )
                 if str(item).strip()
             ]
             visual_evidence_for_beat = list(
                 dict.fromkeys([beat_location_name, *segment_evidence])
-            )[:6]
-        elif beat_override:
-            primary_subject = str(
-                beat_override.get("primary_subject") or protagonist
-            ).strip()
-            required_roles = [
-                str(item).strip()
-                for item in beat_override.get("required_roles") or []
-                if str(item).strip()
-            ]
-            override_evidence = [
-                str(item).strip()
-                for item in beat_override.get("required_visual_evidence") or []
-                if str(item).strip()
-            ]
-            visual_evidence_for_beat = list(
-                dict.fromkeys([beat_location_name, *override_evidence])
             )[:6]
         else:
             primary_subject = protagonist
@@ -5616,9 +6562,9 @@ def _scene_event_for_cut_design(
             )
         if isinstance(beat_override.get("visible_character_state"), dict) and beat_override.get("visible_character_state"):
             visible_character_state = dict(beat_override["visible_character_state"])
-        elif isinstance(location_segment.get("visible_character_state"), dict) and location_segment.get("visible_character_state"):
-            visible_character_state = dict(location_segment["visible_character_state"])
-        elif location_segment:
+        elif isinstance(semantic_segment.get("visible_character_state"), dict) and semantic_segment.get("visible_character_state"):
+            visible_character_state = dict(semantic_segment["visible_character_state"])
+        elif semantic_segment:
             visible_character_state = {
                 "posture": visible_action,
                 "gaze": visible_reaction,
@@ -5661,19 +6607,7 @@ def _scene_event_for_cut_design(
                 "hands": f"{primary_subject}の手元が直前の行為を終えた位置で止まっている",
                 "feet": "両足と重心が行為後の位置で止まっている",
             }
-        if location_segment:
-            motion_attention_target = str(
-                beat_override.get("motion_attention_target")
-                or next(
-                    (
-                        item
-                        for item in visual_evidence_for_beat
-                        if item not in {beat_location_name, primary_subject}
-                    ),
-                    beat_location_name,
-                )
-            )
-        elif beat_override:
+        if semantic_segment or beat_override:
             motion_attention_target = str(
                 beat_override.get("motion_attention_target")
                 or next(
@@ -5696,40 +6630,22 @@ def _scene_event_for_cut_design(
         source_event_text = str(what_happens or source_summary)
         motion_brief = str(
             beat_override.get("motion_brief")
-            or location_segment.get("motion_brief")
+            or semantic_segment.get("motion_brief")
             or default_motion_by_function[function]
         ).strip()
         motion_end_state = str(
             beat_override.get("motion_end_state")
-            or location_segment.get("motion_end_state")
+            or semantic_segment.get("motion_end_state")
             or default_motion_end_by_function[function]
         ).strip()
-        allowed_new_reveal_elements = list(
-            dict.fromkeys(
-                str(item).strip()
-                for item in (
-                    beat_override.get("allowed_new_reveal_elements")
-                    or location_segment.get("allowed_new_reveal_elements")
-                    or []
-                )
-                if str(item).strip()
-            )
-        )
-        allowed_reveal_info_ids = list(
-            dict.fromkeys(
-                str(item).strip()
-                for item in (
-                    beat_override.get("allowed_reveal_info_ids")
-                    or location_segment.get("allowed_reveal_info_ids")
-                    or []
-                )
-                if str(item).strip()
-            )
-        )
-        use_next_cut_first_frame_as_last_frame = bool(
-            beat_override.get("use_next_cut_first_frame_as_last_frame")
-            or location_segment.get("use_next_cut_first_frame_as_last_frame")
-        )
+        # First-frame asset, reveal, and next-frame binding policies are all
+        # exact-obligation data. Function/segment roots stay inert so one
+        # authored policy cannot affect sibling semantic obligations.
+        first_frame_character_asset_overrides: dict[str, str] = {}
+        first_frame_excluded_object_ids: list[str] = []
+        allowed_new_reveal_elements: list[str] = []
+        allowed_reveal_info_ids: list[str] = []
+        use_next_cut_first_frame_as_last_frame = False
         obligation_overrides = deepcopy(
             beat_override.get("obligation_overrides")
             if isinstance(beat_override.get("obligation_overrides"), dict)
@@ -5741,8 +6657,8 @@ def _scene_event_for_cut_design(
             and beat_override.get("visible_character_state")
             else (
                 "location_segment"
-                if isinstance(location_segment.get("visible_character_state"), dict)
-                and location_segment.get("visible_character_state")
+                if isinstance(semantic_segment.get("visible_character_state"), dict)
+                and semantic_segment.get("visible_character_state")
                 else "inferred"
             )
         )
@@ -5778,6 +6694,8 @@ def _scene_event_for_cut_design(
                     "required_visual_evidence": visual_evidence_for_beat,
                     "motion_brief": motion_brief,
                     "motion_end_state": motion_end_state,
+                    "first_frame_character_asset_overrides": first_frame_character_asset_overrides,
+                    "first_frame_excluded_object_ids": first_frame_excluded_object_ids,
                     "allowed_new_reveal_elements": allowed_new_reveal_elements,
                     "allowed_reveal_info_ids": allowed_reveal_info_ids,
                     "use_next_cut_first_frame_as_last_frame": use_next_cut_first_frame_as_last_frame,
@@ -5826,6 +6744,8 @@ def _scene_event_for_cut_design(
                 "required_roles": required_roles,
                 "motion_brief": motion_brief,
                 "motion_end_state": motion_end_state,
+                "first_frame_character_asset_overrides": first_frame_character_asset_overrides,
+                "first_frame_excluded_object_ids": first_frame_excluded_object_ids,
                 "allowed_new_reveal_elements": allowed_new_reveal_elements,
                 "allowed_reveal_info_ids": allowed_reveal_info_ids,
                 "use_next_cut_first_frame_as_last_frame": use_next_cut_first_frame_as_last_frame,
@@ -5910,6 +6830,7 @@ def _event_context_for_cut_contract(
     scene_event: dict[str, Any],
     source_event_contract: dict[str, Any],
     reveal_constraints: Any,
+    cut_location: str,
 ) -> dict[str, Any]:
     sequence = [beat for beat in scene_event.get("event_sequence", []) if isinstance(beat, dict)]
     by_id = {str(beat.get("beat_id") or "").strip(): beat for beat in sequence if str(beat.get("beat_id") or "").strip()}
@@ -5927,13 +6848,32 @@ def _event_context_for_cut_contract(
                     neighbor_id = str(sequence[neighbor_index].get("beat_id") or "").strip()
                     if neighbor_id and neighbor_id not in source_ids and neighbor_id not in neighbor_ids:
                         neighbor_ids.append(neighbor_id)
+    def project_cut_location(beat: dict[str, Any]) -> dict[str, Any]:
+        projected = deepcopy(beat)
+        if (
+            cut_location
+            and str(projected.get("beat_id") or "").strip() == primary_id
+        ):
+            concrete_event = (
+                deepcopy(projected.get("concrete_event"))
+                if isinstance(projected.get("concrete_event"), dict)
+                else {}
+            )
+            concrete_event["where"] = cut_location
+            projected["concrete_event"] = concrete_event
+        return projected
+
     constraints = reveal_constraints if isinstance(reveal_constraints, list) else []
     return {
         "derived_from": ["scene_event.event_sequence[]", "cut_contract.source_event_contract"],
         "editable": False,
         "scene_event_logline": str(scene_event.get("event_logline") or ""),
-        "primary_event_beat": by_id.get(primary_id, {}),
-        "source_event_beats": [by_id[source_id] for source_id in source_ids if source_id in by_id],
+        "primary_event_beat": project_cut_location(by_id.get(primary_id, {})),
+        "source_event_beats": [
+            project_cut_location(by_id[source_id])
+            for source_id in source_ids
+            if source_id in by_id
+        ],
         "neighboring_event_beats": [by_id[neighbor_id] for neighbor_id in neighbor_ids if neighbor_id in by_id],
         "forbidden_event_changes": [str(item) for item in scene_event.get("forbidden_event_changes", []) if str(item).strip()] if isinstance(scene_event.get("forbidden_event_changes"), list) else [],
         "reveal_constraints_for_this_cut": constraints,
@@ -6503,19 +7443,10 @@ def _scene_cut_coverage_plan(
             return "payoff"
         return "pressure"
 
-    scene_targets = profile.get("scene_target_durations")
-    if isinstance(scene_targets, list) and 0 <= idx - 1 < len(scene_targets):
-        scene_target_seconds = max(1, int(scene_targets[idx - 1]))
-    else:
-        duration_plan = profile.get("duration_plan") if isinstance(profile.get("duration_plan"), dict) else {}
-        total_target_seconds = max(1, int(duration_plan.get("target_seconds") or 300))
-        scene_target_seconds = max(1, (total_target_seconds + len(profile.get("scene_titles") or [title]) - 1) // len(profile.get("scene_titles") or [title]))
-    duration_cut_floor = max(3, (scene_target_seconds + 7) // 8)
-
-    # Add only meaningfully distinct event-beat facets when duration requires
-    # more cuts than the story obligations already justify. Missing beat
-    # functions are filled first; additional cuts cycle through setup,
-    # pressure, turn, and payoff with a unique evidence lens.
+    # Duration alone must never invent filler actions.  If the authored
+    # obligations do not cover all canonical event functions, add only the
+    # missing event-beat coverage; pacing and clip duration are handled later.
+    duration_cut_floor = 0
     function_order = ("setup", "pressure", "turn", "payoff")
     function_counts = {
         function: sum(
@@ -6537,7 +7468,7 @@ def _scene_cut_coverage_plan(
         "turn": "不可逆な転換",
         "payoff": "直後の結果",
     }
-    required_obligation_count = max(duration_cut_floor, len(event_sequence))
+    required_obligation_count = len(event_sequence)
     while len(obligations) < required_obligation_count:
         function = min(function_order, key=lambda item: (function_counts[item], function_order.index(item)))
         beat = beat_for_function(function)
@@ -6577,7 +7508,7 @@ def _scene_cut_coverage_plan(
         ] if isinstance(concrete_event.get("who"), list) else []
         append_unique(
             extra_obligation(
-                obligation_id=f"duration_{function}_{occurrence:02d}",
+                obligation_id=f"coverage_{function}_{occurrence:02d}",
                 cut_function=f"{function}_detail",
                 source=f"scene_event.event_sequence[{beat_id}]",
                 target_beat=f"{title}: {function_labels[function]}の{facet}を独立して見せる — {what_happens}",
@@ -6590,7 +7521,7 @@ def _scene_cut_coverage_plan(
                 foreground=must_show[0],
                 midground=protagonist,
                 background=location_name,
-                screen_direction=f"duration_{function}_{occurrence:02d}",
+                screen_direction=f"coverage_{function}_{occurrence:02d}",
                 motion_brief=f"{visible_action}から{visible_reaction}へ小さく進み、{facet}を強める",
                 motion_end_state=immediate_consequence,
                 narration=f"{title}。{what_happens}",
@@ -6644,31 +7575,80 @@ def _scene_cut_coverage_plan(
             **shared_obligation_override,
             **exact_obligation_override,
         }
-        beat_location = str(concrete.get("where") or location_name).strip()
+        beat_location = str(
+            obligation_override.get("location")
+            or concrete.get("where")
+            or location_name
+        ).strip()
+        if beat_location not in location_sequence:
+            raise RuntimeError(
+                f"scene{idx:02d} {obligation_id}: cut location is not declared in "
+                f"scene_location_sequence: {beat_location}"
+            )
         primary_subject = str(
             obligation_override.get("primary_subject")
             or beat.get("primary_subject")
             or concrete.get("primary_subject")
             or protagonist
         ).strip()
+        concrete_location = str(concrete.get("where") or location_name).strip()
+        exact_cross_location_projection = beat_location != concrete_location
         what_happens = str(
             obligation_override.get("what_happens")
             or beat.get("what_happens")
             or concrete.get("what_happens")
             or title
         ).strip()
+        other_route_locations = {
+            location for location in location_sequence if location != beat_location
+        }
+        what_happens = str(
+            _sanitize_first_frame_prose(
+                what_happens,
+                excluded_tokens=other_route_locations,
+            )
+            or _sanitize_first_frame_prose(
+                obligation.get("target_beat") or "",
+                excluded_tokens=other_route_locations,
+            )
+            or f"{primary_subject}が{beat_location}でこのcutの出来事を進める"
+        ).strip()
         visible_action = _drawable_phrase_for_scaffold(
             obligation_override.get("visible_action")
+            or (
+                f"{primary_subject}が{beat_location}の経路上で身体を止めている"
+                if exact_cross_location_projection
+                else ""
+            )
             or beat.get("visible_action")
             or concrete.get("visible_action")
             or what_happens
         )
         visible_reaction = _drawable_phrase_for_scaffold(
             obligation_override.get("visible_reaction")
+            or (
+                f"{beat_location}の入口と出口が同じ画面内で読める"
+                if exact_cross_location_projection
+                else ""
+            )
             or beat.get("visible_reaction")
             or concrete.get("visible_reaction")
             or concrete.get("immediate_consequence")
             or beat.get("immediate_consequence")
+        )
+        visible_action = _drawable_phrase_for_scaffold(
+            _sanitize_first_frame_prose(
+                visible_action,
+                excluded_tokens=other_route_locations,
+            )
+            or f"{primary_subject}が{beat_location}で身体を止めている"
+        )
+        visible_reaction = _drawable_phrase_for_scaffold(
+            _sanitize_first_frame_prose(
+                visible_reaction,
+                excluded_tokens=other_route_locations,
+            )
+            or f"{beat_location}の入口と人物の位置関係が読める"
         )
         raw_evidence = obligation_override.get("required_visual_evidence")
         if not isinstance(raw_evidence, list):
@@ -6838,56 +7818,63 @@ def _scene_cut_coverage_plan(
         emotional_change = _drawable_phrase_for_scaffold(
             obligation_override.get("emotional_change")
         )
-        raw_allowed_new_reveal_elements = (
-            obligation_override.get("allowed_new_reveal_elements")
-            if "allowed_new_reveal_elements" in obligation_override
-            else beat.get("allowed_new_reveal_elements")
+        raw_first_frame_character_asset_overrides = (
+            exact_obligation_override["first_frame_character_asset_overrides"]
+            if "first_frame_character_asset_overrides"
+            in exact_obligation_override
+            else _MISSING_POLICY_VALUE
         )
-        if not isinstance(raw_allowed_new_reveal_elements, list):
-            raw_allowed_new_reveal_elements = concrete.get(
-                "allowed_new_reveal_elements"
+        first_frame_character_asset_overrides = (
+            _validate_first_frame_character_asset_overrides(
+                profile,
+                raw_first_frame_character_asset_overrides,
+                context=f"scene{idx:02d}.{obligation_id}",
             )
-        allowed_new_reveal_elements = list(
-            dict.fromkeys(
-                phrase
-                for item in (
-                    raw_allowed_new_reveal_elements
-                    if isinstance(raw_allowed_new_reveal_elements, list)
-                    else []
-                )
-                if (phrase := _drawable_phrase_for_scaffold(item))
+        )
+        raw_first_frame_excluded_object_ids = (
+            exact_obligation_override["first_frame_excluded_object_ids"]
+            if "first_frame_excluded_object_ids" in exact_obligation_override
+            else _MISSING_POLICY_VALUE
+        )
+        first_frame_excluded_object_ids = (
+            _validate_first_frame_excluded_object_ids(
+                profile,
+                raw_first_frame_excluded_object_ids,
+                context=f"scene{idx:02d}.{obligation_id}",
             )
+        )
+        raw_allowed_new_reveal_elements = (
+            exact_obligation_override["allowed_new_reveal_elements"]
+            if "allowed_new_reveal_elements" in exact_obligation_override
+            else _MISSING_POLICY_VALUE
+        )
+        allowed_new_reveal_elements = _validate_exact_obligation_string_list(
+            raw_allowed_new_reveal_elements,
+            field_name="allowed_new_reveal_elements",
+            context=f"scene{idx:02d}.{obligation_id}",
         )
         raw_allowed_reveal_info_ids = (
-            obligation_override.get("allowed_reveal_info_ids")
-            if "allowed_reveal_info_ids" in obligation_override
-            else beat.get("allowed_reveal_info_ids")
+            exact_obligation_override["allowed_reveal_info_ids"]
+            if "allowed_reveal_info_ids" in exact_obligation_override
+            else _MISSING_POLICY_VALUE
         )
-        if not isinstance(raw_allowed_reveal_info_ids, list):
-            raw_allowed_reveal_info_ids = concrete.get("allowed_reveal_info_ids")
-        allowed_reveal_info_ids = list(
-            dict.fromkeys(
-                str(item).strip()
-                for item in (
-                    raw_allowed_reveal_info_ids
-                    if isinstance(raw_allowed_reveal_info_ids, list)
-                    else []
+        allowed_reveal_info_ids = _validate_exact_obligation_string_list(
+            raw_allowed_reveal_info_ids,
+            field_name="allowed_reveal_info_ids",
+            context=f"scene{idx:02d}.{obligation_id}",
+        )
+        if "use_next_cut_first_frame_as_last_frame" in exact_obligation_override:
+            raw_last_frame_binding = exact_obligation_override[
+                "use_next_cut_first_frame_as_last_frame"
+            ]
+            if not isinstance(raw_last_frame_binding, bool):
+                raise RuntimeError(
+                    f"scene{idx:02d}.{obligation_id}: "
+                    "use_next_cut_first_frame_as_last_frame must be a boolean"
                 )
-                if str(item).strip()
-            )
-        )
-        if "use_next_cut_first_frame_as_last_frame" in obligation_override:
-            use_next_cut_first_frame_as_last_frame = bool(
-                obligation_override["use_next_cut_first_frame_as_last_frame"]
-            )
-        elif "use_next_cut_first_frame_as_last_frame" in beat:
-            use_next_cut_first_frame_as_last_frame = bool(
-                beat["use_next_cut_first_frame_as_last_frame"]
-            )
+            use_next_cut_first_frame_as_last_frame = raw_last_frame_binding
         else:
-            use_next_cut_first_frame_as_last_frame = bool(
-                concrete.get("use_next_cut_first_frame_as_last_frame")
-            )
+            use_next_cut_first_frame_as_last_frame = False
         proof_parts = [visible_action, visible_reaction]
         if detail_evidence:
             proof_parts.append("同じ画面に" + "、".join(detail_evidence[:4]) + "が見える")
@@ -6917,6 +7904,8 @@ def _scene_cut_coverage_plan(
                 "motion_attention_target": motion_attention_target,
                 "environment_motion": environment_motion,
                 "emotional_change": emotional_change,
+                "first_frame_character_asset_overrides": first_frame_character_asset_overrides,
+                "first_frame_excluded_object_ids": first_frame_excluded_object_ids,
                 "allowed_new_reveal_elements": allowed_new_reveal_elements,
                 "allowed_reveal_info_ids": allowed_reveal_info_ids,
                 "use_next_cut_first_frame_as_last_frame": use_next_cut_first_frame_as_last_frame,
@@ -6950,8 +7939,15 @@ def _scene_cut_coverage_plan(
         primary_beat_id = str(primary_beat.get("beat_id") or "").strip()
         if (
             previous_projected_obligation is not None
-            and str(previous_projected_obligation.get("background") or "").strip()
-            == str(obligation.get("background") or "").strip()
+            and (
+                str(previous_projected_obligation.get("background") or "").strip()
+                == str(obligation.get("background") or "").strip()
+                or bool(
+                    previous_projected_obligation.get(
+                        "use_next_cut_first_frame_as_last_frame"
+                    )
+                )
+            )
         ):
             previous_end_state = _drawable_phrase_for_scaffold(
                 previous_projected_obligation.get("motion_end_state")
@@ -7120,22 +8116,28 @@ def _scene_cut_coverage_plan(
             selectors.extend(assigned_by_source.get(source, []))
         return list(dict.fromkeys(selectors))
 
-    minimum_by_importance = 3
-    minimum_by_duration = duration_cut_floor
-    minimum_by_event_beats = len([beat for beat in event_sequence if beat.get("must_be_seen") is True]) or len(
-        [beat for beat in event_sequence if str(beat.get("beat_function") or "") in required_functions]
+    minimum_by_distinct_semantic_obligations = len(
+        {
+            str(record.get("obligation_id") or "").strip()
+            for record in assignment_records
+            if str(record.get("obligation_id") or "").strip()
+        }
     )
-    selected_minimum = max(minimum_by_importance, minimum_by_duration, minimum_by_event_beats)
+    minimum_by_event_beats = len(event_sequence)
+    selected_minimum = max(
+        minimum_by_distinct_semantic_obligations,
+        minimum_by_event_beats,
+    )
     coverage = {
         "coverage_strategy": "reverse_from_scene_event",
         "source_schema_version": "scene_event_v1",
         "strategy": "scene設計から必要な視覚要件を列挙し、1 cut = 1主要意図になるよう割り当てる",
         "min_cut_count": {
-            "by_importance": minimum_by_importance,
-            "by_duration": minimum_by_duration,
+            "by_distinct_semantic_obligations": minimum_by_distinct_semantic_obligations,
             "by_event_beats": minimum_by_event_beats,
             "selected": selected_minimum,
-            "exception_reason": "",
+            "by_importance": 0,
+            "by_duration": 0,
         },
         "event_beat_inventory": [
             {
@@ -7149,18 +8151,13 @@ def _scene_cut_coverage_plan(
             for beat in event_sequence
         ],
         "scene_obligations": [
-            {"obligation_id": "dramatic_question_01", "source": "dramatic_question", "evidence": scene_intent.get("dramatic_question"), "assigned_cut_ids": assigned_for("dramatic_question") or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "value_shift_01", "source": "value_shift.visible_evidence", "evidence": (scene_intent.get("value_shift") or {}).get("visible_evidence", []), "assigned_cut_ids": assigned_for("value_shift.visible_evidence", "value_shift/affect_transition/terminal_resolution") or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "causal_turn_01", "source": "causal_turn", "evidence": scene_intent.get("causal_turn"), "assigned_cut_ids": assigned_for("causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution") or [record["cut_selector"] for record in assignment_records[-1:]]},
-            {"obligation_id": "audience_information_01", "source": "audience_information", "evidence": scene_intent.get("audience_information", []), "assigned_cut_ids": assigned_for("audience_information/reveal_constraints") or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "story_event_obligations_01", "source": "story_event_obligations_legacy_projection", "evidence": scene_intent.get("story_event_obligations", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if assigned_beat_ids(record)] or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "audience_knowledge_delta_01", "source": "audience_knowledge_delta", "evidence": scene_intent.get("audience_knowledge_delta", {}), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("audience_knowledge_delta")] or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "role_coverage_01", "source": "role_coverage.required_roles", "evidence": (scene_intent.get("role_coverage") or {}).get("required_roles", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("required_roles")] or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "visual_proof_01", "source": "visual_proof_obligations", "evidence": scene_intent.get("visual_proof_obligations", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records if record.get("visual_proof")]},
-            {"obligation_id": "reveal_constraints_01", "source": "reveal_constraints", "evidence": scene_intent.get("reveal_constraints", []), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records]},
-            {"obligation_id": "visual_thesis_01", "source": "visual_thesis", "evidence": scene_intent.get("visual_thesis"), "assigned_cut_ids": [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "spatial_plan_01", "source": "spatial_plan", "evidence": scene_intent.get("spatial_plan"), "assigned_cut_ids": assigned_for("spatial_plan", "causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution") or [record["cut_selector"] for record in assignment_records[:1]]},
-            {"obligation_id": "handoff_01", "source": "handoff_to_next_scene", "evidence": scene_intent.get("handoff_to_next_scene") or scene_intent.get("terminal_resolution"), "assigned_cut_ids": assigned_for("causal_turn/handoff_to_next_scene", "causal_turn/terminal_resolution", "terminal_resolution") or [record["cut_selector"] for record in assignment_records[-1:]]},
+            {
+                "obligation_id": str(record["obligation_id"]),
+                "source": str(record.get("source") or "scene"),
+                "evidence": str(record.get("visual_proof") or record.get("target_beat") or ""),
+                "assigned_cut_ids": [str(record["cut_selector"])],
+            }
+            for record in assignment_records
         ],
         "knowledge_assignments": [
             {
@@ -7349,6 +8346,364 @@ def _story_scene_character_ids(
     return list(dict.fromkeys(character_ids)) or ["protagonist"]
 
 
+def _authored_location_segments_for_story(
+    *,
+    profile: dict[str, Any],
+    scene_index: int,
+    blueprint: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Materialize one complete, exact route from authored scene semantics."""
+
+    route = _scene_location_sequence(profile, scene_index)
+    existing = {
+        str(segment.get("location") or "").strip(): deepcopy(segment)
+        for segment in _scene_location_segments(profile, scene_index)
+        if str(segment.get("location") or "").strip() in route
+    }
+    if len(route) <= 1:
+        return [existing[name] for name in route if name in existing]
+
+    candidates_by_location: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in route
+    }
+    beat_overrides = (
+        blueprint.get("beat_overrides")
+        if isinstance(blueprint.get("beat_overrides"), dict)
+        else {}
+    )
+    for function, raw_override in beat_overrides.items():
+        if not isinstance(raw_override, dict):
+            continue
+        root_location = str(raw_override.get("location") or "").strip()
+        if root_location in candidates_by_location:
+            candidates_by_location[root_location].append(
+                {**deepcopy(raw_override), "beat_function": str(function)}
+            )
+        nested = raw_override.get("obligation_overrides")
+        if not isinstance(nested, dict):
+            continue
+        for obligation_id, raw_exact in nested.items():
+            if not isinstance(raw_exact, dict):
+                continue
+            exact_location = str(
+                raw_exact.get("location") or root_location
+            ).strip()
+            if exact_location in candidates_by_location:
+                candidates_by_location[exact_location].append(
+                    {
+                        **deepcopy(raw_override),
+                        **deepcopy(raw_exact),
+                        "beat_function": str(function),
+                        "obligation_id": str(obligation_id),
+                    }
+                )
+
+    protagonist = str(profile.get("protagonist_name") or "主人公").strip()
+    _runtime_position, runtime_segment_count, _runtime_role = _scene_segment(
+        profile, scene_index
+    )
+
+    def route_only_segment(location: str, route_position: int) -> dict[str, Any]:
+        return {
+            "location": location,
+            "responsibility": "このruntime sceneではroute continuityだけを保持する",
+            "primary_subject": protagonist,
+            "primary_subject_by_function": {},
+            "beat_overrides": {},
+            "root_active_beat_functions": [],
+            "visible_action": f"{location}の空間構造だけをroute contextとして保持する",
+            "visible_reaction": f"{location}の入口と出口の関係だけを保持する",
+            "required_visual_evidence": [location],
+            "required_roles": ["protagonist"],
+            "motion_brief": "このruntime sceneでは新しいroot actionを割り当てない",
+            "motion_end_state": "route contextを変えず、authored owner sceneへ委ねる",
+            "visible_character_state": {
+                "route_position": f"{route_position}/{len(route)}"
+            },
+        }
+
+    materialized: list[dict[str, Any]] = []
+    for route_position, location in enumerate(route, start=1):
+        if location in existing:
+            materialized.append(existing[location])
+            continue
+        candidates = candidates_by_location.get(location, [])
+        if not candidates:
+            if runtime_segment_count > 1:
+                materialized.append(route_only_segment(location, route_position))
+                continue
+            raise RuntimeError(
+                f"scene{scene_index} location segment has no authored beat or obligation: {location}"
+            )
+        candidate = max(
+            candidates,
+            key=lambda item: sum(
+                bool(item.get(key))
+                for key in (
+                    "visible_action",
+                    "required_visual_evidence",
+                    "motion_brief",
+                    "motion_end_state",
+                    "primary_subject",
+                )
+            ),
+            default={},
+        )
+        missing_concrete_fields = [
+            key
+            for key in (
+                "required_visual_evidence",
+                "motion_brief",
+                "motion_end_state",
+            )
+            if not candidate.get(key)
+        ]
+        if missing_concrete_fields:
+            if runtime_segment_count > 1:
+                materialized.append(route_only_segment(location, route_position))
+                continue
+            raise RuntimeError(
+                f"scene{scene_index} location segment is not concretely authored: "
+                f"{location} ({', '.join(missing_concrete_fields)})"
+            )
+        primary_subject = str(
+            candidate.get("primary_subject") or protagonist
+        ).strip()
+        responsibility = str(
+            candidate.get("what_happens")
+            or candidate.get("visible_action")
+            or candidate.get("motion_brief")
+            or ""
+        ).strip()
+        evidence = list(
+            dict.fromkeys(
+                [
+                    str(item).strip()
+                    for item in candidate.get("required_visual_evidence") or []
+                    if str(item).strip()
+                ]
+                + [location, primary_subject]
+            )
+        )
+        visible_action = str(candidate.get("visible_action") or "").strip()
+        if not visible_action:
+            visible_action = (
+                f"{evidence[0]}が{location}にあり、"
+                f"{primary_subject}との位置関係が見える"
+            )
+        visible_reaction = str(candidate.get("visible_reaction") or "").strip()
+        if not visible_reaction:
+            visible_reaction = (
+                f"{evidence[1] if len(evidence) > 1 else location}と"
+                f"{location}の入口・出口の関係が同じ画面で読める"
+            )
+        motion_brief = str(candidate["motion_brief"]).strip()
+        motion_end_state = str(candidate["motion_end_state"]).strip()
+        primary_subject_by_function = {
+            str(item.get("beat_function") or "").strip(): str(
+                item.get("primary_subject") or protagonist
+            ).strip()
+            for item in candidates
+            if str(item.get("beat_function") or "").strip()
+        }
+        required_roles = list(
+            dict.fromkeys(
+                str(role).strip()
+                for role in candidate.get("required_roles") or []
+                if str(role).strip()
+            )
+        ) or ["protagonist"]
+        materialized_segment = {
+                "location": location,
+                "responsibility": responsibility,
+                "primary_subject": primary_subject,
+                "primary_subject_by_function": primary_subject_by_function,
+                "beat_overrides": {},
+                "visible_action": visible_action,
+                "visible_reaction": visible_reaction,
+                "required_visual_evidence": evidence,
+                "required_roles": required_roles,
+                "motion_brief": motion_brief,
+                "motion_end_state": motion_end_state,
+                "visible_character_state": {
+                    "posture": visible_action,
+                    "gaze": visible_reaction,
+                    "route_position": f"{route_position}/{len(route)}",
+                },
+            }
+        if runtime_segment_count > 1:
+            owner_function = str(candidate.get("beat_function") or "").strip()
+            materialized_segment["root_active_beat_functions"] = (
+                [owner_function] if owner_function else []
+            )
+        materialized.append(materialized_segment)
+    return materialized
+
+
+def _materialize_exact_reviewed_story_location_segments(
+    story: dict[str, Any], *, profile: dict[str, Any]
+) -> bool:
+    """Repair only review output whose route is exactly the authored route."""
+
+    script = story.get("script") if isinstance(story.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    changed = False
+    for scene_index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        location = (
+            scene.get("location")
+            if isinstance(scene.get("location"), dict)
+            else {}
+        )
+        raw_route = location.get("sequence")
+        route = [
+            str(item).strip()
+            for item in (raw_route if isinstance(raw_route, list) else [])
+            if str(item).strip()
+        ]
+        authored_route = _scene_location_sequence(profile, scene_index)
+        if len(route) <= 1 or route != authored_route:
+            continue
+        segments = [
+            segment
+            for item in (
+                location.get("segments")
+                if isinstance(location.get("segments"), list)
+                else []
+            )
+            if (segment := _normalize_location_segment(item))
+        ]
+        segment_locations = [segment["location"] for segment in segments]
+        has_complete_exact_route = (
+            segment_locations == route
+            and all(
+                all(
+                    segment.get(key)
+                    for key in (
+                        "responsibility",
+                        "primary_subject",
+                        "visible_action",
+                        "required_visual_evidence",
+                        "motion_brief",
+                        "motion_end_state",
+                    )
+                )
+                for segment in segments
+            )
+        )
+        if has_complete_exact_route:
+            continue
+        title = str(scene.get("title") or f"scene {scene_index}").strip()
+        blueprint = _scene_blueprint(
+            profile=profile,
+            idx=scene_index,
+            title=title,
+            location_name=str(location.get("name") or route[0]),
+            include_artifact=_scene_uses_artifact(profile, scene_index),
+        )
+        location["segments"] = _authored_location_segments_for_story(
+            profile=profile,
+            scene_index=scene_index,
+            blueprint=blueprint,
+        )
+        scene["location"] = location
+        changed = True
+    return changed
+
+
+def _validate_next_cut_last_frame_boundary(
+    *,
+    selector: str,
+    current_cut_plan: dict[str, Any],
+    next_cut_plan: dict[str, Any] | None,
+    route_locations: list[str],
+) -> dict[str, str]:
+    """Validate an authored last-frame/next-first-frame spatial boundary."""
+
+    if not isinstance(next_cut_plan, dict):
+        raise RuntimeError(
+            f"{selector}: next-cut last-frame binding requires a next cut"
+        )
+    departure = str(current_cut_plan.get("background") or "").strip()
+    destination = str(next_cut_plan.get("background") or "").strip()
+    route = [str(value).strip() for value in route_locations if str(value).strip()]
+    if not destination or destination not in route:
+        raise RuntimeError(
+            f"{selector}: next-cut destination is not declared in scene route: "
+            f"{destination or '<empty>'}"
+        )
+    actual_end_state = str(
+        current_cut_plan.get("motion_end_state") or ""
+    ).strip()
+    if not actual_end_state:
+        raise RuntimeError(
+            f"{selector}: next-cut boundary requires a concrete motion end state"
+        )
+    next_first_frame_text = " / ".join(
+        str(next_cut_plan.get(key) or "").strip()
+        for key in (
+            "first_frame_brief",
+            "visual_proof",
+            "visible_action",
+            "visible_reaction",
+        )
+        if str(next_cut_plan.get(key) or "").strip()
+    )
+    if destination != departure:
+        allowed_destinations = {
+            str(item).strip()
+            for item in current_cut_plan.get("allowed_new_reveal_elements") or []
+            if str(item).strip()
+        }
+        if destination not in allowed_destinations:
+            raise RuntimeError(
+                f"{selector}: cross-location boundary lacks exact obligation "
+                f"authorization for destination: {destination}"
+            )
+        if destination not in actual_end_state:
+            raise RuntimeError(
+                f"{selector}: motion end state does not reach destination: "
+                f"{destination}"
+            )
+        if destination not in next_first_frame_text:
+            raise RuntimeError(
+                f"{selector}: next first frame does not agree with destination: "
+                f"{destination}"
+            )
+    if actual_end_state not in next_first_frame_text:
+        raise RuntimeError(
+            f"{selector}: next first frame does not agree with actual motion "
+            "end state"
+        )
+    return {
+        "departure_location": departure,
+        "destination_location": destination,
+        "actual_end_state": actual_end_state,
+    }
+
+
+def _validate_adjacent_cut_motion_is_distinct(
+    *, scene_id: int, cut_plans: list[dict[str, Any]]
+) -> None:
+    """Fail closed when adjacent semantic cuts would replay the same action."""
+
+    for index, (previous, current) in enumerate(
+        zip(cut_plans, cut_plans[1:]), start=1
+    ):
+        previous_motion = str(previous.get("motion_brief") or "").strip()
+        previous_end = str(previous.get("motion_end_state") or "").strip()
+        current_motion = str(current.get("motion_brief") or "").strip()
+        current_end = str(current.get("motion_end_state") or "").strip()
+        if previous_motion == current_motion and previous_end == current_end:
+            raise RuntimeError(
+                f"scene{scene_id} adjacent cuts replay identical motion: "
+                f"cut{index:02d} -> cut{index + 1:02d}; "
+                "author distinct exact obligation start/motion/end states or "
+                "merge the semantic responsibilities"
+            )
+
+
 def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -> dict[str, Any]:
     scenes = []
     motif_text = "・".join(profile["motifs"])
@@ -7364,7 +8719,6 @@ def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -
         location_specs = _location_specs_for_scene_sequence(profile, idx)
         location_sequence = [str(spec["name"]) for spec in location_specs]
         location_path = " → ".join(location_sequence)
-        location_segments = _scene_location_segments(profile, idx)
         blueprint = _scene_blueprint(
             profile=profile,
             idx=idx,
@@ -7372,14 +8726,24 @@ def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -
             location_name=str(location_spec["name"]),
             include_artifact=_scene_uses_artifact(profile, idx),
         )
+        location_segments = _authored_location_segments_for_story(
+            profile=profile,
+            scene_index=idx,
+            blueprint=blueprint,
+        )
         source_events = [str(value) for value in blueprint.get("source_events") or []]
         canonical_index = _canonical_scene_index(profile, idx)
         segment_position, segment_count, segment_role = _scene_segment(profile, idx)
         visible_evidence = [str(value) for value in blueprint.get("visible_evidence") or [] if str(value).strip()]
-        if location_segments:
+        production_location_segments = [
+            segment
+            for segment in location_segments
+            if _location_segment_root_is_active(segment)
+        ]
+        if production_location_segments:
             segment_overview = "；".join(
                 f"{segment['location']}では{segment['responsibility']}"
-                for segment in location_segments
+                for segment in production_location_segments
             )
             visualizable_action = (
                 f"{location_path}を順に移り、{segment_overview}。"
@@ -7699,6 +9063,10 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
         )
         scene_cut_coverage_plan = cut_plan_bundle["coverage_plan"]
         cut_plans = cut_plan_bundle["cuts"]
+        _validate_adjacent_cut_motion_is_distinct(
+            scene_id=scene_id,
+            cut_plans=cut_plans,
+        )
         scene_major_character_ids = list(
             dict.fromkeys(
                 [
@@ -7762,13 +9130,25 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "scene_event": scene_event,
             "done_when": scene_intent["done_when"],
         }
-        scene_target_seconds = scene_targets[idx - 1] if idx - 1 < len(scene_targets) else len(cut_plans) * 8
-        scene_duration_seconds = len(cut_plans) * 12
+        scene_target_seconds = (
+            scene_targets[idx - 1]
+            if idx - 1 < len(scene_targets)
+            else len(cut_plans) * 8
+        )
+        cut_duration_seconds = _allocate_scene_cut_durations(
+            scene_target_seconds=scene_target_seconds,
+            cut_count=len(cut_plans),
+        )
+        scene_duration_seconds = sum(cut_duration_seconds)
         total_duration_seconds += scene_duration_seconds
         cuts: list[dict[str, Any]] = []
         manifest_cuts: list[dict[str, Any]] = []
         scene_shot_records: list[dict[str, Any]] = []
         for cut_number, cut_plan in enumerate(cut_plans, start=1):
+            cut_target_seconds = cut_duration_seconds[cut_number - 1]
+            cut_duration_exception = _duration_exception_for_cut(
+                cut_target_seconds
+            )
             primary_event_beat_id_for_location = str(
                 cut_plan.get("primary_event_beat_id") or ""
             ).strip()
@@ -7788,7 +9168,9 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 else {}
             )
             event_location_name = str(
-                concrete_event_for_location.get("where") or ""
+                cut_plan.get("background")
+                or concrete_event_for_location.get("where")
+                or ""
             ).strip()
             matching_location_spec = next(
                 (
@@ -7802,8 +9184,33 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 raise RuntimeError(
                     f"cut primary event location is not bound to this scene route: {event_location_name or '<empty>'}"
                 )
+            allowed_reveal_locations = {
+                str(item).strip()
+                for item in cut_plan.get("allowed_new_reveal_elements") or []
+                if str(item).strip() in location_sequence
+            }
+            provider_cut_plan = deepcopy(cut_plan)
+            for field_name in (
+                "target_beat",
+                "visual_proof",
+                "first_frame_brief",
+                "foreground",
+                "midground",
+                "background",
+                "visible_action",
+                "visible_reaction",
+                "causal_proof",
+                "visual_evidence",
+                "must_show_extra",
+                "visible_character_state",
+            ):
+                provider_cut_plan[field_name] = _abstract_non_primary_route_locations(
+                    cut_plan.get(field_name),
+                    primary_location=event_location_name,
+                    route_locations=location_sequence,
+                )
             provider_location_text = " / ".join(
-                str(cut_plan.get(key) or "")
+                str(provider_cut_plan.get(key) or "")
                 for key in (
                     "target_beat",
                     "visual_proof",
@@ -7811,8 +9218,6 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "foreground",
                     "midground",
                     "background",
-                    "motion_brief",
-                    "motion_end_state",
                 )
             )
             cross_locations = [
@@ -7820,11 +9225,29 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 for other_location in location_sequence
                 if other_location != event_location_name
                 and other_location in provider_location_text
+                and other_location not in allowed_reveal_locations
             ]
             if cross_locations:
+                cross_location_fields = [
+                    key
+                    for key in (
+                        "target_beat",
+                        "visual_proof",
+                        "first_frame_brief",
+                        "foreground",
+                        "midground",
+                        "background",
+                    )
+                    if any(
+                        location in str(provider_cut_plan.get(key) or "")
+                        for location in cross_locations
+                    )
+                ]
                 raise RuntimeError(
-                    "cut provider fields mix locations outside the primary event beat: "
+                    f"scene{scene_id} cut{cut_number:02d} provider fields mix locations "
+                    f"outside primary event location {event_location_name}: "
                     + ", ".join(cross_locations)
+                    + f" (fields: {', '.join(cross_location_fields)})"
                 )
             location_spec = matching_location_spec
             location_ref = str(location_spec["output"])
@@ -7865,7 +9288,52 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             focal_character_name = str(
                 cut_plan.get("primary_subject_name") or profile["protagonist_name"]
             ).strip()
-            cut_uses_artifact = _cut_uses_artifact(profile, idx, obligation_id, include_artifact=include_artifact)
+            first_frame_character_asset_overrides = (
+                _validate_first_frame_character_asset_overrides(
+                    profile,
+                    cut_plan["first_frame_character_asset_overrides"]
+                    if "first_frame_character_asset_overrides" in cut_plan
+                    else _MISSING_POLICY_VALUE,
+                    context=selector,
+                )
+            )
+            first_frame_excluded_object_ids = (
+                _validate_first_frame_excluded_object_ids(
+                    profile,
+                    cut_plan["first_frame_excluded_object_ids"]
+                    if "first_frame_excluded_object_ids" in cut_plan
+                    else _MISSING_POLICY_VALUE,
+                    context=selector,
+                )
+            )
+            first_frame_excluded_tokens = _first_frame_exclusion_tokens(
+                profile, first_frame_excluded_object_ids
+            )
+            first_frame_location_name = str(
+                _sanitize_first_frame_prose(
+                    location_name,
+                    excluded_tokens=first_frame_excluded_tokens,
+                )
+                or "承認済みの場所"
+            ).strip()
+
+            def is_first_frame_excluded_object_evidence(value: Any) -> bool:
+                text = str(value or "").strip()
+                return any(
+                    token in text
+                    for token in first_frame_excluded_tokens
+                )
+
+            cut_uses_artifact = (
+                _cut_uses_artifact(
+                    profile,
+                    idx,
+                    obligation_id,
+                    include_artifact=include_artifact,
+                )
+                and str(profile.get("artifact_asset_id") or "").strip()
+                not in first_frame_excluded_object_ids
+            )
             must_show = list(
                 dict.fromkeys(
                     phrase
@@ -7873,7 +9341,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         _drawable_phrase_for_scaffold(item)
                         for item in [focal_character_name, *cut_plan["must_show_extra"]]
                     )
-                    if phrase
+                    if phrase and not is_first_frame_excluded_object_evidence(phrase)
                 )
             )
             if not cut_uses_artifact:
@@ -7886,8 +9354,18 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 {
                     "must_show": must_show,
                     "visual_evidence": [
-                        *(cut_plan.get("visual_evidence", []) or []),
-                        cut_plan.get("visual_proof"),
+                        *(
+                            item
+                            for item in cut_plan.get("visual_evidence", []) or []
+                            if not is_first_frame_excluded_object_evidence(item)
+                        ),
+                        *(
+                            [cut_plan.get("visual_proof")]
+                            if not is_first_frame_excluded_object_evidence(
+                                cut_plan.get("visual_proof")
+                            )
+                            else []
+                        ),
                     ],
                 }
             )
@@ -7930,12 +9408,25 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 cut_plan=cut_plan,
                 scene_event=scene_event,
             )
+            drawable_evidence = [
+                item
+                for item in drawable_evidence
+                if not is_first_frame_excluded_object_evidence(
+                    item.get("must_be_drawn_as") if isinstance(item, dict) else item
+                )
+            ]
+            supporting_object_ids = [
+                object_id
+                for object_id in supporting_object_ids
+                if object_id not in first_frame_excluded_object_ids
+            ]
             object_ids = [*supporting_object_ids, *([artifact_asset] if cut_uses_artifact else [])]
             primary_character_asset = _character_asset_for_subject(
                 profile,
                 scene_index=idx,
                 obligation_id=obligation_id,
                 subject=focal_character_name,
+                first_frame_asset_overrides=first_frame_character_asset_overrides,
             )
             if not primary_character_asset:
                 raise RuntimeError(
@@ -7953,9 +9444,40 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         scene_index=idx,
                         obligation_id=obligation_id,
                         subject=str(subject_name),
+                        first_frame_asset_overrides=first_frame_character_asset_overrides,
                     )
                 )
             ]
+            protagonist_variant_ids = {
+                str(profile.get("protagonist_asset_id") or "").strip(),
+                str(profile.get("protagonist_transformed_asset_id") or "").strip(),
+                str(profile.get("protagonist_post_midnight_asset_id") or "").strip(),
+            }
+            protagonist_override = (
+                first_frame_character_asset_overrides.get(
+                    str(profile.get("protagonist_name") or "").strip()
+                )
+                or first_frame_character_asset_overrides.get("protagonist")
+            )
+            if protagonist_override and any(
+                character_id in protagonist_variant_ids
+                for character_id in [
+                    *carried_character_ids,
+                    *supporting_character_ids,
+                ]
+            ):
+                supporting_character_ids = [
+                    character_id
+                    for character_id in supporting_character_ids
+                    if character_id not in protagonist_variant_ids
+                ]
+                carried_character_ids = [
+                    character_id
+                    for character_id in carried_character_ids
+                    if character_id not in protagonist_variant_ids
+                ]
+                if protagonist_override != primary_character_asset:
+                    carried_character_ids.append(protagonist_override)
             supporting_character_ids = list(
                 dict.fromkeys(
                     asset_id
@@ -7986,8 +9508,71 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 ref for ref in (_supporting_object_reference(profile, asset_id) for asset_id in supporting_object_ids) if ref
             ]
             references = [primary_character_ref, *supporting_character_refs, location_ref, *supporting_object_refs, *([artifact_ref] if cut_uses_artifact else [])]
-            beat = str(cut_plan["target_beat"])
-            visual_beat = str(cut_plan["visual_proof"])
+            clean_first_frame_fallback = (
+                f"{first_frame_location_name}。{focal_character_name}が次の行為の直前で"
+                "身体を止めている"
+            )
+            safe_cut_plan = deepcopy(provider_cut_plan)
+            for field_name in (
+                "target_beat",
+                "visual_proof",
+                "first_frame_brief",
+                "static_first_frame_rule",
+                "visible_action",
+                "visible_reaction",
+                "causal_proof",
+                "foreground",
+                "midground",
+                "background",
+            ):
+                safe_cut_plan[field_name] = _sanitize_first_frame_prose(
+                    provider_cut_plan.get(field_name, ""),
+                    excluded_tokens=first_frame_excluded_tokens,
+                )
+            for field_name in (
+                "visual_evidence",
+                "must_show_extra",
+                "carried_character_subject_names",
+                "visible_character_ids",
+            ):
+                safe_cut_plan[field_name] = _sanitize_first_frame_prose(
+                    provider_cut_plan.get(field_name, []),
+                    excluded_tokens=first_frame_excluded_tokens,
+                )
+            safe_cut_plan["visible_character_state"] = _sanitize_first_frame_prose(
+                provider_cut_plan.get("visible_character_state", {}),
+                excluded_tokens=first_frame_excluded_tokens,
+            )
+            safe_cut_plan["target_beat"] = (
+                str(safe_cut_plan.get("target_beat") or "").strip()
+                or clean_first_frame_fallback
+            )
+            safe_cut_plan["visual_proof"] = (
+                str(safe_cut_plan.get("visual_proof") or "").strip()
+                or clean_first_frame_fallback
+            )
+            safe_cut_plan["first_frame_brief"] = (
+                str(safe_cut_plan.get("first_frame_brief") or "").strip()
+                or clean_first_frame_fallback
+            )
+            safe_cut_plan["static_first_frame_rule"] = (
+                str(safe_cut_plan.get("static_first_frame_rule") or "").strip()
+                or "次の行為の直前に止まった一つの静止状態だけを描く"
+            )
+            safe_cut_plan["foreground"] = (
+                str(safe_cut_plan.get("foreground") or "").strip()
+                or focal_character_name
+            )
+            safe_cut_plan["midground"] = (
+                str(safe_cut_plan.get("midground") or "").strip()
+                or focal_character_name
+            )
+            safe_cut_plan["background"] = (
+                str(safe_cut_plan.get("background") or "").strip()
+                or first_frame_location_name
+            )
+            beat = str(safe_cut_plan["target_beat"])
+            visual_beat = str(safe_cut_plan["visual_proof"])
             source_event_beat_ids = [str(item) for item in cut_plan.get("source_event_beat_ids", []) if str(item).strip()]
             primary_event_beat_id = str(cut_plan.get("primary_event_beat_id") or (source_event_beat_ids[0] if source_event_beat_ids else "")).strip()
             if primary_event_beat_id and primary_event_beat_id not in source_event_beat_ids:
@@ -8003,12 +9588,15 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             )
             event_beat_function = str(primary_event_beat.get("beat_function") or cut_plan.get("event_beat_function") or "custom")
             event_time_position = str(cut_plan.get("event_time_position") or ("trigger_moment" if event_beat_function == "turn" else "consequence" if event_beat_function == "payoff" else "early_action"))
-            cut_state_progression = dict(cut_state_progression_by_selector.get(selector, {}))
+            cut_state_progression = _sanitize_first_frame_prose(
+                dict(cut_state_progression_by_selector.get(selector, {})),
+                excluded_tokens=first_frame_excluded_tokens,
+            )
             is_terminal_scene = bool(scene_intent.get("terminal_resolution"))
             cut_blueprint = {
                 "cut_role": "状況を前へ進める映画的断片",
                 "cut_function": cut_plan["cut_function"],
-                "duration_intent": "12秒で感情と情報を同時に渡す",
+                "duration_intent": f"{cut_target_seconds}秒で感情と情報を同時に渡す",
                 "target_beat": beat,
                 "scene_focus": scene_intent["dramatic_question"],
                 "coverage_obligation_id": cut_plan["obligation_id"],
@@ -8016,32 +9604,33 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "screen_question": cut_plan["screen_question"],
                 "dramatic_job": cut_plan["dramatic_job"],
                 "audience_knowledge_delta": cut_plan.get("audience_knowledge_delta", ""),
-                "causal_proof": cut_plan.get("causal_proof", ""),
-                "visual_evidence": cut_plan.get("visual_evidence", []),
+                "causal_proof": safe_cut_plan.get("causal_proof", ""),
+                "visual_evidence": safe_cut_plan.get("visual_evidence", []),
                 "required_roles": cut_plan.get("required_roles", []),
                 "anti_redundancy_key": cut_plan.get("anti_redundancy_key", ""),
                 "must_show": must_show,
                 "must_avoid": ["画面内テキスト", "字幕", "ロゴ"],
                 "done_when": [cut_plan["done_when"]],
                 "visual_beat": visual_beat,
-                "first_frame_brief": cut_plan["first_frame_brief"],
-                "static_first_frame_rule": cut_plan.get("static_first_frame_rule", ""),
+                "first_frame_brief": safe_cut_plan["first_frame_brief"],
+                "static_first_frame_rule": safe_cut_plan.get("static_first_frame_rule", ""),
                 "action_completion_state": str(cut_state_progression.get("action_completion_state") or ("pre_action" if cut_number == 1 else "early_action")),
                 "motion_brief": cut_plan["motion_brief"],
                 "motion_end_state": cut_plan["motion_end_state"],
+                "first_frame_asset_policy": {
+                    "character_asset_overrides": first_frame_character_asset_overrides,
+                    "excluded_object_ids": sorted(first_frame_excluded_object_ids),
+                },
                 "allowed_new_reveal_elements": list(
                     cut_plan.get("allowed_new_reveal_elements") or []
                 ),
                 "narration_role": "絵を説明せず内面の方向だけを示す",
                 "asset_dependency_hint": {"characters": character_ids, "objects": object_ids, "locations": [location_spec["asset_id"]]},
             }
-            script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": 12, "estimated_duration_seconds": 12, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}}
+            script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": cut_target_seconds, "estimated_duration_seconds": cut_target_seconds, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}}
             narration = str(cut_plan["narration"])
-            continuity_end_state = (
-                "証明を受け止め、物語が閉じる"
-                if is_terminal_scene and cut_number == len(cut_plans)
-                else "次cutへ主被写体の視線が残る"
-            )
+            actual_motion_end_state = str(cut_blueprint["motion_end_state"]).strip()
+            continuity_destination_location = location_name
             motion_must_not_add = (
                 ["新しい人物", "外部への導線", "次sceneのreveal", "画面内テキスト"]
                 if is_terminal_scene
@@ -8056,14 +9645,16 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 else None
             )
             if use_next_cut_first_frame_as_last_frame:
-                if not isinstance(next_cut_plan, dict):
-                    raise RuntimeError(
-                        f"{selector}: next-cut last-frame binding requires a next cut"
-                    )
-                if str(next_cut_plan.get("background") or "").strip() != location_name:
-                    raise RuntimeError(
-                        f"{selector}: next-cut last-frame binding crosses locations"
-                    )
+                boundary = _validate_next_cut_last_frame_boundary(
+                    selector=selector,
+                    current_cut_plan=cut_plan,
+                    next_cut_plan=next_cut_plan,
+                    route_locations=location_sequence,
+                )
+                continuity_destination_location = boundary[
+                    "destination_location"
+                ]
+                actual_motion_end_state = boundary["actual_end_state"]
             bound_last_frame = (
                 f"assets/scenes/scene{scene_id}_cut{cut_number + 1:02d}.png"
                 if use_next_cut_first_frame_as_last_frame
@@ -8096,9 +9687,9 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             visible_start_state = {
                 "character_state": str(cut_state_progression.get("state_visible_in_this_cut") or ("まだ行為を完了していない" if scene_state_progression_plan["progression_mode"] != "sequential_state_progression" else cut_blueprint["first_frame_brief"])),
                 "prop_state": "前cutから進んだ小道具・場所の状態が見える" if scene_state_progression_plan["progression_mode"] == "sequential_state_progression" else "必要な小道具や証拠は見えるが、結果を説明しすぎない",
-                "spatial_state": location_name,
+                "spatial_state": first_frame_location_name,
                 "emotional_state": "sceneの圧力を受けている",
-                "gaze_or_attention": f"{cut_plan['foreground']}へ向く",
+                "gaze_or_attention": f"{safe_cut_plan['foreground']}へ向く",
                 "pose": str(cut_state_progression.get("state_visible_in_this_cut") or cut_blueprint["first_frame_brief"]),
                 "hand_position": "前cutから進んだ状態に合う手元" if scene_state_progression_plan["progression_mode"] == "sequential_state_progression" else "行為を始める位置で止まった手元",
                 "foot_position": "前cutから進んだ位置関係が読める足元" if scene_state_progression_plan["progression_mode"] == "sequential_state_progression" else "次に動き出せる足元",
@@ -8134,7 +9725,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             }
             visible_behavior = _visible_behavior_from_cut(
                 profile=profile,
-                cut_plan=cut_plan,
+                cut_plan=safe_cut_plan,
                 cut_blueprint=cut_blueprint,
                 location_name=location_name,
                 object_ids=object_ids,
@@ -8157,7 +9748,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 location_name=location_name,
                 cut_number=cut_number,
                 cut_count=len(cut_plans),
-                cut_plan=cut_plan,
+                cut_plan=safe_cut_plan,
                 cut_blueprint=cut_blueprint,
                 primary_event_beat=primary_event_beat,
                 primary_event_beat_id=primary_event_beat_id,
@@ -8204,25 +9795,46 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "source_event_beat_ids": source_event_beat_ids,
                     "event_beat_function": event_beat_function,
                     "event_time_position": event_time_position,
-                    "source_event_summary": " / ".join(str(beat.get("what_happens") or "") for beat in event_beats_for_cut if str(beat.get("what_happens") or "").strip()),
+                    "source_event_summary": (
+                        _sanitize_first_frame_prose(
+                            " / ".join(
+                                str(event_beat.get("what_happens") or "")
+                                for event_beat in event_beats_for_cut
+                                if str(event_beat.get("what_happens") or "").strip()
+                            ),
+                            excluded_tokens=first_frame_excluded_tokens,
+                        )
+                        or beat
+                    ),
                     "source_concrete_events": [
                         {
-                            **beat["concrete_event"],
+                            **event_beat["concrete_event"],
                             "primary_subject": cut_plan.get(
                                 "primary_subject_name"
                             ),
                             "where": cut_plan.get("background") or location_name,
-                            "visible_action": cut_plan.get("visible_action"),
-                            "visible_reaction": cut_plan.get("visible_reaction"),
+                            "what_happens": (
+                                _sanitize_first_frame_prose(
+                                    event_beat["concrete_event"].get("what_happens", ""),
+                                    excluded_tokens=first_frame_excluded_tokens,
+                                )
+                                or beat
+                            ),
+                            "object_or_trace": _sanitize_first_frame_prose(
+                                event_beat["concrete_event"].get("object_or_trace", []),
+                                excluded_tokens=first_frame_excluded_tokens,
+                            ),
+                            "visible_action": safe_cut_plan.get("visible_action"),
+                            "visible_reaction": safe_cut_plan.get("visible_reaction"),
                             "required_visual_evidence": list(
-                                cut_plan.get("visual_evidence") or []
+                                safe_cut_plan.get("visual_evidence") or []
                             ),
                             "motion_brief": cut_plan.get("motion_brief"),
                             "motion_end_state": cut_plan.get(
                                 "motion_end_state"
                             ),
                             "visible_character_state": dict(
-                                cut_plan.get("visible_character_state") or {}
+                                safe_cut_plan.get("visible_character_state") or {}
                             ),
                             "allowed_new_reveal_elements": list(
                                 cut_plan.get("allowed_new_reveal_elements") or []
@@ -8236,8 +9848,8 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                                 )
                             ),
                         }
-                        for beat in event_beats_for_cut
-                        if isinstance(beat.get("concrete_event"), dict)
+                        for event_beat in event_beats_for_cut
+                        if isinstance(event_beat.get("concrete_event"), dict)
                     ],
                     "source_story_grounding": [
                         beat.get("story_grounding")
@@ -8245,14 +9857,58 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         if isinstance(beat.get("story_grounding"), dict)
                     ],
                     "source_non_replaceable_elements": source_non_replaceable_elements,
-                    "source_visible_action": str(primary_event_beat.get("visible_action") or cut_plan.get("visual_proof") or ""),
-                    "source_visible_reaction": str(primary_event_beat.get("visible_reaction") or cut_plan.get("audience_knowledge_delta") or "画面内の人物の視線が出来事へ向く"),
-                    "source_required_visual_evidence": [
+                    "source_visible_action": str(
+                        _sanitize_first_frame_prose(
+                            primary_event_beat.get("visible_action")
+                            or safe_cut_plan.get("visual_proof")
+                            or "",
+                            excluded_tokens=first_frame_excluded_tokens,
+                        )
+                        or visual_beat
+                    ),
+                    "canonical_source_visible_action": str(
+                        primary_event_beat.get("visible_action")
+                        or safe_cut_plan.get("visual_proof")
+                        or visual_beat
+                    ),
+                    "source_visible_reaction": str(
+                        _sanitize_first_frame_prose(
+                            primary_event_beat.get("visible_reaction")
+                            or safe_cut_plan.get("audience_knowledge_delta")
+                            or "画面内の人物の視線が出来事へ向く",
+                            excluded_tokens=first_frame_excluded_tokens,
+                        )
+                        or "画面内の人物の視線が出来事へ向く"
+                    ),
+                    "source_required_visual_evidence": (
+                        _sanitize_first_frame_prose(
+                            [
+                                str(item)
+                                for event_beat in event_beats_for_cut
+                                for item in (
+                                    event_beat.get("required_visual_evidence", [])
+                                    if isinstance(
+                                        event_beat.get("required_visual_evidence"), list
+                                    )
+                                    else []
+                                )
+                                if str(item).strip()
+                            ],
+                            excluded_tokens=first_frame_excluded_tokens,
+                        )
+                        or cut_blueprint["visual_evidence"]
+                        or must_show
+                    ),
+                    "canonical_source_required_visual_evidence": [
                         str(item)
-                        for beat in event_beats_for_cut
-                        for item in (beat.get("required_visual_evidence", []) if isinstance(beat.get("required_visual_evidence"), list) else [])
+                        for event_beat in event_beats_for_cut
+                        for item in (
+                            event_beat.get("required_visual_evidence", [])
+                            if isinstance(event_beat.get("required_visual_evidence"), list)
+                            else []
+                        )
                         if str(item).strip()
-                    ] or cut_blueprint["visual_evidence"] or must_show,
+                    ],
                     "source_story_information_revealed_ids": [
                         str(item)
                         for beat in event_beats_for_cut
@@ -8265,10 +9921,18 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         for item in (beat.get("story_information_hinted_ids", []) if isinstance(beat.get("story_information_hinted_ids"), list) else [])
                         if str(item).strip()
                     ],
-                    "event_facts_to_preserve": [
-                        str(beat.get("what_happens") or "")
-                        for beat in event_beats_for_cut
-                        if str(beat.get("what_happens") or "").strip()
+                    "event_facts_to_preserve": _sanitize_first_frame_prose(
+                        [
+                            str(event_beat.get("what_happens") or "")
+                            for event_beat in event_beats_for_cut
+                            if str(event_beat.get("what_happens") or "").strip()
+                        ],
+                        excluded_tokens=first_frame_excluded_tokens,
+                    ),
+                    "canonical_event_facts_to_preserve": [
+                        str(event_beat.get("what_happens") or "")
+                        for event_beat in event_beats_for_cut
+                        if str(event_beat.get("what_happens") or "").strip()
                     ],
                     "event_facts_not_to_invent": scene_event.get("forbidden_event_changes", []),
                     "allowed_reveal_info_ids": list(
@@ -8289,7 +9953,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "coverage_obligation_id": cut_plan["obligation_id"],
                 "coverage_source": cut_plan["source"],
                 "duration_intent": "standard",
-                "target_duration_seconds": 12,
+                "target_duration_seconds": cut_target_seconds,
                 "intent_budget": {
                     "primary_intent": beat,
                     "secondary_intents_allowed": ["continuity_handoff"],
@@ -8334,16 +9998,25 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 },
                 "cinematic_contract": {
                     "camera_intent": "観客の視線を主人公、光、場所の奥行きへ導く",
-                    "subject_priority": {"primary": focal_character_name, "secondary": profile["artifact_name"] if cut_uses_artifact else location_name, "background": location_name},
-                    "screen_geography": {"foreground": cut_plan["foreground"], "midground": cut_plan["midground"], "background": cut_plan["background"], "screen_direction": cut_plan["screen_direction"]},
+                    "subject_priority": {"primary": focal_character_name, "secondary": profile["artifact_name"] if cut_uses_artifact else first_frame_location_name, "background": first_frame_location_name},
+                    "screen_geography": {"foreground": safe_cut_plan["foreground"], "midground": safe_cut_plan["midground"], "background": safe_cut_plan["background"], "screen_direction": cut_plan["screen_direction"]},
                 },
                 "continuity_contract": {
                     "location_ids": [location_spec["asset_id"]],
                     "character_ids": character_ids,
                     "object_ids": object_ids,
-                    "start_state": {"character_state": visible_start_state["character_state"], "prop_state": visible_start_state["prop_state"], "spatial_state": location_name, "time_state": "scene内の現在時点"},
-                    "end_state": {"character_state": continuity_end_state, "prop_state": "次へ渡す証拠が画面に残る", "spatial_state": location_name, "time_state": "cutの理解が完了した時点"},
-                    "carry_forward_to_next_cut": [focal_character_name, location_name, *object_ids],
+                    "start_state": {"character_state": visible_start_state["character_state"], "prop_state": visible_start_state["prop_state"], "spatial_state": first_frame_location_name, "time_state": "scene内の現在時点"},
+                    "end_state": {"character_state": actual_motion_end_state, "prop_state": "次へ渡す証拠が画面に残る", "spatial_state": continuity_destination_location, "time_state": "cutの理解が完了した時点"},
+                    "carry_forward_to_next_cut": list(
+                        dict.fromkeys(
+                            [
+                                focal_character_name,
+                                continuity_destination_location,
+                                actual_motion_end_state,
+                                *object_ids,
+                            ]
+                        )
+                    ),
                     "continuity_risks": ["人物同一性のdrift", "小道具の位置関係のdrift"],
                 },
                 "cut_handoff": {
@@ -8456,12 +10129,14 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "silence_reason": "",
                 },
                 "rhythm_contract": {
-                    "expected_duration_seconds": 12,
+                    "expected_duration_seconds": cut_target_seconds,
                     "pacing": "standard",
                     "comprehension_moment": "visual_proof が画面で読める瞬間",
                     "cut_out_reason": "次cutへ渡す anchor が画面に残った瞬間",
                     "audio_visual_sync_point": "ナレーションは visual_proof の後を追い、画面説明にならない",
-                    "duration_exception": {"allowed": False, "reason": ""},
+                    "duration_exception": {
+                        **cut_duration_exception,
+                    },
                 },
                 "asset_dependency": {
                     "character_ids_required": character_ids,
@@ -8494,7 +10169,15 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                         "must_not_caption_visible_content": True,
                     },
                     "p800_video": {"event_context_for_cut": "<cut_contract.event_context_for_cut>", "motion_requirements": [cut_blueprint["motion_brief"]], "start_state": "first_frame_contract.visible_start_state", "last_frame_or_end_state": cut_blueprint["motion_end_state"], "must_not_add": motion_must_not_add},
-                    "carries_to_next_cut": [focal_character_name, location_name],
+                    "carries_to_next_cut": list(
+                        dict.fromkeys(
+                            [
+                                focal_character_name,
+                                continuity_destination_location,
+                                actual_motion_end_state,
+                            ]
+                        )
+                    ),
                     "carries_to_next_scene": carries_to_next_scene,
                 },
             }
@@ -8502,14 +10185,17 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 scene_event=scene_event,
                 source_event_contract=cut_contract["source_event_contract"],
                 reveal_constraints=scene_intent.get("reveal_constraints", []),
+                cut_location=str(
+                    safe_cut_plan.get("background") or first_frame_location_name
+                ).strip(),
             )
             first_frame_visual_plan = _first_frame_visual_plan_for_scaffold(
                 selector=selector,
                 profile=profile,
                 location_spec=location_spec,
-                location_name=location_name,
+                location_name=first_frame_location_name,
                 cut_number=cut_number,
-                cut_plan=cut_plan,
+                cut_plan=safe_cut_plan,
                 cut_blueprint=cut_blueprint,
                 cut_contract=cut_contract,
                 character_ids=character_ids,
@@ -8522,7 +10208,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             image_prompt_review_metadata = _image_prompt_review_metadata_for_scaffold(
                 selector=selector,
                 location_spec=location_spec,
-                location_name=location_name,
+                location_name=first_frame_location_name,
                 cut_number=cut_number,
                 cut_blueprint=cut_blueprint,
                 cut_contract=cut_contract,
@@ -8568,7 +10254,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 {
                     "cut_id": f"{cut_number:02d}",
                     "selector": selector,
-                    "duration_seconds": 12,
+                    "duration_seconds": cut_target_seconds,
                     "cut_contract": cut_contract,
                     "scene_contract": {
                         "cut_function": cut_contract["cut_function"],
@@ -8596,7 +10282,8 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "first_frame_visual_plan": first_frame_visual_plan, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
                     "video_generation": {
                         "tool": "kling_3_0_omni",
-                        "duration_seconds": 12,
+                        "duration_seconds": cut_target_seconds,
+                        "duration_exception": deepcopy(cut_duration_exception),
                         "first_frame": f"assets/scenes/{selector}.png",
                         **(
                             {"last_frame": bound_last_frame}
@@ -8744,8 +10431,11 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "fixed_prompts": [f"{profile['protagonist_name']}、自然な実写肌、同じ顔と髪型を維持"],
             "cinematic": {
                 "role": f"{profile['protagonist_name']}本人の変身前の一貫性",
-                "visual_subject": profile.get("protagonist_asset_subject") or f"{profile['protagonist_name']}の全身、自然な映画俳優の顔立ち、生活感のある衣装",
+                "visual_subject": profile.get("protagonist_asset_subject") or f"{profile['protagonist_name']}の変身前の全身参照。自然な映画俳優の顔立ち。衣装は下記の役割、身分、状態に従う",
             },
+            "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
+            "appearance_contract": _protagonist_appearance_contract(profile),
+            "reuse_contract": {"mode": "neutral_anchor"},
         }
     ]
     for spec in _supporting_character_asset_specs(profile):
@@ -8794,6 +10484,9 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                     if value
                 ],
                 "cinematic": {"role": spec["story_purpose"], "visual_subject": spec["visual_subject"]},
+                "subject_contract": deepcopy(spec.get("subject_contract") or {}),
+                "appearance_contract": deepcopy(spec.get("appearance_contract") or {}),
+                "reuse_contract": deepcopy(spec.get("reuse_contract") or {"mode": "neutral_anchor"}),
                 **(
                     {
                         "appearance_continuity": appearance_continuity
@@ -8811,6 +10504,7 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
             "review_aliases": [profile["artifact_name"]],
             "fixed_prompts": [profile["artifact_fixed_prompt"]],
             "cinematic": {"role": profile["artifact_role"], "visual_takeaways": ["脆さと証拠性"], "spectacle_details": ["光を反射して手がかりになる"]},
+            "reuse_contract": {"mode": "neutral_anchor"},
         }
     ]
     for spec in _supporting_object_asset_specs(profile):
@@ -8822,9 +10516,14 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
                 "review_aliases": [spec["name"]],
                 "fixed_prompts": [spec["visual_subject"]],
                 "cinematic": {"role": spec["story_purpose"], "visual_takeaways": [spec["name"]], "visual_subject": spec["visual_subject"]},
+                "reuse_contract": deepcopy(spec.get("reuse_contract") or {"mode": "neutral_anchor"}),
             }
         )
-    manifest = {"schema_version": "scene_event_v1", "manifest_phase": "production", "video_metadata": {"topic": topic, "source_story": str(run_dir / "story.md"), "created_at": now, "run_variant": run_variant, "experience": "cinematic_story", "aspect_ratio": "16:9", "resolution": "1280x720", "frame_rate": 24, "target_duration_seconds": int(duration_plan["target_seconds"]), "minimum_duration_seconds": int(duration_plan["minimum_effective_seconds"]), "minimum_scene_count": int(duration_plan["minimum_scene_count"]), "minimum_cut_count": int(duration_plan["minimum_cut_count"]), "minimum_narration_seconds": int(duration_plan["minimum_narration_seconds"]), "duration_plan": duration_plan, "duration_seconds": total_duration_seconds}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "assets": {"character_bible": character_bible, "object_bible": object_bible, "location_bible": [{"location_id": spec["asset_id"], "reference_images": [spec["output"]], "review_aliases": [spec["name"]], "fixed_prompts": [str((spec.get("visual_spec") or {}).get("subject") or f"{spec['name']}、実写映画の場所参照、同じ光と質感を維持")], "cinematic": {"role": spec["story_purpose"], "visual_subject": str((spec.get("visual_spec") or {}).get("subject") or "")}} for spec in _location_asset_specs(profile)], "style_guide": {"visual_style": "実写、シネマティック、プラクティカルエフェクト。画面内テキストなし。", "forbidden": ["アニメ調", "漫画調", "イラスト調", "画面内テキスト", "字幕", "ウォーターマーク", "ロゴ"], "reference_images": []}}, "human_change_requests": [], "scenes": manifest_scenes}
+    derived_semantic_minimum_cut_count = sum(
+        int(scene["scene_cut_coverage_plan"]["min_cut_count"]["selected"])
+        for scene in manifest_scenes
+    )
+    manifest = {"schema_version": "scene_event_v1", "manifest_phase": "production", "video_metadata": {"topic": topic, "source_story": str(run_dir / "story.md"), "created_at": now, "run_variant": run_variant, "experience": "cinematic_story", "aspect_ratio": "16:9", "resolution": "1280x720", "frame_rate": 24, "target_duration_seconds": int(duration_plan["target_seconds"]), "minimum_duration_seconds": int(duration_plan["minimum_effective_seconds"]), "minimum_scene_count": int(duration_plan["minimum_scene_count"]), "minimum_cut_count": derived_semantic_minimum_cut_count, "minimum_narration_seconds": int(duration_plan["minimum_narration_seconds"]), "duration_plan": duration_plan, "duration_seconds": total_duration_seconds}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "assets": {"character_bible": character_bible, "object_bible": object_bible, "location_bible": [{"location_id": spec["asset_id"], "reference_images": [spec["output"]], "review_aliases": [spec["name"]], "fixed_prompts": [str((spec.get("visual_spec") or {}).get("subject") or f"{spec['name']}、実写映画の場所参照、空間構造と固定素材を維持")], "cinematic": {"role": spec["story_purpose"], "visual_subject": str((spec.get("visual_spec") or {}).get("subject") or "")}, "reuse_contract": deepcopy(spec.get("reuse_contract") or {"mode": "neutral_anchor"})} for spec in _location_asset_specs(profile)], "style_guide": {"visual_style": "実写、シネマティック、プラクティカルエフェクト。画面内テキストなし。", "forbidden": ["アニメ調", "漫画調", "イラスト調", "画面内テキスト", "字幕", "ウォーターマーク", "ロゴ"], "reference_images": []}}, "human_change_requests": [], "scenes": manifest_scenes}
     manifest["video_metadata"]["time"] = str(profile.get("story_time") or "").strip()
     manifest["video_metadata"]["scene_time_of_day_contract"] = SCENE_TIME_OF_DAY_CONTRACT
     manifest["video_metadata"]["scene_time_of_day_visual_basis_contract"] = SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT
@@ -8945,13 +10644,6 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
 
 
 def _materialize_standard_request_files(run_dir: Path) -> None:
-    append_state_snapshot(
-        run_dir / "state.txt",
-        {
-            "eval.p400_readiness.status": "approved",
-            "eval.p400_readiness.reason_keys": "",
-        },
-    )
     subprocess.run(
         [
             sys.executable,
@@ -8983,6 +10675,25 @@ def _materialize_standard_request_files(run_dir: Path) -> None:
             capture_output=True,
             text=True,
         )
+
+
+def _require_fresh_p400_readiness(run_dir: Path) -> None:
+    stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
+    append_state_snapshot(run_dir / "state.txt", updates)
+    if updates.get("eval.p400_readiness.status") != "approved":
+        reasons = updates.get("eval.p400_readiness.reason_keys") or "unknown"
+        details = [
+            str(check.get("message") or check.get("description") or "").strip()
+            for check in stage_result.get("checks", [])
+            if isinstance(check, dict)
+            and check.get("passed") is False
+            and (
+                str(check.get("id") or "") in {value for value in reasons.split(",") if value}
+                or str(check.get("id") or "").startswith("p400.")
+            )
+        ]
+        suffix = f" ({'; '.join(details[:4])})" if details else ""
+        raise RuntimeError(f"p400 readiness gate is not approved: {reasons}{suffix}")
 
 
 def _review_status_line(stage: str) -> str:
@@ -9311,13 +11022,13 @@ def _build_asset_artifacts_from_manifest(
         if not asset_id or not output or not selectors:
             continue
         role = str((entry.get("cinematic") or {}).get("role") or "登場人物の一貫性を固定する")
-        subject = str((entry.get("cinematic") or {}).get("visual_subject") or f"{profile['protagonist_name']}の全身、自然な映画俳優の顔立ち、生活感のある衣装")
+        subject = str((entry.get("cinematic") or {}).get("visual_subject") or f"{profile['protagonist_name']}の全身、自然な映画俳優の顔立ち。衣装は下記の役割、身分、状態に従う")
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
         reference_inputs = _asset_reference_inputs_for_plan(profile, asset_id)
         execution_lane = "standard" if reference_inputs else "bootstrap_builtin"
         coverage["characters"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "characters", "source_script_selectors": selectors, "story_purpose": role, "reusable_reason": "登場cutで人物同一性を保つ", "recommended_asset_type": "character_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": execution_lane, "bootstrap_allowed": not reference_inputs, "required_views": ["front", "side", "back"], "reference_inputs": reference_inputs, "output": output}, "review": {"status": "approved", "reason": "登場cutで人物同一性を保つため必須"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "subject_contract": deepcopy(entry.get("subject_contract") or {"identity_scope": "individual", "subject_count": 1, "member_ids": []}), "appearance_contract": deepcopy(entry.get("appearance_contract") or {}), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": execution_lane, "bootstrap_allowed": not reference_inputs, "required_views": ["front", "side", "back"], "reference_inputs": reference_inputs, "output": output}, "review": {"status": "approved", "reason": "登場cutで人物同一性を保つため必須"}})
 
     for entry in assets.get("object_bible", []) or []:
         if not isinstance(entry, dict):
@@ -9332,7 +11043,7 @@ def _build_asset_artifacts_from_manifest(
         subject = str((entry.get("cinematic") or {}).get("visual_subject") or profile["artifact_visual"])
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
         inventory_items.append({"item_id": asset_id, "category": "story_specific_items", "source_script_selectors": selectors, "story_purpose": role, "reusable_reason": "証が必要なcutで小道具の形状を保つ", "recommended_asset_type": "object_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "object_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "visual_spec": {"subject": subject, "style": "photorealistic live-action product still", "forbidden": ["文字", "ロゴ", "玩具風"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["front"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "証または舞台装置として必要なcutに使う"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "object_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action product still", "forbidden": ["文字", "ロゴ", "玩具風"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["front"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "証または舞台装置として必要なcutに使う"}})
 
     for entry in assets.get("location_bible", []) or []:
         if not isinstance(entry, dict):
@@ -9355,7 +11066,7 @@ def _build_asset_artifacts_from_manifest(
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
         coverage["locations"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "locations", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間・光・質感を固定する", "reusable_reason": "同じ場所のcutで背景と空気感を保つ", "recommended_asset_type": "location_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間・光・質感を固定する", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "scene背景と空気感の一貫性に必要"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間構造と固定素材を保つ", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "scene背景の空間構造と固定素材の一貫性に必要"}})
 
     if not plan_entries:
         raise RuntimeError("manifest did not yield any reusable asset plan entries")
@@ -9440,7 +11151,6 @@ def materialize_run(
             "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
-            "runtime.duration_plan.minimum_cut_count": str(duration_plan["minimum_cut_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
             "runtime.foundation_semantic_review": "required" if foundation_review_runner else "not_run_direct_materialization",
             "review.policy.story": "required",
@@ -9579,8 +11289,9 @@ def materialize_run(
     asset_inventory, asset_plan = _build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
     (run_dir / "asset_inventory.md").write_text(_md_yaml("Asset Inventory", asset_inventory), encoding="utf-8")
     (run_dir / "asset_plan.md").write_text(_md_yaml("Asset Plan", asset_plan), encoding="utf-8")
-    _write_asset_request_files(run_dir, asset_plan, profile)
     _write_review_artifacts(run_dir)
+    _require_fresh_p400_readiness(run_dir)
+    _write_asset_request_files(run_dir, asset_plan, profile)
     _materialize_standard_request_files(run_dir)
     state_updates = _write_orchestration(
         run_dir,
@@ -9626,7 +11337,6 @@ def materialize_run(
             "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
-            "runtime.duration_plan.minimum_cut_count": str(duration_plan["minimum_cut_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
             "status": "P650",
             "runtime.stage": "image_prompt_semantic_review_pending",
@@ -9707,6 +11417,29 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
         await image_gen_app._generate_create_images("toc-immersive-frontend-run", run_id=run_id)
 
 
+async def run_pre_media_semantic_pipeline(
+    run_dir: Path,
+    *,
+    image_prompt_provider_ready: bool,
+) -> None:
+    """Review every authored design even when media generation is disabled."""
+
+    from server import image_gen_app
+
+    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
+        await image_gen_app._run_semantic_review(
+            "toc-immersive-frontend-run",
+            run_dir=run_dir,
+            stage=stage,
+        )
+    await image_gen_app._run_semantic_review(
+        "toc-immersive-frontend-run",
+        run_dir=run_dir,
+        stage="image_prompt",
+        image_prompt_provider_ready=image_prompt_provider_ready,
+    )
+
+
 def validate(run_dir: Path, stop_target: str) -> None:
     from server import image_gen_app
 
@@ -9750,11 +11483,23 @@ def main() -> None:
         foundation_review_runner=_run_foundation_semantic_review,
     )
     prepare_grounding(run_dir)
-    if not args.materialize_only:
+    if args.materialize_only:
+        asyncio.run(
+            run_pre_media_semantic_pipeline(
+                run_dir,
+                image_prompt_provider_ready=False,
+            )
+        )
+    else:
         asyncio.run(generate_images(run_dir, args.stop_target))
     write_run_index(run_dir)
-    if not args.skip_validation and not args.materialize_only:
-        validate(run_dir, args.stop_target)
+    if not args.skip_validation:
+        if args.materialize_only:
+            from server import image_gen_app
+
+            image_gen_app._validate_materialized_p650_run(_run_id_from_dir(run_dir))
+        else:
+            validate(run_dir, args.stop_target)
     print(f"Run dir: {run_dir.resolve()}")
     print(f"Stop target: {args.stop_target}")
 

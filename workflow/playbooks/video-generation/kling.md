@@ -19,6 +19,8 @@ ToC で `kling_3_0` / `kling_3_0_omni` を使うときの provider 固有 policy
 
 現在の ToC Kling adapter は first / last frame だけを画像入力として送る。Kling 3.0 Omni 製品自体の Elements / multi-image 機能と、未実装の local `references[]` 転送を同一視しない。Kling target の auxiliary `references[]` と対応する `video_input_contract.reference_roles[]` は approval / provider 実行前に拒否し、ordered reference role binding が必要なら Seedance を選ぶ。
 
+Kling target の payload `mode` は `text_to_video | image_to_video | first_last_frame` のいずれかとし、`reference_to_video` と非空 `references[]` は拒否する。
+
 ## ToC での位置づけ
 
 - [`docs/video-generation.md`](../../../docs/video-generation.md)
@@ -36,7 +38,7 @@ ToC で `kling_3_0` / `kling_3_0_omni` を使うときの provider 固有 policy
 
 ```text
 cut_contract + first/last frame + continuity + settings
-  -> video_prompt_projection_registry_v3
+  -> video_prompt_projection_registry_v5
   -> compile_video_api_prompt_v1
   -> video_api_prompt_v1
   -> Kling API
@@ -46,6 +48,8 @@ cut_contract + first/last frame + continuity + settings
 - image prompt と narration / TTS prose を motion 指示として複製しない
 - daypart basis、scene route / segments、cut responsibility、event / reveal 境界、reference path の exact value は `review_only_sources` と `source_digest` に残すが、Kling prompt 本文へ出さない
 - `prompt_authoring_source` は自由入力の候補であり、canonical `motion_contract` と競合するときは canonical 値を優先する
+- `motion_attention_target` は upstream cut authoring 用で、現行 video registry / compiler は独立 projection source / trace / provider fragment にしない。cut contract に保持された値は normalized design source として `source_digest` を変え得る。必要な対象指向は `motion_brief`、`emotional_change`、`end_state` に具体化する
+- render unit の 1-cut effective contract は source contract を exact 継承する。explicit field の省略 / 空値は no-op とするが、非空の指定値が対応する source value と異なる場合は拒否し、出力を変更しない。multi-cut の explicit reveal allowlist は source cut 順に stable dedupe した reveal union と normalized member set が exact 一致しなければならず、出力順を stable source order に正規化する。欠落も superset による新 reveal の発明も拒否する
 - provider へ渡す prompt を直したい場合は upstream design を直し、再 compile / 再 materialize する
 
 ## Kling の必須 Policy
@@ -83,7 +87,7 @@ cut_contract + first/last frame + continuity + settings
   - last frame を別 shot として挿入しない
   - fade / cut で到達を偽装しない
 
-`beat_overrides.<function>.obligation_overrides.<obligation_id>.use_next_cut_first_frame_as_last_frame: true` を使う場合、次 cut が存在し、同じ location にあり、current `motion_end_state` と許可済み reveal が next first-frame contract と一致していなければならない。next image は approved/current であることを検証し、materializer はその path と bytes hash を current Kling request の exact `last_frame` binding に含める。境界 flag だけで新しい reveal を許可してはならない。
+`beat_overrides.<function>.obligation_overrides.<obligation_id>.use_next_cut_first_frame_as_last_frame: true` を使う場合、次 cut が存在し、current `motion_end_state` と許可済み reveal が next first-frame contract と exact match しなければならない。同一 location ではその一致を必須とし、cross-location はさらに exact destination が `scene.location_sequence[]` と current obligation の `allowed_new_reveal_elements[]` の双方にある場合だけ許可する。next image は approved/current であることを検証し、materializer はその path と bytes hash を current Kling request の exact `last_frame` binding に含める。境界 flag だけで新しい reveal を許可してはならない。
 
 ## Canonical Motion Authoring
 
@@ -166,7 +170,7 @@ compiler は active な 8 groups だけを固定順で自然文化する。次�
 
 provider prompt 例に raw key / ID / path / hash / narration / image prompt を混ぜない。実 path、hash、projection trace は payload metadata に残す。
 
-compiler v3 が返す `quality_issues[]` は syntax warning ではなく blocking review input である。`video_motion_generated_fallback`、`video_motion_unresolved_alternative`、`video_motion_abstract_primary`、`video_motion_abstract_end_state`、`video_motion_duplicate_environment`、`video_motion_duplicate_emotion` が一件でもあれば、Kling 実行へ進めず canonical motion field を具体化して再 compile する。
+compiler v5 が返す `quality_issues[]` は syntax warning ではなく blocking review input である。`video_motion_generated_fallback`、`video_motion_unresolved_alternative`、`video_motion_abstract_primary`、`video_motion_abstract_end_state`、`video_motion_duplicate_environment`、`video_motion_duplicate_emotion`、`video_motion_sequential_overview` が一件でもあれば、Kling 実行へ進めず canonical motion field を具体化して再 compile する。
 
 ## Temporal Continuity
 
@@ -203,27 +207,39 @@ compiler v3 が返す `quality_issues[]` は syntax warning ではなく blockin
 
 禁止文を増やして intent がぼやける場合は、prompt を長くする前に shot の責務を切り直す。
 
-開始画像にない要素を主動作で出す必要がある場合だけ、exact obligation entry に次を置く。
+開始画像にない要素を主動作で出す必要がある場合だけ、exact `beat_overrides.<function>.obligation_overrides.<obligation_id>` entry に次を置く。
 
+- `location`: cut の departure location。exact `scene.location_sequence[]` 内だけ
+- `first_frame_character_asset_overrides` / `first_frame_excluded_object_ids[]`: 開始側の人物 variant / object 除外
 - `allowed_new_reveal_elements[]`: 最大8件の具体的な画面要素。すべて `motion_brief` または `motion_end_state` に現れ、`must_not_add` と交差しないこと
 - `allowed_reveal_info_ids[]`: canonical reveal inventory に存在する、この cut だけの内部情報 ID。Kling prompt には出さないこと
 
+変身後の人物参照、小道具、遷移先場所は開始画像へ先回りさせない。開始側は `first_frame_character_asset_overrides` / `first_frame_excluded_object_ids[]` / cut-local `location` で固定し、cut-local `location` は exact `scene.location_sequence[]` 内だけで選ぶ。終了側だけを `allowed_new_reveal_elements[]` と必要時の next-cut last-frame binding で許可する。場所をまたぐ binding は、遷移先が `scene.location_sequence[]` と current obligation の allowlist の双方に exact 宣言され、end/start state と reveal が exact match する場合だけ認める。
+
 compiler は positive `constraints` に許可要素を列挙し、その要素以外の追加を禁止する。Kling の separate `negative_prompt` には正の allowlist 文と許可要素名を複写せず、「承認済み要素以外」の禁止だけを残す。positive allowlist と negative prohibition の両方に同じ要素名が入る request は矛盾として拒否する。
+
+scene 全体の `visualizable_action` や `A→B→C` 形式の展開要約は review input であり motion source ではない。1 clip には cut の開始状態、単一主動作、終了状態だけを投影する。目標尺だけを理由に同じ動作の filler cut を追加しない。
 
 ## Materialization / Execution
 
 frontend、CLI、scene storyboard の全経路で、provider call の前に `compile_video_api_prompt_v1` の結果を target の `video_generation.api_prompt_payload` へ保存する。
 
-保存対象:
+compiler v5 が返す full payload を field の削除・再解釈なしで保存する。次は Kling 固有 assertion の抜粋であり、payload の exhaustive field list ではない。
 
 - `policy_version: video_api_prompt_v1`
-- `compiler_version: conditional_video_prompt_compiler_v3`
-- `projection_registry_version: video_prompt_projection_registry_v3`
+- `compiler_version: conditional_video_prompt_compiler_v5`
+- `projection_registry_version: video_prompt_projection_registry_v5`
+- `provider_policy.multimodal_reference: false` / `provider_policy.negative_prompt_mode: separate`
 - exact `prompt` / `negative_prompt`
-- `source_digest` / prompt `sha256`
-- `video_prompt_ir`（`video_prompt_ir_v2`）/ `projection_review_contract`（exact `review_only_sources[].value` を含む）
+- `source_digest` / payload `sha256`。review・request state の同じ値は `prompt_sha256` として束縛する
+- `video_prompt_ir`（`video_prompt_ir_v2`）/ `projection_review_contract`（exact `review_only_sources[].value` と、caller dependency が正規化後に非空なら exact `review_only_dependencies` を含む）
+- `video_prompt_ir.dependencies.has_references: false`
 - `quality_issues[]`（Kling 実行可能 target は空配列）
 - tool / duration / quality / aspect ratio / first / last（`references` は空であること）
+
+render unit の `review_only_dependencies` は string trim と空 descendant 除去後に非空なら、exact normalized `render_unit_source_cut_ids` / `render_unit_source_cut_contracts` を `projection_review_contract.review_only_dependencies` に返して `source_digest` に束縛する。未指定または正規化後に空なら field は出さない。Kling の `prompt`、`negative_prompt`、top-level / IR の `included_fragments`、その他の `video_prompt_ir` fragment には出さない。
+
+materialization 設定名は manifest template と同じ `review_prompt_fence`、`provider_prompt_sources`、`bind_materialized_reference_content_sha256`、`approval_request_flag`、`bind_negative_prompt`、`bind_provider_execution_options`、`reject_reserved_provider_extra_overrides` を使う。
 
 `video_generation_requests.md` は同じ exact prompt と metadata を見せる review projection である。生成 API は materialized payload を provider request に使い、current design の再 compile 結果と prompt hash / source digest / settings を照合する。未 materialize、obsolete version、hash mismatch、design / setting / reference drift は再 materialize まで拒否する。
 

@@ -39,6 +39,7 @@ FOUNDATION_SEMANTIC_CRITERIA = {
         "conflict_resolution",
         "historical_time_context",
         "scene_time_of_day_continuity",
+        "scene_location_route_continuity",
         "duration_scene_readiness",
     ),
 }
@@ -294,10 +295,10 @@ def check_image_prompt_judgment(run_dir: Path, *, require_entries: bool = True) 
         require_entries=require_entries,
     )
     if all((run_dir / rel).exists() for rel in generic_paths.values()):
-        generic_status = check_semantic_review(run_dir, "image_prompt", require_entries=require_entries)
-        if generic_status.passed or not legacy_status.passed:
-            return generic_status
-        return legacy_status
+        # Once the canonical generic artifact set exists it is authoritative.
+        # Falling back to an older passing judgment here can mask a pending or
+        # failed current review revision.
+        return check_semantic_review(run_dir, "image_prompt", require_entries=require_entries)
     return legacy_status
 
 

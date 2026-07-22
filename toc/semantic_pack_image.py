@@ -593,7 +593,7 @@ def collect_scene_composite_entries(
                     "minimum_cut_count": _coverage_minimum_cut_count(scene_cut_coverage_plan),
                     "must_judge": [
                         "scene_cut_coverage_plan の scene_obligations が cut_entries に割り当てられているか",
-                        "cut_contract.source_event_contract の primary_event_beat_id / source_event_beat_ids が scene_event.event_sequence の beat_id を参照し、setup/pressure/turn/payoff を網羅しているか",
+                        "cut_contract.source_event_contract の primary_event_beat_id / source_event_beat_ids が scene_event.event_sequence の beat_id を参照し、must-be-seen event_beat_inventory を網羅しているか",
                         "event_context_for_cut が source_event_contract から生成された downstream 用 projection として primary beat だけを渡しているか",
                         "cut_context_packet が scene全体の義務を cut ごとの実行可能責務へ落とし、required_roles / visual_proof / reveal_boundary / previous_next_delta を欠落させていないか",
                         "first_frame_visual_plan が source_event_contract / event_context_for_cut / first_frame_contract / motion_contract から派生し、物語意味を描画可能な開始静止画へ変換しているか",
@@ -1132,19 +1132,44 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _coverage_identifier(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _coverage_authored_obligation_ids(plan: dict[str, Any]) -> set[str]:
+    obligation_ids: set[str] = set()
+    for assignment in _list(plan.get("cut_assignments")):
+        if not isinstance(assignment, dict):
+            continue
+        obligation_ids.update(
+            identifier
+            for value in _list(assignment.get("obligation_ids"))
+            if (identifier := _coverage_identifier(value))
+            and not identifier.lower().startswith("duration_")
+        )
+        single_obligation_id = _coverage_identifier(assignment.get("obligation_id"))
+        if single_obligation_id and not single_obligation_id.lower().startswith("duration_"):
+            obligation_ids.add(single_obligation_id)
+    return obligation_ids
+
+
+def _coverage_authored_event_beat_ids(plan: dict[str, Any]) -> set[str]:
+    return {
+        beat_id
+        for event_beat in _list(plan.get("event_beat_inventory"))
+        if isinstance(event_beat, dict)
+        and event_beat.get("must_be_seen") is not False
+        and (beat_id := _coverage_identifier(event_beat.get("beat_id")))
+    }
+
+
 def _coverage_minimum_cut_count(plan: dict[str, Any]) -> int:
     if not isinstance(plan, dict):
-        return 2
-    direct = _as_int(plan.get("minimum_cut_count"))
-    if direct:
-        return direct
-    min_cut_count = _dict(plan.get("min_cut_count"))
-    selected = _as_int(min_cut_count.get("selected"))
-    if selected:
-        return selected
-    by_importance = _as_int(min_cut_count.get("by_importance"))
-    by_duration = _as_int(min_cut_count.get("by_duration"))
-    return max(by_importance, by_duration, 2)
+        return 0
+    return max(
+        len(_coverage_authored_obligation_ids(plan)),
+        len(_coverage_authored_event_beat_ids(plan)),
+    )
 
 
 def _audience_knowledge_items(scene_intent: dict[str, Any]) -> list[str]:

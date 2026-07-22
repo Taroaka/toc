@@ -6,8 +6,9 @@ import re
 import json
 import importlib.util
 import os
+from copy import deepcopy
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
@@ -53,6 +54,102 @@ def parse_state(path: Path) -> dict[str, str]:
 
 
 class TestTocImmersiveFrontendRun(unittest.TestCase):
+    @staticmethod
+    def _legacy_cinderella_profile(module, *, target_seconds: int = 300, seed: str = "boundary"):
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            return module._duration_aware_profile(
+                module._story_profile("シンデレラ", "シンデレラ", variant_seed=seed),
+                target_duration_seconds=target_seconds,
+            )
+
+    @staticmethod
+    def _scene_design_bundle(module, profile, idx: int):
+        title = profile["scene_titles"][idx - 1]
+        location = module._location_spec_for_scene(profile, idx)
+        include_artifact = module._scene_uses_artifact(profile, idx)
+        intent = module._scene_intent_for_cut_design(
+            title=title,
+            idx=idx,
+            location_spec=location,
+            profile=profile,
+            include_artifact=include_artifact,
+        )
+        event = module._scene_event_for_cut_design(
+            title=title,
+            idx=idx,
+            scene_intent=intent,
+            location_name=str(location["name"]),
+            location_id=str(location["asset_id"]),
+            profile=profile,
+            include_artifact=include_artifact,
+        )
+        intent["story_event_obligations"] = module._story_event_obligations_from_scene_event(
+            event
+        )
+        return title, location, intent, event, include_artifact
+
+    def test_pre_media_semantic_pipeline_reviews_every_design_stage_without_media(self) -> None:
+        module = load_frontend_run_module()
+        calls: list[tuple[str, bool]] = []
+
+        async def review(_job_id, *, run_dir, stage, image_prompt_provider_ready=True):
+            self.assertEqual(run_dir, Path("/tmp/example-run"))
+            calls.append((stage, image_prompt_provider_ready))
+
+        with patch("server.image_gen_app._run_semantic_review", side_effect=review):
+            import asyncio
+
+            asyncio.run(
+                module.run_pre_media_semantic_pipeline(
+                    Path("/tmp/example-run"),
+                    image_prompt_provider_ready=False,
+                )
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("scene_set", True),
+                ("scene_detail", True),
+                ("cut_blueprint", True),
+                ("asset_plan", True),
+                ("image_prompt", False),
+            ],
+        )
+
+    def test_materialize_only_main_runs_semantic_pipeline_but_not_media_generation(self) -> None:
+        module = load_frontend_run_module()
+        semantic_pipeline = AsyncMock()
+        media_generation = AsyncMock()
+
+        with (
+            patch.object(module, "materialize_run"),
+            patch.object(module, "prepare_grounding"),
+            patch.object(module, "run_pre_media_semantic_pipeline", semantic_pipeline),
+            patch.object(module, "generate_images", media_generation),
+            patch.object(module, "write_run_index"),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-immersive-frontend-run.py",
+                    "--topic",
+                    "創作",
+                    "--run-dir",
+                    "/tmp/materialized-run",
+                    "--materialize-only",
+                    "--skip-validation",
+                ],
+            ),
+        ):
+            module.main()
+
+        semantic_pipeline.assert_awaited_once_with(
+            Path("/tmp/materialized-run"),
+            image_prompt_provider_ready=False,
+        )
+        media_generation.assert_not_awaited()
+
     @staticmethod
     def _write_passing_foundation_review(run_dir: Path, stage: str) -> None:
         review_dir = run_dir / "logs" / "review" / "semantic"
@@ -127,7 +224,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["runtime.target_video_seconds"], "900")
             self.assertEqual(state["runtime.duration_plan.minimum_scene_count"], "23")
-            self.assertEqual(state["runtime.duration_plan.minimum_cut_count"], "75")
+            self.assertNotIn("runtime.duration_plan.minimum_cut_count", state)
             self.assertEqual(state["runtime.duration_plan.minimum_narration_seconds"], "630")
 
     def test_story_semantic_transport_failure_stops_before_cut_generation(self) -> None:
@@ -166,6 +263,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
     def test_cli_main_always_enables_foundation_semantic_reviews(self) -> None:
         module = load_frontend_run_module()
         calls: list[dict[str, object]] = []
+        semantic_pipeline = AsyncMock()
 
         def fake_materialize(*args, **kwargs) -> None:
             calls.append({"args": args, "kwargs": kwargs})
@@ -173,6 +271,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         with (
             patch.object(module, "materialize_run", fake_materialize),
             patch.object(module, "prepare_grounding", Mock()),
+            patch.object(
+                module,
+                "run_pre_media_semantic_pipeline",
+                semantic_pipeline,
+            ),
             patch.object(module, "write_run_index", Mock()),
             patch.object(
                 sys,
@@ -192,6 +295,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0]["kwargs"]["foundation_review_runner"], module._run_foundation_semantic_review)
+        semantic_pipeline.assert_awaited_once_with(
+            Path("output/test_foundation_cli"),
+            image_prompt_provider_ready=False,
+        )
 
     def test_orchestration_results_match_completed_foundation_review_slots(self) -> None:
         module = load_frontend_run_module()
@@ -1068,7 +1175,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(state["runtime.stage"], "reviewed_research_duration_contract_failed")
             self.assertEqual(state["slot.p130.status"], "failed")
 
-    def test_reviewed_research_duration_contract_requires_requested_plan(self) -> None:
+    def test_reviewed_research_duration_contract_has_no_duration_cut_floor(self) -> None:
         module = load_frontend_run_module()
         profile = module._duration_aware_profile(
             module._story_profile("シンデレラ", "シンデレラ", variant_seed="reviewed-research-target"),
@@ -1080,13 +1187,13 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             "2099-01-01T00:00:00+09:00",
             profile,
         )
-        research["metadata"]["duration_plan"].pop("minimum_cut_count")
-
-        with self.assertRaisesRegex(RuntimeError, "metadata.duration_plan.minimum_cut_count"):
-            module._validate_reviewed_research_duration_contract(
-                research,
-                target_duration_seconds=300,
-            )
+        self.assertNotIn(
+            "minimum_cut_count", research["metadata"]["duration_plan"]
+        )
+        module._validate_reviewed_research_duration_contract(
+            research,
+            target_duration_seconds=300,
+        )
 
     def test_reviewed_story_duration_contract_requires_explicit_requested_target(self) -> None:
         module = load_frontend_run_module()
@@ -1105,6 +1212,40 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "story_metadata.target_duration_seconds"):
             module._validate_reviewed_story_duration_contract(
                 story,
+                target_duration_seconds=300,
+            )
+
+    def test_reviewed_story_scene_targets_must_be_exact_positive_integers(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="reviewed-integer-targets",
+            ),
+            target_duration_seconds=300,
+        )
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/reviewed-integer-targets"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+
+        fractional = deepcopy(story)
+        for scene in fractional["script"]["scenes"]:
+            scene["target_duration_seconds"] = 37.5
+        with self.assertRaisesRegex(RuntimeError, "positive integer"):
+            module._validate_reviewed_story_duration_contract(
+                fractional,
+                target_duration_seconds=300,
+            )
+
+        oversized = deepcopy(story)
+        oversized["script"]["scenes"][0]["target_duration_seconds"] += 1
+        with self.assertRaisesRegex(RuntimeError, "must equal requested target"):
+            module._validate_reviewed_story_duration_contract(
+                oversized,
                 target_duration_seconds=300,
             )
 
@@ -1146,9 +1287,224 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         self.assertEqual(twenty_minutes["duration_plan"]["target_seconds"], 1200)
         self.assertEqual(twenty_minutes["duration_plan"]["minimum_scene_count"], 30)
-        self.assertEqual(twenty_minutes["duration_plan"]["minimum_cut_count"], 100)
+        self.assertNotIn("minimum_cut_count", twenty_minutes["duration_plan"])
         self.assertEqual(twenty_minutes["duration_plan"]["minimum_narration_seconds"], 840)
         self.assertEqual(sum(twenty_minutes["scene_target_durations"]), 1200)
+
+    def test_scene_target_seconds_are_distributed_deterministically_across_semantic_cuts(self) -> None:
+        module = load_frontend_run_module()
+
+        self.assertEqual(
+            module._allocate_scene_cut_durations(
+                scene_target_seconds=38,
+                cut_count=4,
+            ),
+            [10, 10, 9, 9],
+        )
+        self.assertEqual(
+            module._allocate_scene_cut_durations(
+                scene_target_seconds=37,
+                cut_count=8,
+            ),
+            [5, 5, 5, 5, 5, 4, 4, 4],
+        )
+        self.assertEqual(
+            module._allocate_scene_cut_durations(
+                scene_target_seconds=40,
+                cut_count=1,
+            ),
+            [40],
+        )
+        self.assertEqual(
+            module._allocate_scene_cut_durations(
+                scene_target_seconds=60,
+                cut_count=4,
+            ),
+            [15, 15, 15, 15],
+        )
+        fifteen_second_exception = module._duration_exception_for_cut(15)
+        self.assertTrue(fifteen_second_exception["allowed"])
+        self.assertTrue(fifteen_second_exception["reason"])
+        self.assertEqual(
+            module._duration_exception_for_cut(12),
+            {"allowed": False, "reason": ""},
+        )
+        with self.assertRaisesRegex(RuntimeError, "Kling duration range"):
+            module._allocate_scene_cut_durations(
+                scene_target_seconds=61,
+                cut_count=1,
+            )
+
+    def test_cut_duration_fields_exactly_partition_cinderella_and_generic_targets(self) -> None:
+        module = load_frontend_run_module()
+
+        def build(profile: dict[str, object], *, topic: str):
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                research = module._build_research(topic, topic, "now", profile)
+                (run_dir / "research.md").write_text(
+                    module._md_yaml("Research", research), encoding="utf-8"
+                )
+                story = module._build_story(topic, run_dir, "now", profile)
+                (run_dir / "story.md").write_text(
+                    module._md_yaml("Story", story), encoding="utf-8"
+                )
+                return module._build_script_and_manifest(
+                    topic, run_dir, "now", profile
+                )[:2]
+
+        long_semantic_cut_profile = module._duration_aware_profile(
+            module._story_profile(
+                "長い一場面",
+                "長い一場面",
+                variant_seed="exact-cut-duration-long-semantic-cut",
+            ),
+            target_duration_seconds=300,
+        )
+        long_semantic_cut_profile["scene_target_durations"] = [
+            100,
+            29,
+            29,
+            29,
+            29,
+            28,
+            28,
+            28,
+        ]
+        profiles = [
+            (
+                "シンデレラ",
+                self._legacy_cinderella_profile(
+                    module, seed="exact-cut-duration-cinderella"
+                ),
+            ),
+            (
+                "星の旅人",
+                module._duration_aware_profile(
+                    module._story_profile(
+                        "星の旅人",
+                        "星の旅人",
+                        variant_seed="exact-cut-duration-generic",
+                    ),
+                    target_duration_seconds=300,
+                ),
+            ),
+            ("長い一場面", long_semantic_cut_profile),
+        ]
+
+        saw_long_cut_exception = False
+        saw_normal_cut_without_exception = False
+        for topic, profile in profiles:
+            with self.subTest(topic=topic):
+                script, manifest = build(profile, topic=topic)
+                target_seconds = int(
+                    manifest["video_metadata"]["target_duration_seconds"]
+                )
+                self.assertEqual(target_seconds, 300)
+                self.assertEqual(
+                    manifest["video_metadata"]["duration_seconds"],
+                    target_seconds,
+                )
+                self.assertEqual(
+                    manifest["video_metadata"]["minimum_cut_count"],
+                    sum(
+                        int(
+                            scene["scene_cut_coverage_plan"]["min_cut_count"][
+                                "selected"
+                            ]
+                        )
+                        for scene in manifest["scenes"]
+                    ),
+                )
+                self.assertEqual(
+                    sum(
+                        int(cut["duration_seconds"])
+                        for scene in manifest["scenes"]
+                        for cut in scene["cuts"]
+                    ),
+                    target_seconds,
+                )
+
+                for script_scene, manifest_scene in zip(
+                    script["scenes"], manifest["scenes"], strict=True
+                ):
+                    scene_target = int(manifest_scene["target_duration_seconds"])
+                    self.assertEqual(
+                        manifest_scene["estimated_duration_seconds"], scene_target
+                    )
+                    self.assertEqual(
+                        script_scene["estimated_duration_seconds"], scene_target
+                    )
+                    manifest_cuts = {
+                        cut["selector"]: cut for cut in manifest_scene["cuts"]
+                    }
+                    self.assertEqual(
+                        sum(int(cut["duration_seconds"]) for cut in manifest_cuts.values()),
+                        scene_target,
+                    )
+                    scene_cut_durations = [
+                        int(cut["duration_seconds"])
+                        for cut in manifest_scene["cuts"]
+                    ]
+                    self.assertLessEqual(
+                        max(scene_cut_durations) - min(scene_cut_durations), 1
+                    )
+                    for script_cut in script_scene["cuts"]:
+                        manifest_cut = manifest_cuts[script_cut["selector"]]
+                        cut_seconds = int(manifest_cut["duration_seconds"])
+                        self.assertGreaterEqual(cut_seconds, 1)
+                        self.assertLessEqual(cut_seconds, 60)
+                        self.assertEqual(
+                            script_cut["target_duration_seconds"], cut_seconds
+                        )
+                        self.assertEqual(
+                            script_cut["estimated_duration_seconds"], cut_seconds
+                        )
+                        self.assertEqual(
+                            script_cut["cut_contract"]["target_duration_seconds"],
+                            cut_seconds,
+                        )
+                        self.assertEqual(
+                            script_cut["cut_contract"]["rhythm_contract"][
+                                "expected_duration_seconds"
+                            ],
+                            cut_seconds,
+                        )
+                        self.assertIn(
+                            f"{cut_seconds}秒",
+                            script_cut["cut_blueprint"]["duration_intent"],
+                        )
+                        self.assertEqual(
+                            manifest_cut["video_generation"]["duration_seconds"],
+                            cut_seconds,
+                        )
+                        self.assertEqual(
+                            manifest_cut["cut_contract"]["target_duration_seconds"],
+                            cut_seconds,
+                        )
+                        self.assertEqual(
+                            manifest_cut["cut_contract"]["rhythm_contract"][
+                                "expected_duration_seconds"
+                            ],
+                            cut_seconds,
+                        )
+                        duration_exception = manifest_cut["cut_contract"][
+                            "rhythm_contract"
+                        ]["duration_exception"]
+                        self.assertEqual(
+                            duration_exception["allowed"], cut_seconds > 12
+                        )
+                        self.assertEqual(
+                            bool(duration_exception["reason"]), cut_seconds > 12
+                        )
+                        self.assertEqual(
+                            manifest_cut["video_generation"]["duration_exception"],
+                            duration_exception,
+                        )
+                        saw_long_cut_exception |= cut_seconds > 12
+                        saw_normal_cut_without_exception |= cut_seconds <= 12
+        self.assertTrue(saw_long_cut_exception)
+        self.assertTrue(saw_normal_cut_without_exception)
 
     def test_twenty_minute_builders_propagate_target_and_minimum_budgets(self) -> None:
         module = load_frontend_run_module()
@@ -1174,12 +1530,37 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertEqual(script["script_metadata"]["target_duration"], 1200)
         self.assertEqual(script["script_metadata"]["minimum_narration_seconds"], 840)
         self.assertGreaterEqual(len(script["scenes"]), 30)
-        self.assertGreaterEqual(len(selectors), 100)
+        self.assertEqual(
+            len(selectors),
+            sum(len(scene["cuts"]) for scene in manifest["scenes"]),
+        )
         self.assertEqual(manifest["video_metadata"]["target_duration_seconds"], 1200)
         self.assertEqual(manifest["video_metadata"]["minimum_duration_seconds"], 960)
-        self.assertGreaterEqual(sum(scene["target_duration_seconds"] for scene in manifest["scenes"]), 1200)
+        self.assertEqual(
+            sum(scene["target_duration_seconds"] for scene in manifest["scenes"]),
+            1200,
+        )
+        self.assertEqual(
+            sum(scene["estimated_duration_seconds"] for scene in manifest["scenes"]),
+            1200,
+        )
+        self.assertEqual(manifest["video_metadata"]["duration_seconds"], 1200)
+        self.assertEqual(
+            manifest["video_metadata"]["minimum_cut_count"],
+            sum(
+                scene["scene_cut_coverage_plan"]["min_cut_count"]["selected"]
+                for scene in manifest["scenes"]
+            ),
+        )
+        self.assertTrue(
+            all(
+                not str(cut["coverage_obligation_id"]).startswith("duration_")
+                for scene in script["scenes"]
+                for cut in (item["cut_contract"] for item in scene["cuts"])
+            )
+        )
 
-    def test_scene_cut_coverage_meets_duration_floor_with_distinct_obligations(self) -> None:
+    def test_scene_cut_coverage_uses_authored_obligations_and_event_beats_not_duration_fillers(self) -> None:
         module = load_frontend_run_module()
         profile = module._duration_aware_profile(
             module._story_profile("シンデレラ", "シンデレラ", variant_seed="duration-cut-floor"),
@@ -1216,15 +1597,43 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         cuts = result["cuts"]
         coverage = result["coverage_plan"]
-        required_floor = (profile["scene_target_durations"][idx - 1] + 7) // 8
+        distinct_obligation_count = len(
+            {str(cut["obligation_id"]) for cut in cuts}
+        )
+        event_beat_count = len(scene_event["event_sequence"])
 
-        self.assertGreaterEqual(len(cuts), required_floor)
-        self.assertEqual(coverage["min_cut_count"]["by_duration"], required_floor)
-        self.assertGreaterEqual(coverage["min_cut_count"]["selected"], required_floor)
+        self.assertEqual(
+            coverage["min_cut_count"]["by_distinct_semantic_obligations"],
+            distinct_obligation_count,
+        )
+        self.assertEqual(
+            coverage["min_cut_count"]["by_event_beats"], event_beat_count
+        )
+        self.assertEqual(
+            coverage["min_cut_count"]["selected"],
+            max(distinct_obligation_count, event_beat_count),
+        )
+        self.assertEqual(coverage["min_cut_count"].get("by_importance"), 0)
+        self.assertEqual(coverage["min_cut_count"].get("by_duration"), 0)
         self.assertEqual(coverage["selected_cut_count"], len(cuts))
         self.assertEqual(len(coverage["cut_assignments"]), len(cuts))
         self.assertEqual(len({cut["obligation_id"] for cut in cuts}), len(cuts))
+        declared_obligation_selectors = {
+            str(obligation["obligation_id"]): set(obligation["assigned_cut_ids"])
+            for obligation in coverage["scene_obligations"]
+        }
+        assigned_obligation_selectors = {
+            str(assignment["obligation_id"]): {str(assignment["cut_selector"])}
+            for assignment in coverage["cut_assignments"]
+        }
+        self.assertEqual(
+            declared_obligation_selectors,
+            assigned_obligation_selectors,
+        )
         self.assertTrue(all(cut.get("primary_event_beat_id") for cut in cuts))
+        self.assertFalse(
+            any(str(cut["obligation_id"]).startswith("duration_") for cut in cuts)
+        )
 
     def test_core_cut_obligations_use_concrete_single_states_and_distinct_motion(self) -> None:
         module = load_frontend_run_module()
@@ -1439,7 +1848,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             for other_location in expected_locations - {location_name}:
                 self.assertNotIn(other_location, prompt)
             primary_subject = contract["cinematic_contract"]["subject_priority"]["primary"]
-            self.assertEqual(primary_subject, expected_primary_subject[location_name])
+            expected_subject = (
+                "王宮の使者"
+                if cut["selector"] == "scene80_cut06"
+                else expected_primary_subject[location_name]
+            )
+            self.assertEqual(primary_subject, expected_subject)
             character_bindings = cut["image_generation"]["first_frame_visual_plan"][
                 "reference_binding"
             ]["character_references"]
@@ -1447,6 +1861,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn(primary_subject, character_bindings[0]["target_character_name"])
 
             if cut["selector"] == "scene80_cut03":
+                plan = cut["image_generation"]["first_frame_visual_plan"]
+                self.assertIn(
+                    "椅子の横の床", plan["character_state_gate"]["foot_position"]
+                )
+                self.assertNotIn(
+                    "隙間なく合",
+                    plan["object_visibility_gate"]["objects"][0]["object_state"],
+                )
+            if cut["selector"] == "scene80_cut04":
                 plan = cut["image_generation"]["first_frame_visual_plan"]
                 self.assertIn(
                     "数センチ手前", plan["character_state_gate"]["foot_position"]
@@ -1649,12 +2072,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         expected_turn_motion = {
             "scene10_cut03": "家事道具を入れた籠を灰の床へ",
             "scene20_cut03": "裏口の掛け金を外し",
-            "scene30_cut03": "開いた馬車扉へ一歩だけ進む",
+            "scene30_cut03": "ドレス、ガラスの靴、馬車の形へ変える",
             "scene40_cut03": "身体を一度だけ客室内へ乗り入れる",
-            "scene50_cut03": "大階段を二段だけ上り",
+            "scene50_cut03": "大階段を上り切り",
             "scene60_cut03": "最初の一歩だけ踊り始める",
             "scene70_cut03": "ガラスの靴が踵から外れて一段上に残る",
-            "scene80_cut03": "ガラスの靴へ踵まで入れる",
+            "scene80_cut03": "椅子へ腰を下ろし",
         }
         for selector, expected in expected_turn_motion.items():
             self.assertIn(
@@ -1665,36 +2088,60 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 selector,
             )
 
-        scene30_cut2 = cuts["scene30_cut02"]
         scene30_cut3 = cuts["scene30_cut03"]
+        scene30_cut4 = cuts["scene30_cut04"]
         self.assertNotIn(
             profile["artifact_asset_id"],
-            scene30_cut2["image_generation"]["object_ids"],
+            scene30_cut3["image_generation"]["object_ids"],
+        )
+        self.assertNotIn(
+            profile["carriage_asset_id"],
+            scene30_cut3["image_generation"]["object_ids"],
         )
         self.assertIn(
+            profile["protagonist_asset_id"],
+            scene30_cut3["image_generation"]["character_ids"],
+        )
+        self.assertNotIn(
+            profile["protagonist_transformed_asset_id"],
+            scene30_cut3["image_generation"]["character_ids"],
+        )
+        first_frame_prompt = scene30_cut3["image_generation"][
+            "api_prompt_payload"
+        ]["prompt"]
+        positive_prompt, separator, forbidden_prompt = first_frame_prompt.partition(
+            "[禁止]"
+        )
+        self.assertTrue(separator)
+        self.assertNotIn("ガラスの靴", positive_prompt)
+        self.assertNotIn("馬車", positive_prompt)
+        self.assertNotIn("舞踏会ドレス姿を維持", positive_prompt)
+        self.assertIn("ガラスの靴", forbidden_prompt)
+        self.assertIn("馬車", forbidden_prompt)
+        self.assertIn(
             "ドレス、ガラスの靴、馬車の形へ変える",
-            scene30_cut2["cut_contract"]["motion_contract"]["subject_motion"],
+            scene30_cut3["cut_contract"]["motion_contract"]["subject_motion"],
         )
         self.assertEqual(
-            scene30_cut2["cut_contract"]["motion_contract"][
+            scene30_cut3["cut_contract"]["motion_contract"][
                 "allowed_new_reveal_elements"
             ],
             ["変身後のシンデレラ", "ガラスの靴", "完成したかぼちゃの馬車"],
         )
         self.assertEqual(
-            scene30_cut2["video_generation"]["last_frame"],
-            "assets/scenes/scene30_cut03.png",
+            scene30_cut3["video_generation"]["last_frame"],
+            "assets/scenes/scene30_cut04.png",
         )
         self.assertIn(
-            scene30_cut2["cut_contract"]["motion_contract"]["end_state"],
-            scene30_cut3["cut_contract"]["first_frame_contract"][
+            scene30_cut3["cut_contract"]["motion_contract"]["end_state"],
+            scene30_cut4["cut_contract"]["first_frame_contract"][
                 "event_fact_visible_in_still"
             ],
         )
-        scene30_plan = scene30_cut3["image_generation"][
+        scene30_plan = scene30_cut4["image_generation"][
             "first_frame_visual_plan"
         ]
-        self.assertFalse(
+        self.assertTrue(
             any(
                 "魔法の助力者" in binding["target_character_name"]
                 for binding in scene30_plan["reference_binding"][
@@ -1708,6 +2155,52 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         }
         self.assertNotIn("足に隙間なく合", object_states["馬車"])
         self.assertIn("足に隙間なく合", object_states["ガラスの靴"])
+
+        for transition_from, transition_to, from_location, to_location in (
+            (
+                "scene20_cut03",
+                "scene20_cut04",
+                "屋敷の裏口",
+                "月明かりの庭",
+            ),
+            (
+                "scene40_cut04",
+                "scene40_cut05",
+                "馬車が待つ門前",
+                "宮殿へ続く石畳",
+            ),
+            (
+                "scene50_cut03",
+                "scene50_cut04",
+                "宮殿の階段",
+                "舞踏会の大広間",
+            ),
+        ):
+            from_cut = cuts[transition_from]
+            to_cut = cuts[transition_to]
+            self.assertEqual(
+                from_cut["cut_contract"]["first_frame_contract"][
+                    "visible_start_state"
+                ]["spatial_state"],
+                from_location,
+                transition_from,
+            )
+            self.assertEqual(
+                to_cut["cut_contract"]["first_frame_contract"][
+                    "visible_start_state"
+                ]["spatial_state"],
+                to_location,
+                transition_to,
+            )
+            self.assertNotEqual(
+                from_cut["image_generation"]["location_ids"],
+                to_cut["image_generation"]["location_ids"],
+            )
+            self.assertEqual(
+                from_cut["video_generation"]["last_frame"],
+                f"assets/scenes/{transition_to}.png",
+                transition_from,
+            )
 
         scene70_cut4 = cuts["scene70_cut04"]
         scene70_cut5 = cuts["scene70_cut05"]
@@ -1742,17 +2235,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         scene70_cut7 = cuts["scene70_cut07"]
         scene70_cut8 = cuts["scene70_cut08"]
         self.assertIn(
-            "胸元まで一度だけ持ち上げる",
+            "片手を一度だけ伸ばす",
             scene70_cut7["cut_contract"]["motion_contract"]["subject_motion"],
         )
         self.assertIn(
-            "片方のガラスの靴を胸元で支え",
+            "指先がガラスの靴の踵に触れ",
             scene70_cut8["cut_contract"]["first_frame_contract"][
                 "event_fact_visible_in_still"
             ],
         )
         self.assertIn(
-            "片方のガラスの靴を胸元で持ち",
+            "片方のガラスの靴を胸元で支え",
             scene70_cut8["cut_contract"]["motion_contract"]["end_state"],
         )
         self.assertIn(
@@ -1779,8 +2272,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         expected_source_hand_state = {
             "scene70_cut06": "片手が身体の横で止まっている",
-            "scene70_cut07": "ガラスの靴の踵に触れている",
-            "scene70_cut08": "ガラスの靴を胸元で支えている",
+            "scene70_cut07": "片手が身体の横で止まっている",
+            "scene70_cut08": "ガラスの靴の踵に触れている",
         }
         for selector in ("scene70_cut06", "scene70_cut07", "scene70_cut08"):
             source_state = cuts[selector]["cut_contract"]["source_event_contract"][
@@ -1808,7 +2301,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "義姉の足に入らないガラスの靴",
+            "不適合だった家の扉を背にし",
             cuts["scene80_cut02"]["cut_contract"]["motion_contract"][
                 "subject_motion"
             ],
@@ -1821,7 +2314,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             "first_frame_visual_plan"
         ]["character_state_gate"]
         self.assertIn("gaze", scene80_cut6_gate)
-        self.assertIn("踵まで隙間なく合", scene80_cut6_gate["foot_position"])
+        self.assertIn("王宮の使者", scene80_cut6_gate["pose"])
+        scene80_cut6_objects = cuts["scene80_cut06"]["image_generation"][
+            "first_frame_visual_plan"
+        ]["object_visibility_gate"]["objects"]
+        self.assertTrue(
+            any(
+                "隙間なく合" in str(item.get("object_state") or "")
+                for item in scene80_cut6_objects
+            )
+        )
 
     def test_cinderella_video_cut_projection_uses_authored_local_causal_actions(self) -> None:
         module = load_frontend_run_module()
@@ -1901,11 +2403,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertIn("大広間の内側へ二歩", motion("scene50_cut05"))
         self.assertNotIn("宮殿の階段の中景", end("scene50_cut05"))
 
-        self.assertIn("二人が半回転", motion("scene60_cut04"))
+        self.assertIn("半回転だけ", motion("scene60_cut04"))
         self.assertIn("壁時計", motion("scene60_cut05"))
 
         self.assertIn("画面外へ出る", motion("scene70_cut05"))
-        self.assertIn("シンデレラは画面内にいない", end("scene70_cut05"))
+        self.assertIn("階段下方の出入口は空いている", end("scene70_cut05"))
         self.assertIn("三段だけ下り", motion("scene70_cut06"))
         self.assertIn("片手を一度だけ伸ばす", motion("scene70_cut07"))
         self.assertIn("胸元まで一度だけ持ち上げる", motion("scene70_cut08"))
@@ -2133,11 +2635,13 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         scene30_cut1 = request_a.split("## scene30_cut1", 1)[1].split("## scene30_cut2", 1)[0]
         scene30_cut3 = request_a.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
+        scene30_cut4 = request_a.split("## scene30_cut4", 1)[1].split("## scene30_cut5", 1)[0]
         scene70_cut1 = request_a.split("## scene70_cut1", 1)[1].split("## scene70_cut2", 1)[0]
         scene70_cut3 = request_a.split("## scene70_cut3", 1)[1].split("## scene70_cut4", 1)[0]
         scene70_cut5 = request_a.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
         self.assertNotRegex(scene30_cut1, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
-        self.assertRegex(scene30_cut3, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertNotRegex(scene30_cut3, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
+        self.assertRegex(scene30_cut4, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
         self.assertNotRegex(scene70_cut1, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
         self.assertRegex(scene70_cut3, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
         self.assertRegex(scene70_cut5, r"assets/objects/[a-z0-9_]+_signature_artifact\.png")
@@ -2241,7 +2745,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             for stage in ("scene_implementation_hard", "scene_implementation_judgment"):
                 self.assertEqual(state[f"eval.{stage}.loop.status"], "pending")
                 self.assertFalse((run_dir / f"logs/eval/{stage}/round_01/critic_1.md").exists())
-            self.assertEqual(state["review.semantic.asset_plan.entry_count"], "20")
+            asset_scope = json.loads(
+                (run_dir / "logs/review/semantic/asset_plan.scope.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertGreaterEqual(asset_scope["entry_count"], 20)
+            self.assertEqual(
+                state["review.semantic.asset_plan.entry_count"],
+                str(asset_scope["entry_count"]),
+            )
             for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
                 self.assertEqual(state[f"review.semantic.{stage}.status"], "pending")
                 self.assertIn(f"review.semantic.{stage}.entry_count", state)
@@ -2318,16 +2831,18 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("assets/characters/cinderella_fullbody.png", post_midnight_asset_section)
             self.assertIn("舞踏会ドレスではない質素な衣装だけに戻す", post_midnight_asset_section)
             gate_road_section = re.search(
-                r"## scene\d+\n(?:(?!\n## scene).)*asset_id: `location_04_location_04_78c27f`(?:(?!\n## scene).)*",
+                r"## scene\d+\n(?:(?!\n## scene).)*馬車が待つ門前(?:(?!\n## scene).)*",
                 asset_request_text,
                 re.DOTALL,
             ).group(0)
-            self.assertIn("深夜のみ", gate_road_section)
-            self.assertIn("昼光なし", gate_road_section)
-            self.assertIn("太陽なし", gate_road_section)
-            self.assertIn("明るい青空", gate_road_section)
+            self.assertIn(
+                "特定の朝昼夕夜に固定しない中性的な参照照明",
+                gate_road_section,
+            )
+            self.assertNotIn("深夜のみ", gate_road_section)
+            self.assertNotIn("昼光なし", gate_road_section)
             midnight_stair_section = re.search(
-                r"## scene\d+\n(?:(?!\n## scene).)*asset_id: `location_07_location_07_def6a5`(?:(?!\n## scene).)*",
+                r"## scene\d+\n(?:(?!\n## scene).)*真夜中の大階段(?:(?!\n## scene).)*",
                 asset_request_text,
                 re.DOTALL,
             ).group(0)
@@ -2380,15 +2895,30 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 for scene in manifest_data["scenes"]
                 for cut in scene["cuts"]
             ]
-            duration_cut_floor = sum(
-                (int(scene["target_duration_seconds"]) + 7) // 8
+            semantic_cut_floor = sum(
+                int(scene["scene_cut_coverage_plan"]["min_cut_count"]["selected"])
                 for scene in manifest_data["scenes"]
             )
-            self.assertGreaterEqual(len(manifest_cuts), duration_cut_floor)
+            self.assertGreaterEqual(len(manifest_cuts), semantic_cut_floor)
             for scene in manifest_data["scenes"]:
+                coverage = scene["scene_cut_coverage_plan"]
+                minimums = coverage["min_cut_count"]
+                self.assertEqual(minimums["by_importance"], 0)
+                self.assertEqual(minimums["by_duration"], 0)
+                self.assertEqual(
+                    minimums["selected"],
+                    max(
+                        minimums["by_distinct_semantic_obligations"],
+                        minimums["by_event_beats"],
+                    ),
+                )
                 self.assertGreaterEqual(
                     len(scene["cuts"]),
-                    (int(scene["target_duration_seconds"]) + 7) // 8,
+                    minimums["selected"],
+                )
+                self.assertEqual(
+                    coverage["selected_cut_count"],
+                    len(scene["cuts"]),
                 )
             self.assertTrue(
                 all("prompt" not in cut["image_generation"] for cut in manifest_cuts)
@@ -2643,3 +3173,1082 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             # orchestration step (`prepare_grounding()`), exercised by the CLI
             # and backend create-route tests rather than this profile test.
             self.assertNotIn("stage.scene_implementation.grounding.status", state)
+
+    def test_cinderella_asset_specs_preserve_ensemble_and_neutral_reuse_contracts(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            profile = module._story_profile("シンデレラ", "シンデレラ", variant_seed="asset-contract")
+
+        stepsisters = next(
+            item
+            for item in module._supporting_character_asset_specs(profile)
+            if item.get("source_character_id") == "stepsisters"
+        )
+        self.assertEqual(stepsisters["subject_contract"]["identity_scope"], "ensemble")
+        self.assertEqual(stepsisters["subject_contract"]["subject_count"], 2)
+        self.assertEqual(len(stepsisters["subject_contract"]["member_ids"]), 2)
+        self.assertTrue(stepsisters["appearance_contract"]["materials"])
+
+        forbidden_dayparts = ("朝日", "昼光", "夕日", "夜の", "真夜中", "深夜", "月光", "月明かり")
+        for location in module._location_asset_specs(profile):
+            self.assertEqual(location["reuse_contract"], {"mode": "neutral_anchor"})
+            subject = str((location.get("visual_spec") or {}).get("subject") or "")
+            self.assertFalse(any(marker in subject for marker in forbidden_dayparts), subject)
+
+    def test_asset_plan_projection_keeps_prompt_review_contracts(self) -> None:
+        module = load_frontend_run_module()
+        profile = {
+            "protagonist_name": "主人公",
+            "artifact_name": "鍵",
+            "artifact_role": "証拠",
+            "artifact_visual": "古い鍵",
+        }
+        manifest = {
+            "assets": {
+                "character_bible": [
+                    {
+                        "character_id": "siblings",
+                        "reference_images": ["assets/characters/siblings.png"],
+                        "fixed_prompts": ["姉妹"],
+                        "cinematic": {"role": "対立者", "visual_subject": "二人の姉妹"},
+                        "subject_contract": {"identity_scope": "ensemble", "subject_count": 2, "member_ids": ["older", "younger"]},
+                        "appearance_contract": {"social_position": "裕福な家の姉妹", "materials": "絹"},
+                        "reuse_contract": {"mode": "neutral_anchor"},
+                    }
+                ],
+                "object_bible": [],
+                "location_bible": [],
+            },
+            "scenes": [{"cuts": [{"selector": "scene01_cut01", "image_generation": {"character_ids": ["siblings"]}}]}],
+        }
+
+        _inventory, plan = module._build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
+        entry = plan["assets"][0]
+        self.assertEqual(entry["subject_contract"]["subject_count"], 2)
+        self.assertEqual(entry["appearance_contract"]["materials"], "絹")
+        self.assertEqual(entry["reuse_contract"], {"mode": "neutral_anchor"})
+
+    def test_cinderella_authored_and_exact_reviewed_story_materialize_complete_location_segments(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="reviewed-location-segments"
+        )
+        story = module._build_story(
+            "シンデレラ",
+            Path("output/reviewed-location-segments"),
+            "2099-01-01T00:00:00+09:00",
+            profile,
+        )
+
+        module._validate_reviewed_story_time_of_day_contract(story)
+        for scene in story["script"]["scenes"]:
+            route = scene["location"]["sequence"]
+            if len(route) <= 1:
+                continue
+            self.assertEqual(
+                [segment["location"] for segment in scene["location"]["segments"]],
+                route,
+            )
+
+        scenes = {int(scene["scene_id"]): scene for scene in story["script"]["scenes"]}
+        scene2_segments = {
+            segment["location"]: segment
+            for segment in scenes[2]["location"]["segments"]
+        }
+        self.assertIn("参加を願い出る", scene2_segments["閉ざされた扉の前"]["responsibility"])
+        self.assertIn("拒み", scene2_segments["閉ざされた扉の前"]["responsibility"])
+        self.assertIn("正面扉を閉じ", scene2_segments["閉ざされた扉の前"]["motion_brief"])
+        self.assertIn("掛け金", scene2_segments["屋敷の裏口"]["motion_brief"])
+
+        scene4_segments = {
+            segment["location"]: segment
+            for segment in scenes[4]["location"]["segments"]
+        }
+        gate = scene4_segments["馬車が待つ門前"]
+        self.assertIn("開いた馬車扉の前", gate["visible_action"])
+        self.assertFalse(any("乗せた" in item for item in gate["required_visual_evidence"]))
+        stone_road = scene4_segments["宮殿へ続く石畳"]
+        self.assertTrue(any("馬車" in item for item in stone_road["required_visual_evidence"]))
+        self.assertIn("馬車", stone_road["motion_brief"])
+        self.assertIn("石畳", stone_road["motion_end_state"])
+
+        scene5_segments = {
+            segment["location"]: segment
+            for segment in scenes[5]["location"]["segments"]
+        }
+        ballroom = scene5_segments["舞踏会の大広間"]
+        self.assertEqual(set(ballroom["required_roles"]), {"protagonist", "prince"})
+        self.assertIn("シンデレラ", ballroom["visible_action"])
+        self.assertTrue(any("シンデレラ" in item for item in ballroom["required_visual_evidence"]))
+        self.assertIn("大階段を上り切り", scene5_segments["宮殿の階段"]["motion_brief"])
+
+        scene8_segments = {
+            segment["location"]: segment
+            for segment in scenes[8]["location"]["segments"]
+        }
+        town_search = scene8_segments["町の家々"]
+        self.assertIn("一軒ずつ巡り", town_search["responsibility"])
+        self.assertIn("次の家", town_search["motion_brief"])
+        self.assertEqual(town_search["required_roles"], ["royal_envoy"])
+
+        incomplete_blueprint = module._scene_blueprint(
+            profile=profile,
+            idx=2,
+            title=profile["scene_titles"][1],
+            location_name=profile["scene_locations"][1],
+            include_artifact=False,
+        )
+        incomplete_blueprint["beat_overrides"].pop("payoff", None)
+        with self.assertRaisesRegex(RuntimeError, "no authored beat or obligation"):
+            module._authored_location_segments_for_story(
+                profile=profile,
+                scene_index=2,
+                blueprint=incomplete_blueprint,
+            )
+
+        repaired_story = deepcopy(story)
+        for scene in repaired_story["script"]["scenes"]:
+            if len(scene["location"]["sequence"]) > 1:
+                scene["location"]["segments"] = []
+        module._materialize_exact_reviewed_story_location_segments(
+            repaired_story,
+            profile=profile,
+        )
+        module._validate_reviewed_story_time_of_day_contract(repaired_story)
+
+        arbitrary_story = deepcopy(story)
+        arbitrary_story["script"]["scenes"][1]["location"]["sequence"] = [
+            "閉ざされた扉の前",
+            "未承認の別世界",
+        ]
+        arbitrary_story["script"]["scenes"][1]["location"]["segments"] = []
+        module._materialize_exact_reviewed_story_location_segments(
+            arbitrary_story,
+            profile=profile,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "location.segments must cover every sequence location"
+        ):
+            module._validate_reviewed_story_time_of_day_contract(arbitrary_story)
+
+    def test_exact_obligation_reveal_and_boundary_policies_do_not_leak_from_shared_roots(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(module, seed="exact-obligation-scope")
+        exact_only_fields = {
+            "allowed_new_reveal_elements",
+            "allowed_reveal_info_ids",
+            "use_next_cut_first_frame_as_last_frame",
+            "first_frame_character_asset_overrides",
+            "first_frame_excluded_object_ids",
+        }
+        for scene_index, title in enumerate(profile["scene_titles"], start=1):
+            blueprint = module._scene_blueprint(
+                profile=profile,
+                idx=scene_index,
+                title=title,
+                location_name=profile["scene_locations"][scene_index - 1],
+                include_artifact=module._scene_uses_artifact(profile, scene_index),
+            )
+            for function, function_override in blueprint[
+                "beat_overrides"
+            ].items():
+                self.assertTrue(
+                    exact_only_fields.isdisjoint(function_override),
+                    f"scene {scene_index} {function}",
+                )
+                wildcard = (
+                    function_override.get("obligation_overrides") or {}
+                ).get("*") or {}
+                self.assertTrue(
+                    exact_only_fields.isdisjoint(wildcard),
+                    f"scene {scene_index} {function} wildcard",
+                )
+        title, location, intent, event, include_artifact = self._scene_design_bundle(
+            module, profile, 7
+        )
+        payoff = next(
+            beat
+            for beat in event["event_sequence"]
+            if beat["beat_function"] == "payoff"
+        )
+        payoff["allowed_new_reveal_elements"] = ["ROOT_LEAK"]
+        payoff["allowed_reveal_info_ids"] = ["ROOT_INFO_LEAK"]
+        payoff["use_next_cut_first_frame_as_last_frame"] = True
+        payoff["first_frame_character_asset_overrides"] = {
+            "シンデレラ": profile["protagonist_asset_id"]
+        }
+        payoff["first_frame_excluded_object_ids"] = [
+            profile["artifact_asset_id"]
+        ]
+        payoff["concrete_event"]["allowed_new_reveal_elements"] = [
+            "CONCRETE_LEAK"
+        ]
+        payoff["concrete_event"]["allowed_reveal_info_ids"] = [
+            "CONCRETE_INFO_LEAK"
+        ]
+        payoff["concrete_event"]["use_next_cut_first_frame_as_last_frame"] = True
+        payoff["concrete_event"]["first_frame_character_asset_overrides"] = {
+            "シンデレラ": profile["protagonist_asset_id"]
+        }
+        payoff["concrete_event"]["first_frame_excluded_object_ids"] = [
+            profile["artifact_asset_id"]
+        ]
+        payoff["obligation_overrides"]["*"] = {
+            "allowed_new_reveal_elements": ["WILDCARD_LEAK"],
+            "allowed_reveal_info_ids": ["WILDCARD_INFO_LEAK"],
+            "use_next_cut_first_frame_as_last_frame": True,
+            "first_frame_character_asset_overrides": {
+                "シンデレラ": profile["protagonist_asset_id"]
+            },
+            "first_frame_excluded_object_ids": [profile["artifact_asset_id"]],
+        }
+
+        result = module._scene_cut_coverage_plan(
+            title=title,
+            idx=7,
+            scene_intent=intent,
+            scene_event=event,
+            location_name=str(location["name"]),
+            profile=profile,
+            include_artifact=include_artifact,
+        )
+        by_id = {cut["obligation_id"]: cut for cut in result["cuts"]}
+        audience_context = by_id["audience_context"]
+        self.assertEqual(
+            audience_context["allowed_new_reveal_elements"],
+            ["質素な普段着へ戻ったシンデレラ"],
+        )
+        self.assertEqual(
+            audience_context["allowed_reveal_info_ids"], ["時間制限の結果"]
+        )
+        self.assertTrue(
+            audience_context["use_next_cut_first_frame_as_last_frame"]
+        )
+        self.assertEqual(
+            audience_context["first_frame_character_asset_overrides"],
+            {
+                "シンデレラ": profile["protagonist_transformed_asset_id"],
+                "protagonist": profile["protagonist_transformed_asset_id"],
+            },
+        )
+        self.assertEqual(audience_context["first_frame_excluded_object_ids"], [])
+        for obligation_id, cut in by_id.items():
+            if obligation_id == "audience_context":
+                continue
+            self.assertEqual(cut["allowed_new_reveal_elements"], [], obligation_id)
+            self.assertEqual(cut["allowed_reveal_info_ids"], [], obligation_id)
+            self.assertFalse(
+                cut["use_next_cut_first_frame_as_last_frame"], obligation_id
+            )
+            self.assertEqual(
+                cut["first_frame_character_asset_overrides"], {}, obligation_id
+            )
+            self.assertEqual(
+                cut["first_frame_excluded_object_ids"], [], obligation_id
+            )
+
+    def test_last_frame_boundary_validation_rejects_route_authorization_and_state_mismatches(self) -> None:
+        module = load_frontend_run_module()
+        route = ["出発地", "到着地"]
+        valid_current = {
+            "background": "出発地",
+            "motion_end_state": "主人公が到着地の敷居内で止まっている",
+            "allowed_new_reveal_elements": ["到着地"],
+            "use_next_cut_first_frame_as_last_frame": True,
+        }
+        valid_next = {
+            "background": "到着地",
+            "first_frame_brief": "到着地。主人公が敷居内で止まっている",
+            "visual_proof": valid_current["motion_end_state"],
+        }
+
+        boundary = module._validate_next_cut_last_frame_boundary(
+            selector="scene10_cut01",
+            current_cut_plan=valid_current,
+            next_cut_plan=valid_next,
+            route_locations=route,
+        )
+        self.assertEqual(boundary["destination_location"], "到着地")
+        self.assertEqual(
+            boundary["actual_end_state"], valid_current["motion_end_state"]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "not declared in scene route"):
+            module._validate_next_cut_last_frame_boundary(
+                selector="scene10_cut01",
+                current_cut_plan={
+                    **valid_current,
+                    "allowed_new_reveal_elements": ["ルート外"],
+                    "motion_end_state": "主人公がルート外へ到着する",
+                },
+                next_cut_plan={**valid_next, "background": "ルート外"},
+                route_locations=route,
+            )
+        with self.assertRaisesRegex(RuntimeError, "exact obligation authorization"):
+            module._validate_next_cut_last_frame_boundary(
+                selector="scene10_cut01",
+                current_cut_plan={**valid_current, "allowed_new_reveal_elements": []},
+                next_cut_plan=valid_next,
+                route_locations=route,
+            )
+        with self.assertRaisesRegex(RuntimeError, "motion end state does not reach"):
+            module._validate_next_cut_last_frame_boundary(
+                selector="scene10_cut01",
+                current_cut_plan={
+                    **valid_current,
+                    "motion_end_state": "主人公が出発地に留まっている",
+                },
+                next_cut_plan=valid_next,
+                route_locations=route,
+            )
+        with self.assertRaisesRegex(RuntimeError, "actual motion end state"):
+            module._validate_next_cut_last_frame_boundary(
+                selector="scene10_cut01",
+                current_cut_plan=valid_current,
+                next_cut_plan={
+                    **valid_next,
+                    "first_frame_brief": "到着地。主人公が別の姿勢で立つ",
+                    "visual_proof": "主人公が到着地で別の姿勢を取る",
+                },
+                route_locations=route,
+            )
+
+        same_location_current = {
+            "background": "同じ場所",
+            "motion_end_state": "主人公の右手が扉の取っ手に触れている",
+            "allowed_new_reveal_elements": [],
+            "use_next_cut_first_frame_as_last_frame": True,
+        }
+        with self.assertRaisesRegex(RuntimeError, "actual motion end state"):
+            module._validate_next_cut_last_frame_boundary(
+                selector="scene10_cut02",
+                current_cut_plan=same_location_current,
+                next_cut_plan={
+                    "background": "同じ場所",
+                    "first_frame_brief": "同じ場所。主人公は扉から離れている",
+                    "visual_proof": "主人公の両手は身体の横にある",
+                },
+                route_locations=["同じ場所"],
+            )
+
+    def test_cross_location_last_frame_carry_forward_uses_destination_and_actual_end_state(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(module, seed="cross-location-carry")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            research = module._build_research(
+                "シンデレラ", "シンデレラ", "now", profile
+            )
+            (run_dir / "research.md").write_text(
+                module._md_yaml("Research", research), encoding="utf-8"
+            )
+            story = module._build_story("シンデレラ", run_dir, "now", profile)
+            (run_dir / "story.md").write_text(
+                module._md_yaml("Story", story), encoding="utf-8"
+            )
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ", run_dir, "now", profile
+            )
+
+        cuts = {
+            cut["selector"]: cut
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        }
+        for selector, departure, destination in (
+            ("scene20_cut03", "閉ざされた扉の前", "月明かりの庭"),
+            ("scene40_cut04", "馬車が待つ門前", "宮殿へ続く石畳"),
+            ("scene50_cut03", "宮殿の階段", "舞踏会の大広間"),
+        ):
+            contract = cuts[selector]["cut_contract"]
+            carry = contract["continuity_contract"][
+                "carry_forward_to_next_cut"
+            ]
+            actual_end_state = contract["motion_contract"]["end_state"]
+            next_selector = selector[:-2] + f"{int(selector[-2:]) + 1:02d}"
+            next_contract = cuts[next_selector]["cut_contract"]
+            self.assertNotIn(departure, carry, selector)
+            self.assertIn(destination, carry, selector)
+            self.assertIn(actual_end_state, carry, selector)
+            self.assertIn(
+                destination,
+                contract["motion_contract"]["allowed_new_reveal_elements"],
+                selector,
+            )
+            self.assertIn(
+                actual_end_state,
+                json.dumps(
+                    next_contract["first_frame_contract"], ensure_ascii=False
+                ),
+                selector,
+            )
+            self.assertEqual(
+                contract["continuity_contract"]["end_state"]["spatial_state"],
+                destination,
+                selector,
+            )
+            self.assertEqual(
+                contract["continuity_contract"]["end_state"]["character_state"],
+                actual_end_state,
+                selector,
+            )
+            next_context = next_contract["event_context_for_cut"]
+            primary_context_beat = next_context["primary_event_beat"]
+            self.assertEqual(
+                primary_context_beat["concrete_event"]["where"],
+                destination,
+                next_selector,
+            )
+            matching_source_context_beat = next(
+                beat
+                for beat in next_context["source_event_beats"]
+                if beat["beat_id"] == primary_context_beat["beat_id"]
+            )
+            self.assertEqual(
+                matching_source_context_beat["concrete_event"]["where"],
+                destination,
+                next_selector,
+            )
+
+    def test_adjacent_semantic_cuts_fail_closed_when_they_replay_identical_motion(self) -> None:
+        module = load_frontend_run_module()
+        distinct = [
+            {"motion_brief": "人物が扉へ手を伸ばす", "motion_end_state": "手が扉の前で止まる"},
+            {"motion_brief": "人物が扉を開く", "motion_end_state": "扉が身体一人分だけ開く"},
+        ]
+        module._validate_adjacent_cut_motion_is_distinct(
+            scene_id=10,
+            cut_plans=distinct,
+        )
+        with self.assertRaisesRegex(RuntimeError, "replay identical motion"):
+            module._validate_adjacent_cut_motion_is_distinct(
+                scene_id=10,
+                cut_plans=[distinct[0], dict(distinct[0])],
+            )
+
+    def test_reviewed_story_manifest_enforces_adjacent_motion_and_first_frame_boundaries(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="reviewed-provider-boundaries"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            research = module._build_research(
+                "シンデレラ", "シンデレラ", "now", profile
+            )
+            (run_dir / "research.md").write_text(
+                module._md_yaml("Research", research), encoding="utf-8"
+            )
+            story = module._build_story("シンデレラ", run_dir, "now", profile)
+            (run_dir / "story.md").write_text(
+                module._md_yaml("Story", story), encoding="utf-8"
+            )
+            reviewed_profile = module._profile_from_reviewed_story(profile, story)
+            _script, manifest, selectors = module._build_script_and_manifest(
+                "シンデレラ", run_dir, "now", reviewed_profile
+            )
+
+        self.assertEqual(len(selectors), 45)
+        for scene in manifest["scenes"]:
+            route = list(scene["location_sequence"])
+            for cut_index, cut in enumerate(scene["cuts"]):
+                selector = cut["selector"]
+                contract = cut["cut_contract"]
+                plan = cut["image_generation"]["first_frame_visual_plan"]
+                composition = plan["spatial_composition"]
+                prompt_positive = str(
+                    cut["image_generation"]["api_prompt_payload"].get("prompt")
+                    or ""
+                ).split("\n[禁止]\n", 1)[0]
+
+                if cut_index:
+                    previous = scene["cuts"][cut_index - 1]
+                    previous_motion = previous["cut_contract"]["motion_contract"]
+                    current_motion = contract["motion_contract"]
+                    self.assertNotEqual(
+                        (
+                            previous_motion["motion_brief"],
+                            previous_motion["subject_motion"],
+                            previous_motion["end_state"],
+                        ),
+                        (
+                            current_motion["motion_brief"],
+                            current_motion["subject_motion"],
+                            current_motion["end_state"],
+                        ),
+                        selector,
+                    )
+                    self.assertEqual(
+                        contract["cut_state_progression"][
+                            "state_after_previous_cut"
+                        ],
+                        previous_motion["end_state"],
+                        selector,
+                    )
+
+                foreground_identities = module._character_identities_in_text(
+                    reviewed_profile, composition["foreground"]
+                )
+                midground_identities = module._character_identities_in_text(
+                    reviewed_profile, composition["midground"]
+                )
+                if not module._is_character_body_part_evidence(
+                    composition["foreground"]
+                ):
+                    self.assertFalse(
+                        foreground_identities.intersection(midground_identities),
+                        selector,
+                    )
+
+                subject_names = [
+                    plan["subject_binding"]["primary_subject"]["name"],
+                    *[
+                        item["name"]
+                        for item in plan["subject_binding"]["secondary_subjects"]
+                    ],
+                ]
+                seen_identities: set[str] = set()
+                for subject_name in subject_names:
+                    identities = module._character_identities_in_text(
+                        reviewed_profile, subject_name
+                    )
+                    self.assertFalse(
+                        identities.intersection(seen_identities), selector
+                    )
+                    seen_identities.update(identities)
+
+                for other_location in route:
+                    if other_location != composition["background"]:
+                        self.assertNotIn(other_location, prompt_positive, selector)
+                for future_reveal in contract["motion_contract"][
+                    "allowed_new_reveal_elements"
+                ]:
+                    self.assertNotIn(future_reveal, prompt_positive, selector)
+
+                event_context = contract["event_context_for_cut"]
+                self.assertEqual(
+                    event_context["primary_event_beat"]["concrete_event"]["where"],
+                    composition["background"],
+                    selector,
+                )
+
+    def test_first_frame_excluded_objects_are_removed_from_every_positive_still_source(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="first-frame-object-exclusions"
+        )
+        # Exercise the fail-closed path where the canonical location label
+        # itself contains an object that is forbidden in this first frame.
+        profile["scene_locations"][2] = "馬車が待つ門前"
+        profile["scene_location_sequences"][2] = ["馬車が待つ門前"]
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            research = module._build_research(
+                "シンデレラ", "シンデレラ", "now", profile
+            )
+            (run_dir / "research.md").write_text(
+                module._md_yaml("Research", research), encoding="utf-8"
+            )
+            story = module._build_story("シンデレラ", run_dir, "now", profile)
+            (run_dir / "story.md").write_text(
+                module._md_yaml("Story", story), encoding="utf-8"
+            )
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ", run_dir, "now", profile
+            )
+
+        cut = next(
+            cut
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+            if cut["selector"] == "scene30_cut03"
+        )
+        excluded_ids = {
+            str(profile["artifact_asset_id"]),
+            str(profile["carriage_asset_id"]),
+        }
+        excluded_tokens = {
+            *excluded_ids,
+            *(module._object_name_for_asset(profile, value) for value in excluded_ids),
+        }
+        positive_still_sources = {
+            "scene_contract": {
+                key: cut["scene_contract"].get(key)
+                for key in ("visual_beat", "first_frame_brief", "visual_evidence")
+            },
+            "first_frame_contract": cut["cut_contract"]["first_frame_contract"],
+            "visual_translation": cut["image_generation"]["first_frame_visual_plan"][
+                "visual_translation"
+            ],
+            "temporal_boundary_positive": {
+                key: cut["image_generation"]["first_frame_visual_plan"][
+                    "temporal_boundary"
+                ].get(key)
+                for key in (
+                    "first_visible_moment",
+                    "event_fact_visible_in_still",
+                    "action_completion_state",
+                )
+            },
+            "character_state_gate": cut["image_generation"][
+                "first_frame_visual_plan"
+            ]["character_state_gate"],
+            "spatial_composition": cut["image_generation"][
+                "first_frame_visual_plan"
+            ]["spatial_composition"],
+            "source_grounding": {
+                key: cut["image_generation"]["first_frame_visual_plan"][
+                    "source_grounding"
+                ].get(key)
+                for key in (
+                    "what_happens",
+                    "visible_action",
+                    "visible_reaction",
+                    "event_facts_to_preserve",
+                )
+            },
+            "source_event_positive_review_trace": {
+                key: cut["cut_contract"]["source_event_contract"].get(key)
+                for key in (
+                    "source_event_summary",
+                    "source_visible_action",
+                    "source_visible_reaction",
+                    "source_required_visual_evidence",
+                    "event_facts_to_preserve",
+                )
+            },
+            "positive_start_and_composition_contracts": {
+                "first_frame": cut["cut_contract"]["first_frame_contract"],
+                "continuity_start": cut["cut_contract"]["continuity_contract"][
+                    "start_state"
+                ],
+                "cinematic": cut["cut_contract"]["cinematic_contract"],
+            },
+            "provider_prompt_positive": str(
+                cut["image_generation"]["api_prompt_payload"].get("prompt") or ""
+            ).split("\n[禁止]\n", 1)[0],
+        }
+        positive_text = json.dumps(
+            positive_still_sources, ensure_ascii=False, sort_keys=True
+        )
+        for token in excluded_tokens:
+            self.assertNotIn(token, positive_text, token)
+
+        motion_text = json.dumps(
+            cut["cut_contract"]["motion_contract"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertIn("ガラスの靴", motion_text)
+        self.assertIn("馬車", motion_text)
+        canonical_source_event_text = json.dumps(
+            {
+                key: cut["cut_contract"]["source_event_contract"].get(key)
+                for key in (
+                    "canonical_source_visible_action",
+                    "canonical_source_required_visual_evidence",
+                    "canonical_event_facts_to_preserve",
+                )
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertIn("ガラスの靴", canonical_source_event_text)
+        self.assertIn("馬車", canonical_source_event_text)
+        from toc.stage_evaluator import _cut_event_ref_issue_map
+
+        scene = next(
+            scene
+            for scene in manifest["scenes"]
+            if cut in scene["cuts"]
+        )
+        self.assertNotIn(
+            "source_event_preservation",
+            _cut_event_ref_issue_map(scene),
+        )
+
+    def test_motion_reveals_are_explicit_first_frame_negatives_until_the_action(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="first-frame-motion-reveal-negatives"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            research = module._build_research(
+                "シンデレラ", "シンデレラ", "now", profile
+            )
+            (run_dir / "research.md").write_text(
+                module._md_yaml("Research", research), encoding="utf-8"
+            )
+            story = module._build_story("シンデレラ", run_dir, "now", profile)
+            (run_dir / "story.md").write_text(
+                module._md_yaml("Story", story), encoding="utf-8"
+            )
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ", run_dir, "now", profile
+            )
+
+        cuts = {
+            cut["selector"]: cut
+            for scene in manifest["scenes"]
+            for cut in scene["cuts"]
+        }
+        for selector, expected_not_yet in (
+            (
+                "scene30_cut03",
+                {
+                    "変身後のシンデレラ",
+                    "ガラスの靴",
+                    "完成したかぼちゃの馬車",
+                    "馬車",
+                },
+            ),
+            ("scene70_cut04", {"質素な普段着へ戻ったシンデレラ"}),
+        ):
+            cut = cuts[selector]
+            plan = cut["image_generation"]["first_frame_visual_plan"]
+            not_yet = set(
+                plan["temporal_boundary"]["not_yet_happened_in_still"]
+            )
+            self.assertLessEqual(expected_not_yet, not_yet, selector)
+            prompt = cut["image_generation"]["api_prompt_payload"]["prompt"]
+            self.assertIn("まだ描かないものは", prompt, selector)
+            for outcome in expected_not_yet:
+                self.assertIn(outcome, prompt, f"{selector}: {outcome}")
+            motion_reveals = set(
+                cut["cut_contract"]["motion_contract"][
+                    "allowed_new_reveal_elements"
+                ]
+            )
+            self.assertTrue(motion_reveals, selector)
+            self.assertLessEqual(motion_reveals, not_yet, selector)
+
+        self.assertNotIn(
+            "変身後のシンデレラ",
+            cuts["scene30_cut04"]["image_generation"][
+                "first_frame_visual_plan"
+            ]["temporal_boundary"]["not_yet_happened_in_still"],
+        )
+        self.assertNotIn(
+            "質素な普段着へ戻ったシンデレラ",
+            cuts["scene70_cut05"]["image_generation"][
+                "first_frame_visual_plan"
+            ]["temporal_boundary"]["not_yet_happened_in_still"],
+        )
+
+    def test_first_frame_excluded_object_ids_fail_closed_for_malformed_or_unknown_values(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="first-frame-object-validation"
+        )
+        with self.assertRaisesRegex(RuntimeError, "must be a list"):
+            module._validate_first_frame_excluded_object_ids(
+                profile, "glass_slipper", context="scene30.turn"
+            )
+        with self.assertRaisesRegex(RuntimeError, "unknown object asset id"):
+            module._validate_first_frame_excluded_object_ids(
+                profile, ["unknown_object"], context="scene30.turn"
+            )
+        with self.assertRaisesRegex(RuntimeError, "non-blank strings"):
+            module._validate_first_frame_excluded_object_ids(
+                profile, [""], context="scene30.turn"
+            )
+        with self.assertRaisesRegex(RuntimeError, "non-blank strings"):
+            module._validate_first_frame_excluded_object_ids(
+                profile, [123], context="scene30.turn"
+            )
+
+    def test_first_frame_character_overrides_only_accept_known_same_identity_variants(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="first-frame-character-validation"
+        )
+        protagonist_name = str(profile["protagonist_name"])
+        base_id = str(profile["protagonist_asset_id"])
+        transformed_id = str(profile["protagonist_transformed_asset_id"])
+        post_midnight_id = str(profile["protagonist_post_midnight_asset_id"])
+        self.assertEqual(
+            module._validate_first_frame_character_asset_overrides(
+                profile,
+                {
+                    protagonist_name: base_id,
+                    "protagonist": transformed_id,
+                    f"魔法が解けた後の{protagonist_name}": post_midnight_id,
+                },
+                context="scene30.turn",
+            ),
+            {
+                protagonist_name: base_id,
+                "protagonist": transformed_id,
+                f"魔法が解けた後の{protagonist_name}": post_midnight_id,
+            },
+        )
+
+        stepmother_id = next(
+            str(spec["character_id"])
+            for spec in module._supporting_character_asset_specs(profile)
+            if str(spec.get("source_character_id") or "") == "stepmother"
+        )
+        with self.assertRaisesRegex(RuntimeError, "same identity"):
+            module._validate_first_frame_character_asset_overrides(
+                profile,
+                {protagonist_name: stepmother_id},
+                context="scene30.turn",
+            )
+        with self.assertRaisesRegex(RuntimeError, "known character asset"):
+            module._validate_first_frame_character_asset_overrides(
+                profile,
+                {protagonist_name: "unknown_character"},
+                context="scene30.turn",
+            )
+        with self.assertRaisesRegex(RuntimeError, "must be an object"):
+            module._validate_first_frame_character_asset_overrides(
+                profile, [], context="scene30.turn"
+            )
+
+        ambiguous_profile = dict(profile)
+        ambiguous_profile["protagonist_name"] = "Alex"
+        with patch.object(
+            module,
+            "_supporting_character_asset_specs",
+            return_value=[
+                {
+                    "character_id": "rival_alex",
+                    "source_character_id": "rival",
+                    "name": "Alex",
+                    "identity_name": "Alex",
+                }
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "alias is ambiguous"):
+                module._validate_first_frame_character_asset_overrides(
+                    ambiguous_profile,
+                    {"Alex": "rival_alex"},
+                    context="scene10.setup",
+                )
+
+    def test_character_reference_binding_never_uses_positional_non_character_refs(self) -> None:
+        module = load_frontend_run_module()
+        with self.assertRaisesRegex(RuntimeError, "character reference binding"):
+            module._bind_character_reference_pairs(
+                character_ids=["hero", "ally"],
+                references=[
+                    "assets/characters/hero.png",
+                    "assets/locations/palace.png",
+                    "assets/objects/key.png",
+                ],
+                context="scene10_cut01",
+            )
+        self.assertEqual(
+            module._bind_character_reference_pairs(
+                character_ids=["hero", "ally"],
+                references=[
+                    "assets/characters/ally.png",
+                    "assets/locations/palace.png",
+                    "assets/characters/hero.png",
+                ],
+                context="scene10_cut02",
+            ),
+            [
+                ("hero", "assets/characters/hero.png"),
+                ("ally", "assets/characters/ally.png"),
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "id mismatch"):
+            module._bind_character_reference_pairs(
+                character_ids=["hero", "ally"],
+                references=[
+                    "assets/characters/hero.png",
+                    "assets/characters/rival.png",
+                ],
+                context="scene10_cut03",
+            )
+
+    def test_reviewed_scene_visualizable_action_survives_only_as_scene_review_trace(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module, seed="review-only-visualizable-action"
+        )
+        sentinel = "REGISTRY_REVIEW_TRACE_ONLY"
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            research = module._build_research(
+                "シンデレラ", "シンデレラ", "now", profile
+            )
+            (run_dir / "research.md").write_text(
+                module._md_yaml("Research", research), encoding="utf-8"
+            )
+            story = module._build_story("シンデレラ", run_dir, "now", profile)
+            story["script"]["scenes"][0]["visualizable_action"] = sentinel
+            (run_dir / "story.md").write_text(
+                module._md_yaml("Story", story), encoding="utf-8"
+            )
+            reviewed_profile = module._profile_from_reviewed_story(profile, story)
+            _script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ", run_dir, "now", reviewed_profile
+            )
+
+        scene = manifest["scenes"][0]
+        self.assertEqual(
+            scene["scene_intent"]["review_only_visualizable_action"], sentinel
+        )
+        provider_payload = json.dumps(
+            [
+                {
+                    "scene_contract": cut["scene_contract"],
+                    "first_frame_visual_plan": cut["image_generation"][
+                        "first_frame_visual_plan"
+                    ],
+                    "api_prompt_payload": cut["image_generation"][
+                        "api_prompt_payload"
+                    ],
+                }
+                for cut in scene["cuts"]
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertNotIn(sentinel, provider_payload)
+
+    def test_duration_expansion_preserves_canonical_routes_and_scoped_beat_overrides(self) -> None:
+        module = load_frontend_run_module()
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            canonical_profile = module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="duration-segment",
+            )
+            profile = module._duration_aware_profile(
+                canonical_profile,
+                target_duration_seconds=1200,
+            )
+
+        def explicit_locations(value: object) -> set[str]:
+            if isinstance(value, dict):
+                locations = {
+                    str(value.get("location") or "").strip()
+                } if str(value.get("location") or "").strip() else set()
+                for child in value.values():
+                    locations.update(explicit_locations(child))
+                return locations
+            if isinstance(value, list):
+                locations: set[str] = set()
+                for child in value:
+                    locations.update(explicit_locations(child))
+                return locations
+            return set()
+
+        checked_split_scenes = 0
+        seen_functions_by_canonical: dict[int, set[str]] = {}
+        seen_segment_functions_by_canonical: dict[int, set[str]] = {}
+        root_functions_by_segment: dict[tuple[int, str], list[str]] = {}
+        scene8_event_sequences: list[tuple[int, list[dict[str, object]]]] = []
+        preserved_stone_road_obligations: set[str] = set()
+        for runtime_scene_index, segment_count in enumerate(profile["scene_segment_counts"], start=1):
+            if segment_count <= 1:
+                continue
+            allowed_locations = set(profile["scene_location_sequences"][runtime_scene_index - 1])
+            canonical_index = int(profile["canonical_scene_indices"][runtime_scene_index - 1])
+            canonical_route = list(
+                canonical_profile["scene_location_sequences"][canonical_index - 1]
+            )
+            self.assertEqual(
+                profile["scene_location_sequences"][runtime_scene_index - 1],
+                canonical_route,
+                f"runtime scene {runtime_scene_index}",
+            )
+            blueprint = module._scene_blueprint(
+                profile=profile,
+                idx=runtime_scene_index,
+                title=profile["scene_titles"][runtime_scene_index - 1],
+                location_name=profile["scene_locations"][runtime_scene_index - 1],
+                include_artifact=False,
+            )
+            locations = explicit_locations(blueprint["beat_overrides"])
+            self.assertLessEqual(locations, allowed_locations, f"runtime scene {runtime_scene_index}")
+            seen_functions = seen_functions_by_canonical.setdefault(canonical_index, set())
+            duplicated_functions = seen_functions.intersection(blueprint["beat_overrides"])
+            self.assertFalse(duplicated_functions, f"runtime scene {runtime_scene_index}")
+            seen_functions.update(blueprint["beat_overrides"])
+            seen_segment_functions = seen_segment_functions_by_canonical.setdefault(
+                canonical_index, set()
+            )
+            for segment in profile["scene_location_segments"][runtime_scene_index - 1]:
+                segment_functions = set((segment.get("beat_overrides") or {}).keys())
+                self.assertFalse(
+                    seen_segment_functions.intersection(segment_functions),
+                    f"runtime scene {runtime_scene_index} segment overrides",
+                )
+                seen_segment_functions.update(segment_functions)
+                root_functions_by_segment.setdefault(
+                    (canonical_index, str(segment["location"])), []
+                ).extend(segment.get("root_active_beat_functions") or [])
+            if canonical_index == 8:
+                location_spec = module._location_spec_for_scene(
+                    profile, runtime_scene_index
+                )
+                scene_intent = module._scene_intent_for_cut_design(
+                    title=profile["scene_titles"][runtime_scene_index - 1],
+                    idx=runtime_scene_index,
+                    location_spec=location_spec,
+                    profile=profile,
+                    include_artifact=True,
+                )
+                scene_event = module._scene_event_for_cut_design(
+                    title=profile["scene_titles"][runtime_scene_index - 1],
+                    idx=runtime_scene_index,
+                    scene_intent=scene_intent,
+                    location_name=str(location_spec["name"]),
+                    location_id=str(location_spec["asset_id"]),
+                    profile=profile,
+                    include_artifact=True,
+                )
+                scene8_event_sequences.append(
+                    (runtime_scene_index, scene_event["event_sequence"])
+                )
+            if canonical_index == 4 and "宮殿へ続く石畳" in allowed_locations:
+                payoff = blueprint["beat_overrides"].get("payoff") or {}
+                preserved_stone_road_obligations.update(
+                    (payoff.get("obligation_overrides") or {}).keys()
+                )
+            checked_split_scenes += 1
+        self.assertGreater(checked_split_scenes, 1)
+        self.assertEqual(
+            preserved_stone_road_obligations,
+            {
+                "audience_context",
+                "spatial_transition",
+                "time_or_deadline_pressure",
+            },
+        )
+        for canonical_index, canonical_segments in enumerate(
+            canonical_profile["scene_location_segments"], start=1
+        ):
+            expected_segment_functions = {
+                function
+                for segment in canonical_segments
+                for function in (segment.get("beat_overrides") or {})
+            }
+            self.assertEqual(
+                seen_segment_functions_by_canonical.get(canonical_index, set()),
+                expected_segment_functions,
+                f"canonical scene {canonical_index} segment override coverage",
+            )
+        self.assertEqual(
+            root_functions_by_segment[(8, "王宮の命令の間")], ["setup"]
+        )
+        self.assertEqual(
+            root_functions_by_segment[(8, "町の家々")], ["pressure"]
+        )
+        self.assertEqual(
+            root_functions_by_segment[(8, "靴合わせの部屋")], ["payoff"]
+        )
+        for segment in canonical_profile["scene_location_segments"][7]:
+            responsibility = str(segment["responsibility"])
+            owners = [
+                (runtime_index, str(beat["beat_function"]))
+                for runtime_index, sequence in scene8_event_sequences
+                for beat in sequence
+                if responsibility in str(beat.get("what_happens") or "")
+            ]
+            self.assertEqual(len(owners), 1, responsibility)

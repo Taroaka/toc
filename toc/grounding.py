@@ -593,9 +593,19 @@ def build_stage_grounding_audit(
     contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     loaded = contract or load_grounding_contract()
+    current_contract_version = str(loaded.get("contract_version") or "").strip()
+    report_contract_version = str(report.get("contract_version") or "").strip()
+    readset_contract_version = str(readset.get("contract_version") or "").strip()
+    report_contract_current = bool(current_contract_version) and report_contract_version == current_contract_version
+    readset_contract_current = bool(current_contract_version) and readset_contract_version == current_contract_version
     expected_global = set(global_required_docs(loaded))
     readset_global = {str(entry.get("path") or "").strip() for entry in readset.get("global_docs", []) if str(entry.get("path") or "").strip()}
-    expected_stage_docs = {str(entry.get("path") or "").strip() for entry in report.get("resolved_paths", {}).get("docs", []) if str(entry.get("path") or "").strip()}
+    current_stage_spec = stage_contract(stage, loaded)
+    expected_stage_docs = {
+        str(path).strip()
+        for path in current_stage_spec.get("required_docs", [])
+        if isinstance(path, str) and path.strip()
+    }
     readset_stage_docs = {str(entry.get("path") or "").strip() for entry in readset.get("stage_docs", []) if str(entry.get("path") or "").strip()}
 
     missing_global = sorted(expected_global - readset_global)
@@ -605,6 +615,22 @@ def build_stage_grounding_audit(
     readset_verified = bool(readset.get("verified_before_edit"))
 
     checks = [
+        {
+            "id": f"{stage}.audit.report_contract_current",
+            "passed": report_contract_current,
+            "message": (
+                "grounding report contract_version matches the current contract "
+                f"(current {current_contract_version or '(unset)'}, got {report_contract_version or '(unset)'})"
+            ),
+        },
+        {
+            "id": f"{stage}.audit.readset_contract_current",
+            "passed": readset_contract_current,
+            "message": (
+                "grounding readset contract_version matches the current contract "
+                f"(current {current_contract_version or '(unset)'}, got {readset_contract_version or '(unset)'})"
+            ),
+        },
         {"id": f"{stage}.audit.grounding_ready", "passed": report.get("status") == "ready", "message": f"grounding status is ready (got {report.get('status', '(unset)')})"},
         {"id": f"{stage}.audit.readset_verified", "passed": readset_verified, "message": "readset is marked verified_before_edit"},
         {"id": f"{stage}.audit.global_docs_present", "passed": not missing_global, "message": f"global docs are included in readset (missing {missing_global or 'none'})"},
@@ -615,6 +641,9 @@ def build_stage_grounding_audit(
     status = "passed" if all(check["passed"] for check in checks) else "failed"
     return {
         "generated_at": now_iso(),
+        "contract_version": loaded.get("contract_version"),
+        "grounding_report_contract_version": report.get("contract_version"),
+        "readset_contract_version": readset.get("contract_version"),
         "stage": stage,
         "canonical_stage": report.get("canonical_stage"),
         "flow": report.get("flow"),
@@ -640,6 +669,22 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
     readset, readset_path = load_grounding_readset(run_dir, stage, loaded)
     audit, audit_path = load_grounding_audit(run_dir, stage, loaded)
     playbooks, playbooks_path = load_playbooks_report(run_dir, stage, loaded)
+    current_contract_audit: dict[str, Any] | None = None
+    if report is not None and readset is not None:
+        try:
+            current_contract_audit = build_stage_grounding_audit(
+                run_dir=run_dir,
+                stage=stage,
+                report=report,
+                readset=readset,
+                contract=loaded,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            current_contract_audit = None
+    audit_current_contract_passed = bool(
+        current_contract_audit
+        and current_contract_audit.get("status") == "passed"
+    )
     report_flow = str((report or {}).get("flow") or "")
     state = _load_state_for_grounding(run_dir, flow=report_flow or None)
 
@@ -690,7 +735,13 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
         "audit": audit,
         "audit_path": audit_path,
         "audit_exists": audit is not None and audit_path is not None,
-        "audit_passed": bool(audit and audit.get("status") == "passed"),
+        "audit_passed": bool(
+            audit
+            and audit.get("status") == "passed"
+            and audit_current_contract_passed
+        ),
+        "current_contract_audit": current_contract_audit,
+        "audit_current_contract_passed": audit_current_contract_passed,
         "state_status_key": status_key,
         "state_status": state.get(status_key, "").strip() if status_key else "",
         "state_report_key": report_key,

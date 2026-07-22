@@ -445,6 +445,7 @@ class TestSemanticPackVideo(unittest.TestCase):
 
     def test_render_unit_recompile_preserves_reference_roles_and_review_only_scene_sources(self) -> None:
         source_contract = {
+            "location": "灰の台所",
             "motion_contract": {
                 "motion_brief": "シンデレラが出口へ一歩進む",
                 "end_state": "右足を踏み出した姿勢で止まる",
@@ -534,6 +535,309 @@ class TestSemanticPackVideo(unittest.TestCase):
             ]
         }
         self.assertEqual(traced["scene.location_segments"], location_segments)
+
+    def test_render_unit_explicit_reveal_allowlist_materializes_and_reviews(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "scene_intent": {
+                        "review_only_visualizable_action": "scene全体で主人公が銀の鍵を得て屋敷を出る",
+                    },
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "first_frame_contract": {
+                                    "first_frame_brief": "主人公が閉じた扉の前に立っている",
+                                },
+                                "motion_contract": {
+                                    "motion_brief": "光の中で銀の鍵が新しく現れる",
+                                    "allowed_new_reveal_elements": ["銀の鍵"],
+                                    "must_not_add": ["新しい人物"],
+                                }
+                            },
+                        },
+                        {
+                            "cut_id": 2,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "ランタンが新しく灯り、主人公が銀の鍵を持って扉へ進む",
+                                    "end_state": "銀の鍵を持った主人公が扉の前で止まる",
+                                    "must_not_add": ["別の場所"],
+                                    "allowed_new_reveal_elements": ["ランタン"],
+                                }
+                            },
+                        },
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "ランタンが灯り、光の中で銀の鍵が現れ、主人公が扉へ進む",
+                                    "allowed_new_reveal_elements": [
+                                        "ランタン",
+                                        "銀の鍵",
+                                    ],
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "prompt_authoring_source": "ランタンが灯り、銀の鍵を持った主人公が扉へ進む",
+                                "duration_seconds": 8,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        for invalid_unit_allowlist in (
+            ["銀の鍵"],
+            ["ランタン", "銀の鍵", "魔法の馬車"],
+        ):
+            invalid_allowlist_manifest = copy.deepcopy(manifest)
+            invalid_allowlist_manifest["scenes"][0]["render_units"][0][
+                "cut_contract"
+            ]["motion_contract"][
+                "allowed_new_reveal_elements"
+            ] = invalid_unit_allowlist
+            with self.subTest(invalid_unit_allowlist=invalid_unit_allowlist):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_render_unit_requires_explicit_reveal_authorization",
+                ):
+                    collect_entries(
+                        "video_motion",
+                        Path("."),
+                        invalid_allowlist_manifest,
+                    )
+
+        first_entry = collect_entries("video_motion", Path("."), manifest)[0]
+        materialized = first_entry["provider_prompt_payload"]
+
+        self.assertEqual(
+            first_entry["motion_contract"]["allowed_new_reveal_elements"],
+            ["銀の鍵", "ランタン"],
+        )
+        self.assertEqual(
+            first_entry["motion_contract"]["motion_brief"],
+            "ランタンが灯り、光の中で銀の鍵が現れ、主人公が扉へ進む",
+        )
+        self.assertEqual(
+            first_entry["motion_contract"]["end_state"],
+            "銀の鍵を持った主人公が扉の前で止まる",
+        )
+        self.assertEqual(
+            first_entry["motion_contract"]["must_not_add"],
+            ["新しい人物", "別の場所"],
+        )
+        self.assertIn(
+            "主人公が閉じた扉の前に立っている",
+            materialized["prompt"],
+        )
+        self.assertIn(
+            "銀の鍵を持った主人公が扉の前で止まる",
+            materialized["prompt"],
+        )
+        self.assertIn("新しく現れてよいものは、銀の鍵、ランタン", materialized["prompt"])
+        review_only_sources = {
+            item["source_key"]: item["value"]
+            for item in materialized["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(
+            review_only_sources["scene.visualizable_action"],
+            "scene全体で主人公が銀の鍵を得て屋敷を出る",
+        )
+        self.assertNotIn(
+            "scene全体で主人公が銀の鍵を得て屋敷を出る",
+            materialized["prompt"],
+        )
+        review_dependencies = first_entry["video_prompt_projection"][
+            "review_only_dependencies"
+        ]
+        self.assertEqual(
+            review_dependencies["render_unit_source_cut_ids"],
+            ["1", "2"],
+        )
+        self.assertEqual(
+            [
+                contract["motion_contract"][
+                    "allowed_new_reveal_elements"
+                ]
+                for contract in review_dependencies[
+                    "render_unit_source_cut_contracts"
+                ]
+            ],
+            [["銀の鍵"], ["ランタン"]],
+        )
+
+        reviewed_manifest = copy.deepcopy(manifest)
+        reviewed_manifest["scenes"][0]["render_units"][0]["video_generation"][
+            "api_prompt_payload"
+        ] = materialized
+        reviewed_entry = collect_entries(
+            "video_motion",
+            Path("."),
+            reviewed_manifest,
+        )[0]
+
+        self.assertEqual(
+            reviewed_entry["provider_prompt_payload"]["source_digest"],
+            materialized["source_digest"],
+        )
+
+        stale_manifest = copy.deepcopy(reviewed_manifest)
+        stale_manifest["scenes"][0]["scene_intent"][
+            "review_only_visualizable_action"
+        ] = "scene全体で主人公が別の鍵を得て宮殿へ向かう"
+        with self.assertRaisesRegex(
+            ValueError,
+            "stale for semantic review",
+        ):
+            collect_entries("video_motion", Path("."), stale_manifest)
+
+    def test_render_unit_rejects_missing_or_empty_allowlist_with_empty_second_source_contract(self) -> None:
+        manifest = {
+            "scenes": [
+                {
+                    "scene_id": 1,
+                    "cuts": [
+                        {
+                            "cut_id": 1,
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "光の中で銀の鍵が新しく現れる",
+                                    "allowed_new_reveal_elements": ["銀の鍵"],
+                                }
+                            },
+                        },
+                        {"cut_id": 2, "cut_contract": {}},
+                    ],
+                    "render_units": [
+                        {
+                            "unit_id": 1,
+                            "source_cut_ids": [1, 2],
+                            "cut_contract": {
+                                "motion_contract": {
+                                    "motion_brief": "主人公が扉へ進む",
+                                }
+                            },
+                            "video_generation": {
+                                "tool": "seedance",
+                                "prompt_authoring_source": "主人公が扉へ進む",
+                                "duration_seconds": 8,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_requires_explicit_reveal_authorization",
+        ):
+            collect_entries("video_motion", Path("."), manifest)
+
+        single_source_manifest = copy.deepcopy(manifest)
+        single_source_manifest["scenes"][0]["cuts"] = single_source_manifest[
+            "scenes"
+        ][0]["cuts"][:1]
+        single_source_manifest["scenes"][0]["render_units"][0][
+            "source_cut_ids"
+        ] = [1]
+        single_source_motion = single_source_manifest["scenes"][0]["cuts"][0][
+            "cut_contract"
+        ]["motion_contract"]
+        single_source_motion[
+            "motion_brief"
+        ] = "光の中で銀の鍵とランタンが新しく現れる"
+        single_source_motion["allowed_new_reveal_elements"] = [
+            "銀の鍵",
+            "ランタン",
+        ]
+        single_source_manifest["scenes"][0]["render_units"][0][
+            "cut_contract"
+        ] = {}
+
+        missing_allowlist_entry = collect_entries(
+            "video_motion",
+            Path("."),
+            single_source_manifest,
+        )[0]
+        self.assertEqual(
+            missing_allowlist_entry["motion_contract"],
+            single_source_manifest["scenes"][0]["cuts"][0]["cut_contract"][
+                "motion_contract"
+            ],
+        )
+
+        empty_allowlist_manifest = copy.deepcopy(single_source_manifest)
+        empty_allowlist_manifest["scenes"][0]["render_units"][0][
+            "cut_contract"
+        ] = {"motion_contract": {"allowed_new_reveal_elements": []}}
+        empty_allowlist_entry = collect_entries(
+            "video_motion",
+            Path("."),
+            empty_allowlist_manifest,
+        )[0]
+        self.assertEqual(
+            empty_allowlist_entry["motion_contract"][
+                "allowed_new_reveal_elements"
+            ],
+            ["銀の鍵", "ランタン"],
+        )
+
+        for unit_allowlist in (
+            ["銀の鍵"],
+            ["銀の鍵", "ランタン", "魔法の馬車"],
+        ):
+            override_manifest = copy.deepcopy(single_source_manifest)
+            override_manifest["scenes"][0]["render_units"][0][
+                "cut_contract"
+            ] = {
+                "motion_contract": {
+                    "allowed_new_reveal_elements": unit_allowlist,
+                }
+            }
+            with self.subTest(unit_allowlist=unit_allowlist):
+                with self.assertRaises(ValueError):
+                    collect_entries(
+                        "video_motion",
+                        Path("."),
+                        override_manifest,
+                    )
+
+        unresolved_source_manifest = copy.deepcopy(single_source_manifest)
+        unresolved_source_manifest["scenes"][0]["render_units"][0][
+            "source_cut_ids"
+        ] = [1, 999]
+        unresolved_source_manifest["scenes"][0]["render_units"][0][
+            "cut_contract"
+        ] = {}
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_source_cut_ids_unresolved",
+        ):
+            collect_entries(
+                "video_motion",
+                Path("."),
+                unresolved_source_manifest,
+            )
+
+        manifest["scenes"][0]["render_units"][0]["cut_contract"][
+            "motion_contract"
+        ]["allowed_new_reveal_elements"] = []
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_requires_explicit_reveal_authorization",
+        ):
+            collect_entries("video_motion", Path("."), manifest)
 
     def test_video_motion_rejects_stale_materialized_provider_payload(self) -> None:
         old_contract = {

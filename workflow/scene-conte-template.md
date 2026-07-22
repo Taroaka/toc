@@ -92,7 +92,9 @@
 
 ---
 
-## 4) Beat Ladder（scene 内部の劇的流れ）
+## 4) Authored Beat Inventory（scene 内部の劇的流れ）
+
+次の行は候補例であり、必須 ladder ではない。実際には `scene_event.event_sequence[]` の一意な `beat_id` と任意の非空 `beat_function` を順序どおり列挙する。1 beat だけの scene や独自 function も許容する。
 
 | beat | 目的 | 画面で見える証拠 | cut候補 |
 |---|---|---|---|
@@ -110,16 +112,15 @@
 
 - 1カット = 1意図。
 - cutは映像編集単位。narration spanは複数cutをまたいでよく、または明示的な silent cut。
-- cinematic_story の production scene は原則3カット以上。low importance は2カット以上、high は5カット以上、critical は7カット以上。
-- `target_duration_seconds / 8` を切り上げたカット数も下回らない。
-- メインカット（最低1つ）: 5–15秒。
-- サブカット（最低1つ / 複数可）: 3–15秒。
-- spectacle / transformation / emotional reversal / proof reveal は、setup / threshold / payoff / reaction / handoff へ分解する。
+- cut 数は distinct semantic obligation ID 数と、可視化必須の authored event beat ID 数から逆算する。importance や target duration だけでは増やさない。
+- 1 authored beat に 1 つの十分な可視責務しかない scene は、1 cut でもよい。
+- 各 cut の秒数は provider capability と scene の意味上の必要尺に合わせる。尺不足は narration / silence、既存 cut の duration、scene 構成または target 調整で解決する。
+- spectacle / transformation / emotional reversal / proof reveal は、独立した authored beat または可視責務がある段階だけを複数 cut に分ける。
 
 ### Cut `<scene_id>_1`
 
 - cut_role: `main|sub|transition|reaction|visual_payoff`
-- cut_function: `setup|pressure|threshold|turn|payoff|reaction|handoff`
+- cut_function: `<authored beat に整合する任意の非空 function。setup|pressure|threshold|turn|payoff|reaction|handoff は候補例>`
 - target_beat: `<このカットで観客に与える1つの情報/感情>`
 - screen_question: `<このカットの間、観客が画面から読む問い>`
 - visual_beat: `<画として何が見えるか>`

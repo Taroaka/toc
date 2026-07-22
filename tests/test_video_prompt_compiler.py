@@ -159,7 +159,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
                 self.assertNotIn(value, _other_fragment_text(payload, group))
 
         continuity = _fragment_text(payload, "continuity")
-        self.assertIn("主人公の顔と衣装", continuity)
+        self.assertNotIn("主人公の顔と衣装", continuity)
         self.assertIn("暁前の青い薄明", continuity)
         self.assertIn("顔、衣装、扉の外観を開始画像と一致させる", continuity)
         self.assertIn("新しい人物", _fragment_text(payload, "constraints"))
@@ -172,6 +172,191 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn(
             "SOURCE_PROMPT_SECOND_INTENT_SHOULD_NOT_SURFACE",
             payload["prompt"],
+        )
+
+    def test_downstream_handoff_state_is_review_only_not_current_clip_continuity(self) -> None:
+        carry_forward = "少女の顔が出口を向いた状態を次場面へ引き継ぐ"
+        receives = "前場面から足元を見た姿勢を受け取る"
+        delivers = "次場面へ出口を向いた姿勢を渡す"
+        stable_preserve = "青いドレスの色を変えない"
+        explicit_continuity = "少女の画面内の左右位置を保つ"
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "first_frame_contract": {
+                    "first_frame_brief": "少女が足元を見て立っている",
+                },
+                "motion_contract": {
+                    "motion_brief": "少女が顔を足元から出口へ向ける",
+                    "end_state": "少女の顔が出口を向く",
+                },
+                "continuity_contract": {
+                    "carry_forward_to_next_cut": [carry_forward],
+                },
+                "cut_handoff": {
+                    "receives_from_previous": {
+                        "visible_or_audible_form": receives,
+                    },
+                    "delivers_to_next": {
+                        "visible_or_audible_form": delivers,
+                    },
+                },
+            },
+            video_generation={
+                "motion_contract": {
+                    "must_preserve": [stable_preserve],
+                }
+            },
+            continuity_notes=(explicit_continuity,),
+        )
+
+        self.assertIn(
+            "少女が顔を足元から出口へ向ける",
+            _fragment_text(payload, "primary_motion"),
+        )
+        self.assertIn("少女の顔が出口を向く", _fragment_text(payload, "end_state"))
+        continuity = _fragment_text(payload, "continuity")
+        self.assertIn(stable_preserve, continuity)
+        self.assertIn(explicit_continuity, continuity)
+        for downstream_value in (carry_forward, receives, delivers):
+            self.assertNotIn(downstream_value, continuity)
+            self.assertNotIn(downstream_value, payload["prompt"])
+
+        review_only = {
+            item["source_key"]: item["value"]
+            for item in payload["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(
+            review_only[
+                "cut.cut_contract.continuity_contract.carry_forward_to_next_cut"
+            ],
+            [carry_forward],
+        )
+        self.assertEqual(
+            review_only[
+                "cut.cut_contract.cut_handoff.receives_from_previous.visible_or_audible_form"
+            ],
+            receives,
+        )
+        self.assertEqual(
+            review_only[
+                "cut.cut_contract.cut_handoff.delivers_to_next.visible_or_audible_form"
+            ],
+            delivers,
+        )
+
+    def test_structured_must_preserve_shadows_parsed_continuity_fallback(self) -> None:
+        stable_preserve = "青いドレスを保つ"
+        parsed_fallback = "銀の髪飾りを保つ"
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女が出口へ一歩進む",
+                }
+            },
+            video_generation={
+                "motion_contract": {
+                    "must_preserve": [stable_preserve],
+                }
+            },
+            source_prompt=f"continuity: {parsed_fallback}",
+        )
+
+        continuity = _fragment_text(payload, "continuity")
+        self.assertIn(stable_preserve, continuity)
+        self.assertNotIn(parsed_fallback, continuity)
+        projected = [
+            item["value"]
+            for item in payload["projection_review_contract"]["groups"][
+                "continuity"
+            ]
+        ]
+        self.assertEqual(projected, [[stable_preserve]])
+        shadowed = {
+            item["source_key"]: item["reason"]
+            for item in payload["projection_review_contract"]["shadowed_sources"]
+        }
+        self.assertEqual(
+            shadowed["compiler_normalized.authoring_source.continuity"],
+            "higher_priority_design_source_present",
+        )
+
+    def test_structured_forbidden_shadows_parsed_constraint_fallback(self) -> None:
+        structured_forbidden = "青い鳥を出さない"
+        parsed_fallback = "銀の鍵を出さない"
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女が出口へ一歩進む",
+                }
+            },
+            video_generation={
+                "motion_contract": {
+                    "must_not_add": [structured_forbidden],
+                }
+            },
+            source_prompt=f"negative: {parsed_fallback}",
+        )
+
+        constraints = _fragment_text(payload, "constraints")
+        self.assertIn(structured_forbidden, constraints)
+        self.assertIn(structured_forbidden, payload["negative_prompt"])
+        self.assertNotIn(parsed_fallback, constraints)
+        self.assertNotIn(parsed_fallback, payload["negative_prompt"])
+        projected = {
+            item["source_key"]: item["value"]
+            for item in payload["projection_review_contract"]["groups"][
+                "constraints"
+            ]
+        }
+        self.assertEqual(
+            projected["video_generation.motion_contract.must_not_add"],
+            [structured_forbidden],
+        )
+        shadowed = {
+            item["source_key"]: item["reason"]
+            for item in payload["projection_review_contract"]["shadowed_sources"]
+        }
+        self.assertEqual(
+            shadowed["compiler_normalized.authoring_source.constraints"],
+            "higher_priority_design_source_present",
+        )
+
+    def test_structured_handoff_shadows_parsed_end_state_fallback(self) -> None:
+        structured_end = "扉の前で止まる"
+        parsed_fallback = "階段の前で止まる"
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女が出口へ一歩進む",
+                }
+            },
+            video_generation={
+                "motion_contract": {
+                    "handoff_state": structured_end,
+                }
+            },
+            source_prompt=f"end_state: {parsed_fallback}",
+        )
+
+        end_state = _fragment_text(payload, "end_state")
+        self.assertIn(structured_end, end_state)
+        self.assertNotIn(parsed_fallback, end_state)
+        projected = [
+            item["value"]
+            for item in payload["projection_review_contract"]["groups"][
+                "end_state"
+            ]
+        ]
+        self.assertEqual(projected, [structured_end])
+        shadowed = {
+            item["source_key"]: item["reason"]
+            for item in payload["projection_review_contract"]["shadowed_sources"]
+        }
+        self.assertEqual(
+            shadowed["compiler_normalized.authoring_source.end_state"],
+            "higher_priority_design_source_present",
         )
 
     def test_kling_prompt_is_one_intent_and_one_continuous_shot(self) -> None:
@@ -679,14 +864,52 @@ class VideoPromptCompilerTests(unittest.TestCase):
             "旧scene入力の接触前で止まる",
             _fragment_text(scene_payload, "end_state"),
         )
-        self.assertIn(
+        self.assertNotIn(
             "旧scene入力の顔と衣装",
             _fragment_text(scene_payload, "continuity"),
+        )
+        scene_review_only = {
+            item["source_key"]: item["value"]
+            for item in scene_payload["projection_review_contract"][
+                "review_only_sources"
+            ]
+        }
+        self.assertEqual(
+            scene_review_only[
+                "cut.cut_contract.continuity_contract.carry_forward_to_next_cut"
+            ],
+            ["旧scene入力の顔と衣装"],
         )
         self.assertIn(
             "旧scene入力にない人物",
             _fragment_text(scene_payload, "constraints"),
         )
+
+        for alias in ("motion_brief", "action_intent"):
+            with self.subTest(primary_motion_alias=alias):
+                alias_motion = f"{alias}入力から出口へ一歩進む"
+                alias_payload = compile_video_api_prompt_v1(
+                    cut_contract={},
+                    video_generation={
+                        "motion_contract": {
+                            alias: alias_motion,
+                        }
+                    },
+                )
+                self.assertIn(
+                    alias_motion,
+                    _fragment_text(alias_payload, "primary_motion"),
+                )
+                traced_sources = {
+                    item["source_key"]
+                    for item in alias_payload["projection_review_contract"][
+                        "groups"
+                    ]["primary_motion"]
+                }
+                self.assertIn(
+                    f"video_generation.motion_contract.{alias}",
+                    traced_sources,
+                )
 
         motion_prompt_payload = compile_video_api_prompt_v1(
             cut_contract={},
@@ -827,6 +1050,91 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn("新しく現れてよいものは、かぼちゃの馬車", constraints)
         self.assertNotIn("かぼちゃの馬車", payload["prompt"])
 
+    def test_explicit_empty_canonical_reveal_allowlist_suppresses_legacy_aliases(self) -> None:
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女がその場で一度だけ振り返る",
+                    "allowed_new_reveal_elements": [],
+                }
+            },
+            scene_contract={
+                "motion_contract": {
+                    "allowed_new_reveal_elements": ["古いscene契約のガラスの靴"],
+                },
+            },
+            video_generation={
+                "motion_contract": {
+                    "allowed_new_reveal_elements": ["flat入力のガラスの靴"],
+                }
+            },
+        )
+
+        constraints = _fragment_text(payload, "constraints")
+        self.assertIn("開始画像にない人物", constraints)
+        self.assertNotIn("新しく現れてよいものは", constraints)
+        self.assertNotIn("ガラスの靴", payload["prompt"])
+        active_sources = {
+            str(item.get("source_key") or "")
+            for item in payload["projection_review_contract"]["active_rules"]
+        }
+        self.assertNotIn(
+            "video_generation.motion_contract.allowed_new_reveal_elements",
+            active_sources,
+        )
+        shadowed_sources = {
+            str(item.get("source_key") or "")
+            for item in payload["projection_review_contract"]["shadowed_sources"]
+        }
+        self.assertIn(
+            "video_generation.motion_contract.allowed_new_reveal_elements",
+            shadowed_sources,
+        )
+
+    def test_explicit_empty_reveal_allowlist_has_distinct_source_identity(self) -> None:
+        missing = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女がその場で一度だけ振り返る",
+                }
+            }
+        )
+        explicit_empty = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "少女がその場で一度だけ振り返る",
+                    "allowed_new_reveal_elements": [],
+                }
+            }
+        )
+
+        self.assertEqual(missing["prompt"], explicit_empty["prompt"])
+        self.assertEqual(missing["sha256"], explicit_empty["sha256"])
+        self.assertNotEqual(missing["source_digest"], explicit_empty["source_digest"])
+
+    def test_malformed_canonical_reveal_allowlist_cannot_resurrect_scene_authorization(self) -> None:
+        for malformed in (None, "", set()):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_reveal_allowlist_requires_sequence",
+                ):
+                    compile_video_api_prompt_v1(
+                        cut_contract={
+                            "motion_contract": {
+                                "motion_brief": "少女がその場で一度だけ振り返る",
+                                "allowed_new_reveal_elements": malformed,
+                            }
+                        },
+                        scene_contract={
+                            "motion_contract": {
+                                "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                                "end_state": "少女がガラスの靴を履いて立っている",
+                                "allowed_new_reveal_elements": ["ガラスの靴"],
+                            }
+                        },
+                    )
+
     def test_reveal_allowlist_rejects_malformed_scalar(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -841,6 +1149,42 @@ class VideoPromptCompilerTests(unittest.TestCase):
                     }
                 }
             )
+
+    def test_reveal_allowlist_rejects_set_empty_duplicate_and_raw_oversize_values(self) -> None:
+        invalid_cases = (
+            (
+                "",
+                "video_reveal_allowlist_requires_sequence",
+            ),
+            (
+                {"ガラスの靴"},
+                "video_reveal_allowlist_requires_sequence",
+            ),
+            (
+                ["ガラスの靴", "  "],
+                "video_reveal_allowlist_requires_nonempty_strings",
+            ),
+            (
+                ["ガラスの靴", "ガラスの靴"],
+                "video_reveal_allowlist_requires_unique_items",
+            ),
+            (
+                ["ガラスの靴"] * 9,
+                "video_reveal_allowlist_exceeds_limit",
+            ),
+        )
+        for allowlist, expected_error in invalid_cases:
+            with self.subTest(allowlist=allowlist, expected_error=expected_error):
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    compile_video_api_prompt_v1(
+                        cut_contract={
+                            "motion_contract": {
+                                "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                                "end_state": "少女がガラスの靴を履いて立っている",
+                                "allowed_new_reveal_elements": allowlist,
+                            }
+                        }
+                    )
 
     def test_reveal_allowlist_rejects_more_than_eight_elements(self) -> None:
         elements = [f"承認済み要素{i}" for i in range(1, 10)]
@@ -874,6 +1218,44 @@ class VideoPromptCompilerTests(unittest.TestCase):
                 }
             )
 
+    def test_reveal_allowlist_rejects_additional_negative_that_negates_allowed_element(self) -> None:
+        for tool in ("kling_3_0", "seedance"):
+            with self.subTest(tool=tool):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_reveal_allowlist_conflicts_with_forbidden",
+                ):
+                    compile_video_api_prompt_v1(
+                        cut_contract={
+                            "motion_contract": {
+                                "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                                "end_state": "少女がガラスの靴を履いて立っている",
+                                "allowed_new_reveal_elements": ["ガラスの靴"],
+                            }
+                        },
+                        tool=tool,
+                        additional_negative_prompt="ガラスの靴を出さない",
+                    )
+
+    def test_reveal_allowlist_rejects_authored_forbidden_phrase_containing_allowed_element(self) -> None:
+        for tool in ("kling_3_0", "seedance"):
+            with self.subTest(tool=tool):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_reveal_allowlist_conflicts_with_forbidden",
+                ):
+                    compile_video_api_prompt_v1(
+                        cut_contract={
+                            "motion_contract": {
+                                "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                                "end_state": "少女がガラスの靴を履いて立っている",
+                                "allowed_new_reveal_elements": ["ガラスの靴"],
+                                "must_not_add": ["ガラスの靴を履いた別の少女"],
+                            }
+                        },
+                        tool=tool,
+                    )
+
     def test_reveal_allowlist_rejects_element_not_grounded_in_motion_or_end(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -887,6 +1269,44 @@ class VideoPromptCompilerTests(unittest.TestCase):
                         "allowed_new_reveal_elements": ["ガラスの靴"],
                     }
                 }
+            )
+
+    def test_canonical_reveal_allowlist_cannot_be_grounded_only_by_flat_legacy_prose(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_reveal_allowlist_not_grounded_in_motion_or_end_state",
+        ):
+            compile_video_api_prompt_v1(
+                cut_contract={
+                    "motion_contract": {
+                        "allowed_new_reveal_elements": ["ガラスの靴"],
+                    }
+                },
+                video_generation={
+                    "motion_contract": {
+                        "motion_intent": "光が少女を包み、ガラスの靴を新しく出現させる",
+                        "handoff_state": "少女がガラスの靴を履いて立っている",
+                    }
+                },
+            )
+
+    def test_cut_reveal_allowlist_cannot_be_grounded_only_by_scene_legacy_prose(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_reveal_allowlist_not_grounded_in_motion_or_end_state",
+        ):
+            compile_video_api_prompt_v1(
+                cut_contract={
+                    "motion_contract": {
+                        "allowed_new_reveal_elements": ["ガラスの靴"],
+                    }
+                },
+                scene_contract={
+                    "motion_contract": {
+                        "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                        "end_state": "少女がガラスの靴を履いて立っている",
+                    }
+                },
             )
 
     def test_multi_cut_render_unit_rejects_source_reveal_allowlist_leakage(self) -> None:
@@ -911,7 +1331,153 @@ class VideoPromptCompilerTests(unittest.TestCase):
         ):
             compose_video_render_unit_contract(contracts)
 
+    def test_single_cut_render_unit_inherits_exact_source_contract(self) -> None:
+        source_contract = {
+            "motion_contract": {
+                "motion_brief": "光の中で銀の鍵と青い宝石が新しく現れる",
+                "allowed_new_reveal_elements": ["銀の鍵", "青い宝石"],
+            }
+        }
+
+        self.assertEqual(
+            compose_video_render_unit_contract([source_contract]),
+            source_contract,
+        )
+        compatible_unit_contracts = (
+            {},
+            {"motion_contract": {}},
+            {"motion_contract": {"allowed_new_reveal_elements": []}},
+            {
+                "motion_contract": {
+                    "motion_brief": source_contract["motion_contract"]["motion_brief"],
+                }
+            },
+            {
+                "motion_contract": {
+                    "allowed_new_reveal_elements": ["青い宝石", "銀の鍵"],
+                }
+            },
+        )
+        for unit_contract in compatible_unit_contracts:
+            with self.subTest(unit_contract=unit_contract):
+                self.assertEqual(
+                    compose_video_render_unit_contract(
+                        [source_contract],
+                        unit_contract=unit_contract,
+                    ),
+                    source_contract,
+                )
+
+        invalid_unit_contracts = (
+            {
+                "motion_contract": {
+                    "motion_brief": "光の中で銀の鍵だけが新しく現れる",
+                }
+            },
+            {
+                "motion_contract": {
+                    "motion_brief": "光の中で銀の鍵が現れる",
+                    "allowed_new_reveal_elements": ["銀の鍵"],
+                }
+            },
+            {
+                "motion_contract": {
+                    "allowed_new_reveal_elements": [
+                        "銀の鍵",
+                        "青い宝石",
+                        "金の冠",
+                    ],
+                }
+            },
+        )
+        for unit_contract in invalid_unit_contracts:
+            with self.subTest(unit_contract=unit_contract):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "single_cut_contract_must_match_source",
+                ):
+                    compose_video_render_unit_contract(
+                        [source_contract],
+                        unit_contract=unit_contract,
+                    )
+
+    def test_multi_cut_render_unit_preserves_empty_source_contract_cardinality(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_render_unit_requires_explicit_reveal_authorization",
+        ):
+            compose_video_render_unit_contract(
+                [
+                    {
+                        "motion_contract": {
+                            "motion_brief": "光の中で銀の鍵が新しく現れる",
+                            "allowed_new_reveal_elements": ["銀の鍵"],
+                        }
+                    },
+                    {},
+                ]
+            )
+
+    def test_multi_cut_render_unit_accepts_explicit_unit_reveal_authorization(self) -> None:
+        source_contracts = [
+            {
+                "motion_contract": {
+                    "motion_brief": "光が少女を包み、ガラスの靴を新しく出現させる",
+                    "allowed_new_reveal_elements": ["ガラスの靴"],
+                }
+            },
+            {
+                "motion_contract": {
+                    "motion_brief": "ランタンが新しく灯り、少女がガラスの靴で一歩進む",
+                    "end_state": "少女が階段前で止まる",
+                    "allowed_new_reveal_elements": ["ランタン"],
+                }
+            },
+        ]
+        unit_contract = {
+            "motion_contract": {
+                "motion_brief": "ランタンが灯り、光の中でガラスの靴が現れ、少女が階段前へ一歩進む",
+                "end_state": "ガラスの靴を履いた少女が階段前で止まる",
+                "allowed_new_reveal_elements": ["ランタン", "ガラスの靴"],
+            }
+        }
+
+        composed = compose_video_render_unit_contract(
+            source_contracts,
+            unit_contract=unit_contract,
+        )
+        payload = compile_video_api_prompt_v1(cut_contract=composed)
+
+        self.assertEqual(
+            composed["motion_contract"]["allowed_new_reveal_elements"],
+            ["ガラスの靴", "ランタン"],
+        )
+        self.assertIn(
+            "新しく現れてよいものは、ガラスの靴、ランタン",
+            _fragment_text(payload, "constraints"),
+        )
+
+        for invalid_allowlist in (
+            ["ガラスの靴"],
+            ["ガラスの靴", "ランタン", "金の冠"],
+        ):
+            with self.subTest(invalid_allowlist=invalid_allowlist):
+                invalid_unit_contract = copy.deepcopy(unit_contract)
+                invalid_unit_contract["motion_contract"][
+                    "allowed_new_reveal_elements"
+                ] = invalid_allowlist
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_render_unit_requires_explicit_reveal_authorization",
+                ):
+                    compose_video_render_unit_contract(
+                        source_contracts,
+                        unit_contract=invalid_unit_contract,
+                    )
+
     def test_first_frame_visual_plan_replaces_generic_visible_start_state_prose(self) -> None:
+        scene_overview = "主人公が灰の床から立ち、扉を抜けて階段へ向かう"
+        plan_start = "主人公の片手が灰の床で止まり、顔は継母の足元へ向いている"
         payload = compile_video_api_prompt_v1(
             cut_contract={
                 "first_frame_contract": {
@@ -927,16 +1493,57 @@ class VideoPromptCompilerTests(unittest.TestCase):
             first_frame="assets/scenes/start.png",
             first_frame_visual_plan={
                 "temporal_boundary": {
-                    "event_fact_visible_in_still": "主人公の片手が灰の床で止まり、顔は継母の足元へ向いている"
+                    "event_fact_visible_in_still": plan_start
                 }
             },
+            scene_visualizable_action=scene_overview,
         )
 
         start = _fragment_text(payload, "start_state")
-        self.assertIn("主人公の片手が灰の床で止まり", start)
+        self.assertIn(plan_start, start)
         self.assertNotIn("汎用の人物状態", start)
         self.assertNotIn("開始画像にある小道具・場所の状態が見える", start)
         self.assertNotIn("周囲からの圧力を受けている", start)
+        projection = payload["projection_review_contract"]
+        projected_start_values = [
+            item["value"] for item in projection["groups"]["start_state"]
+        ]
+        self.assertEqual(projected_start_values, [plan_start])
+        active_sources = {
+            str(item.get("source_key") or "")
+            for item in projection["active_rules"]
+        }
+        self.assertIn(
+            "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still",
+            active_sources,
+        )
+        traced = {
+            item["source_key"]: item["value"]
+            for item in projection["review_only_sources"]
+        }
+        self.assertEqual(traced["scene.visualizable_action"], scene_overview)
+        self.assertNotIn(scene_overview, payload["prompt"])
+
+    def test_invalid_first_frame_visual_plan_start_leaf_is_rejected_before_projection(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_first_frame_visual_plan_start_state_invalid",
+        ):
+            compile_video_api_prompt_v1(
+                cut_contract={
+                    "first_frame_contract": {
+                        "first_frame_brief": "主人公が閉じた扉の前に立つ",
+                    },
+                    "motion_contract": {
+                        "motion_brief": "主人公が扉へ一歩だけ進む",
+                    },
+                },
+                first_frame_visual_plan={
+                    "temporal_boundary": {
+                        "event_fact_visible_in_still": "scene04_cut02_internal",
+                    }
+                },
+            )
 
     def test_provider_prompt_excludes_internal_keys_ids_paths_and_other_stage_prose(self) -> None:
         payload = compile_video_api_prompt_v1(
@@ -1121,9 +1728,15 @@ class VideoPromptCompilerTests(unittest.TestCase):
             review_only_dependencies={
                 "render_unit_source_cut_ids": ["1", "2"],
                 "render_unit_source_cut_contracts": [
-                    {"motion_contract": {"motion_brief": "廊下へ一歩進む"}},
+                    {
+                        "motion_contract": {
+                            "motion_brief": "廊下へ一歩進む",
+                            "allowed_new_reveal_elements": ["銀の鍵"],
+                        }
+                    },
                     {"motion_contract": {"motion_brief": "扉の前で止まる"}},
                 ],
+                "empty_review_note": "  ",
             },
         )
         after = compile_video_api_prompt_v1(
@@ -1131,7 +1744,12 @@ class VideoPromptCompilerTests(unittest.TestCase):
             review_only_dependencies={
                 "render_unit_source_cut_ids": ["1", "2"],
                 "render_unit_source_cut_contracts": [
-                    {"motion_contract": {"motion_brief": "廊下を走り抜ける"}},
+                    {
+                        "motion_contract": {
+                            "motion_brief": "廊下を走り抜ける",
+                            "allowed_new_reveal_elements": ["銀の鍵"],
+                        }
+                    },
                     {"motion_contract": {"motion_brief": "扉の前で止まる"}},
                 ],
             },
@@ -1140,6 +1758,40 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertEqual(before["prompt"], after["prompt"])
         self.assertEqual(before["sha256"], after["sha256"])
         self.assertNotEqual(before["source_digest"], after["source_digest"])
+        expected_dependencies = {
+            "render_unit_source_cut_ids": ["1", "2"],
+            "render_unit_source_cut_contracts": [
+                {
+                    "motion_contract": {
+                        "motion_brief": "廊下へ一歩進む",
+                        "allowed_new_reveal_elements": ["銀の鍵"],
+                    }
+                },
+                {"motion_contract": {"motion_brief": "扉の前で止まる"}},
+            ],
+        }
+        self.assertEqual(
+            before["projection_review_contract"]["review_only_dependencies"],
+            expected_dependencies,
+        )
+        serialized_ir = str(before["video_prompt_ir"])
+        for review_only_value in (
+            "廊下へ一歩進む",
+            "銀の鍵",
+            "render_unit_source_cut_ids",
+        ):
+            self.assertNotIn(review_only_value, before["prompt"])
+            self.assertNotIn(review_only_value, before["negative_prompt"])
+            self.assertNotIn(review_only_value, serialized_ir)
+
+        without_dependencies = compile_video_api_prompt_v1(
+            **common,
+            review_only_dependencies={},
+        )
+        self.assertNotIn(
+            "review_only_dependencies",
+            without_dependencies["projection_review_contract"],
+        )
 
     def test_execution_bindings_stale_source_digest_without_changing_prompt_text(self) -> None:
         base = compile_video_api_prompt_v1(
@@ -1188,7 +1840,10 @@ class VideoPromptCompilerTests(unittest.TestCase):
 
     def test_review_only_scene_sources_stale_digest_without_surface_text(self) -> None:
         common = {
-            "cut_contract": _canonical_cut_contract(),
+            "cut_contract": {
+                **_canonical_cut_contract(),
+                "location": "灰の台所",
+            },
             "story_time": "17世紀末フランス",
             "time_of_day": "朝",
             "scene_location_mode": "sequence",
@@ -1240,6 +1895,60 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         self.assertNotIn("東向きの小窓", first["prompt"])
         self.assertNotIn("灰の台所", first["prompt"])
+
+    def test_cut_local_location_must_belong_to_declared_scene_route(self) -> None:
+        route = ("灰の台所", "屋敷の玄関")
+        valid_contract = {
+            "location": "灰の台所",
+            "source_event_contract": {
+                "source_concrete_events": [{"where": "灰の台所"}],
+            },
+            "motion_contract": {
+                "motion_brief": "主人公が灰の床から一度だけ顔を上げる",
+            },
+        }
+        payload = compile_video_api_prompt_v1(
+            cut_contract=valid_contract,
+            scene_location_sequence=route,
+        )
+        self.assertIn("主人公が灰の床から一度だけ顔を上げる", payload["prompt"])
+
+        invalid_contracts = (
+            {
+                **valid_contract,
+                "location": "地下室",
+                "source_event_contract": {
+                    "source_concrete_events": [{"where": "地下室"}],
+                },
+            },
+            {
+                "source_event_contract": {
+                    "source_concrete_events": [{"where": "地下室"}],
+                },
+                "motion_contract": valid_contract["motion_contract"],
+            },
+        )
+        for invalid_contract in invalid_contracts:
+            with self.subTest(invalid_contract=invalid_contract):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "video_cut_location_not_in_scene_location_sequence",
+                ):
+                    compile_video_api_prompt_v1(
+                        cut_contract=invalid_contract,
+                        scene_location_sequence=route,
+                    )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "video_cut_location_missing_for_scene_location_sequence",
+        ):
+            compile_video_api_prompt_v1(
+                cut_contract={
+                    "motion_contract": valid_contract["motion_contract"],
+                },
+                scene_location_sequence=route,
+            )
 
     def test_reference_roles_are_validated_rendered_without_paths_and_digest_bound(self) -> None:
         references = (

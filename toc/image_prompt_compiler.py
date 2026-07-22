@@ -628,7 +628,7 @@ def _reference_fragment(
             if character_name:
                 subject_suffix = f"（{character_name}）"
         lines.append(
-            f"{label}{counters[kind]}{subject_suffix}は{preserved}だけを保ち、構図と状態はこの画像の描写に合わせる。"
+            f"{label}{counters[kind]}{subject_suffix}は{preserved}だけを保ち、構図と状態はこの場面の記述を優先する。"
             + (
                 "光と色温度はこのシーンの時間帯を優先する。"
                 if kind == "location" and time_of_day
@@ -714,6 +714,17 @@ def _validate_positive_drawable_fragments(
     for marker in abstract_markers:
         if marker in text:
             raise ValueError(f"drawable_prompt_abstract_placeholder:{marker}")
+    broken_join = re.search(
+        r"(?:をの|をと(?:前景|中景|背景)|がを|にはを|のでを|へを|とを)",
+        text,
+    )
+    if broken_join:
+        context = text[
+            max(0, broken_join.start() - 40) : broken_join.end() + 40
+        ]
+        raise ValueError(
+            f"drawable_prompt_broken_japanese_join:{broken_join.group(0)}:{context}"
+        )
 
 
 def _visual_evidence_values(plan: Mapping[str, Any]) -> tuple[str, ...]:

@@ -173,6 +173,74 @@ class TestSemanticPackFoundation(unittest.TestCase):
             ["valid", "valid", "valid"],
         )
 
+    def test_story_pack_reports_sequence_location_segment_coverage(self) -> None:
+        story = STORY.replace(
+            "      time_of_day: 昼\n",
+            """      time_of_day: 昼
+      location:
+        mode: sequence
+        sequence: [\"浜辺\", \"鬼ヶ島の門\"]
+        segments:
+          - location: \"浜辺\"
+            responsibility: \"出航を見せる\"
+            primary_subject: \"桃太郎\"
+            visible_action: \"桃太郎が舟へ乗る\"
+            required_visual_evidence: [\"舟\"]
+            required_roles: [\"桃太郎\"]
+            motion_brief: \"桃太郎が舟へ片足を置く\"
+            motion_end_state: \"桃太郎が舟内に立つ\"
+""",
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "research.md").write_text(RESEARCH, encoding="utf-8")
+            (run_dir / "story.md").write_text(story, encoding="utf-8")
+
+            foundation = collect_entries("story", run_dir)[0]
+
+        statuses = foundation["scene_location_route_statuses"]
+        self.assertEqual(statuses[0]["status"], "undeclared")
+        self.assertEqual(statuses[1]["status"], "invalid")
+        self.assertEqual(statuses[1]["missing_segment_locations"], ["鬼ヶ島の門"])
+        self.assertEqual(statuses[1]["sequence"], ["浜辺", "鬼ヶ島の門"])
+
+    def test_story_pack_accepts_exact_ordered_sequence_location_segments(self) -> None:
+        story = STORY.replace(
+            "      time_of_day: 昼\n",
+            """      time_of_day: 昼
+      location:
+        mode: sequence
+        sequence: [\"浜辺\", \"鬼ヶ島の門\"]
+        segments:
+          - location: \"浜辺\"
+            responsibility: \"出航を見せる\"
+            primary_subject: \"桃太郎\"
+            visible_action: \"桃太郎が舟へ乗る\"
+            required_visual_evidence: [\"舟\"]
+            required_roles: [\"桃太郎\"]
+            motion_brief: \"桃太郎が舟へ片足を置く\"
+            motion_end_state: \"桃太郎が舟内に立つ\"
+          - location: \"鬼ヶ島の門\"
+            responsibility: \"到着を見せる\"
+            primary_subject: \"桃太郎\"
+            visible_action: \"桃太郎が門前へ降りる\"
+            required_visual_evidence: [\"門\"]
+            required_roles: [\"桃太郎\"]
+            motion_brief: \"桃太郎が舟から岸へ降りる\"
+            motion_end_state: \"桃太郎が門前に立つ\"
+""",
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "research.md").write_text(RESEARCH, encoding="utf-8")
+            (run_dir / "story.md").write_text(story, encoding="utf-8")
+
+            foundation = collect_entries("story", run_dir)[0]
+
+        self.assertEqual(foundation["scene_location_route_statuses"][1]["status"], "valid")
+
     def test_foundation_pack_scope_and_prompt_are_auditable_and_internal_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
             run_dir = Path(td)
@@ -199,6 +267,8 @@ class TestSemanticPackFoundation(unittest.TestCase):
                     self.assertIn("time_of_day_contract_declared", prompt)
                     self.assertIn("scene_time_of_day_missing", prompt)
                     self.assertIn("sky brightness", prompt)
+                    self.assertIn("scene_location_route_statuses", prompt)
+                    self.assertIn("scene_location_route_incomplete", prompt)
                 self.assertIn("MUST edit exactly one file", prompt)
                 self.assertIn("Do not return the verdict only in chat", prompt)
                 for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]:

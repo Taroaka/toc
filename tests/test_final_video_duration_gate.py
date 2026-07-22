@@ -58,6 +58,14 @@ class FinalVideoDurationGateTests(unittest.TestCase):
 
         self.assertLess(gate_index, done_index)
 
+    def test_immersive_cli_does_not_pass_deprecated_dynamic_chain_flags(self) -> None:
+        script = (REPO_ROOT / "scripts" / "toc-immersive-ride-generate.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("--chain-first-frame-from-prev-video", script)
+        self.assertNotIn("--chain-first-frame-seconds-from-end", script)
+
     def _run_gate(
         self,
         *,

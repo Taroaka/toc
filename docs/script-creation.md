@@ -55,7 +55,7 @@ p400 の scene 設計は「台本を時間で割る」作業ではなく、story
   - `meaning_ladder`: 主人公、関係、道具/舞台装置の意味段階
   - `concrete_handoff`: 次 scene を発生させる具体的な物、音、視線、行為、圧力
   - `anti_template_language`: テンプレ文を避け、固有名詞・道具・関係・場所・行為で書けているか
-- scene は必ず `before_state → pressure → turn → after_state` を持つ。
+- scene は `before_state → scene 固有の authored event progression → after_state` を持つ。`pressure` / `turn` は必要な場合の候補ラベルであり、固定段階ではない。
 - scene は「観客がこの scene 中に追う問い」を持つ。問いがない scene は、単なる説明または素材集になりやすい。
 - scene は `visual_thesis` を持つ。これは p600 が一枚絵として描ける scene の代表的意味であり、単なる美術説明ではない。
 - scene の終点は、次 scene の起点を発生させる。`handoff_to_next_scene` が弱い scene は、cut を追加するか scene を統合する。
@@ -72,7 +72,7 @@ scene_intent:
   estimated_duration_seconds: 24
   story_purpose: "この scene が全体で進めるもの"
   dramatic_question: "この scene の間、観客が追う問い"
-  scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+  scene_spine: "scene 固有の authored event progression の1文要約。候補ラベルを固定順で埋めない"
   value_shift:
     from: "scene開始時の状態"
     to: "scene終了時の状態"
@@ -176,8 +176,8 @@ p400 は次の順で進める。
    - human review は `gate.script_scene_review=required|optional|skipped` に従うが、agent 指摘の自動適用を都度止める gate ではない
 2. `p420 cut blueprint`
    - 全 scene が `review.script.scene_set.status=approved` / `review.script.scene_detail.status=approved` / `agent_review.status=passed` を満たした後だけ cut 化する
-   - cinematic_story の production scene は原則 3 cut 以上に分ける。low importance scene だけ 2 cut を許容し、high は 5 cut 以上、critical は 7 cut 以上を必須目安にする
-   - `target_duration_seconds` が長い scene は `ceil(target_duration_seconds / 8)` を下回らない。reference / title / pure transition のような例外は理由を残す
+   - cut floor は、同じ story fact を証明する obligation をまとめた後の distinct semantic obligation ID 数と、可視化必須の event beat ID 数の大きい方から決める
+   - `importance` と `target_duration_seconds` は review context として残すが、cut floor を増やす根拠にしない。尺のためだけの `duration_*` obligation や重複 generic action は作らない
    - cut 数と cut 役割は固定 template で決めない。scene の不可逆な story event、因果証明、観客理解差分、必要な人物役割を列挙し、それを画で証明するために必要な cut へ逆算する
    - scene 単位で並列 agent に分担してよいが、`script.md` は担当 `p400` L2 supervisor が bucket single writer として統合する
    - 1 cut は 1 意図に限定する。1 cut の中で場所移動、reveal、感情反転、説明を同時に背負わせない
@@ -185,18 +185,18 @@ p400 は次の順で進める。
    - cut ごとに `target_beat`, `audience_knowledge_delta`, `causal_proof`, `visual_evidence`, `required_roles`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `first_frame_brief`, `narration role`, `asset dependency hint` を書く
    - cut blueprint の agent review loop を回し、`cut_blueprint_review.md` と `eval.cut_blueprint.loop.*` に記録する
    - cut blueprint review は、critic_1=`cut_intent_isolation`, critic_2=`scene_event_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_event_boundary_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする
-   - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、beat ladder coverage、first frame / motion readiness、multimodal contract、duration / handoff が説明できる場合だけ `approved` にする
+   - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、authored event beat ID の exact inventory と must-be-seen assignment、任意の非空 `beat_function` の一致、first frame / motion readiness、multimodal contract、duration / handoff が説明できる場合だけ `approved` にする。固定の beat-function 集合は要求しない
    - human review は `gate.script_cut_review=required|optional|skipped` に従う
 3. `p430 script review`
    - `script.md` を正本として、scene/cut loop 後の最終集約 review を行う
    - facts / theme / protagonist / reveal order / approved human requests を無断変更していないか確認する
-   - cut 数、尺、visual/narration の距離、説明過多、asset 依存の抜けを確認する
+   - semantic obligation / event beat の cut coverage、尺、visual/narration の距離、説明過多、asset 依存の抜けを確認する
 4. `p435 production readiness council`
    - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
    - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
-   - Duration Auditor は選択された 5-20 分の目標尺と台本から不足を特定する。最低設計量は `ceil(target/40)` scene、`ceil(target/12)` cut、`ceil(target*0.70)` narration 秒とする
+   - Duration Auditor は選択された 5-20 分の目標尺と台本から実効尺の不足を特定する。目標尺だけから最低 cut 数を作らず、意味のある cut の duration、narration / silence、または scene 構成で不足を解消する。cut 追加を提案できるのは独立した semantic obligation / event beat がある場合だけとする
    - Duration Auditor は `video_manifest.md.video_metadata.target_duration_seconds` と production cut duration 合計を共有 duration audit で比較し、80% 未満なら passed にしてはいけない。上限超過は失敗にせず、p700 へ defer してはいけない
-   - Quality Auditor は尺/骨格の弱点から scene/cut 追加、cut 増厚、映像品質改善を提案する
+   - Quality Auditor は尺/骨格の弱点から scene 構成、意味のある cut の増厚、narration / silence、映像品質改善を提案する。cut 追加は独立した semantic obligation / event beat を伴う場合に限る
    - Orchestrator は各 auditor の意見を統合し、Design Owner 向け patch brief にする
    - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この p435 process 内で downstream design artifacts を触れるのは Design Owner だけとする
    - p500 へ進むには `eval.p400_readiness.status=approved` が必要で、scene/cut/review/duration/selector 対応の deterministic gate が 1 つでも落ちたら p500 grounding は開始しない
@@ -216,7 +216,7 @@ scene_intent:
   estimated_duration_seconds: 24
   story_purpose: "この scene が物語全体で担う役割"
   dramatic_question: "この scene の間、観客が追う問い"
-  scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+  scene_spine: "scene 固有の authored event progression の1文要約。候補ラベルを固定順で埋めない"
   value_shift:
     from: "scene開始時の状態"
     to: "scene終了時の状態"
@@ -345,7 +345,7 @@ p410 の review は抽象から具体へ進む。
    - `scene_count_coverage` reviewer は、承認済み story の主要 beat が既存 scene に埋もれていないかを専門に見る
    - `dramatic_structure` reviewer は、各 scene が独立した問い・価値変化・因果 turn を持つかを見る
    - `reveal_order` reviewer は、追加/分割した scene が reveal の早出しや欠落を起こしていないかを見る
-   - `duration_density` reviewer は、全体尺・scene 重要度・cut 数から、scene 追加と cut 増厚のどちらが品質に効くかを見る
+   - `duration_density` reviewer は、全体尺と authored semantic obligation / event beat の密度から、scene 構成の見直しと意味のある cut の増厚のどちらが品質に効くかを見る。importance や尺だけから cut floor を増やさない
    - `visual_production` reviewer は、追加 scene が後段 p500/p600/p800 で実際に映像化できる visible evidence を持つかを見る
    - `handoff_integrity` reviewer は、scene 間の因果と handoff が途切れていないかを見る
    - aggregator は全 reviewer の finding を統合し、`Scene Count Gate`、`Scene Specificity Gate`、`Reveal Order Gate`、`Handoff Chain Gate` が説明できる場合だけ `approved` にする
@@ -354,11 +354,11 @@ p410 の review は抽象から具体へ進む。
 2. `scene_detail_review`
    - 各 scene ごとに、その scene は必要か、scene 内の情報は足りているか、後続 stage への handoff が十分かを評価する
    - 目標動画は frontend で選択された 5-20 分を使い、全体 scene 数と scene 重要度から、その scene に必要な尺を見積もる
-   - 1 cut はおおよそ 4-15 秒であり、cut が 1 つしかない scene は 4-15 秒程度の尺しか持てないことを明示して評価する
-   - medium 以上の scene が 2 cut だけで済んでいる場合は、情報量・感情変化・次 scene への接続のどれかを失っていないかを blocking finding として扱う
+   - 1 cut はおおよそ 4-15 秒を目安とし、長い hold / silence / spectacle は `duration_exception.reason` を伴って評価する。cut が少ないこと自体を blocking にせず、尺だけを埋める cut 追加を要求しない
+   - scene importance や cut 数にかかわらず、独立した semantic obligation / event beat、情報差分、感情変化、次 scene への接続が cut に未割当なら blocking finding として扱う
    - この scene で見せるべき内容が、予定 cut ですべて表現されているか確認する
    - 別の具体 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する
-   - つながらない場合は、もう 1 cut 追加するか、最終 cut を厚くする修正案を出す
+   - つながらない場合は、独立した handoff obligation があるときだけ cut 追加を提案し、それ以外は最終 cut の増厚または scene 構成の修正案を出す
    - 全 scene の `agent_review.status=passed` が揃うまで cut blueprint へ進まない
    - aggregator は `Scene Detail Gate` として scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、隣接 scene handoff を確認し、未解決なら `approved` にしない
 
@@ -453,8 +453,8 @@ p410 の review は抽象から具体へ進む。
 silent visual payoff の互換ルール:
 
 - 配置は動画全体の `20% - 80%`
-- 1パート `4-6` カット
-- 各カット `4` 秒
+- cut 数は、その payoff を成立させる distinct semantic obligation / required event beat から決める
+- 各 cut の尺は見せる証拠、hold、silence、spectacle の必要時間から決め、固定秒数で分割しない
 - ナレーションなし
 - 文字説明ではなく、映像だけで満足感を作る
 
@@ -1131,7 +1131,7 @@ scenes:
 ### 3.2.1 映画的 scene の内部構造
 
 scene は cut の集合ではなく、cut を束ねる劇的な流れを持つ。
-標準形は次の 5 段階で考える。
+次の 5 段階は必要な責務を発見するための候補であり、固定 slot や最低 cut 数ではない。
 
 ```yaml
 cinematic_scene_structure:
@@ -1142,8 +1142,8 @@ cinematic_scene_structure:
   payoff_or_handoff: "変化の結果、または次sceneへの未解決アンカー"
 ```
 
-cut 数が少ない場合でも、この 5 段階のどれを省略しているかを明示する。
-`high` / `critical` scene で pressure と reaction が無い場合は、観客が感情変化を体験する前に話だけが進みやすいため blocking finding とする。
+各段階は、その scene に独立した意味責務がある場合だけ authored obligation / event beat にする。
+importance や候補ラベルの欠落だけでは blocking にせず、観客に必要な圧力・反応・価値変化がどの cut にも割り当てられていない場合を blocking finding とする。
 
 ### 3.3 シーン間の連続性
 
@@ -1757,8 +1757,8 @@ scenes:
       narration_policy: "silent"
       placement_guard: "20-80%"
 
-    # 実際の manifest / scene_conte では 4-6 cuts に分解し、
-    # 各 cut を 4 秒・ナレーションなしで表現する
+    # 実際の manifest / scene_conte では、distinct semantic obligation / required event beat
+    # ごとに必要な cut へ分解し、固定 cut 数・固定秒数を使わずナレーションなしで表現する
 
 # === エンゲージメント設計（story-creationから継承）===
 engagement_design:
@@ -1872,34 +1872,32 @@ scene_cut_coverage_plan:
   coverage_strategy: "reverse_from_scene_event"
   source_schema_version: "scene_event_v1"
   min_cut_count:
-    by_importance: 3
-    by_duration: 3
-    by_event_beats: 4
-    selected: 4
-    exception_reason: ""
+    by_distinct_semantic_obligations: 1
+    by_event_beats: 1
+    selected: 1
   event_beat_inventory:
     - beat_id: "scene1_event_setup"
       beat_function: "setup"
       must_be_seen: true
-      assigned_cut_ids: []
+      assigned_cut_ids: ["scene1_cut1"]
   scene_obligations:
-    - obligation_id: "scene_event_sequence_01"
-      source: "scene_event.event_sequence"
+    - obligation_id: "scene1_setup_proof_01"
+      source: "scene_event.event_sequence[scene1_event_setup]"
       evidence:
         - beat_id: "scene1_event_setup"
           beat_function: "setup"
           required_visual_evidence: []
-      assigned_cut_ids: []
+      assigned_cut_ids: ["scene1_cut1"]
   cut_assignments:
     - cut_index: 1
-      cut_selector: ""
-      obligation_ids: []
-      cut_function: ""
+      cut_selector: "scene1_cut1"
+      obligation_ids: ["scene1_setup_proof_01"]
+      cut_function: "setup"
       event_assignment:
         source_event_contract:
           primary_event_beat_id: "scene1_event_setup"
           source_event_beat_ids: ["scene1_event_setup"]
-      target_beat: ""
+      target_beat: "scene setup を成立させる可視証拠"
       visual_proof: ""
       audience_knowledge_delta: ""
       causal_proof: ""
@@ -1909,6 +1907,9 @@ scene_cut_coverage_plan:
   overloaded_cuts: []
   duplicate_meaning_risks: []
 ```
+
+`min_cut_count.selected` は、同じ story fact を証明する obligation をまとめた後の `by_distinct_semantic_obligations` と、可視化必須の `by_event_beats` の大きい方にする。scene の importance や目標尺だけで値を増やさず、`duration_*` obligation や同じ generic action の重複 cut を作らない。総尺は意味のある cut の duration、narration / silence、または scene 構成の見直しで満たす。
+上例は 1 obligation / 1 event beat の完全な対応例である。実際の scene では authored ID ごとに inventory / obligation / assignment を追加し、3 つの count を実在 ID の unique 数と一致させる。
 
 各 cut は `cut_contract` を正本にする。既存 reader のために `scene_contract` は互換 alias として残してよい。
 
@@ -2073,13 +2074,12 @@ cut_contract:
 
 ### Cut Count and Split Rules
 
-- low scene: 2 cuts 以上。
-- medium scene: 3 cuts 以上。
-- high scene: 5 cuts 以上。
-- critical scene: 7 cuts 以上。
-- さらに `ceil(target_duration_seconds / 8)` を下回らない。
+- `by_distinct_semantic_obligations` は、同じ story fact をまとめた後の unique な non-duration `cut_assignments[].obligation_id(s)` 数にする。
+- `by_event_beats` は、`must_be_seen != false` の unique な `event_beat_inventory[].beat_id` 数にする。
+- `selected = max(by_distinct_semantic_obligations, by_event_beats)` とし、importance / duration では増やさない。
+- 目標尺は、意味のある cut の duration、narration / silence、または scene 構成の見直しで満たす。同じ動作の言い換えだけの cut は追加しない。
 - 1 cut が 12 秒を超える場合は、意図的な hold / silence / spectacle である理由を残す。
-- spectacle / transformation / emotional reversal / proof reveal は `approach -> mechanism -> threshold -> reveal/payoff -> reaction -> handoff` に分ける。
+- spectacle / transformation / emotional reversal / proof reveal では `approach / mechanism / threshold / reveal or payoff / reaction / handoff` を責務発見の候補にする。独立した authored obligation / event beat がある段階だけを cut に分け、固定 ladder として全段階を要求しない。
 - mixed affect は全 cut 必須ではない。必要な pressure / turn / payoff / reaction / terminal cut だけ `mixed_affect_design.mode != none` にし、視覚・語り・音/リズム・handoff の支えを少なくとも 1 つ示す。
 
 ### Blocking Conditions

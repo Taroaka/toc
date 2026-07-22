@@ -17,10 +17,7 @@ from toc.video_prompt_compiler import (
     compile_video_api_prompt_v1,
     compose_video_render_unit_contract,
 )
-from toc.video_prompt_projection_registry import (
-    VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
-    resolve_video_prompt_contract,
-)
+from toc.video_prompt_projection_registry import VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION
 
 
 VIDEO_STAGE_NAMES = {"video_motion"}
@@ -261,6 +258,15 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _scene_visualizable_action(scene: dict[str, Any]) -> Any:
+    action = scene.get("visualizable_action")
+    if action not in (None, "", [], {}):
+        return action
+    return _mapping(scene.get("scene_intent")).get(
+        "review_only_visualizable_action"
+    )
+
+
 def _cut_selector(scene: dict[str, Any], cut: dict[str, Any]) -> str:
     return make_scene_cut_selector(scene.get("scene_id"), cut.get("cut_id"))
 
@@ -417,6 +423,7 @@ def _provider_prompt_payload(
             )
             if isinstance(value, dict)
         ],
+        scene_visualizable_action=_scene_visualizable_action(scene),
     )
     if not materialized_prompt:
         return current
@@ -509,16 +516,26 @@ def _effective_video_item_contract(
             continue
         cut_id = normalize_dotted_id(cut.get("cut_id")) or str(index)
         cuts_by_id[cut_id] = cut
+    unresolved_source_ids = [
+        str(raw_source_id)
+        for raw_source_id, source_id in zip(raw_source_ids, source_ids)
+        if not source_id or source_id not in cuts_by_id
+    ]
+    if unresolved_source_ids:
+        raise ValueError(
+            "video_render_unit_source_cut_ids_unresolved: "
+            + ", ".join(unresolved_source_ids)
+        )
+    resolved_source_ids = [
+        source_id for source_id in source_ids if source_id is not None
+    ]
     source_contracts = [
         _mapping(cuts_by_id[source_id].get("cut_contract"))
-        for source_id in source_ids
-        if source_id and source_id in cuts_by_id
+        for source_id in resolved_source_ids
     ]
-    composed = compose_video_render_unit_contract(source_contracts)
-    return resolve_video_prompt_contract(
-        {},
-        cut_contract=explicit,
-        scene_contract=composed,
+    return compose_video_render_unit_contract(
+        source_contracts,
+        unit_contract=explicit,
     )
 
 
@@ -618,6 +635,10 @@ def _compact_video_projection(value: Any) -> dict[str, Any]:
         "shadowed_sources": projection.get("shadowed_sources") or [],
         "excluded": excluded,
         "review_only_sources": projection.get("review_only_sources") or [],
+        "review_only_dependencies": projection.get(
+            "review_only_dependencies"
+        )
+        or {},
     }
 
 
