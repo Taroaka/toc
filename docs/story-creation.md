@@ -103,7 +103,7 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - 各 scene は `time_of_day_visual_basis` で光源・明るさ・影・色温度を説明でき、複数場所の場合は順序付き location contract と場所別 segment contract を持つ
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
 - 各 scene が research 由来の事実アンカーと、演出上の創作補完を区別している
-- 後続の `scene_event` では、各 event beat が任意の非空 `beat_function` を持ち、coverage inventory でも同じ値を exact に保つ。これとは別に、抽象的な `dramatic_question / value_shift / causal_turn` を残しつつ、各 beat が意味根拠用の `abstract_function / concrete_event / story_grounding` を持つ前提で source story を渡す
+- 後続の `scene_event` では、各 event beat が authored された任意の非空 `beat_function` を持ち、coverage inventory でも対応する元 beat と同じ値を exact に保つ。`dramatic_question / value_shift / causal_turn` は scene の意味契約として残し、各 beat は `concrete_event / story_grounding` で接地する。固定の `abstract_function` key や予め決めた function 名は要求しない
 - 後続の scene 生成では `scene_authoring_context / scene_prompt_payload / scene_debug_prompt_source / scene_generation_contract` を分離し、実行正本は `scenes[].scene_generation.scene_prompt_payload.prompt` とする
 - `scene_prompt_payload` は scene 正本生成だけに使い、first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。cut/image/video は `scene_event` と `scene_cut_coverage_plan` から逆算する
 - `concrete_event` は人物・場所・関係性・小道具・ルール・視覚証拠のうち、その物語で置換できない要素へ接地する。抽象表現は禁止しないが、抽象だけで終わる scene は不可
@@ -554,8 +554,8 @@ accuracy_checklist:
 運用ルール:
 
 - 価値パートは原則として動画全体の `20% - 80%` に置く
-- 1価値パートの cut 数は、`must_be_seen != false` の authored beat と distinct semantic obligation から導く。1 beat / 1 obligation を十分に担う場合は1 cutを許容し、固定の `4-6` cut を要求しない
-- 各 cut の duration は映像上の責務と provider / model / input mode capability から決め、固定4秒や目標尺だけを理由に filler cut を追加しない
+- 1価値パートの cut 数は、`must_be_seen != false` の authored beat と distinct semantic obligation から導く。一つの cut が一つの beat / obligation を十分に担える場合はそれ以上の分割を要求せず、固定 cut 数を設けない
+- 各 cut の duration は映像上の責務と provider / model / input mode capability から決める。固定秒数や目標尺だけを理由に filler cut を追加しない
 - ナレーションは入れず、映像だけで満足感を作る
 - 文字説明ではなく、形 / 光 / 動き / 機構 / ショー性で価値を伝える
 

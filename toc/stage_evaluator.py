@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import re
@@ -24,6 +25,16 @@ from toc.review_loop import (
     REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
     SCENE_DETAIL_GATE_MARKERS,
     SCENE_SET_GATE_MARKERS,
+    aggregated_review_relpath,
+    critic_relpath,
+    review_critic_report_issues,
+    review_input_digest,
+    review_input_snapshot_issues,
+)
+from toc.semantic_review import (
+    check_semantic_review,
+    semantic_review_currentness_issues,
+    semantic_review_relpaths,
 )
 from toc.story_duration import (
     MAX_TARGET_DURATION_SECONDS,
@@ -1535,6 +1546,33 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     if profile == "standard":
         add_check(checks, "story.no_todo", not has_todo(text), "story.md does not contain TODO/TBD markers", kind="rubric")
     _append_grounding_checks(checks, run_dir=run_dir, stage="story")
+
+    state = parse_state_file(run_dir / "state.txt")
+    semantic_paths = semantic_review_relpaths("story")
+    semantic_artifacts_present = any((run_dir / relpath).exists() for relpath in semantic_paths.values())
+    semantic_review_required = (
+        state.get("review.policy.story", "").strip().lower() == "required"
+        or semantic_artifacts_present
+    )
+    if semantic_review_required:
+        semantic_result = check_semantic_review(run_dir, "story")
+        add_check(
+            checks,
+            "story.semantic_review",
+            semantic_result.passed,
+            "story semantic review passed with exact entry coverage and no blockers"
+            + (f" (issues: {', '.join(semantic_result.errors[:8])})" if semantic_result.errors else ""),
+            kind="rubric",
+        )
+        currentness_issues = semantic_review_currentness_issues(run_dir, "story")
+        add_check(
+            checks,
+            "story.semantic_review_current",
+            not currentness_issues,
+            "story semantic review is bound to the current research/story revision"
+            + (f" (issues: {', '.join(currentness_issues[:8])})" if currentness_issues else ""),
+            kind="rubric",
+        )
 
     selection = nested_get(data, ["selection"], {})
     candidates = as_list(selection.get("candidates")) if isinstance(selection, dict) else []
@@ -3403,14 +3441,18 @@ def _scene_readiness_issues(scenes: list[Any]) -> list[str]:
     concrete_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
     for index, scene in enumerate(concrete_scenes):
         scene_id = as_dotted_str(scene.get("scene_id")) or str(index + 1)
-        importance = _scene_importance(scene)
-        if importance not in {"low", "medium", "high", "critical"}:
-            issues.append(f"scene{scene_id}:importance")
+        scene_intent = as_dict(scene.get("scene_intent"))
+        if "importance" in scene or "importance" in scene_intent:
+            importance = _scene_importance(scene)
+            if importance not in {"low", "medium", "high", "critical"}:
+                issues.append(f"scene{scene_id}:importance")
         for key in ("target_duration_seconds", "estimated_duration_seconds"):
+            if key not in scene and key not in scene_intent:
+                continue
             value = scene.get(key)
-            if not isinstance(value, (int, float)) and isinstance(scene.get("scene_intent"), dict):
-                value = scene["scene_intent"].get(key)
-            if not isinstance(value, (int, float)) or value <= 0:
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)) and key in scene_intent:
+                value = scene_intent.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
                 issues.append(f"scene{scene_id}:{key}")
         if index < len(concrete_scenes) - 1:
             if not non_empty(scene.get("handoff_to_next_scene")):
@@ -4150,9 +4192,41 @@ def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("sce
         if not round_dir.exists():
             issues.append(f"{stage}:round_01_missing")
             continue
-        critic_reports = sorted(round_dir.glob("critic_*.md"))
-        if len(critic_reports) != REVIEW_LOOP_CRITIC_COUNT:
-            issues.append(f"{stage}:critics<{REVIEW_LOOP_CRITIC_COUNT}")
+        expected_critic_paths = [
+            run_dir / critic_relpath(stage, 1, index)
+            for index in range(1, REVIEW_LOOP_CRITIC_COUNT + 1)
+        ]
+        critic_report_paths = sorted(round_dir.glob("critic_*.md"))
+        if {path.resolve() for path in critic_report_paths} != {
+            path.resolve() for path in expected_critic_paths
+        }:
+            issues.append(f"{stage}:critic_inventory_mismatch")
+        critic_reports: list[str] = []
+        for path in expected_critic_paths:
+            if not path.exists():
+                issues.append(f"{stage}:{path.name}_missing")
+                continue
+            critic_reports.append(path.read_text(encoding="utf-8"))
+        snapshot_issues = review_input_snapshot_issues(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+        )
+        issues.extend(f"{stage}:snapshot:{issue}" for issue in snapshot_issues)
+        expected_digest = ""
+        if not snapshot_issues:
+            try:
+                expected_digest = review_input_digest(run_dir=run_dir, stage=stage, round_number=1)
+            except ValueError as exc:
+                issues.append(f"{stage}:snapshot:{exc}")
+        if len(critic_reports) == REVIEW_LOOP_CRITIC_COUNT:
+            critic_issues, derived_status, _statuses = review_critic_report_issues(
+                critic_reports=critic_reports,
+                expected_input_digest=expected_digest or None,
+            )
+            issues.extend(f"{stage}:critic:{issue}" for issue in critic_issues)
+            if derived_status != "passed":
+                issues.append(f"{stage}:critics_not_passed")
         stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
         for critic_number, (focus_name, _) in stage_focus.items():
             prompt_path = round_dir / "prompts" / f"critic_{critic_number}.prompt.md"
@@ -4163,11 +4237,26 @@ def _review_loop_integrity_issues(run_dir: Path, stages: tuple[str, ...] = ("sce
             report_path = round_dir / f"critic_{critic_number}.md"
             if report_path.exists() and focus_name not in report_path.read_text(encoding="utf-8"):
                 issues.append(f"{stage}:critic_{critic_number}_report_missing_focus:{focus_name}")
-        aggregate = round_dir / "aggregated_review.md"
+        aggregate = run_dir / aggregated_review_relpath(stage, 1)
         if not aggregate.exists():
             issues.append(f"{stage}:aggregated_review_missing")
             continue
         aggregate_text = aggregate.read_text(encoding="utf-8")
+        if _review_report_status(aggregate_text) != "passed":
+            issues.append(f"{stage}:aggregated_review_status")
+        aggregate_digest_match = re.search(
+            r"(?m)^-\s*review_input_digest:\s*([0-9a-f]{64})\s*$",
+            aggregate_text,
+        )
+        if not expected_digest or aggregate_digest_match is None or aggregate_digest_match.group(1) != expected_digest:
+            issues.append(f"{stage}:aggregated_review_input_digest")
+        for index, report in enumerate(critic_reports, start=1):
+            expected_hash = hashlib.sha256(report.encode("utf-8")).hexdigest()
+            if not re.search(
+                rf"(?m)^\s*-\s*critic_{index}:\s*{expected_hash}\s*$",
+                aggregate_text,
+            ):
+                issues.append(f"{stage}:aggregated_review_critic_{index}_sha256")
         required_sections = ("## Blocking Findings", "## Recommended Changes", "## Rejected Suggestions", "## Round Summary")
         for section in required_sections:
             if section not in aggregate_text:
@@ -4685,7 +4774,13 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
                 )
 
 
-def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[str, Any], dict[str, str]]:
+def check_manifest_single(
+    run_dir: Path,
+    profile: str,
+    flow: str,
+    *,
+    require_review_artifacts: bool = True,
+) -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "video_manifest.md"
     checks: list[dict[str, Any]] = []
     updates: dict[str, str] = {}
@@ -4765,24 +4860,25 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
             + (f" (mismatch: {', '.join(selector_mismatch[:8])})" if selector_mismatch else ""),
             kind="rubric",
         )
-        review_issues = _review_report_issues(run_dir)
-        add_check(
-            checks,
-            "p400.review_report_integrity",
-            not review_issues,
-            "p400 review reports have required passed status, p435 council sections, and no duration deferral"
-            + (f" (issues: {', '.join(review_issues[:8])})" if review_issues else ""),
-            kind="rubric",
-        )
-        loop_issues = _review_loop_integrity_issues(run_dir)
-        add_check(
-            checks,
-            "p400.review_loop_integrity",
-            not loop_issues,
-            "p400 review loops include five critic reports, aggregate report, and required patch brief sections"
-            + (f" (issues: {', '.join(loop_issues[:8])})" if loop_issues else ""),
-            kind="rubric",
-        )
+        if require_review_artifacts:
+            review_issues = _review_report_issues(run_dir)
+            add_check(
+                checks,
+                "p400.review_report_integrity",
+                not review_issues,
+                "p400 review reports have required passed status, p435 council sections, and no duration deferral"
+                + (f" (issues: {', '.join(review_issues[:8])})" if review_issues else ""),
+                kind="rubric",
+            )
+            loop_issues = _review_loop_integrity_issues(run_dir)
+            add_check(
+                checks,
+                "p400.review_loop_integrity",
+                not loop_issues,
+                "p400 review loops include five critic reports, aggregate report, and required patch brief sections"
+                + (f" (issues: {', '.join(loop_issues[:8])})" if loop_issues else ""),
+                kind="rubric",
+            )
     nodes = _iter_manifest_nodes(data)
     nodes_with_selectors = _iter_manifest_nodes_with_selectors(data)
     experience_value = str(nested_get(data, ["video_metadata", "experience"]) or "").strip().lower()
@@ -5084,7 +5180,21 @@ def append_stage_review_state(*, run_dir: Path, stage: str, stage_result: dict[s
     state_updates = dict(updates)
     state_updates[f"eval.{stage}.status"] = "approved" if stage_result["passed"] else "changes_requested"
     if stage == "story":
-        state_updates["review.story.status"] = "approved" if stage_result["passed"] else "changes_requested"
+        semantic_checks = {
+            str(check.get("id") or ""): bool(check.get("passed"))
+            for check in stage_result.get("checks", [])
+            if isinstance(check, dict)
+        }
+        semantic_approved = (
+            semantic_checks.get("story.semantic_review") is True
+            and semantic_checks.get("story.semantic_review_current") is True
+        )
+        if semantic_approved and stage_result["passed"]:
+            state_updates["review.story.status"] = "approved"
+        elif stage_result["passed"]:
+            state_updates["review.story.status"] = "deterministic_passed"
+        else:
+            state_updates["review.story.status"] = "changes_requested"
     state_updates[f"eval.{stage}.findings"] = str(finding_count)
     state_updates[f"eval.{stage}.reason_keys"] = ",".join(stage_result.get("reason_keys") or [])
     state_updates[f"eval.{stage}.warning_keys"] = ",".join(stage_result.get("warning_keys") or [])

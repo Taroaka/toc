@@ -20,6 +20,80 @@ MERGE_SPEC.loader.exec_module(MERGE_MODULE)
 
 
 class TestImmersiveNarrationMultiagent(unittest.TestCase):
+    def test_prepare_legacy_scene_without_cuts_creates_one_scene_anchor(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_narration_legacy_scene_anchor_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(
+                """```yaml
+scenes:
+  - scene_id: 10
+    scene_summary: "cut設計前の旧scene"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "ai" / "toc-immersive-narration-multiagent.py"),
+                    "--run-dir",
+                    str(run_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            import yaml
+
+            scratch = yaml.safe_load(
+                (run_dir / "scratch" / "narration" / "scene10.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual([cut["cut_id"] for cut in scratch["cuts"]], [1])
+            prompt = (run_dir / "scratch" / "narration" / "authoring_prompt.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("scene10_cut1", prompt)
+            self.assertNotIn("scene10_cut2", prompt)
+            self.assertNotIn("scene10_cut3", prompt)
+
+    def test_prepare_rejects_legacy_min_cuts_expansion_for_scene_without_cuts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_narration_legacy_min_cuts_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(
+                """```yaml
+scenes:
+  - scene_id: 10
+    scene_summary: "cut設計前の旧scene"
+```
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "ai" / "toc-immersive-narration-multiagent.py"),
+                    "--run-dir",
+                    str(run_dir),
+                    "--min-cuts",
+                    "3",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--min-cuts only accepts 1", result.stderr)
+            self.assertFalse((run_dir / "scratch" / "narration").exists())
+
     def test_merge_sync_failure_rolls_back_script_manifest_and_state_byte_exactly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_narration_merge_transaction_") as td:
             run_dir = Path(td)
@@ -131,7 +205,7 @@ scenes:
                     "--run-dir",
                     str(run_dir),
                     "--min-cuts",
-                    "1",
+                    "3",
                 ],
                 check=False,
                 capture_output=True,

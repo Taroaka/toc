@@ -80,6 +80,23 @@ class TestReviewStoryStage(unittest.TestCase):
             (grounding_dir / "story.json").write_text("{\"status\":\"ready\"}", encoding="utf-8")
             (grounding_dir / "story.readset.json").write_text("{\"verified_before_edit\":true}", encoding="utf-8")
             (grounding_dir / "story.audit.json").write_text("{\"status\":\"passed\"}", encoding="utf-8")
+            grounding_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "resolve-stage-grounding.py"),
+                    "--stage",
+                    "story",
+                    "--run-dir",
+                    str(run_dir),
+                    "--flow",
+                    "toc-run",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(grounding_result.returncode, 0, grounding_result.stderr)
 
             result = subprocess.run(
                 [
@@ -105,7 +122,7 @@ class TestReviewStoryStage(unittest.TestCase):
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["artifact.story_review"], str((run_dir / "story_review.md").resolve()))
             self.assertEqual(state["eval.story.status"], "approved")
-            self.assertEqual(state["review.story.status"], "approved")
+            self.assertEqual(state["review.story.status"], "deterministic_passed")
 
 
 if __name__ == "__main__":

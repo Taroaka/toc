@@ -30,6 +30,7 @@ from toc.review_loop import (
     render_aggregator_prompt,
     render_critic_prompt,
 )
+from toc.review_loop_runner import materialize_review_loop_round
 from toc.stage_evaluator import check_manifest_single
 
 EXPERIENCE_TEMPLATES: dict[str, Path] = {
@@ -360,25 +361,11 @@ def review_handoff_updates(*stage_names: str) -> dict[str, str]:
 
 
 def materialize_review_loop_prompts(run_dir: Path, *, stage: str, round_number: int = 1) -> dict[str, str]:
-    updates = loop_state_updates(stage=stage, status="pending", current_round=0)
-    for idx in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-        prompt_rel = critic_prompt_relpath(stage, round_number, idx)
-        prompt_path = run_dir / prompt_rel
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(
-            render_critic_prompt(run_dir=run_dir.resolve(), stage=stage, round_number=round_number, critic_number=idx) + "\n",
-            encoding="utf-8",
-        )
-        updates[f"eval.{stage}.loop.round_{round_number:02d}.critic_{idx}_prompt"] = str(prompt_rel)
-    aggregate_prompt_rel = aggregator_prompt_relpath(stage, round_number)
-    aggregate_prompt_path = run_dir / aggregate_prompt_rel
-    aggregate_prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    aggregate_prompt_path.write_text(
-        render_aggregator_prompt(run_dir=run_dir.resolve(), stage=stage, round_number=round_number) + "\n",
-        encoding="utf-8",
+    return materialize_review_loop_round(
+        run_dir=run_dir,
+        stage=stage,
+        round_number=round_number,
     )
-    updates[f"eval.{stage}.loop.round_{round_number:02d}.aggregator_prompt"] = str(aggregate_prompt_rel)
-    return updates
 
 
 def merge_review_loop_updates(run_dir: Path, *stage_names: str) -> dict[str, str]:

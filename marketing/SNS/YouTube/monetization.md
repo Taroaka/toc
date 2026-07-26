@@ -1,6 +1,6 @@
 # ToC acquisition and monetization design
 
-更新日: 2026-07-18
+更新日: 2026-07-25
 
 ## 1. Principle
 
@@ -10,8 +10,9 @@ ToC の収益化は、YouTube 広告収益や民話制作代行を中心に置�
 content / ad
   -> persona LP
   -> one-line idea
-  -> first-video experience
-  -> continued use
+  -> introduction consultation
+  -> system delivery
+  -> customer-owned continued production
 ```
 
 ## 2. Persona value
@@ -24,27 +25,31 @@ The user pays to reduce the time, learning, and operational burden required to t
 
 The user pays to turn expertise and worldview into consistent, repeatable video publishing. Do not sell generic AI output as a brand solution.
 
-## 3. Offer architecture to validate
+## 3. Offer architecture
 
-Final prices are not yet decided. Validate the delivery model before publishing a rate table.
+ToC は継続利用権を月額で販売する SaaS ではない。顧客へ動画作成システム一式を納品する。最終価格は未決定のため、納品範囲を定義してから導入費を公開する。
 
-| Offer | Purpose | Likely persona |
-|-------|---------|----------------|
-| First video | experience the complete flow with one real idea | both |
-| Guided creator | recurring access with setup / review support | side business |
-| Brand system | brand brief, series design, repeated production | personal brand |
-| Done-for-you | managed production for cases that cannot self-operate | optional |
+| Charge | Policy |
+|--------|--------|
+| system delivery | one-time introduction fee; individual quote until fixed |
+| ToC monthly fee | 0 yen after delivery |
+| external API | separately paid according to usage |
+| support / updates / managed operation | optional separate contract when requested |
 
-For each offer, decide:
+Before publishing the offer, decide:
 
 - deliverables
+- target environment and ownership
+- installation / setup boundary
 - user-owned decisions
 - ToC-owned stages
-- turnaround target
-- included revisions
-- provider costs
-- support boundary
-- cancellation and data handling
+- included initial configuration and training
+- supported external providers and estimated usage model
+- warranty / defect response
+- support and update boundary
+- source, credential, generated asset, and data handling
+
+Never publish `月額0円` without adjacent disclosure of the initial delivery fee and separate external API fees.
 
 ## 4. Site conversion
 

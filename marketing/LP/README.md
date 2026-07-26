@@ -1,6 +1,6 @@
 # ToC Public Site / LP Guide
 
-更新日: 2026-07-19
+更新日: 2026-07-25
 
 `marketing/LP/` は、既存 ToC 制作フロントとは分離して公開する marketing site と persona-specific LP の正本を置く。
 
@@ -10,6 +10,12 @@
 
 - 副業の最初の1本を作る
 - 自分のブランド動画を設計する
+
+同時に、提供形態を誤解なく伝える。
+
+- 動画作成システム一式を顧客へ納品する
+- 納品後の ToC 月額料金は 0 円
+- 外部 AI / cloud API の利用料は別途、使用量に応じてかかる
 
 ## Information architecture
 
@@ -53,6 +59,9 @@
 
 ## Files
 
+- `lp-strategy.md`: LP 部門の正本。情報価値、訴求順序、調査根拠、検証、法務・速度・accessibility
 - `personas.md`: side-business / personal-brand persona, message, objection, proof contract
 - `toc-marketing-site.md`: common site and persona LP copy / section contract
 - `lead-form-schema.md`: native form, validation, event, and data contract
+
+画像モックと試作は `marketing/test/` に置く。公開用 source of truth と混同せず、採用する copy / section だけを上記正本へ戻す。

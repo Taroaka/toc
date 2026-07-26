@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import hashlib
 import json
 from pathlib import Path
 import yaml
@@ -12,7 +13,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, parse_state_file
 from toc import stage_evaluator as STAGE_EVALUATOR
-from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
+from toc.review_loop import (
+    REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
+    REVIEW_LOOP_SPECS,
+    aggregator_prompt_relpath,
+    build_review_input_snapshot,
+    critic_prompt_relpath,
+    write_review_input_snapshot,
+)
 
 
 def _good_research_yaml() -> str:
@@ -209,6 +217,17 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
     for filename, text in reports.items():
         (run_dir / filename).write_text(text, encoding="utf-8")
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
+        for source_relpath in REVIEW_LOOP_SPECS[stage].source_artifacts:
+            source_path = run_dir / source_relpath
+            if not source_path.exists():
+                source_text = (
+                    _good_story_yaml()
+                    if source_relpath == "story.md"
+                    else f"# {source_relpath}\nfixture\n"
+                )
+                source_path.write_text(source_text, encoding="utf-8")
+        snapshot = build_review_input_snapshot(run_dir=run_dir, stage=stage, round_number=1)
+        digest = str(snapshot["input_digest"])
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         round_dir.mkdir(parents=True, exist_ok=True)
         prompt_dir = round_dir / "prompts"
@@ -217,9 +236,16 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
         for idx in range(1, 6):
             focus_name = stage_focus.get(idx, ("", ""))[0]
             focus_line = f"- critic_focus: {focus_name}\n" if focus_name else ""
-            (round_dir / f"critic_{idx}.md").write_text(f"{focus_line}- status: passed\n", encoding="utf-8")
+            (round_dir / f"critic_{idx}.md").write_text(
+                f"- critic_id: critic_{idx}\n- review_input_digest: {digest}\n{focus_line}- status: passed\n",
+                encoding="utf-8",
+            )
             (prompt_dir / f"critic_{idx}.prompt.md").write_text(
-                f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
+                (
+                    f"Review input digest: `{digest}`\nCritic focus for this prompt:\n- role: {focus_name}\n"
+                    if focus_name
+                    else f"Review input digest: `{digest}`\ngeneric critic\n"
+                ),
                 encoding="utf-8",
             )
         patch_heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
@@ -265,10 +291,15 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- internal_pressure: pressure escalates before the turn",
                     "- value_shift_visibility: value shift is visible",
                     "- causal_turn_visibility: causal turn is visible",
-                    "- scene_event_sequence: setup, pressure, turn, and payoff are present",
+                    "- scene_event_sequence: authored event IDs/functions are inventoried and assigned where must_be_seen",
                     "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details",
                     "- scene_generation_debug_source: source beats and adaptation choices are recorded",
                     "- scene_generation_contract: required scene outputs are declared",
+                    "- story_specific_grounding: source-grounded concrete events are present",
+                    "- non_replaceable_elements: story-specific people, objects, and places are declared",
+                    "- concrete_story_function: concrete details carry authored story functions",
+                    "- specificity_budget: detail stays within the approved budget",
+                    "- canonical_event_coverage: required source events map to scene/event beat ids",
                     "- scene_character_state_timeline: start/mid/end visible behavior is present",
                     "- scene_film_coverage_plan: shot/action-reaction/missing coverage and required_when rules are present",
                     "- turning_event_alignment: turning_event matches scene_intent.causal_turn",
@@ -306,10 +337,17 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                     "- triangulation_review_ready: passed",
                     "",
                 ]
+        critic_hash_lines = [
+            f"  - critic_{idx}: {hashlib.sha256((round_dir / f'critic_{idx}.md').read_bytes()).hexdigest()}"
+            for idx in range(1, 6)
+        ]
         (round_dir / "aggregated_review.md").write_text(
             "\n".join(
                 [
                     "- status: passed",
+                    f"- review_input_digest: {digest}",
+                    "- critic_report_sha256s:",
+                    *critic_hash_lines,
                     "",
                     "## Blocking Findings",
                     "",
@@ -335,6 +373,21 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
             )
             + "\n",
             encoding="utf-8",
+        )
+        aggregate_prompt = run_dir / aggregator_prompt_relpath(stage, 1)
+        aggregate_prompt.write_text(
+            f"Review input digest: `{digest}`\nAggregate five critics.\n",
+            encoding="utf-8",
+        )
+        write_review_input_snapshot(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+            snapshot=snapshot,
+            prompt_relpaths=tuple(
+                critic_prompt_relpath(stage, 1, idx) for idx in range(1, 6)
+            )
+            + (aggregator_prompt_relpath(stage, 1),),
         )
 
 
@@ -734,7 +787,7 @@ def _write_valid_immersive_p400_pair(
             "    scene_cut_coverage_plan:",
             "      coverage_strategy: \"reverse_from_scene_event\"",
             "      source_schema_version: \"scene_event_v1\"",
-            "      min_cut_count: {by_distinct_semantic_obligations: 4, by_importance: 3, by_duration: 4, by_event_beats: 4, selected: 4, exception_reason: \"\"}",
+            "      min_cut_count: {by_distinct_semantic_obligations: 4, by_importance: 0, by_duration: 0, by_event_beats: 4, selected: 4, exception_reason: \"\"}",
             "      event_beat_inventory:",
             f"        - {{beat_id: \"scene{scene_idx}_event_setup\", beat_function: \"setup\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut1\"]}}",
             f"        - {{beat_id: \"scene{scene_idx}_event_pressure\", beat_function: \"pressure\", must_be_seen: true, assigned_cut_ids: [\"scene{scene_idx}_cut2\"]}}",
@@ -1681,6 +1734,85 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             ["scene1:scene1_event_turn.uncovered"],
         )
 
+    def test_one_custom_authored_beat_without_optional_planning_fields_passes_cut_readiness(self) -> None:
+        scene = _semantic_duration_scene()
+        for optional_field in (
+            "importance",
+            "target_duration_seconds",
+            "estimated_duration_seconds",
+        ):
+            scene.pop(optional_field)
+
+        beat_id = "scene1_event_threshold_witnessed"
+        scene["scene_event"]["event_sequence"] = [
+            {
+                "beat_id": beat_id,
+                "beat_function": "threshold_witnessed",
+                "must_be_seen": True,
+            }
+        ]
+        plan = scene["scene_cut_coverage_plan"]
+        plan.pop("minimum_cut_count")
+        plan["min_cut_count"] = {
+            "by_distinct_semantic_obligations": 1,
+            "by_event_beats": 1,
+            "selected": 1,
+        }
+        plan["event_beat_inventory"] = [
+            {
+                "beat_id": beat_id,
+                "beat_function": "threshold_witnessed",
+                "must_be_seen": True,
+                "assigned_cut_ids": ["scene1_cut1"],
+            }
+        ]
+        plan["scene_obligations"] = [
+            {
+                "obligation_id": "threshold_proof",
+                "source": f"scene_event.event_sequence[{beat_id}]",
+                "evidence": "主人公が境界を越えた物証が見える。",
+                "assigned_cut_ids": ["scene1_cut1"],
+            }
+        ]
+        plan["cut_assignments"] = [
+            {
+                "cut_selector": "scene1_cut1",
+                "obligation_ids": ["threshold_proof"],
+                "event_assignment": {
+                    "source_event_contract": {
+                        "primary_event_beat_id": beat_id,
+                        "source_event_beat_ids": [beat_id],
+                    }
+                },
+            }
+        ]
+        scene["cuts"] = [
+            {
+                "cut_id": 1,
+                "selector": "scene1_cut1",
+                "cut_contract": {
+                    "viewer_contract": {
+                        "anti_redundancy_key": "scene1:threshold_proof",
+                    },
+                    "cut_handoff": {
+                        "receives_from_previous": {"anchor_type": "none"},
+                        "delivers_to_next": {"anchor_type": "terminal"},
+                    },
+                },
+            }
+        ]
+
+        self.assertEqual(
+            STAGE_EVALUATOR._scene_cut_coverage_plan_issues(
+                scene,
+                scene_id="1",
+                cuts=scene["cuts"],
+            ),
+            [],
+        )
+        self.assertEqual(STAGE_EVALUATOR._cinematic_min_cuts_for_scene(scene), 1)
+        self.assertEqual(STAGE_EVALUATOR._scene_readiness_issues([scene]), [])
+
     def test_manifest_semantic_cut_aggregate_must_match_scene_floors(self) -> None:
         scene = _semantic_duration_scene()
         manifest = {
@@ -1810,6 +1942,63 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertFalse(manifest_checks["manifest.scene_time_of_day"]["passed"])
             self.assertIn("2", manifest_checks["manifest.scene_time_of_day"]["message"])
             self.assertFalse(manifest_checks["manifest.scene_time_of_day_visual_basis"]["passed"])
+
+    def test_story_required_semantic_review_is_missing_or_stale_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_story_semantic_gate_") as td:
+            run_dir = Path(td)
+            (run_dir / "story.md").write_text(_good_story_yaml(), encoding="utf-8")
+            append_state_snapshot(run_dir / "state.txt", {"review.policy.story": "required"})
+
+            missing_stage, _ = STAGE_EVALUATOR.check_story(run_dir, "fast")
+            self.assertIn("story.semantic_review", missing_stage["reason_keys"])
+            self.assertIn("story.semantic_review_current", missing_stage["reason_keys"])
+
+            review_dir = run_dir / "logs" / "review" / "semantic"
+            review_dir.mkdir(parents=True)
+            entry_id = "story:foundation"
+            (review_dir / "story.collection.md").write_text("# story\n", encoding="utf-8")
+            (review_dir / "story.prompt.md").write_text("review story\n", encoding="utf-8")
+            (review_dir / "story.scope.json").write_text(
+                json.dumps(
+                    {
+                        "entry_count": 1,
+                        "entry_ids": [entry_id],
+                        "source_artifacts": ["story.md"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            criteria = [
+                {"criterion_id": criterion_id, "status": "passed", "evidence": ["fixture"]}
+                for criterion_id in (
+                    "research_event_allocation",
+                    "chronology_causality",
+                    "character_continuity",
+                    "conflict_resolution",
+                    "historical_time_context",
+                    "scene_time_of_day_continuity",
+                    "scene_location_route_continuity",
+                    "duration_scene_readiness",
+                )
+            ]
+            (review_dir / "story.report.md").write_text(
+                "\n".join(
+                    [
+                        "status: passed",
+                        f"reviewed_entries: [{entry_id}]",
+                        "blocked_entries: []",
+                        "failed_selectors: []",
+                        "criteria_results_json: " + json.dumps(criteria, ensure_ascii=False),
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "story.md").write_text(_good_story_yaml() + "\n# revised\n", encoding="utf-8")
+
+            stale_stage, _ = STAGE_EVALUATOR.check_story(run_dir, "fast")
+            self.assertIn("story.semantic_review_current", stale_stage["reason_keys"])
 
     def test_stage_evaluator_accepts_compact_grounded_research_pack(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_") as td:
@@ -2085,7 +2274,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["eval.research.status"], "approved")
             self.assertEqual(state["eval.story.status"], "approved")
-            self.assertEqual(state["review.story.status"], "approved")
+            self.assertEqual(state["review.story.status"], "deterministic_passed")
             self.assertEqual(state["eval.script.status"], "approved")
             self.assertEqual(state["eval.manifest.status"], "approved")
             self.assertEqual(state["eval.video.status"], "approved")

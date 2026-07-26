@@ -1,6 +1,6 @@
 # ToC marketing site repositioning design
 
-更新日: 2026-07-18
+更新日: 2026-07-25
 
 ## Positioning
 
@@ -27,6 +27,14 @@
 ### Mechanism
 
 テーマを起点に、企画、調査、構成、台本、scene、画像、動画、ナレーション、編集、品質確認を一つの制作フローとして組み立てる。複数の生成サービスを人間が一つずつ操作する負担を減らし、人間は目的、品質、公開判断へ集中する。
+
+### Delivery / pricing model
+
+- 顧客の利用環境へ動画作成システム一式を納品する
+- 導入費用は個別見積り
+- 納品後の ToC 月額料金は 0 円
+- 外部 AI / cloud API 料金は別途、使用量に応じて発生
+- 保守、更新、運用代行は必要に応じて別契約
 
 ## Audience architecture
 
@@ -97,13 +105,13 @@ Meta / SNS campaigns send each persona directly to its dedicated LP. The common 
 ## Home page structure
 
 1. Hero: common promise
-2. `Idea-to-Video Line`: one-line theme becomes a finished timeline
-3. persona split: side business / personal brand
-4. three values: speed / simplicity / repeatability
-5. proof library
-6. workflow comparison
-7. human judgment and quality
-8. persona CTA
+2. production problem: fragmented tools and unfinished ideas
+3. information value: abstract / sequence / demonstration / reusable asset
+4. `Idea-to-Video Line`: one-line theme becomes a finished timeline
+5. persona split: side business / personal brand
+6. system delivery and cost structure
+7. proof library, human judgment, limits
+8. consultation CTA
 
 ### Hero draft
 
@@ -113,7 +121,9 @@ Meta / SNS campaigns send each persona directly to its dedicated LP. The common 
 テーマを伝えるだけで、企画、台本、映像、ナレーション、編集まで。
 ToC は、複雑な動画制作を一つの流れに変えます。
 
-[自分なら何を作れるか見る]
+[納品後のToC月額 0円]
+[外部AI API料金は別途]
+[自分の用途で導入できるか相談する]
 [制作事例を見る]
 ```
 
@@ -184,4 +194,3 @@ Primary business metrics:
 - first-video start rate
 - first-video completion rate
 - continuation / second-video intent
-

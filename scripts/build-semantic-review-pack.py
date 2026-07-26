@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 import re
 import sys
@@ -22,8 +23,13 @@ from toc.semantic_review import (  # noqa: E402
     IMAGE_PROMPT_JUDGMENT_PROMPT,
     IMAGE_PROMPT_JUDGMENT_REPORT,
     IMAGE_PROMPT_JUDGMENT_SCOPE,
+    SEMANTIC_REVIEW_INPUT_SCHEMA,
     SEMANTIC_REVIEW_STAGES,
+    safe_semantic_write_text,
+    semantic_review_file_sha256,
+    semantic_review_input_digest,
     semantic_review_relpaths,
+    semantic_review_scope_binding_sha256,
     semantic_state_updates,
 )
 
@@ -41,10 +47,8 @@ STAGE_LABELS = {
 }
 
 
-def write_text(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
+def write_text(run_dir: Path, path: Path, text: str) -> Path:
+    return safe_semantic_write_text(run_dir, path, text)
 
 
 def _json_block(value: object) -> str:
@@ -87,14 +91,28 @@ def render_scope_json(
     shard_plan: dict[str, object] | None = None,
 ) -> str:
     diagnostics = entry_diagnostics(entries)
+    entry_ids = [str(entry.get("id") or entry.get("selector") or "") for entry in entries]
+    source_artifacts = _source_artifacts(run_dir, stage)
+    source_artifact_digests = _source_artifact_digest_records(run_dir, source_artifacts)
+    collection_sha256 = semantic_review_file_sha256(collection_path)
+    prompt_sha256 = semantic_review_file_sha256(prompt_path)
+    request_revision = _semantic_review_request_revision(
+        run_dir,
+        stage,
+        source_artifacts,
+    )
     payload = {
         "stage": stage,
         "run_dir": str(run_dir.resolve()),
         "entry_count": len(entries),
-        "entry_ids": [str(entry.get("id") or entry.get("selector") or "") for entry in entries],
+        "entry_ids": entry_ids,
         "review_scope": "all_entries",
         "diagnostics": diagnostics,
-        "source_artifacts": _source_artifacts(run_dir, stage),
+        "source_artifacts": source_artifacts,
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
+        "collection_sha256": collection_sha256,
+        "prompt_sha256": prompt_sha256,
         "artifacts": {
             "collection": str(collection_path.relative_to(run_dir)),
             "scope": str(scope_path.relative_to(run_dir)),
@@ -103,6 +121,8 @@ def render_scope_json(
         },
         "generated_at": now_iso(),
     }
+    if request_revision:
+        payload["request_revision"] = request_revision
     if shard_plan:
         payload.update(
             {
@@ -111,6 +131,18 @@ def render_scope_json(
                 "coverage": shard_plan.get("coverage", {}),
             }
         )
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(payload)
+    input_digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=collection_sha256,
+        prompt_sha256=prompt_sha256,
+        source_artifact_digests=source_artifact_digests,
+        request_revision=request_revision,
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    payload["scope_binding_sha256"] = scope_binding_sha256
+    payload["semantic_review_input_digest"] = input_digest
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
@@ -120,14 +152,16 @@ def _entry_id(entry: dict[str, object], index: int) -> str:
 
 def _image_prompt_scene_token(entry: dict[str, object], entry_id: str) -> str:
     raw_scene_id = str(entry.get("scene_id") or "").strip()
-    for candidate in (raw_scene_id, entry_id):
-        match = re.search(r"scene[_:\s-]*(\d+)", candidate, re.I)
+    if raw_scene_id:
+        match = re.search(r"scene[_:\s-]*(\d+)", raw_scene_id, re.I)
         if match:
             return str(int(match.group(1)))
-    if raw_scene_id:
         label = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_scene_id).strip("._-").lower()
         if label:
             return label
+    match = re.search(r"scene[_:\s-]*(\d+)", entry_id, re.I)
+    if match:
+        return str(int(match.group(1)))
     return ""
 
 
@@ -222,12 +256,40 @@ def materialize_image_prompt_scene_shards(
         shard_id = str(shard["shard_id"])
         entry_ids = [str(item) for item in shard["entry_ids"]]
         shard_entries = [entries_by_id[entry_id] for entry_id in entry_ids]
-        base = shard_root / f"{index:03d}_{shard_id}"
-        collection_path = base.with_suffix(".collection.md")
-        scope_path = base.with_suffix(".scope.json")
-        prompt_path = base.with_suffix(".prompt.md")
-        report_path = base.with_suffix(".report.md")
-        write_text(collection_path, render_collection("image_prompt", shard_entries))
+        safe_shard_id = re.sub(r"[^A-Za-z0-9_-]+", "_", shard_id).strip("_")[:48] or "shard"
+        shard_hash = hashlib.sha256(shard_id.encode("utf-8")).hexdigest()[:12]
+        base = shard_root / f"{index:03d}_{safe_shard_id}_{shard_hash}"
+        collection_path = Path(f"{base}.collection.md")
+        scope_path = Path(f"{base}.scope.json")
+        prompt_path = Path(f"{base}.prompt.md")
+        report_path = Path(f"{base}.report.md")
+        write_text(run_dir, collection_path, render_collection("image_prompt", shard_entries))
+        shard_prompt = render_prompt(
+            stage="image_prompt",
+            run_dir=run_dir,
+            collection_path=collection_path,
+            scope_path=scope_path,
+            report_path=report_path,
+        )
+        write_text(
+            run_dir,
+            prompt_path,
+            shard_prompt.rstrip()
+            + "\n\n"
+            + f"Review only image_prompt scene shard `{shard_id}`.\n"
+            + "Expected reviewed_entries exactly once: "
+            + json.dumps(entry_ids, ensure_ascii=False)
+            + "\n",
+        )
+        source_artifacts = _source_artifacts(run_dir, "image_prompt")
+        source_artifact_digests = _source_artifact_digest_records(run_dir, source_artifacts)
+        collection_sha256 = semantic_review_file_sha256(collection_path)
+        prompt_sha256 = semantic_review_file_sha256(prompt_path)
+        request_revision = _semantic_review_request_revision(
+            run_dir,
+            "image_prompt",
+            source_artifacts,
+        )
         shard_scope = {
             "stage": "image_prompt",
             "run_dir": str(run_dir.resolve()),
@@ -238,7 +300,11 @@ def materialize_image_prompt_scene_shards(
             "scene_id": str(shard["scene_id"]),
             "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
             "canonical_report": str(canonical_report_path.relative_to(run_dir)),
-            "source_artifacts": _source_artifacts(run_dir, "image_prompt"),
+            "source_artifacts": source_artifacts,
+            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+            "source_artifact_digests": source_artifact_digests,
+            "collection_sha256": collection_sha256,
+            "prompt_sha256": prompt_sha256,
             "artifacts": {
                 "collection": str(collection_path.relative_to(run_dir)),
                 "scope": str(scope_path.relative_to(run_dir)),
@@ -247,30 +313,30 @@ def materialize_image_prompt_scene_shards(
             },
             "generated_at": now_iso(),
         }
-        write_text(scope_path, json.dumps(shard_scope, ensure_ascii=False, indent=2) + "\n")
-        shard_prompt = render_prompt(
+        if request_revision:
+            shard_scope["request_revision"] = request_revision
+        scope_binding_sha256 = semantic_review_scope_binding_sha256(shard_scope)
+        input_digest = semantic_review_input_digest(
             stage="image_prompt",
-            run_dir=run_dir,
-            collection_path=collection_path,
-            scope_path=scope_path,
-            report_path=report_path,
+            entry_ids=entry_ids,
+            collection_sha256=collection_sha256,
+            prompt_sha256=prompt_sha256,
+            source_artifact_digests=source_artifact_digests,
+            request_revision=request_revision,
+            scope_binding_sha256=scope_binding_sha256,
         )
+        shard_scope["scope_binding_sha256"] = scope_binding_sha256
+        shard_scope["semantic_review_input_digest"] = input_digest
+        write_text(run_dir, scope_path, json.dumps(shard_scope, ensure_ascii=False, indent=2) + "\n")
         write_text(
-            prompt_path,
-            shard_prompt.rstrip()
-            + "\n\n"
-            + f"Review only image_prompt scene shard `{shard_id}`.\n"
-            + "Expected reviewed_entries exactly once: "
-            + json.dumps(entry_ids, ensure_ascii=False)
-            + "\n",
-        )
-        write_text(
+            run_dir,
             report_path,
             render_report_template(
                 stage="image_prompt",
                 run_dir=run_dir,
                 scope_path=scope_path,
                 collection_path=collection_path,
+                semantic_review_input_digest_value=input_digest,
             )
             + "\n",
         )
@@ -410,7 +476,61 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
     return artifacts
 
 
-def render_report_template(*, stage: str, run_dir: Path, scope_path: Path, collection_path: Path) -> str:
+def _source_artifact_digest_records(
+    run_dir: Path,
+    source_artifacts: list[str],
+) -> list[dict[str, str]]:
+    run_root = run_dir.resolve(strict=True)
+    records: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rel in source_artifacts:
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts or rel_path.as_posix() != rel:
+            raise ValueError(f"semantic review source artifact is not a safe run-relative path: {rel}")
+        try:
+            source_path = (run_root / rel_path).resolve(strict=True)
+            source_path.relative_to(run_root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"semantic review source artifact escapes or is missing: {rel}") from exc
+        if not source_path.is_file():
+            raise ValueError(f"semantic review source artifact is not a file: {rel}")
+        if rel in seen:
+            raise ValueError(f"semantic review source artifact is duplicated: {rel}")
+        seen.add(rel)
+        records.append({"path": rel, "sha256": semantic_review_file_sha256(source_path)})
+    return records
+
+
+def _semantic_review_request_revision(
+    run_dir: Path,
+    stage: str,
+    source_artifacts: list[str],
+) -> str | None:
+    if stage != "image_prompt":
+        return None
+    snapshot_rel = "image_generation_request_snapshot.json"
+    if snapshot_rel not in source_artifacts:
+        return None
+    try:
+        snapshot = json.loads((run_dir / snapshot_rel).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    request_revision = snapshot.get("request_revision")
+    if isinstance(request_revision, str) and request_revision.strip():
+        return request_revision.strip()
+    return None
+
+
+def render_report_template(
+    *,
+    stage: str,
+    run_dir: Path,
+    scope_path: Path,
+    collection_path: Path,
+    semantic_review_input_digest_value: str | None = None,
+) -> str:
     lines = [
         f"# Semantic Review Report: {stage}",
         "",
@@ -419,6 +539,11 @@ def render_report_template(*, stage: str, run_dir: Path, scope_path: Path, colle
         f"- scope: `{scope_path}`",
         f"- collection: `{collection_path}`",
         "- status: `pending`",
+        *(
+            [f"- semantic_review_input_digest: `{semantic_review_input_digest_value}`"]
+            if semantic_review_input_digest_value
+            else []
+        ),
         "",
         "## Reviewed Entries",
         "",
@@ -564,10 +689,9 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
         [
             f"You are a contextless semantic review agent for ToC `{stage}` artifacts.",
             "",
-            "You do semantic judgment only. Do not edit source artifacts and do not repair outputs.",
-            f"You MUST edit exactly one file: `{report_path}`. This report is not a source artifact; replacing its pending template is required.",
+            "You do semantic judgment only. The workspace is read-only: do not edit any artifact and do not repair outputs.",
             "Do not spawn or delegate to another agent. Read the listed artifacts and make the judgment yourself.",
-            "Do not return the verdict only in chat. The task is incomplete until the report file contains the final machine-readable verdict.",
+            "Return the complete machine-readable report as your final response. The trusted orchestrator will validate and save it.",
             "Structural completeness is checked by deterministic functions elsewhere; your job is to catch meaning errors that structurally valid data can hide.",
             "",
             "Read these artifacts in order:",
@@ -578,21 +702,22 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             "Use these source artifacts as cross-check context when present:",
             *(source_lines or ["- `(none discovered)`"]),
             "",
-            f"Write the final report to `{report_path}` and replace the pending template.",
+            f"The pending report path is `{report_path}`; do not write it yourself.",
             "",
             "Judge whether each entry preserves the intended story/source meaning and is usable by the next downstream stage.",
             "Check subject identity, location, object/setpiece visibility, timeline, scene time-of-day continuity, reveal order, continuity, narration alignment, and output-media suitability when those fields exist.",
             "For planning stages (`research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt`, `narration`, `video_motion`), do not fail solely because referenced media files such as scene stills, videos, audio, or asset images do not exist yet; those files are generated and judged by frontend human review or deterministic output validators.",
             "Flag round-robin references, always-on story objects in unrelated entries, mismatched location/character/object references, missing semantic contracts, and outputs that do not support the contract.",
             "For entries whose review_scope is `scene_composite`, this is a gate, not advice: judge the scene as a whole across its split cuts.",
-            "A scene_composite passes only when the exact authored `event_beat_inventory` mirrors every ordered nonblank beat ID from `scene_event.event_sequence`, every inventory beat's arbitrary nonblank `beat_function` matches its corresponding source beat whether assigned or not, every inventory beat with `must_be_seen != false` and every required scene_cut_coverage_plan.scene_obligation are assigned to cut_entries via cut_contract.source_event_contract, event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
-            "Do not require a fixed beat-function ladder, order, or cut count. Labels such as setup, pressure, turn, payoff, threshold, and custom are examples only. A valid one-beat scene with a custom function must not fail solely because fixed function names are absent; judge whether the cuts were reverse-designed from the scene's exact authored beats and actual visual obligations.",
-            "If the scene meaning cannot be conveyed by the listed cuts, fail the gate. Recommend more cuts only when a distinct authored beat or semantic obligation is uncovered; otherwise require a stronger existing per-cut prompt or a different scene split without duplicating an obligation.",
+            "A scene_composite passes only when the exact authored `event_beat_inventory` mirrors every ordered nonblank beat ID from `scene_event.event_sequence`, including every authored entry with `must_be_seen: false`; every inventory beat's arbitrary nonblank `beat_function` matches its corresponding source beat whether assigned or not. Only inventory beats with `must_be_seen != false`, plus every required scene_cut_coverage_plan.scene_obligation, must be assigned to cut_entries via cut_contract.source_event_contract. event_context_for_cut is a derived downstream projection rather than an authoring source, story_event_obligations remain legacy projection only, each cut has a concrete audience_knowledge_delta and causal_proof where required, role_coverage is not collapsed into protagonist-only imagery, no cut invents source_event_contract.event_facts_not_to_invent, the cut prompts collectively visualize the scene's intended question/value shift/causal turn/handoff, and the planned videos can connect into one meaningful scene.",
+            "Do not require a fixed beat-function vocabulary, ladder, order, or cut count. A valid one-beat scene with any authored nonblank function must not fail because a predefined function name is absent; judge whether the cuts were reverse-designed from the scene's exact authored beats and actual visual obligations.",
+            "If the scene meaning cannot be conveyed by the listed cuts, fail the gate. Recommend more cuts only when a distinct authored beat or semantic obligation is uncovered: the authored beat must be required (`must_be_seen != false`), while the distinct obligation must be unable to fit an existing one-intent cut. Otherwise require a stronger existing per-cut prompt or a different scene split without duplicating an obligation.",
             *stage_specific_instructions,
             *foundation_criteria_lines,
             "",
             "Report format:",
             "status: passed|failed",
+            "semantic_review_input_digest: copy the exact semantic_review_input_digest from the scope",
             "reviewed_entries: [...]",
             "blocked_entries: [...]",
             "findings: [...]",
@@ -614,16 +739,21 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
 
 
 def write_legacy_image_prompt_aliases(run_dir: Path, paths: dict[str, Path], *, entries: list[dict[str, object]], prompt: str) -> None:
-    write_text(run_dir / IMAGE_PROMPT_JUDGMENT_COLLECTION, (run_dir / paths["collection"]).read_text(encoding="utf-8"))
-    write_text(run_dir / IMAGE_PROMPT_JUDGMENT_SCOPE, (run_dir / paths["scope"]).read_text(encoding="utf-8"))
-    write_text(run_dir / IMAGE_PROMPT_JUDGMENT_PROMPT, prompt + "\n")
+    write_text(run_dir, run_dir / IMAGE_PROMPT_JUDGMENT_COLLECTION, (run_dir / paths["collection"]).read_text(encoding="utf-8"))
+    scope_text = (run_dir / paths["scope"]).read_text(encoding="utf-8")
+    write_text(run_dir, run_dir / IMAGE_PROMPT_JUDGMENT_SCOPE, scope_text)
+    write_text(run_dir, run_dir / IMAGE_PROMPT_JUDGMENT_PROMPT, prompt + "\n")
+    scope = json.loads(scope_text)
+    input_digest = str(scope.get("semantic_review_input_digest") or "")
     write_text(
+        run_dir,
         run_dir / IMAGE_PROMPT_JUDGMENT_REPORT,
         render_report_template(
             stage="image_prompt",
             run_dir=run_dir,
             scope_path=run_dir / IMAGE_PROMPT_JUDGMENT_SCOPE,
             collection_path=run_dir / IMAGE_PROMPT_JUDGMENT_COLLECTION,
+            semantic_review_input_digest_value=input_digest or None,
         )
         + "\n",
     )
@@ -664,23 +794,37 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
             # report the coverage defect without starting an unscoped review.
             shard_plan = _invalid_image_prompt_scene_shard_plan(entries, exc)
 
-    write_text(collection_path, render_collection(stage, entries))
+    write_text(run_dir, collection_path, render_collection(stage, entries))
+    prompt = render_prompt(stage=stage, run_dir=run_dir, collection_path=collection_path, scope_path=scope_path, report_path=report_path)
+    write_text(run_dir, prompt_path, prompt + "\n")
+    scope_text = render_scope_json(
+        stage=stage,
+        run_dir=run_dir,
+        entries=entries,
+        collection_path=collection_path,
+        scope_path=scope_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
+        shard_plan=shard_plan,
+    )
     write_text(
+        run_dir,
         scope_path,
-        render_scope_json(
+        scope_text,
+    )
+    input_digest = str(json.loads(scope_text).get("semantic_review_input_digest") or "")
+    write_text(
+        run_dir,
+        report_path,
+        render_report_template(
             stage=stage,
             run_dir=run_dir,
-            entries=entries,
-            collection_path=collection_path,
             scope_path=scope_path,
-            prompt_path=prompt_path,
-            report_path=report_path,
-            shard_plan=shard_plan,
-        ),
+            collection_path=collection_path,
+            semantic_review_input_digest_value=input_digest or None,
+        )
+        + "\n",
     )
-    prompt = render_prompt(stage=stage, run_dir=run_dir, collection_path=collection_path, scope_path=scope_path, report_path=report_path)
-    write_text(prompt_path, prompt + "\n")
-    write_text(report_path, render_report_template(stage=stage, run_dir=run_dir, scope_path=scope_path, collection_path=collection_path) + "\n")
     append_state_snapshot(
         run_dir / "state.txt",
         semantic_state_updates(stage, status="pending", entry_count=len(entries), generated_at=now_iso()),

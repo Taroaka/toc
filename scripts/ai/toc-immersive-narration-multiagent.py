@@ -72,6 +72,13 @@ def _active_manifest_cuts(scene: dict) -> list[dict]:
     ]
 
 
+def _scratch_manifest_cuts(scene: dict) -> list[dict]:
+    active_cuts = _active_manifest_cuts(scene)
+    if active_cuts:
+        return active_cuts
+    return [{"cut_id": 1}]
+
+
 def _load_manifest_data(manifest_path: Path) -> dict:
     if yaml is None:
         raise SystemExit("PyYAML is required. Install with: pip install pyyaml")
@@ -246,7 +253,7 @@ def _refresh_scene_scratch(path: Path, manifest_scene: dict) -> None:
     }
     changed = False
     projected_cuts: list[dict] = []
-    for manifest_cut in _active_manifest_cuts(manifest_scene):
+    for manifest_cut in _scratch_manifest_cuts(manifest_scene):
         cut_id = _normalized_id(manifest_cut.get("cut_id"))
         assert cut_id is not None
         seed = _scene_cut_scratch(cut_id, manifest_cut)
@@ -418,7 +425,7 @@ def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
             scopes=("scene",),
             indent="",
         )
-        for cut in _active_manifest_cuts(scene):
+        for cut in _scratch_manifest_cuts(scene):
             cut_id = _normalized_id(cut.get("cut_id"))
             assert cut_id is not None
             selector = make_scene_cut_selector(scene_id, cut_id)
@@ -496,7 +503,12 @@ def main() -> None:
         default=None,
         help="Prepare scenes with id >= this (default: auto-detect from manifest story scenes).",
     )
-    parser.add_argument("--min-cuts", type=int, default=3, help="Default number of cuts per scene (used only when scratch is created).")
+    parser.add_argument(
+        "--min-cuts",
+        type=int,
+        default=1,
+        help="Deprecated compatibility option; only 1 is valid for a scene without manifest cuts.",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -532,6 +544,22 @@ def main() -> None:
     )
     if not targets:
         raise SystemExit("No target scenes found. Check --scene-ids / --start-scene-id.")
+    if args.min_cuts != 1:
+        target_ids = set(targets)
+        scenes_without_cuts = [
+            scene_id
+            for scene in manifest_scenes
+            if isinstance(scene, dict)
+            and not is_non_renderable_manifest_node(scene)
+            and (scene_id := _normalized_id(scene.get("scene_id"))) in target_ids
+            and not _active_manifest_cuts(scene)
+        ]
+        if scenes_without_cuts:
+            selectors = ", ".join(f"scene{scene_id}" for scene_id in scenes_without_cuts)
+            raise SystemExit(
+                "--min-cuts only accepts 1 for scenes without manifest cuts; "
+                f"refusing to invent cuts for: {selectors}"
+            )
 
     scratch_dir = run_dir / "scratch" / "narration"
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -589,7 +617,7 @@ def main() -> None:
             for cut in _active_manifest_cuts(manifest_scene)
             if (cut_id := _normalized_id(cut.get("cut_id"))) is not None
         ]
-        cut_ids = manifest_cut_ids or [str(index) for index in range(1, int(args.min_cuts) + 1)]
+        cut_ids = manifest_cut_ids or ["1"]
         skeleton = {
             "scene_id": _manifest_id_value(sid),
             "cuts": [

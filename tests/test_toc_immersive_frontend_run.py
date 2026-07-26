@@ -4,15 +4,22 @@ import tempfile
 import unittest
 import re
 import json
+import hashlib
 import importlib.util
 import os
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
-from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
+from toc.semantic_review import (
+    FOUNDATION_SEMANTIC_CRITERIA,
+    SEMANTIC_REVIEW_INPUT_SCHEMA,
+    semantic_review_input_digest,
+    semantic_review_scope_binding_sha256,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -96,7 +103,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(run_dir, Path("/tmp/example-run"))
             calls.append((stage, image_prompt_provider_ready))
 
-        with patch("server.image_gen_app._run_semantic_review", side_effect=review):
+        with (
+            patch("server.image_gen_app._run_semantic_review", side_effect=review),
+            patch.object(module, "check_semantic_review", return_value=Mock(passed=True, errors=())),
+        ):
             import asyncio
 
             asyncio.run(
@@ -123,6 +133,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         media_generation = AsyncMock()
 
         with (
+            patch.object(
+                module,
+                "_validated_fresh_cli_run_dir",
+                return_value=Path("/tmp/materialized-run"),
+            ),
+            patch.object(module, "_run_materialization_lock", return_value=nullcontext()),
             patch.object(module, "materialize_run"),
             patch.object(module, "prepare_grounding"),
             patch.object(module, "run_pre_media_semantic_pipeline", semantic_pipeline),
@@ -155,20 +171,54 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         review_dir = run_dir / "logs" / "review" / "semantic"
         review_dir.mkdir(parents=True, exist_ok=True)
         entry_id = f"{stage}:foundation"
-        (review_dir / f"{stage}.collection.md").write_text(f"# Collection\n\n## {entry_id}\n", encoding="utf-8")
-        (review_dir / f"{stage}.scope.json").write_text(
-            json.dumps(
-                {
-                    "entry_count": 1,
-                    "entry_ids": [entry_id],
-                    "source_artifacts": ["research.md"] if stage == "research" else ["research.md", "story.md"],
-                },
-                ensure_ascii=False,
-            )
-            + "\n",
+        collection_path = review_dir / f"{stage}.collection.md"
+        scope_path = review_dir / f"{stage}.scope.json"
+        prompt_path = review_dir / f"{stage}.prompt.md"
+        report_path = review_dir / f"{stage}.report.md"
+        collection_path.write_text(f"# Collection\n\n## {entry_id}\n", encoding="utf-8")
+        prompt_path.write_text("review prompt\n", encoding="utf-8")
+        source_artifacts = (
+            ["research.md"] if stage == "research" else ["research.md", "story.md"]
+        )
+        source_artifact_digests = [
+            {
+                "path": source,
+                "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
+            }
+            for source in source_artifacts
+        ]
+        scope = {
+            "stage": stage,
+            "entry_count": 1,
+            "entry_ids": [entry_id],
+            "review_scope": "all_entries",
+            "source_artifacts": source_artifacts,
+            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+            "source_artifact_digests": source_artifact_digests,
+            "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+            "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+            "artifacts": {
+                "collection": collection_path.relative_to(run_dir).as_posix(),
+                "scope": scope_path.relative_to(run_dir).as_posix(),
+                "prompt": prompt_path.relative_to(run_dir).as_posix(),
+                "report": report_path.relative_to(run_dir).as_posix(),
+            },
+        }
+        binding = semantic_review_scope_binding_sha256(scope)
+        digest = semantic_review_input_digest(
+            stage=stage,
+            entry_ids=[entry_id],
+            collection_sha256=scope["collection_sha256"],
+            prompt_sha256=scope["prompt_sha256"],
+            source_artifact_digests=source_artifact_digests,
+            scope_binding_sha256=binding,
+        )
+        scope["scope_binding_sha256"] = binding
+        scope["semantic_review_input_digest"] = digest
+        scope_path.write_text(
+            json.dumps(scope, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        (review_dir / f"{stage}.prompt.md").write_text("review prompt\n", encoding="utf-8")
         criteria_results = [
             {
                 "criterion_id": criterion_id,
@@ -177,10 +227,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             }
             for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]
         ]
-        (review_dir / f"{stage}.report.md").write_text(
+        report_path.write_text(
             "\n".join(
                 [
                     "status: passed",
+                    f"semantic_review_input_digest: {digest}",
                     f"reviewed_entries: [{entry_id}]",
                     "blocked_entries: []",
                     "failed_selectors: []",
@@ -2301,7 +2352,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "不適合だった家の扉を背にし",
+            "義姉たちの足元から継母が塞ぐ奥の戸口へ",
             cuts["scene80_cut02"]["cut_contract"]["motion_contract"][
                 "subject_motion"
             ],
@@ -2591,8 +2642,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             run_a = Path(tmp_a)
             run_b = Path(tmp_b)
 
-            module.materialize_run("シンデレラ", "シンデレラ", run_a, "p650")
-            module.materialize_run("シンデレラ", "シンデレラ", run_b, "p650")
+            with (
+                patch.object(module, "_prepare_authoring_grounding"),
+                patch.object(module, "_authoring_review_blocking_findings", return_value=()),
+            ):
+                module.materialize_run("シンデレラ", "シンデレラ", run_a, "p650")
+                module.materialize_run("シンデレラ", "シンデレラ", run_b, "p650")
 
             request_a = (run_a / "image_generation_requests.md").read_text(encoding="utf-8")
             request_b = (run_b / "image_generation_requests.md").read_text(encoding="utf-8")
@@ -2698,7 +2753,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="frontend_run_", dir=output_root) as tmp:
             run_dir = Path(tmp)
 
-            with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            with (
+                patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}),
+                patch.object(module, "_prepare_authoring_grounding"),
+                patch.object(module, "_authoring_review_blocking_findings", return_value=()),
+            ):
                 module.materialize_run("シンデレラ", "シンデレラ", run_dir, "p650")
                 module.write_run_index(run_dir)
             for name in (
@@ -2961,7 +3020,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("must_be_static_evidence_not_motion: true", manifest_text)
             self.assertIn("coverage_obligation_id:", manifest_text)
             self.assertIn("scene10_cut04", scene_request_text)
-            self.assertIn("scene10_cut05", scene_request_text)
+            self.assertNotIn("scene10_cut05", scene_request_text)
             self.assertIn("scene30_cut06", scene_request_text)
             self.assertIn("scene70_cut08", scene_request_text)
             self.assertIn("symbolic_proof", manifest_text)
@@ -2969,10 +3028,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertNotIn("reveal_protection", manifest_text)
             self.assertIn("time_or_deadline_pressure", manifest_text)
             scene70_text = scene_request_text.split("## scene70_cut1", 1)[1].split("## scene80_cut1", 1)[0]
+            scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
             self.assertIn("ガラスの靴", scene70_text)
             self.assertIn("脱げ", scene70_text)
             self.assertIn("階段に残ったガラスの靴", scene70_text)
-            self.assertIn("片方のガラスの靴を胸元で支え", scene70_text)
+            self.assertNotIn("片方のガラスの靴を胸元で支え", scene70_text)
+            self.assertIn("片方のガラスの靴を胸元で支え", scene70_manifest)
             self.assertIn("逃走", scene70_text)
             post_loss_scene70 = scene_request_text.split("## scene70_cut5", 1)[1].split("## scene70_cut6", 1)[0]
             self.assertIn("cinderella_post_midnight_fullbody", post_loss_scene70)
@@ -2980,7 +3041,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_transformed_fullbody", pre_loss_scene70)
             self.assertIn("シンデレラの衣装は、舞踏会ドレス姿を維持し、質素な普段着には変えない。", pre_loss_scene70)
             self.assertIn("シンデレラの衣装は、魔法が解けた後の質素な衣装を維持し、舞踏会ドレスには変えない。", post_loss_scene70)
-            scene70_manifest = manifest_text.split("scene_id: 70", 1)[1].split("scene_id: 80", 1)[0]
             self.assertIn("source_event_contract:", scene70_manifest)
             self.assertIn("event_context_for_cut:", scene70_manifest)
             self.assertIn("cut_contract.source_event_contract", scene70_manifest)
@@ -2994,10 +3054,25 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("cinderella_helper_fullbody", transformation_threshold)
             self.assertNotIn("glass_slipper", transformation_threshold)
             self.assertIn("魔法の助力者", transformation_threshold)
-            transformation_reveal = scene_request_text.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
+            transformation_motion_start = scene_request_text.split("## scene30_cut3", 1)[1].split("## scene30_cut4", 1)[0]
+            transformation_motion_start_api_prompt = re.search(
+                r"```api_prompt\n(?P<body>.*?)\n```",
+                transformation_motion_start,
+                re.DOTALL,
+            ).group("body")
+            transformation_motion_start_header = transformation_motion_start.split(
+                "```debug_prompt_source", 1
+            )[0]
+            self.assertIn("cinderella_helper_fullbody", transformation_motion_start_header)
+            self.assertIn("cinderella_fullbody", transformation_motion_start_header)
+            self.assertNotIn("cinderella_transformed_fullbody", transformation_motion_start_header)
+            self.assertNotIn("pumpkin_carriage", transformation_motion_start_header)
+            self.assertNotIn("glass_slipper", transformation_motion_start_header)
+            self.assertIn("[禁止]", transformation_motion_start_api_prompt)
+            self.assertIn("ガラスの靴", transformation_motion_start_api_prompt)
+            transformation_reveal = scene_request_text.split("## scene30_cut4", 1)[1].split("## scene30_cut5", 1)[0]
             transformation_reveal_api_prompt = re.search(r"```api_prompt\n(?P<body>.*?)\n```", transformation_reveal, re.DOTALL).group("body")
-            self.assertIn("reference_count: `4`", transformation_reveal)
-            self.assertNotIn("cinderella_helper_fullbody", transformation_reveal)
+            self.assertIn("cinderella_helper_fullbody", transformation_reveal)
             self.assertIn("pumpkin_carriage", transformation_reveal)
             self.assertIn("glass_slipper", transformation_reveal)
             self.assertNotIn("object_visibility:", transformation_reveal_api_prompt)
@@ -3048,7 +3123,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             final_scene_manifest = re.split(r"\n-\s+scene_id:\s+'?80'?", manifest_text, maxsplit=1)[1]
             self.assertIn("物語を閉じる", final_scene_manifest)
             self.assertIn("終結", final_scene_manifest)
-            self.assertIn("靴合わせが行われる部屋", final_scene_manifest)
+            self.assertIn("靴合わせの部屋", final_scene_manifest)
             self.assertIn("ガラスの靴", final_scene_manifest)
             self.assertIn("主人公の価値を証明", final_scene_manifest)
             self.assertIn("出口ではなく主人公とガラスの靴へ収束する", final_scene_manifest)
@@ -3067,7 +3142,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIn("[小道具 / 舞台装置]", final_scene_api_prompts)
             self.assertIn("ガラスの靴は", final_scene_api_prompts)
             self.assertIn("シンデレラの足に隙間なく合っている", final_scene_requests)
-            self.assertIn("靴合わせが行われる部屋", final_scene_requests)
+            self.assertIn("靴合わせの部屋", final_scene_requests)
             self.assertNotIn("月光、ガラス、階段", final_scene_requests)
 
             video_request_text = (run_dir / "video_generation_requests.md").read_text(encoding="utf-8")
@@ -3104,12 +3179,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="frontend_run_generic_", dir=output_root) as tmp:
             run_dir = Path(tmp)
 
-            module.materialize_run(
-                "桃太郎",
-                "桃から生まれた主人公が仲間と鬼のいる島へ向かう民話。",
-                run_dir,
-                "p650",
-            )
+            with (
+                patch.object(module, "_prepare_authoring_grounding"),
+                patch.object(module, "_authoring_review_blocking_findings", return_value=()),
+            ):
+                module.materialize_run(
+                    "桃太郎",
+                    "桃から生まれた主人公が仲間と鬼のいる島へ向かう民話。",
+                    run_dir,
+                    "p650",
+                )
 
             request_text = "\n".join(
                 [
@@ -3287,9 +3366,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             for segment in scenes[8]["location"]["segments"]
         }
         town_search = scene8_segments["町の家々"]
-        self.assertIn("一軒ずつ巡り", town_search["responsibility"])
-        self.assertIn("次の家", town_search["motion_brief"])
-        self.assertEqual(town_search["required_roles"], ["royal_envoy"])
+        self.assertIn("義姉たちへ順に", town_search["responsibility"])
+        self.assertIn("継母が塞ぐ奥の戸口", town_search["motion_brief"])
+        self.assertEqual(
+            town_search["required_roles"],
+            ["royal_envoy", "stepmother", "stepsisters"],
+        )
 
         incomplete_blueprint = module._scene_blueprint(
             profile=profile,
@@ -4110,7 +4192,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         self.assertNotIn(sentinel, provider_payload)
 
-    def test_duration_expansion_preserves_canonical_routes_and_scoped_beat_overrides(self) -> None:
+    def test_duration_expansion_partitions_canonical_routes_and_scoped_beat_overrides(self) -> None:
         module = load_frontend_run_module()
         with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
             canonical_profile = module._story_profile(
@@ -4144,6 +4226,8 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         root_functions_by_segment: dict[tuple[int, str], list[str]] = {}
         scene8_event_sequences: list[tuple[int, list[dict[str, object]]]] = []
         preserved_stone_road_obligations: set[str] = set()
+        last_route_position_by_canonical: dict[int, int] = {}
+        seen_route_locations_by_canonical: dict[int, set[str]] = {}
         for runtime_scene_index, segment_count in enumerate(profile["scene_segment_counts"], start=1):
             if segment_count <= 1:
                 continue
@@ -4152,11 +4236,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             canonical_route = list(
                 canonical_profile["scene_location_sequences"][canonical_index - 1]
             )
-            self.assertEqual(
-                profile["scene_location_sequences"][runtime_scene_index - 1],
-                canonical_route,
-                f"runtime scene {runtime_scene_index}",
+            runtime_route = profile["scene_location_sequences"][runtime_scene_index - 1]
+            route_positions = [canonical_route.index(location) for location in runtime_route]
+            self.assertEqual(route_positions, sorted(route_positions))
+            self.assertGreaterEqual(
+                route_positions[0],
+                last_route_position_by_canonical.get(canonical_index, 0),
+                f"runtime scene {runtime_scene_index} must not replay a completed route origin",
             )
+            last_route_position_by_canonical[canonical_index] = route_positions[-1]
+            seen_route_locations_by_canonical.setdefault(canonical_index, set()).update(runtime_route)
             blueprint = module._scene_blueprint(
                 profile=profile,
                 idx=runtime_scene_index,
@@ -4164,6 +4253,29 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 location_name=profile["scene_locations"][runtime_scene_index - 1],
                 include_artifact=False,
             )
+            segment_position, _segment_count, _segment_role = module._scene_segment(
+                profile, runtime_scene_index
+            )
+            segment_contract = module._cinderella_segment_contract(
+                canonical_index,
+                segment_position,
+                segment_count,
+            )
+            self.assertTrue(
+                set(blueprint["visible_pressure"]).isdisjoint(
+                    {
+                        segment_contract["first_action"],
+                        segment_contract["last_action"],
+                    }
+                ),
+                f"event clauses must not become physical pressure anchors in runtime scene {runtime_scene_index}",
+            )
+            if canonical_index == 1:
+                self.assertEqual(
+                    blueprint["visible_pressure"][0],
+                    "積み上がる家事道具",
+                    "the cut-local pressure anchor must be a drawable obstruction, not floor texture",
+                )
             locations = explicit_locations(blueprint["beat_overrides"])
             self.assertLessEqual(locations, allowed_locations, f"runtime scene {runtime_scene_index}")
             seen_functions = seen_functions_by_canonical.setdefault(canonical_index, set())
@@ -4213,6 +4325,15 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 )
             checked_split_scenes += 1
         self.assertGreater(checked_split_scenes, 1)
+        for canonical_index, canonical_route in enumerate(
+            canonical_profile["scene_location_sequences"], start=1
+        ):
+            if canonical_index in seen_route_locations_by_canonical:
+                self.assertEqual(
+                    seen_route_locations_by_canonical[canonical_index],
+                    set(canonical_route),
+                    f"canonical scene {canonical_index} aggregate route coverage",
+                )
         self.assertEqual(
             preserved_stone_road_obligations,
             {

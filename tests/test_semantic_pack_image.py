@@ -60,7 +60,7 @@ def write_manifest(run_dir: Path) -> None:
                 "    scene_cut_coverage_plan:",
                 "      coverage_strategy: reverse_from_scene_event",
                 "      source_schema_version: scene_event_v1",
-                "      min_cut_count: {by_distinct_semantic_obligations: 2, by_importance: 2, by_duration: 2, by_event_beats: 2, selected: 2}",
+                "      min_cut_count: {by_distinct_semantic_obligations: 2, by_importance: 0, by_duration: 0, by_event_beats: 2, selected: 2}",
                 "      minimum_cut_count: 2",
                 "      selected_cut_count: 2",
                 "      event_beat_inventory:",

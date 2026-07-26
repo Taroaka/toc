@@ -1,6 +1,6 @@
 # ToC marketing site repositioning tasklist
 
-更新日: 2026-07-19
+更新日: 2026-07-25
 
 ## Documentation repositioning
 
@@ -13,6 +13,12 @@
 - [x] Define detailed behavioral personas, messages, objections, and proof requirements
 - [x] Update repo pointers and marketing skill routing
 - [x] Validate pointer docs and search for stale canonical claims
+- [x] Define the system-delivery offer, no-ToC-monthly policy, and separate external API cost
+- [x] Add the LP department strategy for information value, research, proof, legal, accessibility, and performance
+- [x] Define each LP section's visitor question, perception shift, message, proof, and transition
+- [ ] Review and approve the section message design before further image generation
+- [ ] Generate and inspect a section-based LP prototype under `marketing/test/`
+- [ ] Stitch the approved sections into one vertical LP proposal
 
 ## Future site implementation
 

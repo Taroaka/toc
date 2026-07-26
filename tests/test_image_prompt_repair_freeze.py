@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import yaml
 
@@ -17,7 +18,12 @@ from toc.image_request_snapshot import (
     materialize_request_snapshot,
     write_request_snapshot_atomic,
 )
-from toc.semantic_review import SemanticReviewStatus
+from toc.semantic_review import (
+    SEMANTIC_REVIEW_INPUT_SCHEMA,
+    SemanticReviewStatus,
+    semantic_review_input_digest,
+    semantic_review_scope_binding_sha256,
+)
 
 
 def _plan(moment: str) -> dict[str, object]:
@@ -148,6 +154,14 @@ def _write_v2_revision_fixture(
     return manifest
 
 
+def _current_request_revision(run_dir: Path) -> str:
+    return load_request_snapshot(
+        run_dir / "image_generation_request_snapshot.json",
+        run_dir=run_dir,
+        verify_references=False,
+    ).request_revision
+
+
 def _write_deterministic_review(
     run_dir: Path,
     *,
@@ -257,21 +271,57 @@ def _write_passing_review_artifacts(run_dir: Path) -> None:
         "image_generation_request_snapshot.json",
         "image_prompt_story_review.md",
     ]
-    (run_dir / paths["scope"]).write_text(
-        json.dumps(
-            {
-                "entry_count": 1,
-                "entry_ids": ["scene1_cut1"],
-                "source_artifacts": source_artifacts,
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    scope_path = run_dir / paths["scope"]
+    report_path = run_dir / paths["report"]
+    prompt_path.write_text("# prompt\n", encoding="utf-8")
+    source_artifact_digests = [
+        {
+            "path": source,
+            "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
+        }
+        for source in source_artifacts
+    ]
+    scope = {
+        "stage": "image_prompt",
+        "entry_count": 1,
+        "entry_ids": ["scene1_cut1"],
+        "review_scope": "all_entries",
+        "request_revision": _current_request_revision(run_dir),
+        "source_artifacts": source_artifacts,
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
+        "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+        "artifacts": {
+            "collection": paths["collection"].as_posix(),
+            "scope": paths["scope"].as_posix(),
+            "prompt": paths["prompt"].as_posix(),
+            "report": paths["report"].as_posix(),
+        },
+    }
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(scope)
+    digest = semantic_review_input_digest(
+        stage="image_prompt",
+        entry_ids=["scene1_cut1"],
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=source_artifact_digests,
+        request_revision=scope["request_revision"],
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    scope["scope_binding_sha256"] = scope_binding_sha256
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
-    (run_dir / paths["report"]).write_text(
-        "status: passed\nreviewed_entries: [scene1_cut1]\nblocked_entries: []\nfindings: []\nfailed_selectors: []\n",
+    report_path.write_text(
+        "status: passed\n"
+        + f"semantic_review_input_digest: {digest}\n"
+        + "reviewed_entries: [scene1_cut1]\n"
+        + "blocked_entries: []\nfindings: []\nfailed_selectors: []\n",
         encoding="utf-8",
     )
 
@@ -310,7 +360,11 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
             run_dir = Path(td)
             manifest = _write_v2_revision_fixture(run_dir)
 
-            image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+            reviewed_revision = _current_request_revision(run_dir)
+            image_gen_app._mark_image_prompt_request_freeze_done(
+                run_dir,
+                expected_request_revision=reviewed_revision,
+            )
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             manifest["scenes"][0]["cuts"][0]["image_generation"]["api_prompt_payload"][
                 "prompt"
@@ -322,7 +376,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RuntimeError, "snapshot/manifest revision mismatch"):
-                image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+                image_gen_app._mark_image_prompt_request_freeze_done(
+                    run_dir,
+                    expected_request_revision=reviewed_revision,
+                )
 
         self.assertEqual(state["review.image_prompt.request_freeze.status"], "frozen")
         self.assertTrue(state["review.image_prompt.request_freeze.request_revision"])
@@ -351,7 +408,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+            image_gen_app._mark_image_prompt_request_freeze_done(
+                run_dir,
+                expected_request_revision=_current_request_revision(run_dir),
+            )
             result = json.loads(result_path.read_text(encoding="utf-8"))
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             hard_review = (run_dir / "manifest_review.md").read_text(encoding="utf-8")
@@ -386,7 +446,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(RuntimeError, "unresolved image request reference"):
-                image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+                image_gen_app._mark_image_prompt_request_freeze_done(
+                    run_dir,
+                    expected_request_revision=_current_request_revision(run_dir),
+                )
 
     def test_review_preparation_promotes_deferred_reference_and_freeze_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
@@ -424,7 +487,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
             _write_passing_review_artifacts(run_dir)
             snapshot_path = run_dir / "image_generation_request_snapshot.json"
             snapshot_mtime_ns = snapshot_path.stat().st_mtime_ns
-            image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+            image_gen_app._mark_image_prompt_request_freeze_done(
+                run_dir,
+                expected_request_revision=_current_request_revision(run_dir),
+            )
             self.assertEqual(snapshot_path.stat().st_mtime_ns, snapshot_mtime_ns)
             scope = json.loads(
                 (run_dir / image_gen_app.semantic_review_relpaths("image_prompt")["scope"]).read_text(
@@ -455,7 +521,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
             _write_deterministic_review(run_dir, hard_findings=1)
 
             with self.assertRaisesRegex(RuntimeError, "deterministic image prompt review failed"):
-                image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
+                image_gen_app._mark_image_prompt_request_freeze_done(
+                    run_dir,
+                    expected_request_revision=_current_request_revision(run_dir),
+                )
 
     def test_deterministic_human_override_does_not_fail_server_hard_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
@@ -880,6 +949,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
         self.assertNotEqual(payload["sha256"], old_payload["sha256"])
 
     def test_image_prompt_repair_synchronizes_requests_before_rereview(self) -> None:
+        reviewed_revision = "a" * 64
         failed = SemanticReviewStatus(
             status="failed",
             entry_count=1,
@@ -904,11 +974,15 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 patch(
                     "server.image_gen_app._mark_image_prompt_request_freeze_done",
                     Mock(),
-                ),
+                ) as freeze,
                 patch(
                     "server.image_gen_app._prepare_image_prompt_request_revision_for_review",
-                    Mock(),
-                ),
+                    Mock(return_value=reviewed_revision),
+                ) as prepare_revision,
+                patch(
+                    "server.image_gen_app._assert_image_prompt_request_revision_unchanged",
+                    Mock(return_value=reviewed_revision),
+                ) as assert_revision,
             ):
                 asyncio.run(
                     image_gen_app._run_semantic_review(
@@ -920,6 +994,33 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 )
 
         synchronize.assert_called_once_with(run_dir)
+        self.assertEqual(
+            prepare_revision.call_args_list,
+            [
+                call(run_dir, provider_ready=True),
+                call(run_dir, provider_ready=True),
+                call(run_dir, provider_ready=True),
+            ],
+        )
+        self.assertEqual(
+            assert_revision.call_args_list,
+            [
+                call(
+                    run_dir,
+                    expected_request_revision=reviewed_revision,
+                    require_resolved_references=True,
+                ),
+                call(
+                    run_dir,
+                    expected_request_revision=reviewed_revision,
+                    require_resolved_references=True,
+                ),
+            ],
+        )
+        freeze.assert_called_once_with(
+            run_dir,
+            expected_request_revision=reviewed_revision,
+        )
 
     def test_repaired_asset_requests_are_generated_before_scene_images(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:

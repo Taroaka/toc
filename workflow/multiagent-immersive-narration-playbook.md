@@ -42,8 +42,7 @@ single-writer が scratch 雛形を作る:
 
 ```bash
 python scripts/ai/toc-immersive-narration-multiagent.py \
-  --run-dir "output/<topic>_<timestamp>_immersive" \
-  --min-cuts 3
+  --run-dir "output/<topic>_<timestamp>_immersive"
 ```
 
 runner はmanifestの実cut IDからscene scratchを作り、同時に`audio_story.yaml`と
@@ -75,7 +74,7 @@ scene担当者は、自分の scene の scratch だけ編集して原稿を入�
   - `cuts[].tts_text` に ElevenLabs v3 へ送る final string を置く
   - 同じ声の流れを保つspanへ同じ`tts_generation_group_id`を付ける。1つのvoiced cutを複数groupへ所属させない
   - human_locked spanは変更しない
-  - main=5–15秒、sub=3–15秒を目安にしつつ、短いcutごとに演技を分断しない
+  - cut duration は映像責務と provider capability に従い、短いcutごとに演技を分断しない。narration span は必要なら複数cutをまたぐ
 
 ## Phase 3: Merge to script and sync（直列）
 

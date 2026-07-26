@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -28,26 +29,35 @@ def _load_pack_builder():
     return module
 
 
-def _collection(entries: list[dict[str, object]]) -> str:
-    lines = ["# Semantic Review Collection: image_prompt", ""]
-    for entry in entries:
-        entry_id = str(entry["selector"])
-        lines.extend(
-            [
-                f"## {entry_id}",
-                "",
-                "```json",
-                json.dumps(entry, ensure_ascii=False),
-                "```",
-                "",
-            ]
-        )
-    return "\n".join(lines)
+def _semantic_input_digest_for_report(report_path: Path) -> str:
+    suffix = ".report.md"
+    if not report_path.name.endswith(suffix):
+        raise AssertionError(f"unexpected semantic report path: {report_path}")
+    scope_path = report_path.with_name(report_path.name[: -len(suffix)] + ".scope.json")
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    digest = str(scope.get("semantic_review_input_digest") or "")
+    if not digest.startswith("sha256:"):
+        raise AssertionError(f"semantic scope has no input digest: {scope_path}")
+    return digest
 
 
-def _scope_payload(entries: list[dict[str, object]]) -> dict[str, object]:
-    builder = _load_pack_builder()
-    return builder.image_prompt_scene_shard_plan(entries)
+def _pending_report_path_from_prompt(text: str) -> Path:
+    marker = "The pending report path is `"
+    return Path(text.split(marker, 1)[1].split("`", 1)[0])
+
+
+def _agent_message_transcript(report_text: str) -> list[dict[str, object]]:
+    return [
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "agentMessage",
+                    "text": report_text,
+                }
+            },
+        }
+    ]
 
 
 class ImagePromptSemanticPackShardTests(unittest.TestCase):
@@ -119,7 +129,13 @@ class ImagePromptSemanticPackShardTests(unittest.TestCase):
             second = plan["shards"][1]
             first_collection = (run_dir / first["artifacts"]["collection"]).read_text(encoding="utf-8")
             second_collection = (run_dir / second["artifacts"]["collection"]).read_text(encoding="utf-8")
+            first_collection_path = run_dir / first["artifacts"]["collection"]
+            first_prompt_path = run_dir / first["artifacts"]["prompt"]
+            first_report_path = run_dir / first["artifacts"]["report"]
             first_scope = json.loads((run_dir / first["artifacts"]["scope"]).read_text(encoding="utf-8"))
+            first_report = first_report_path.read_text(encoding="utf-8")
+            first_collection_sha256 = hashlib.sha256(first_collection_path.read_bytes()).hexdigest()
+            first_prompt_sha256 = hashlib.sha256(first_prompt_path.read_bytes()).hexdigest()
 
         self.assertIn("scene10_cut01", first_collection)
         self.assertIn("## scene10", first_collection)
@@ -129,27 +145,26 @@ class ImagePromptSemanticPackShardTests(unittest.TestCase):
         self.assertEqual(first_scope["entry_ids"], ["scene10_cut01", "scene10"])
         self.assertEqual(first_scope["review_scope"], "single_scene_image_prompt_shard")
         self.assertEqual(first_scope["canonical_scope"], "logs/review/semantic/image_prompt.scope.json")
+        self.assertEqual(first_scope["semantic_review_input_schema"], "semantic_review_input_v1")
+        self.assertEqual(first_scope["source_artifact_digests"], [])
+        self.assertEqual(
+            first_scope["collection_sha256"],
+            first_collection_sha256,
+        )
+        self.assertEqual(
+            first_scope["prompt_sha256"],
+            first_prompt_sha256,
+        )
+        self.assertRegex(first_scope["semantic_review_input_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertIn(
+            f"semantic_review_input_digest: `{first_scope['semantic_review_input_digest']}`",
+            first_report,
+        )
 
 
 class ImagePromptSemanticServerShardTests(unittest.TestCase):
     @staticmethod
     def _write_pack(run_dir: Path, entries: list[dict[str, object]]) -> None:
-        paths = image_gen_app.semantic_review_relpaths("image_prompt")
-        collection_path = run_dir / paths["collection"]
-        collection_path.parent.mkdir(parents=True, exist_ok=True)
-        collection_path.write_text(_collection(entries), encoding="utf-8")
-        scope = _scope_payload(entries)
-        scope.update(
-            {
-                "stage": "image_prompt",
-                "entry_count": len(entries),
-                "entry_ids": [str(entry["selector"]) for entry in entries],
-                "source_artifacts": ["video_manifest.md"],
-            }
-        )
-        (run_dir / paths["scope"]).write_text(json.dumps(scope, ensure_ascii=False) + "\n", encoding="utf-8")
-        (run_dir / paths["prompt"]).write_text("# canonical image prompt review\n", encoding="utf-8")
-        (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
         # The semantic shard reviewer is downstream of the deterministic
         # story/prompt gate.  Keep this fixture provider-ready instead of
         # accidentally testing the missing-gate failure path.
@@ -199,6 +214,12 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        # Use the production pack builder so the canonical scope and every
+        # scene shard carry real artifact paths, source hashes, prompt hashes,
+        # and a SHA-bound semantic_review_input_digest.
+        builder = _load_pack_builder()
+        with patch.object(builder, "collect_entries", return_value=entries):
+            builder.build_pack(run_dir, "image_prompt")
 
     def test_runtime_reviews_one_shard_per_scene_with_bounded_concurrency_and_exact_coverage(self) -> None:
         entries = [
@@ -231,23 +252,22 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                     review_turns += 1
                     try:
                         await asyncio.sleep(0.02)
-                        report_path = Path(text.split("Write the final report to `", 1)[1].split("`", 1)[0])
+                        report_path = _pending_report_path_from_prompt(text)
                         expected = json.loads(text.split("Expected reviewed_entries exactly once: ", 1)[1].splitlines()[0])
-                        report_path.write_text(
+                        input_digest = _semantic_input_digest_for_report(report_path)
+                        return _agent_message_transcript(
                             "\n".join(
                                 [
                                     "status: passed",
+                                    f"semantic_review_input_digest: {input_digest}",
                                     "reviewed_entries: [" + ", ".join(expected) + "]",
                                     "blocked_entries: []",
                                     "findings: []",
                                     "failed_selectors: []",
                                     "reason_keys: []",
-                                    "",
                                 ]
-                            ),
-                            encoding="utf-8",
+                            )
                         )
-                        return []
                     finally:
                         active_turns -= 1
 
@@ -303,24 +323,23 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                     return "thread-1"
 
                 async def run_turn(self, *, text: str, **_kwargs):
-                    report_path = Path(text.split("Write the final report to `", 1)[1].split("`", 1)[0])
+                    report_path = _pending_report_path_from_prompt(text)
                     expected = json.loads(text.split("Expected reviewed_entries exactly once: ", 1)[1].splitlines()[0])
                     reviewed = expected if expected[0].startswith("scene10") else [expected[0], expected[0]]
-                    report_path.write_text(
+                    input_digest = _semantic_input_digest_for_report(report_path)
+                    return _agent_message_transcript(
                         "\n".join(
                             [
                                 "status: passed",
+                                f"semantic_review_input_digest: {input_digest}",
                                 "reviewed_entries: [" + ", ".join(reviewed) + "]",
                                 "blocked_entries: []",
                                 "findings: []",
                                 "failed_selectors: []",
                                 "reason_keys: []",
-                                "",
                             ]
-                        ),
-                        encoding="utf-8",
+                        )
                     )
-                    return []
 
                 async def stop(self):
                     return None
@@ -384,16 +403,16 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                     turn_counts[shard_id] = turn_counts.get(shard_id, 0) + 1
                     if shard_id == "scene_20" and turn_counts[shard_id] == 1:
                         raise CodexAppServerTransportError("turn timed out")
-                    report_path = Path(text.split("Write the final report to `", 1)[1].split("`", 1)[0])
+                    report_path = _pending_report_path_from_prompt(text)
                     expected = json.loads(text.split("Expected reviewed_entries exactly once: ", 1)[1].splitlines()[0])
-                    report_path.write_text(
+                    input_digest = _semantic_input_digest_for_report(report_path)
+                    return _agent_message_transcript(
                         "status: passed\n"
+                        + f"semantic_review_input_digest: {input_digest}\n"
                         + "reviewed_entries: ["
                         + ", ".join(expected)
-                        + "]\nblocked_entries: []\nfindings: []\nfailed_selectors: []\nreason_keys: []\n",
-                        encoding="utf-8",
+                        + "]\nblocked_entries: []\nfindings: []\nfailed_selectors: []\nreason_keys: []\n"
                     )
-                    return []
 
                 async def stop(self):
                     return None

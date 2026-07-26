@@ -1,6 +1,6 @@
 # ToC Marketing Guide
 
-更新日: 2026-07-19
+更新日: 2026-07-25
 
 `marketing/` は、ToC を必要な個人へ届け、利用開始、継続、収益化またはブランド構築へ接続するための正本を置く。
 
@@ -29,6 +29,19 @@ ToC は、個人の動画制作を圧倒的に速く、簡単にする AI 動画
 一般的な AI 動画制作では、人間が企画、台本、scene、画像、動画、音声、編集のサービスを行き来する。ToC はこれらを一つの制作フローとして組み立て、人間が目的、品質、公開判断へ集中できるようにする。
 
 神話、民話、物語は ToC の商品テーマではない。制作能力を検証し、長尺ストーリーも作れることを示す proof / example の一カテゴリとして扱う。
+
+## Offer facts
+
+ToC は SaaS の月額利用権ではなく、顧客が自分の環境で動画制作を続けられるように、動画作成システム一式を納品するサービスである。
+
+| 項目 | 公開時の扱い |
+|------|--------------|
+| ToC 導入費 | システム納品に対する一回の費用。金額確定までは `個別見積り` |
+| ToC 月額料金 | `0円`。システム利用権に継続課金しない |
+| 外部 API 料金 | 別途必要。利用する AI / cloud provider の使用量に応じて顧客が負担する |
+| 保守・更新・運用代行 | 納品費に自動で含めない。必要な場合は範囲と料金を別契約で明示する |
+
+`月額0円` だけを単独で強調して無料サービスと誤認させない。必ず `システム納品後の ToC 月額料金` であることと、`外部 API 料金は別途` を近接表示する。
 
 ## Primary personas
 
@@ -85,6 +98,7 @@ Meta / YouTube / SNS / search
 
 - Marketing North Star: this file
 - Public site / LP: `marketing/LP/`
+- LP research / strategy: `marketing/LP/lp-strategy.md`
 - Persona / message contract: `marketing/LP/personas.md`
 - SNS distribution: `marketing/SNS/`
 - YouTube channel strategy: `marketing/SNS/YouTube/strategy.md`

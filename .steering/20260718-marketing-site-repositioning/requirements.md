@@ -19,6 +19,8 @@ ToC のマーケティング正本を、民話・神話チャンネル中心の�
 - 感情・直感に先に届く設計は、神話の感情ではなく、訪問者本人の可能性、解放感、自己効力感、期待へ向ける
 - 民話・神話は ToC の商品テーマではなく、制作能力を示すテスト事例の一つ
 - 既存 ToC 制作フロントとは別に、独立した公開マーケティングサイトを作る
+- 提供物は ToC 動画作成システム一式の納品
+- 納品後の ToC 月額料金は 0 円。外部 API 料金は別途、使用量に応じて発生
 
 ## Success criteria
 
@@ -29,6 +31,8 @@ ToC のマーケティング正本を、民話・神話チャンネル中心の�
 5. 民話・神話の個別資料が product positioning の正本として参照されない
 6. repo pointer と marketing router が LP / public site を含む新しい scope を指す
 7. 通常の research / story / image / video production rules と marketing rules の境界は維持する
+8. LP 部門が、動画の情報価値、offer facts、訴求順序、proof、法務、accessibility、performance、検証を定義する
+9. section 別の LP prototype と縦長 composite を `marketing/test/` に保存する
 
 ## In scope
 
@@ -60,4 +64,3 @@ ToC のマーケティング正本を、民話・神話チャンネル中心の�
 4. channel / campaign 固有資料
 
 浦島太郎や民話・神話に限定されたファイルは campaign artifact とし、ToC 全体の positioning を上書きしない。
-

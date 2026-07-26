@@ -163,7 +163,7 @@ p400 は次の順で進める。
    - `story.md` の scene を読み、scene ごとの物語責務を固定する
    - `visual_value.md` がある場合は、その scene の visual value / anchor / regeneration risk を読む
    - scene ごとに、観客へ渡す情報、まだ隠す情報、感情変化、根拠境界、後続 stage への注意を残す
-   - scene ごとに `importance`, `target_duration_seconds`, `estimated_duration_seconds`, `handoff_to_next_scene`（最終 scene は `terminal_resolution`）, `coverage_review` を必須で残す
+   - scene ごとに `handoff_to_next_scene`（最終 scene は `terminal_resolution`）と `coverage_review` を残す。`importance`, `target_duration_seconds`, `estimated_duration_seconds` は計画・見積り用の optional annotation であり、欠落だけを blocking finding にしない
    - scene ごとに `story_specificity` の 7 項目を必須で残す。抽象語だけの `主人公は前進できるか`, `次へ進む理由が生まれる`, `光が次の場面へ運ぶ`, `価値変化の兆し`, `場所の圧力`, `主人公の姿勢と視線` は通さない
    - scene-set 初稿は圧縮優先にしない。主要 beat が scene として独立可能なら一度 scene 化し、review で「追加するより cut を厚くした方が良い」と説明できるところまで scene 数を増やす
    - まず抽象 scene-set review loop を回し、全 scene の追加/削除/統合/分割/順序変更/話の接続を `scene_set_review.md` と `eval.scene_set.loop.*` に記録する

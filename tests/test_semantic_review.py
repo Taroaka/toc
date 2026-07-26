@@ -1,4 +1,6 @@
 import json
+import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,11 +8,18 @@ from unittest.mock import patch
 
 from toc.semantic_review import (
     FOUNDATION_SEMANTIC_CRITERIA,
+    LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
+    SEMANTIC_REVIEW_INPUT_SCHEMA,
     SEMANTIC_REVIEW_STAGES,
     check_image_prompt_judgment,
     check_semantic_review,
     parse_judgment_report_status,
+    safe_semantic_write_text,
+    semantic_review_currentness_issues,
+    semantic_review_input_digest,
     semantic_review_relpaths,
+    semantic_review_scope_binding_sha256,
+    semantic_review_sources_are_current,
 )
 from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
@@ -34,7 +43,7 @@ def write_review_pack(run_dir: Path, *, status: str = "passed", entry_count: int
         encoding="utf-8",
     )
     (review_dir / "image_prompt.judgment_prompt.md").write_text("review prompt\n", encoding="utf-8")
-    report = "status: {status}\nreviewed_entries: [scene10_cut01]\nblocked_entries: []\nfindings: []\nnotes: []\n".format(status=status)
+    report = "status: {status}\nreviewed_entries: [scene10_cut01]\nblocked_entries: []\nfailed_selectors: []\nfindings: []\nnotes: []\n".format(status=status)
     if placeholder:
         report = "# Image Prompt Judgment Review\n\n- status: `pending`\n\n## Findings\n\n- `...`\n"
     (review_dir / "image_prompt.judgment.md").write_text(report, encoding="utf-8")
@@ -47,49 +56,151 @@ def write_generic_pack(
     status: str = "passed",
     entry_count: int = 1,
     reviewed_entries: list[str] | None = None,
+    blocked_entries: list[str] | None = None,
+    failed_selectors: list[str] | None = None,
     include_foundation_criteria: bool = True,
 ) -> None:
     paths = semantic_review_relpaths(stage)
     entry_ids = [f"{stage}:entry:{index + 1}" for index in range(entry_count)]
     reviewed = entry_ids if reviewed_entries is None else reviewed_entries
-    for key, rel in paths.items():
-        path = run_dir / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if key == "scope":
-            path.write_text(
-                json.dumps({"entry_count": entry_count, "entry_ids": entry_ids}, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        elif key == "report":
-            criteria_results = [
-                {
-                    "criterion_id": criterion_id,
-                    "status": "passed",
-                    "evidence": f"{stage}.md:{criterion_id}",
-                }
-                for criterion_id in FOUNDATION_SEMANTIC_CRITERIA.get(stage, ())
+    source_path = run_dir / f"{stage}_semantic_source.md"
+    source_path.write_text(f"# {stage} semantic source\n", encoding="utf-8")
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    scope_path = run_dir / paths["scope"]
+    report_path = run_dir / paths["report"]
+    collection_path.parent.mkdir(parents=True, exist_ok=True)
+    collection_path.write_text(f"{stage} collection\n", encoding="utf-8")
+    prompt_path.write_text(f"{stage} prompt\n", encoding="utf-8")
+    source_digests = [
+        {
+            "path": source_path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+    ]
+    scope = {
+        "stage": stage,
+        "entry_count": entry_count,
+        "entry_ids": entry_ids,
+        "review_scope": "all_entries",
+        "source_artifacts": [source_path.relative_to(run_dir).as_posix()],
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_digests,
+        "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+        "artifacts": {
+            "collection": paths["collection"].as_posix(),
+            "scope": paths["scope"].as_posix(),
+            "prompt": paths["prompt"].as_posix(),
+            "report": paths["report"].as_posix(),
+        },
+    }
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(scope)
+    digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=source_digests,
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    scope["scope_binding_sha256"] = scope_binding_sha256
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(json.dumps(scope, ensure_ascii=False) + "\n", encoding="utf-8")
+    criteria_results = [
+        {
+            "criterion_id": criterion_id,
+            "status": "passed",
+            "evidence": f"{stage}.md:{criterion_id}",
+        }
+        for criterion_id in FOUNDATION_SEMANTIC_CRITERIA.get(stage, ())
+    ]
+    criteria_line = (
+        "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False)
+        if include_foundation_criteria and stage in FOUNDATION_SEMANTIC_CRITERIA
+        else ""
+    )
+    report_path.write_text(
+        "\n".join(
+            [
+                f"status: {status}",
+                f"semantic_review_input_digest: {digest}",
+                f"reviewed_entries: [{', '.join(reviewed)}]",
+                f"blocked_entries: [{', '.join(blocked_entries or [])}]",
+                f"failed_selectors: [{', '.join(failed_selectors or [])}]",
+                criteria_line,
+                "findings: []",
+                "",
             ]
-            criteria_line = (
-                "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False)
-                if include_foundation_criteria and stage in FOUNDATION_SEMANTIC_CRITERIA
-                else ""
-            )
-            path.write_text(
-                "\n".join(
-                    [
-                        f"status: {status}",
-                        f"reviewed_entries: [{', '.join(reviewed)}]",
-                        "blocked_entries: []",
-                        "failed_selectors: []",
-                        criteria_line,
-                        "findings: []",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-        else:
-            path.write_text(f"{stage} {key}\n", encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_digest_bound_pack(run_dir: Path, stage: str = "asset_plan") -> tuple[Path, Path]:
+    paths = semantic_review_relpaths(stage)
+    source_path = run_dir / "asset_plan.md"
+    source_path.write_text("# Asset plan\n\nrevision one\n", encoding="utf-8")
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    scope_path = run_dir / paths["scope"]
+    report_path = run_dir / paths["report"]
+    collection_path.parent.mkdir(parents=True, exist_ok=True)
+    collection_path.write_text("# Collection\n\n## asset_plan:entry:1\n", encoding="utf-8")
+    prompt_path.write_text("review current asset plan\n", encoding="utf-8")
+    source_artifact_digests = [
+        {
+            "path": "asset_plan.md",
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+    ]
+    scope = {
+        "stage": stage,
+        "entry_count": 1,
+        "entry_ids": ["asset_plan:entry:1"],
+        "review_scope": "all_entries",
+        "source_artifacts": ["asset_plan.md"],
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
+        "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+        "artifacts": {
+            "collection": paths["collection"].as_posix(),
+            "scope": paths["scope"].as_posix(),
+            "prompt": paths["prompt"].as_posix(),
+            "report": paths["report"].as_posix(),
+        },
+    }
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(scope)
+    digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=["asset_plan:entry:1"],
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=source_artifact_digests,
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    scope["scope_binding_sha256"] = scope_binding_sha256
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        "\n".join(
+            [
+                "status: passed",
+                f"semantic_review_input_digest: {digest}",
+                "reviewed_entries: [asset_plan:entry:1]",
+                "blocked_entries: []",
+                "failed_selectors: []",
+                "findings: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return source_path, report_path
 
 
 class TestSemanticReview(unittest.TestCase):
@@ -160,6 +271,187 @@ class TestSemanticReview(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertTrue(any("reviewed_entries coverage" in error for error in result.errors))
+
+    def test_every_semantic_stage_requires_exact_scope_coverage(self) -> None:
+        non_foundation_stages = sorted(SEMANTIC_REVIEW_STAGES - set(FOUNDATION_SEMANTIC_CRITERIA))
+        for stage in non_foundation_stages:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+                run_dir = Path(td)
+                write_generic_pack(
+                    run_dir,
+                    stage,
+                    entry_count=2,
+                    reviewed_entries=[f"{stage}:entry:1"],
+                )
+
+                result = check_semantic_review(run_dir, stage)
+
+                self.assertFalse(result.passed)
+                self.assertTrue(any("reviewed_entries coverage" in error for error in result.errors))
+
+    def test_passed_report_rejects_blocked_entries_and_failed_selectors_for_every_stage(self) -> None:
+        for stage in sorted(SEMANTIC_REVIEW_STAGES):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+                run_dir = Path(td)
+                entry_id = f"{stage}:entry:1"
+                write_generic_pack(
+                    run_dir,
+                    stage,
+                    blocked_entries=[entry_id],
+                    failed_selectors=[entry_id],
+                )
+
+                result = check_semantic_review(run_dir, stage)
+
+                self.assertFalse(result.passed)
+                self.assertIn("passed semantic review must have empty blocked_entries", result.errors)
+                self.assertIn("passed semantic review must have empty failed_selectors", result.errors)
+
+    def test_scope_entry_count_must_equal_exact_entry_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "asset_plan", entry_count=2)
+            scope_path = run_dir / semantic_review_relpaths("asset_plan")["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            scope["entry_count"] = 1
+            scope_path.write_text(json.dumps(scope) + "\n", encoding="utf-8")
+
+            result = check_semantic_review(run_dir, "asset_plan")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("entry_count must match" in error for error in result.errors))
+
+    def test_digest_bound_currentness_rejects_content_change_with_preserved_mtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            source_path, _report_path = write_digest_bound_pack(run_dir)
+            original_stat = source_path.stat()
+
+            self.assertTrue(semantic_review_sources_are_current(run_dir, "asset_plan"))
+
+            source_path.write_text("# Asset plan\n\nrevision two\n", encoding="utf-8")
+            os.utime(
+                source_path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+
+            issues = semantic_review_currentness_issues(run_dir, "asset_plan")
+            self.assertFalse(semantic_review_sources_are_current(run_dir, "asset_plan"))
+            self.assertTrue(any("SHA-256 mismatch" in issue for issue in issues), issues)
+
+    def test_digest_bound_currentness_rejects_unsafe_source_and_unbound_report(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            _source_path, report_path = write_digest_bound_pack(run_dir)
+            scope_path = run_dir / semantic_review_relpaths("asset_plan")["scope"]
+
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8").replace(
+                    "semantic_review_input_digest: sha256:",
+                    "semantic_review_input_digest: sha256:stale-",
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any(
+                    "report semantic_review_input_digest does not match" in issue
+                    for issue in semantic_review_currentness_issues(run_dir, "asset_plan")
+                )
+            )
+
+            write_digest_bound_pack(run_dir)
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            scope["source_artifacts"] = ["../asset_plan.md"]
+            scope["source_artifact_digests"][0]["path"] = "../asset_plan.md"
+            scope_path.write_text(json.dumps(scope) + "\n", encoding="utf-8")
+
+            self.assertTrue(
+                any(
+                    "safe run-relative path" in issue
+                    for issue in semantic_review_currentness_issues(run_dir, "asset_plan")
+                )
+            )
+
+    def test_digest_metadata_cannot_be_removed_to_downgrade_to_legacy_currentness(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_digest_bound_pack(run_dir)
+            scope_path = run_dir / semantic_review_relpaths("asset_plan")["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            for field in (
+                "semantic_review_input_schema",
+                "source_artifact_digests",
+                "collection_sha256",
+                "prompt_sha256",
+                "scope_binding_sha256",
+                "semantic_review_input_digest",
+            ):
+                scope.pop(field, None)
+            scope_path.write_text(json.dumps(scope) + "\n", encoding="utf-8")
+
+            issues = semantic_review_currentness_issues(run_dir, "asset_plan")
+
+            self.assertTrue(any("incomplete digest metadata" in issue for issue in issues), issues)
+
+    def test_duplicate_machine_fields_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_digest_bound_pack(run_dir)
+            report_path = run_dir / semantic_review_relpaths("asset_plan")["report"]
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8")
+                + "status: failed\n"
+                + "semantic_review_input_digest: sha256:duplicate\n",
+                encoding="utf-8",
+            )
+
+            result = check_semantic_review(run_dir, "asset_plan")
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("exactly one status" in error for error in result.errors), result.errors)
+            self.assertTrue(
+                any("exactly one semantic_review_input_digest" in error for error in result.errors),
+                result.errors,
+            )
+
+    def test_safe_semantic_write_rejects_run_local_symlink_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td, tempfile.TemporaryDirectory(
+            prefix="semantic_review_outside_"
+        ) as outside_td:
+            run_dir = Path(td)
+            outside = Path(outside_td)
+            (run_dir / "logs").symlink_to(outside, target_is_directory=True)
+            target = outside / "report.md"
+
+            with self.assertRaisesRegex(ValueError, "symlink|escapes run directory"):
+                safe_semantic_write_text(run_dir, run_dir / "logs" / "report.md", "unsafe\n")
+
+            self.assertFalse(target.exists())
+
+    def test_legacy_currentness_falls_back_to_safe_source_mtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "asset_plan")
+            source_path = run_dir / "asset_plan.md"
+            source_path.write_text("# legacy source\n", encoding="utf-8")
+            scope_path = run_dir / semantic_review_relpaths("asset_plan")["scope"]
+            scope = {
+                "stage": "asset_plan",
+                "entry_count": 1,
+                "entry_ids": ["asset_plan:entry:1"],
+                "source_artifacts": ["asset_plan.md"],
+                "semantic_review_input_schema": LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
+            }
+            scope_path.write_text(json.dumps(scope) + "\n", encoding="utf-8")
+            report_path = run_dir / semantic_review_relpaths("asset_plan")["report"]
+            report_path.touch()
+
+            self.assertTrue(semantic_review_sources_are_current(run_dir, "asset_plan"))
+
+            report_mtime = report_path.stat().st_mtime_ns
+            os.utime(source_path, ns=(report_mtime + 1, report_mtime + 1))
+
+            self.assertFalse(semantic_review_sources_are_current(run_dir, "asset_plan"))
 
     def test_foundation_semantic_review_passes_with_exact_scope_coverage(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
@@ -249,6 +541,19 @@ class TestSemanticReview(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertEqual(result.status, "pending")
+
+    def test_image_prompt_does_not_fall_back_when_canonical_pack_is_partial(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_review_pack(run_dir, status="passed")
+            canonical_scope = run_dir / semantic_review_relpaths("image_prompt")["scope"]
+            canonical_scope.parent.mkdir(parents=True, exist_ok=True)
+            canonical_scope.write_text("{}\n", encoding="utf-8")
+
+            result = check_image_prompt_judgment(run_dir)
+
+            self.assertFalse(result.passed)
+            self.assertTrue(any("missing semantic review" in error for error in result.errors), result.errors)
 
     def test_all_semantic_stages_have_producer_repair_targets(self) -> None:
         self.assertEqual(SEMANTIC_REVIEW_STAGES, set(SEMANTIC_REVIEW_PRODUCER_TARGETS))

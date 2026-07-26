@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -47,11 +48,13 @@ from toc.review_loop import (
     critic_prompt_relpath,
     critic_relpath,
     render_aggregated_review,
+    review_input_digest,
+    review_input_snapshot_issues,
 )
 from toc.review_loop_runner import materialize_review_loop_round
 from toc.run_index import write_run_index
 from toc.semantic_review import check_semantic_review
-from toc.stage_evaluator import check_manifest_single
+from toc.stage_evaluator import check_manifest_single, check_script_single, check_visual_value
 from toc.story_duration import build_duration_plan, normalize_target_duration
 
 
@@ -245,22 +248,22 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                     },
                     {
                         "location": "町の家々",
-                        "responsibility": "王宮の使者がガラスの靴を携えて町の家々を一軒ずつ巡り、不適合を確認して次の家へ移る探索過程を成立させる",
+                        "responsibility": "王宮の使者が町の家々を巡った末に義姉たちへ順にガラスの靴を試し、どちらにも合わないことを確認する。継母は奥の戸口を塞いでシンデレラを試着から排除しようとする",
                         "primary_subject": "王宮の使者",
-                        "visible_action": "王宮の使者が一軒の玄関前でガラスの靴を布張りの箱へ戻し、次の家へ続く石畳へ身体を向けている",
-                        "visible_reaction": "背後の家人は首を横に振り、使者の泥の付いた靴と外套には複数の家を巡った移動の痕跡が残る",
-                        "required_visual_evidence": ["ガラスの靴を収める布張りの箱", "次の家へ続く石畳", "泥の付いた使者の靴と外套", "背後で首を横に振る家人"],
-                        "required_roles": ["royal_envoy"],
+                        "visible_action": "試着を終えた義姉たちが足を引く前で王宮の使者がガラスの靴を支え、継母は奥の戸口を身体で塞いでいる",
+                        "visible_reaction": "義姉たちは合わなかった足を隠し、泥の付いた靴と外套の使者は継母が塞ぐ戸口へ視線を向けている",
+                        "required_visual_evidence": ["義姉たちの足に合わなかったガラスの靴", "戸口を塞ぐ継母", "泥の付いた使者の靴と外套", "奥の部屋へ続く戸口"],
+                        "required_roles": ["royal_envoy", "stepmother", "stepsisters"],
                         "visible_character_state": {
-                            "posture": "王宮の使者が玄関前で布張りの箱を閉じ、次の家へ身体を向けた姿勢",
-                            "gaze": "次の家へ続く石畳へ向けた視線",
-                            "expression": "探索を継続する落ち着いた表情",
-                            "hands": "片手がガラスの靴を収めた箱を支え、もう片手が外套を押さえている",
-                            "feet": "泥の付いた両足が次の家へ踏み出す直前で止まっている",
+                            "posture": "王宮の使者が試着を終えた義姉たちと戸口を塞ぐ継母の間に立つ姿勢",
+                            "gaze": "継母が塞ぐ奥の戸口へ向けた視線",
+                            "expression": "排除の不自然さに気づいて動きを止めた表情",
+                            "hands": "両手が義姉たちに合わなかったガラスの靴を支えている",
+                            "feet": "泥の付いた両足が奥の戸口へ向きを変えて止まっている",
                         },
-                        "motion_attention_target": "次の家へ続く石畳",
-                        "motion_brief": "王宮の使者が不適合だった家の扉を背にし、ガラスの靴を収めた箱を持って石畳を渡り、次の家の玄関前まで進む",
-                        "motion_end_state": "王宮の使者が次の家の玄関前に立ち、ガラスの靴を収めた箱を両手で支えている",
+                        "motion_attention_target": "継母が塞ぐ奥の戸口",
+                        "motion_brief": "王宮の使者がガラスの靴を箱へ戻しかけた手を止め、義姉たちの足元から継母が塞ぐ奥の戸口へ顔を向ける",
+                        "motion_end_state": "王宮の使者がガラスの靴を両手で支えたまま継母の塞ぐ戸口を見て、義姉たちは試着を終えて脇へ退いている",
                     },
                     {
                         "location": "靴合わせの部屋",
@@ -434,22 +437,22 @@ def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str,
                     },
                     {
                         "location": "町の家々",
-                        "responsibility": "王宮の使者がガラスの靴を携えて町の家々を一軒ずつ巡り、不適合を確認して次の家へ移る探索過程を成立させる",
+                        "responsibility": "王宮の使者が町の家々を巡った末に義姉たちへ順にガラスの靴を試し、どちらにも合わないことを確認する。継母は奥の戸口を塞いでシンデレラを試着から排除しようとする",
                         "primary_subject": "王宮の使者",
-                        "visible_action": "王宮の使者が一軒の玄関前でガラスの靴を布張りの箱へ戻し、次の家へ続く石畳へ身体を向けている",
-                        "visible_reaction": "背後の家人は首を横に振り、使者の泥の付いた靴と外套には複数の家を巡った移動の痕跡が残る",
-                        "required_visual_evidence": ["ガラスの靴を収める布張りの箱", "次の家へ続く石畳", "泥の付いた使者の靴と外套", "背後で首を横に振る家人"],
-                        "required_roles": ["royal_envoy"],
+                        "visible_action": "試着を終えた義姉たちが足を引く前で王宮の使者がガラスの靴を支え、継母は奥の戸口を身体で塞いでいる",
+                        "visible_reaction": "義姉たちは合わなかった足を隠し、泥の付いた靴と外套の使者は継母が塞ぐ戸口へ視線を向けている",
+                        "required_visual_evidence": ["義姉たちの足に合わなかったガラスの靴", "戸口を塞ぐ継母", "泥の付いた使者の靴と外套", "奥の部屋へ続く戸口"],
+                        "required_roles": ["royal_envoy", "stepmother", "stepsisters"],
                         "visible_character_state": {
-                            "posture": "王宮の使者が玄関前で布張りの箱を閉じ、次の家へ身体を向けた姿勢",
-                            "gaze": "次の家へ続く石畳へ向けた視線",
-                            "expression": "探索を継続する落ち着いた表情",
-                            "hands": "片手がガラスの靴を収めた箱を支え、もう片手が外套を押さえている",
-                            "feet": "泥の付いた両足が次の家へ踏み出す直前で止まっている",
+                            "posture": "王宮の使者が試着を終えた義姉たちと戸口を塞ぐ継母の間に立つ姿勢",
+                            "gaze": "継母が塞ぐ奥の戸口へ向けた視線",
+                            "expression": "排除の不自然さに気づいて動きを止めた表情",
+                            "hands": "両手が義姉たちに合わなかったガラスの靴を支えている",
+                            "feet": "泥の付いた両足が奥の戸口へ向きを変えて止まっている",
                         },
-                        "motion_attention_target": "次の家へ続く石畳",
-                        "motion_brief": "王宮の使者が不適合だった家の扉を背にし、ガラスの靴を収めた箱を持って石畳を渡り、次の家の玄関前まで進む",
-                        "motion_end_state": "王宮の使者が次の家の玄関前に立ち、ガラスの靴を収めた箱を両手で支えている",
+                        "motion_attention_target": "継母が塞ぐ奥の戸口",
+                        "motion_brief": "王宮の使者がガラスの靴を箱へ戻しかけた手を止め、義姉たちの足元から継母が塞ぐ奥の戸口へ顔を向ける",
+                        "motion_end_state": "王宮の使者がガラスの靴を両手で支えたまま継母の塞ぐ戸口を見て、義姉たちは試着を終えて脇へ退いている",
                     },
                     {
                         "location": "靴合わせの部屋",
@@ -644,10 +647,38 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
 
     runtime_count = max(len(canonical_titles), plan.minimum_scene_count)
     canonical_count = len(canonical_titles)
-    canonical_scene_indices = [
-        min(canonical_count, ((runtime_index - 1) * canonical_count) // runtime_count + 1)
-        for runtime_index in range(1, runtime_count + 1)
-    ]
+    if _profile_is_cinderella(profile) and runtime_count > canonical_count:
+        # Preserve room for the proof/search finale instead of assigning every
+        # extra scene from the start of the story.  The former left canonical
+        # scene 8 as one overloaded 40-second scene at the 600-second target.
+        group_counts_list = [1] * canonical_count
+        preferred_order = [canonical_count, *range(2, canonical_count), 1]
+        remaining = runtime_count - canonical_count
+        while remaining:
+            made_progress = False
+            for canonical_index in preferred_order:
+                if remaining == 0:
+                    break
+                group_index = canonical_index - 1
+                if group_counts_list[group_index] >= 4:
+                    continue
+                group_counts_list[group_index] += 1
+                remaining -= 1
+                made_progress = True
+            if not made_progress:
+                raise RuntimeError(
+                    "Cinderella duration expansion exceeds authored semantic beat capacity"
+                )
+        canonical_scene_indices = [
+            canonical_index
+            for canonical_index, count in enumerate(group_counts_list, start=1)
+            for _ in range(count)
+        ]
+    else:
+        canonical_scene_indices = [
+            min(canonical_count, ((runtime_index - 1) * canonical_count) // runtime_count + 1)
+            for runtime_index in range(1, runtime_count + 1)
+        ]
     group_counts = {
         canonical_index: canonical_scene_indices.count(canonical_index)
         for canonical_index in range(1, canonical_count + 1)
@@ -686,12 +717,6 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
         location_index = min(canonical_index - 1, len(canonical_locations) - 1)
         canonical_location_sequence = canonical_location_sequences[location_index]
         canonical_segments = canonical_location_segments[location_index]
-        # Runtime duration expansion may distribute semantic functions across
-        # several authored scenes, but it must not narrow the canonical route.
-        # Otherwise exact obligation overrides that cross a location boundary
-        # become out-of-route only because the requested duration changed.
-        runtime_location_sequence = list(canonical_location_sequence)
-        runtime_location = canonical_locations[location_index]
         beat_function_order = ("setup", "pressure", "turn", "payoff")
         function_start = (position - 1) * len(beat_function_order) // count
         function_end = position * len(beat_function_order) // count
@@ -699,8 +724,52 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
             beat_function_order[function_start:function_end]
             or [beat_function_order[min(function_start, len(beat_function_order) - 1)]]
         )
+        runtime_location_sequence = list(canonical_location_sequence)
+        if _profile_is_cinderella(profile) and count > 1:
+            function_location_indices = {
+                2: {
+                    "setup": (0,),
+                    "pressure": (0,),
+                    "turn": (1,),
+                    "payoff": (2,),
+                },
+                4: {
+                    "setup": (0,),
+                    "pressure": (0,),
+                    "turn": (0,),
+                    "payoff": (0, 1),
+                },
+                5: {
+                    "setup": (0,),
+                    "pressure": (0,),
+                    "turn": (0,),
+                    "payoff": (1,),
+                },
+                8: {
+                    "setup": (0,),
+                    "pressure": (1,),
+                    "turn": (2,),
+                    "payoff": (2,),
+                },
+            }.get(canonical_index)
+            if function_location_indices:
+                active_location_indices = {
+                    route_index
+                    for function in allowed_segment_functions
+                    for route_index in function_location_indices.get(function, ())
+                    if route_index < len(canonical_location_sequence)
+                }
+                if active_location_indices:
+                    runtime_location_sequence = [
+                        location
+                        for route_index, location in enumerate(canonical_location_sequence)
+                        if route_index in active_location_indices
+                    ]
+        runtime_location = runtime_location_sequence[0]
         runtime_segments: list[dict[str, Any]] = []
         for segment_index, canonical_segment in enumerate(canonical_segments):
+            if canonical_segment["location"] not in runtime_location_sequence:
+                continue
             runtime_segment = deepcopy(canonical_segment)
             segment_overrides = runtime_segment.get("beat_overrides")
             if isinstance(segment_overrides, dict) and count > 1:
@@ -750,6 +819,7 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
             "scene_location_segments": runtime_location_segments,
             "scene_times_of_day": runtime_times_of_day,
             "canonical_scene_titles": canonical_titles,
+            "canonical_scene_location_sequences": canonical_location_sequences,
             "canonical_scene_times_of_day": canonical_times_of_day,
             "canonical_scene_indices": canonical_scene_indices,
             "canonical_scene_count": canonical_count,
@@ -816,6 +886,43 @@ def _run_id_from_dir(run_dir: Path) -> str:
         return resolved.relative_to(REPO_ROOT / "output").as_posix()
     except ValueError as exc:
         raise SystemExit(f"--run-dir must be under output/: {run_dir}") from exc
+
+
+def _validated_fresh_cli_run_dir(raw_run_dir: str) -> Path:
+    run_dir = Path(raw_run_dir)
+    _run_id_from_dir(run_dir)
+    if run_dir.is_symlink():
+        raise SystemExit(f"--run-dir must not be a symlink: {run_dir}")
+    stale_artifacts = [
+        name
+        for name in ("research.md", "story.md", "script.md", "video_manifest.md")
+        if (run_dir / name).exists()
+    ]
+    if stale_artifacts:
+        raise SystemExit(
+            "--run-dir already contains a materialized run; use a fresh run id: "
+            + ", ".join(stale_artifacts)
+        )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+@contextmanager
+def _run_materialization_lock(run_dir: Path):
+    lock_path = run_dir / ".toc_frontend_create.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(f"another frontend-create process owns this run: {run_dir}") from exc
+    try:
+        os.write(descriptor, f"pid={os.getpid()}\n".encode("utf-8"))
+        yield
+    finally:
+        os.close(descriptor)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
@@ -4434,8 +4541,8 @@ _CINDERELLA_SEGMENT_BEATS: dict[int, tuple[str, ...]] = {
     ),
     8: (
         "王子がガラスの靴の持ち主の探索を命じ、その命を受けた王宮の使者が家へ入り義姉たちを試す",
-        "継母の排除を王宮の使者が退け、シンデレラにも試着の場を開く",
-        "シンデレラの足にガラスの靴が合い、使者と証人が適合を見る",
+        "継母が奥の戸口を塞いでシンデレラを試着から排除しようとし、王宮の使者がその戸口へ向き直る",
+        "王宮の使者が継母の排除を退けてシンデレラにも試着させ、足にガラスの靴が合うことを証人と確認する",
         "王宮の使者がシンデレラの身元と価値を公に確認する",
     ),
 }
@@ -4531,7 +4638,11 @@ def _scene_blueprint(
                 "pressure_source": "継母と義姉たちの足元",
                 "turn_motion_target": "継母と義姉たちの足元と床へ伸びる影",
                 "payoff_focus": "灰の床に積まれた家事道具",
-                "pressure": ["灰の床", "積み上がる家事道具", "継母と義姉たちの足音"],
+                # The first pressure item becomes the cut-local physical
+                # anchor.  Use an actual obstruction here; the floor remains
+                # texture/evidence and must not be described as blocking the
+                # route to the exit.
+                "pressure": ["積み上がる家事道具", "灰の床", "継母と義姉たちの足音"],
                 "beat_overrides": {
                     "turn": {
                         "primary_subject": "継母",
@@ -5184,7 +5295,13 @@ def _scene_blueprint(
                 else:
                     spec["payoff"] = f"{segment_contract['last_action']}後の物理的な痕跡と、人物がまだ使っていない画面奥の導線が残る"
                 spec["handoff"] = f"{segment_contract['last_action']}後の人物の姿勢、手元、物の位置が画面内に残る"
-                spec["pressure"] = list(dict.fromkeys([segment_contract["first_action"], segment_contract["last_action"], *spec["pressure"]]))
+                # Segment actions are event clauses, not drawable physical
+                # anchors.  Keep them in the segment responsibility / turn /
+                # handoff fields above, and preserve ``pressure`` as the
+                # noun-valued evidence used to compose still and motion text.
+                # Mixing the two produced phrases such as
+                # ``床と炉を掃除するのそば`` in duration-expanded runs.
+                spec["pressure"] = list(dict.fromkeys(spec["pressure"]))
             return {
                 "source_events": source_events,
                 "research_refs": _downstream_scene_research_refs(idx, source_events, profile),
@@ -8403,25 +8520,6 @@ def _authored_location_segments_for_story(
         profile, scene_index
     )
 
-    def route_only_segment(location: str, route_position: int) -> dict[str, Any]:
-        return {
-            "location": location,
-            "responsibility": "このruntime sceneではroute continuityだけを保持する",
-            "primary_subject": protagonist,
-            "primary_subject_by_function": {},
-            "beat_overrides": {},
-            "root_active_beat_functions": [],
-            "visible_action": f"{location}の空間構造だけをroute contextとして保持する",
-            "visible_reaction": f"{location}の入口と出口の関係だけを保持する",
-            "required_visual_evidence": [location],
-            "required_roles": ["protagonist"],
-            "motion_brief": "このruntime sceneでは新しいroot actionを割り当てない",
-            "motion_end_state": "route contextを変えず、authored owner sceneへ委ねる",
-            "visible_character_state": {
-                "route_position": f"{route_position}/{len(route)}"
-            },
-        }
-
     materialized: list[dict[str, Any]] = []
     for route_position, location in enumerate(route, start=1):
         if location in existing:
@@ -8429,9 +8527,6 @@ def _authored_location_segments_for_story(
             continue
         candidates = candidates_by_location.get(location, [])
         if not candidates:
-            if runtime_segment_count > 1:
-                materialized.append(route_only_segment(location, route_position))
-                continue
             raise RuntimeError(
                 f"scene{scene_index} location segment has no authored beat or obligation: {location}"
             )
@@ -8459,9 +8554,6 @@ def _authored_location_segments_for_story(
             if not candidate.get(key)
         ]
         if missing_concrete_fields:
-            if runtime_segment_count > 1:
-                materialized.append(route_only_segment(location, route_position))
-                continue
             raise RuntimeError(
                 f"scene{scene_index} location segment is not concretely authored: "
                 f"{location} ({', '.join(missing_concrete_fields)})"
@@ -10702,31 +10794,90 @@ def _review_status_line(stage: str) -> str:
     return "- status: passed"
 
 
-def _review_loop_critic_report(stage: str, critic_number: int, prompt_text: str) -> str:
+def _review_loop_critic_report(
+    stage: str,
+    critic_number: int,
+    prompt_text: str,
+    *,
+    blocking_findings: tuple[str, ...] = (),
+) -> str:
     focus_match = re.search(r"critic_focus:\s*([^\n]+)", prompt_text)
     focus = focus_match.group(1).strip() if focus_match else f"{stage}_critic_{critic_number}"
+    digest_match = re.search(r"Review input digest:\s*`([0-9a-f]{64})`", prompt_text)
+    if digest_match is None:
+        raise RuntimeError(f"{stage} critic_{critic_number} prompt is missing review input digest")
+    digest = digest_match.group(1)
+    status = "changes_requested" if blocking_findings else "passed"
+    finding_lines = (
+        [f"- {finding}" for finding in blocking_findings]
+        if blocking_findings
+        else ["- blocking: none"]
+    )
     return "\n".join(
         [
             f"# Critic {critic_number}",
             "",
+            f"- critic_id: critic_{critic_number}",
+            f"- review_input_digest: {digest}",
             f"- critic_focus: {focus}",
-            "- status: passed",
+            f"- status: {status}",
             "",
             "## Root Cause Review",
-            f"この frontend-create run は {stage} の canonical source artifacts を読み、human approval で止まらずに機械的な gate と handoff artifact を生成している。",
+            f"この frontend-create run は {stage} の固定済み source revision を対象に deterministic preflight を実行した。",
             "",
             "## Findings",
-            "- blocking: none",
-            "- root_cause: no blocking issue found in the current authored artifact set",
-            "- downstream_impact: next non-human stage can continue",
-            "- acceptance_condition: verifier and stage-specific aggregate markers remain satisfied",
+            *finding_lines,
+            "- root_cause: current source revision and stage contract were evaluated instead of assuming approval",
+            "- downstream_impact: downstream semantic agents may continue only when this preflight and their own review pass",
+            "- acceptance_condition: source digest remains current and all deterministic plus semantic gates pass",
             "",
         ]
     )
 
 
-def _aggregate_status_for_stage(stage: str) -> str:
-    return "passed"
+def _authoring_review_blocking_findings(run_dir: Path, stage: str) -> tuple[str, ...]:
+    """Evaluate current artifacts before any critic is allowed to claim passed."""
+
+    if stage == "visual_value":
+        result, _updates = check_visual_value(
+            run_dir,
+            "standard",
+            forbid_production_artifacts=False,
+        )
+    elif stage == "script":
+        result, _updates = check_script_single(run_dir, "standard")
+    else:
+        result, _updates = check_manifest_single(
+            run_dir,
+            "standard",
+            "immersive",
+            require_review_artifacts=False,
+        )
+    findings: list[str] = []
+    for check in result.get("checks", []):
+        if not isinstance(check, dict) or check.get("passed") is not False:
+            continue
+        check_id = str(check.get("id") or "")
+        # This function is the preflight that authors the p400 review-loop
+        # outputs. Requiring those outputs (or later semantic reports) here is
+        # circular; their independent gates run after materialization.
+        if check_id in {"p400.review_report_integrity", "p400.review_loop_integrity"}:
+            continue
+        if check_id.endswith(".semantic_review_subagent_passed"):
+            continue
+        findings.append(
+            f"{check_id}: {check.get('message') or check.get('description') or 'failed'}"
+        )
+    if stage == "asset":
+        scope_path = run_dir / "logs/review/semantic/asset_plan.scope.json"
+        try:
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            findings.append(f"asset_plan.semantic_scope: {exc}")
+        else:
+            if not isinstance(scope.get("entry_count"), int) or int(scope["entry_count"]) < 1:
+                findings.append("asset_plan.semantic_scope: no review entries")
+    return tuple(findings)
 
 
 def _final_review_text(stage: str, aggregate_text: str) -> str:
@@ -10856,11 +11007,23 @@ def _write_review_artifacts(run_dir: Path) -> None:
                 }
             )
             continue
+        snapshot_issues = review_input_snapshot_issues(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+        )
+        blocking_findings = tuple(snapshot_issues) + _authoring_review_blocking_findings(run_dir, stage)
+        expected_digest = review_input_digest(run_dir=run_dir, stage=stage, round_number=1)
         critic_reports: list[str] = []
         for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
             prompt_path = run_dir / critic_prompt_relpath(stage, 1, critic_number)
             prompt_text = prompt_path.read_text(encoding="utf-8")
-            critic_text = _review_loop_critic_report(stage, critic_number, prompt_text)
+            critic_text = _review_loop_critic_report(
+                stage,
+                critic_number,
+                prompt_text,
+                blocking_findings=blocking_findings,
+            )
             (run_dir / critic_relpath(stage, 1, critic_number)).write_text(critic_text, encoding="utf-8")
             critic_reports.append(critic_text)
 
@@ -10868,7 +11031,7 @@ def _write_review_artifacts(run_dir: Path) -> None:
             stage=stage,
             round_number=1,
             critic_reports=critic_reports,
-            status=_aggregate_status_for_stage(stage),
+            expected_input_digest=expected_digest,
         )
         if stage in {"scene_set", "scene_detail"}:
             aggregate_text = aggregate_text.replace("maximal_meaningful_stop_condition: TODO", "maximal_meaningful_stop_condition: satisfied")
@@ -10896,12 +11059,16 @@ def _write_review_artifacts(run_dir: Path) -> None:
         aggregate_path = run_dir / aggregated_review_relpath(stage, 1)
         aggregate_path.write_text(aggregate_text, encoding="utf-8")
         final_report = REVIEW_LOOP_SPECS[stage].final_report
-        (run_dir / final_report).write_text(_final_review_text(stage, aggregate_text), encoding="utf-8")
+        aggregate_passed = bool(re.search(r"(?m)^- status:\s*passed\s*$", aggregate_text))
+        (run_dir / final_report).write_text(
+            _final_review_text(stage, aggregate_text) if aggregate_passed else aggregate_text,
+            encoding="utf-8",
+        )
         state_updates.update(
             {
-                f"eval.{stage}.loop.status": "passed",
+                f"eval.{stage}.loop.status": "passed" if aggregate_passed else "changes_requested",
                 f"eval.{stage}.loop.current_round": "1",
-                f"eval.{stage}.loop.round_01.status": "passed",
+                f"eval.{stage}.loop.round_01.status": "passed" if aggregate_passed else "changes_requested",
                 f"eval.{stage}.loop.round_01.aggregated_review": str(aggregated_review_relpath(stage, 1)),
             }
         )
@@ -11147,6 +11314,7 @@ def materialize_run(
         {
             "timestamp": now,
             "topic": topic,
+            "status": "AUTHORING",
             "runtime.stage": "research_authoring",
             "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
@@ -11161,6 +11329,12 @@ def materialize_run(
             "slot.p130.status": "pending",
             "slot.p230.status": "pending",
             "slot.p420.status": "pending",
+            "slot.p650.status": "pending",
+            "slot.p660.status": "pending",
+            "slot.p670.status": "pending",
+            "slot.p680.status": "pending",
+            "review.image_prompt.request_freeze.status": "draft",
+            "review.image_prompt.request_freeze.invalidated_by": "new_materialization",
         },
     )
     (run_dir / "research.md").write_text(_md_yaml(f"リサーチ（{profile['topic_label']}）", _build_research(topic, source, now, profile)), encoding="utf-8")
@@ -11289,6 +11463,7 @@ def materialize_run(
     asset_inventory, asset_plan = _build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
     (run_dir / "asset_inventory.md").write_text(_md_yaml("Asset Inventory", asset_inventory), encoding="utf-8")
     (run_dir / "asset_plan.md").write_text(_md_yaml("Asset Plan", asset_plan), encoding="utf-8")
+    _prepare_authoring_grounding(run_dir)
     _write_review_artifacts(run_dir)
     _require_fresh_p400_readiness(run_dir)
     _write_asset_request_files(run_dir, asset_plan, profile)
@@ -11367,7 +11542,7 @@ def materialize_run(
     append_state_snapshot(run_dir / "state.txt", state_updates)
 
 
-def prepare_grounding(run_dir: Path) -> None:
+def _prepare_authoring_grounding(run_dir: Path) -> None:
     for stage in ("research", "story", "visual_value", "script", "manifest"):
         subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "prepare-stage-context.py"), "--stage", stage, "--run-dir", str(run_dir), "--flow", "immersive"],
@@ -11376,6 +11551,10 @@ def prepare_grounding(run_dir: Path) -> None:
             capture_output=True,
             text=True,
         )
+
+
+def prepare_grounding(run_dir: Path) -> None:
+    _prepare_authoring_grounding(run_dir)
     subprocess.run(
         [
             sys.executable,
@@ -11411,8 +11590,14 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
     if stop_target == "p650":
         for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
             await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage=stage)
+            result = check_semantic_review(run_dir, stage)
+            if not result.passed:
+                raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
         await image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset")
         await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage="image_prompt")
+        result = check_semantic_review(run_dir, "image_prompt")
+        if not result.passed:
+            raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
     else:
         await image_gen_app._generate_create_images("toc-immersive-frontend-run", run_id=run_id)
 
@@ -11432,12 +11617,18 @@ async def run_pre_media_semantic_pipeline(
             run_dir=run_dir,
             stage=stage,
         )
+        result = check_semantic_review(run_dir, stage)
+        if not result.passed:
+            raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
     await image_gen_app._run_semantic_review(
         "toc-immersive-frontend-run",
         run_dir=run_dir,
         stage="image_prompt",
         image_prompt_provider_ready=image_prompt_provider_ready,
     )
+    result = check_semantic_review(run_dir, "image_prompt")
+    if not result.passed:
+        raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
 
 
 def validate(run_dir: Path, stop_target: str) -> None:
@@ -11471,35 +11662,36 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    run_dir = Path(args.run_dir)
+    run_dir = _validated_fresh_cli_run_dir(args.run_dir)
     source = args.source.strip() or args.topic
     materialize_stop_target = "p650" if args.materialize_only and args.stop_target == "p680" else args.stop_target
-    materialize_run(
-        args.topic,
-        source,
-        run_dir,
-        materialize_stop_target,
-        target_duration_seconds=target_duration_seconds,
-        foundation_review_runner=_run_foundation_semantic_review,
-    )
-    prepare_grounding(run_dir)
-    if args.materialize_only:
-        asyncio.run(
-            run_pre_media_semantic_pipeline(
-                run_dir,
-                image_prompt_provider_ready=False,
-            )
+    with _run_materialization_lock(run_dir):
+        materialize_run(
+            args.topic,
+            source,
+            run_dir,
+            materialize_stop_target,
+            target_duration_seconds=target_duration_seconds,
+            foundation_review_runner=_run_foundation_semantic_review,
         )
-    else:
-        asyncio.run(generate_images(run_dir, args.stop_target))
-    write_run_index(run_dir)
-    if not args.skip_validation:
+        prepare_grounding(run_dir)
         if args.materialize_only:
-            from server import image_gen_app
-
-            image_gen_app._validate_materialized_p650_run(_run_id_from_dir(run_dir))
+            asyncio.run(
+                run_pre_media_semantic_pipeline(
+                    run_dir,
+                    image_prompt_provider_ready=False,
+                )
+            )
         else:
-            validate(run_dir, args.stop_target)
+            asyncio.run(generate_images(run_dir, args.stop_target))
+        write_run_index(run_dir)
+        if not args.skip_validation:
+            if args.materialize_only:
+                from server import image_gen_app
+
+                image_gen_app._validate_materialized_p650_run(_run_id_from_dir(run_dir))
+            else:
+                validate(run_dir, args.stop_target)
     print(f"Run dir: {run_dir.resolve()}")
     print(f"Stop target: {args.stop_target}")
 

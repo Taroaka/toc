@@ -564,12 +564,13 @@ p400 の内部 slot:
 - `p410`: scene completion gate
   - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
   - semantic QA: 各 scene は、単なる段落や雰囲気ではなく、上流 story のどの意味を受け取り、何を変化させ、次 scene に何を渡すかを説明できる必要がある
-  - 各 scene は `importance`, `target_duration_seconds`, `estimated_duration_seconds`, 次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、`story_specificity`、および `coverage_review` を持つ
+  - 各 scene は次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、`story_specificity`、および `coverage_review` を持つ
+  - scene-level の `importance`, `target_duration_seconds`, `estimated_duration_seconds` は optional / advisory な計画注釈とする。欠落だけを blocking finding にせず、値がある場合も cut 数や coverage floor の根拠にしない
   - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
   - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
   - `p410b` の stop condition は、これ以上 scene を増やしても既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持てず、cut 設計を厚くした方が品質が上がると説明できる状態である
   - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
-  - 具体 reviewer は 5-20 分程度の目標動画尺、全体 scene 数、scene 重要度から必要尺を見積もるが、尺だけから cut 責務や cut 数を追加しない。cut 追加は既存 cut と異なる semantic obligation / event beat がある場合に限る
+  - 具体 reviewer は 5-20 分程度の全体目標尺、semantic density、provider capability から必要尺を見積もる。scene-level の importance / target / estimated duration がある場合は advisory input として使えるが、欠落だけを blocking finding にせず、尺だけから cut 責務や cut 数を追加しない。cut 追加は既存 cut と異なる semantic obligation / event beat がある場合に限る
   - cut duration は選択 provider / model / input mode の capability と可視責務の密度で検査し、duration の割り算を cut-count floor にしない
   - 具体 reviewer は、その scene で見せるべき内容が cut に全て載っているかを確認する
   - 次 scene 接続 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する。handoff が既存と異なる distinct semantic obligation の場合だけ cut 追加を要求し、同じ責務なら最終 cut の増厚を要求する
@@ -1104,6 +1105,18 @@ p500 slot contract:
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
 - `p570`: 生成済み asset の主対象が asset category と story purpose に一致するかは、deterministic output validator と frontend human review で確認する。`asset_output` semantic review stage は持たない。
+
+p500 resume contract:
+
+- frontend create 済み run の前半を Codex で修正して再実行する場合、新しい run を作らず同じ run directory を使える。
+- resume は `state.txt` の履歴を書き換える rollback ではない。p500 以降の旧成果物を `logs/resume/p500/<checkpoint>/artifacts/` へ退避し、後続 state を新しい append-only snapshot で `pending` / `stale` にする pseudo rollback である。
+- `research.md`、`story.md`、`visual_value.md`、`script.md`、`video_manifest.md` と p400 以前の review/grounding artifact は保持する。
+- frontend create の `video_manifest.md` は p450 時点で production execution 枠を含むため、`manifest_phase: production` だけを理由に p600 artifact として退避しない。旧 request snapshot、semantic report、実在 media、生成/review state を無効化して再 materialize する。
+- reset 前に current `script.md` / `video_manifest.md` から review artifact を除く deterministic `eval.p400_readiness.status=approved` を再計算する。Codex fix で旧 review digest が stale になることは許容するが、reset 後に p400 review artifact を再 materialize し、request/provider 実行前に review integrity を含む完全な p400 readiness を通す。
+- reset は `.locks/create_resume.lock` を frontend create/resume および single/bulk image generation と共有し、同一 run の並行 mutation を禁止する。disk 上の bulk job が `queued|running` の場合も reset しない。
+- apply 前の dry-run、退避 checkpoint、upstream digest、移動対象一覧を必須とする。apply は dry-run の `checkpoint_id` と plan digest token に一致しなければ fail closed とする。unknown artifact は自動退避しない。
+- reset 後は p510 から semantic QA と request freeze を再実行する。過去の `passed` report や frozen snapshot を再利用してはならない。
+- slot は実処理より先に完了扱いにしない。asset request の provider submission が返った後にだけ `p550=done` / `p560=done` とし、asset continuity gate が通れば `p570=done`、frontend 確認が必要なら `p570=awaiting_approval` とする。`--materialize-only` は provider を呼ばないため `p560` / `p570` を `pending` のまま保持し、materialized p650 validator もこの2 slot の未実行を明示的に許容する。
 
 `asset_inventory.md` の最低限:
 
@@ -1727,7 +1740,8 @@ audio:
       schema_version: "narration_contract_v2"
       story_role:
         narrative_position: "opening|middle|ending"
-        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+        # authored cut に由来する任意の非空 key。以下は作品固有の例。
+        cut_function: "decision"
         voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
         audience_state_before: ""
         audience_state_after: ""
@@ -2292,7 +2306,8 @@ cut_contract:
     event_facts_not_to_invent: []
     allowed_reveal_info_ids: []
     forbidden_reveal_info_ids: []
-  cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff|custom"
+  # 任意の非空 key。setup / pressure / turn / payoff / reaction / handoff / custom は候補例にすぎない。
+  cut_function: "decision"
   intent_budget:
     primary_intent: ""
     secondary_intents_allowed: []
@@ -2397,7 +2412,8 @@ cut_contract:
     speakable_or_silent: true
     story_role:
       narrative_position: "opening|middle|ending"
-      cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
+      # authored cut に由来する任意の非空 key。
+      cut_function: "decision"
       voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
       audience_state_before: ""
       audience_state_after: ""

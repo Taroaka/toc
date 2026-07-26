@@ -1,6 +1,6 @@
 # ToC marketing site / LP content contract
 
-更新日: 2026-07-19
+更新日: 2026-07-25
 
 Persona、message、objection、proof の詳細契約は `marketing/LP/personas.md` を正本とする。このファイルでは page section と公開 copy の境界だけを定義する。
 
@@ -11,6 +11,9 @@ Persona、message、objection、proof の詳細契約は `marketing/LP/personas.
 - emotional promise: `作りたいと思った瞬間を、完成まで止めない。`
 - transformation: `速いから試せる。簡単だから続けられる。続けられるから副業やブランドへ育てられる。`
 - proof policy: `圧倒的` は比較可能な実測がある場合だけ公開する
+- offer: 動画作成システム一式を顧客へ納品する
+- recurring fee: 納品後の ToC 月額料金は 0 円
+- variable cost: 外部 AI / cloud API 料金は別途、使用量に応じて発生
 
 ## 1. Common home
 
@@ -37,11 +40,18 @@ Fallback before evidence:
 Subcopy:
 
 ```text
-テーマを伝えるだけで、企画、台本、映像、ナレーション、編集まで。
-ToC は、複雑な動画制作を一つの流れに変えます。
+企画、台本、映像、音声、編集を、ひとつの制作フローへ。
+ToC は、あなたが動画を作り続けるためのシステム一式を納品します。
 ```
 
-Primary CTA: `自分なら何を作れるか見る`
+Offer note:
+
+```text
+納品後のToC月額 0円
+※外部AI API料金は別途・使用量に応じて発生
+```
+
+Primary CTA: `自分の用途で導入できるか相談する`
 
 Secondary CTA: `制作事例を見る`
 
@@ -55,6 +65,29 @@ Hero visual:
   -> visual / voice
   -> completed timeline
 ```
+
+### Information value
+
+Heading:
+
+```text
+説明するだけでは伝わりにくいものを、
+見ればわかる形へ。
+```
+
+Body:
+
+```text
+知識の構造。商品の使い方。考え方の違い。変化の順序。
+言葉・映像・音声を対応させ、相手が理解し、判断できる情報へ変えます。
+```
+
+Show four transformations:
+
+- 抽象的な知識 -> 図像と動き
+- 手順や因果 -> 時間軸
+- 主張 -> 実演と比較
+- 一度の説明 -> 検索・共有・再利用できる動画資産
 
 ### Persona split
 
@@ -152,11 +185,25 @@ ToC は制作工程を進めます。
 何を伝えるか、どこまで公開するか、品質を受け入れるかは人間が決めます。
 ```
 
+### Delivery model
+
+Heading:
+
+`借り続ける動画サービスではなく、作り続けるためのシステムを手元へ。`
+
+Required facts:
+
+- システム一式を顧客環境へ納品
+- 導入費用は個別見積り
+- 納品後の ToC 月額料金は 0 円
+- 外部 API 料金は別途、使用量に応じて発生
+- 保守、更新、運用代行が必要な場合は別途契約
+
 ### Final CTA
 
 Heading: `あなたなら、何を動画にしますか？`
 
-Primary CTA: `テーマを一行で入れる`
+Primary CTA: `自分の用途で導入できるか相談する`
 
 ## 2. Side-business LP
 
@@ -198,7 +245,8 @@ Primary CTA: `副業の最初の1本を作る`
 4. time / effort comparison with evidence
 5. what ToC does / what the user decides
 6. realistic limits: no revenue guarantee, quality needs judgment, provider costs may apply
-7. CTA and native form
+7. system delivery, no ToC monthly fee, external API cost
+8. CTA and native form
 
 ### Objection handling
 
@@ -247,7 +295,8 @@ Primary CTA: `自分のブランド動画を設計する`
 4. personal-brand examples
 5. consistency and human approval
 6. comparison with one-off outsourcing and fragmented self-production
-7. CTA and native form
+7. system delivery, no ToC monthly fee, external API cost
+8. CTA and native form
 
 ### Objection handling
 

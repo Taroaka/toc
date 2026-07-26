@@ -10,7 +10,7 @@
 
 - p400 では完成 image prompt を書かない。`first_frame_brief` と `visual_beat` に留める。
 - 映像内に文字は存在しない（字幕/看板/刻印/ロゴ/透かし禁止）。
-- `visual_value.md` に基づく探索ブロックは、**4-6カット / 各4秒前後 / ナレーションなし** で設計してよい。
+- `visual_value.md` に基づく探索ブロックは、可視化必須の authored beat と distinct semantic obligation から cut 数と各尺を導き、ナレーションなしで設計してよい。固定 cut 数・固定秒数は使わない。
 - 各カットの画像は毎回新規生成しなくてよい。必要なのは、同じ場所/物体/人物状態をまたぐ continuity anchor を作るか再利用するかの判断。
 
 ---
@@ -23,6 +23,7 @@
 - experience: `cinematic_story|cloud_island_walk|...`
 - source_script: `output/<topic>_<timestamp>/script.md`
 - source_visual_value: `output/<topic>_<timestamp>/visual_value.md`
+- story_time: `<story.time の open string。古典は時代名、ユーザー創作は空文字可>`
 - rule: `scene_conte は script.md を分解した橋渡し資料。新しい物語情報を足さない`
 
 ---
@@ -31,11 +32,11 @@
 
 - scene_id: `<int>`
 - scene_name: `<短い名前>`
-- importance: `low|medium|high|critical`
-- target_duration_seconds: `<秒>`
+- importance: `<optional: low|medium|high|critical。欠落だけでは非blocking>`
+- target_duration_seconds: `<optional: 計画用の秒数。cut floorには使わない>`
 - role_in_film: `<threshold / temptation / ordeal / reveal / return / aftertaste など>`
 - dramatic_question: `<この scene の間、観客が追う問い>`
-- scene_spine: `<setup → pressure → turn → payoff → handoff の1文要約>`
+- scene_spine: `<authored event の意味上の流れを1文で要約。固定 function 列は要求しない>`
 - value_shift:
   - from: `<開始時の価値/感情/関係>`
   - to: `<終了時の価値/感情/関係>`
@@ -65,7 +66,13 @@
 ## 2) 世界・連続性（文字なしで伝える）
 
 - location: `<場所>`
-- time_weather: `<時間帯/天候>`
+- time_of_day: `<朝|昼|夕方|夜|作品固有の時間帯を表す非空文字列>`
+- time_of_day_visual_basis:
+  - sky_brightness: `<空と環境の明るさ>`
+  - light_sources: `<自然光・人工光の種類と向き>`
+  - shadows: `<影の長さ・硬さ・向き>`
+  - color_temperature: `<時間帯に整合する色温度>`
+- weather: `<天候。時間帯とは別に保持>`
 - screen_geography: `<前景/中景/背景、入口/出口、奥行き、進行方向>`
 - continuity_from_prev: `<前カット/前シーンから必ず一致させるアンカー>`
 - continuity_to_next: `<次へ繋ぐアンカー>`

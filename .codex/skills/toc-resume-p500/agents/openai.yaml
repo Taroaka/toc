@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToC P500 Resume"
+  short_description: "既存のフロント作成runをp400まで保持し、p500以降を安全に再生成します。"
+  default_prompt: "Use $toc-resume-p500 to safely resume this existing ToC frontend-created run from p500 through the requested stop target."

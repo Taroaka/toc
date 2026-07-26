@@ -795,7 +795,7 @@ B-roll（キャラを映さない）sceneは `character_ids: []` を明示し、
 
 ### 3.4 Ryugu exploratory block（Otohime 登場前の視覚報酬）
 
-`ryugu_palace` の内部を見せる場面では、乙姫をすぐに登場させず、まず **4-6 cuts / 1 cut = 約4秒** の探索ブロックとして設計してよい。
+`ryugu_palace` の内部を見せる場面では、乙姫をすぐに登場させず、承認済みの authored beat と distinct semantic obligation から探索ブロックを設計してよい。件数と各 cut の尺は、その場所で何を発見させるかと provider capability から導き、固定値にはしない。
 
 このブロックの目的は次の通り。
 
@@ -807,7 +807,7 @@ B-roll（キャラを映さない）sceneは `character_ids: []` を明示し、
 
 - `character_ids: []` を基本にし、乙姫は出さない。
 - `object_ids: ["ryugu_palace"]` を使い、舞台装置を固定する。
-- 各 cut は `4` 秒前後、ナレーションなし。
+- 各 cut は一つの発見または視覚責務を担い、その責務を読める尺にする。ナレーションは入れない。
 - 最後の cut は「乙姫が現れる直前の門/回廊/玉座の間の入口」で止める。
 
 竜宮城探索ブロックの v2 IR は、次のように選ぶ。

@@ -104,17 +104,14 @@ generator の既定参照順:
 基本:
 - **cutは映像編集単位、narration spanは文章・演技単位**として分離する
 - **1 spanは1つ以上のcutをまたいでよい**。`1 cut = 1 narration` は互換defaultに留める
-- **メインカット**（最低1つ）: **5–15 秒**
-- **サブカット**（任意 / 複数可）: **3–15 秒**
-  - 3秒のcutへ独立した短文を必ず置かず、前後spanの継続または無音を使う
-  - 複数カットに分割できる場合のみ、短尺（3–4秒）を **サブカット**として選択できる
-- 例外:
-  - `visual_value.md` に基づく **視覚報酬カット** は、**4秒固定 / ナレーションなし** を許可する
-  - この場合は `audio.narration.tool: "silent"` と `audio.narration.text: ""` を使う
+- cut duration は viewer-facing intent を読み取れる長さと、選択 provider / model / input mode の capability から導く。メイン/サブの固定秒数は設けない
+- 短いcutへ独立した短文を必ず置かず、前後spanの継続または意図された無音を使う
+- `visual_value.md` に基づく視覚報酬 cut も固定秒数にせず、ナレーションなしの場合は `audio.narration.tool: "silent"` と `audio.narration.text: ""` を使う
 
 分割判断:
-- 15秒を超えそうなら、役割が近いカットを 2 本以上に分割する
-- 15秒以下でも、scene と narration の両方が揃った時点で「分割した方が映像として自然か」を都度判断する
+- provider の単一 clip 上限を超える場合は、同じ authored cut の semantic identity を保つ render unit / provider clip 分割を先に使う
+- 新しい authored cut は、未被覆の required beat または既存 one-intent cut に載せられない distinct semantic obligation がある場合だけ追加する。同じ責務のまま秒数だけを理由に cut を増やさない
+- scene と narration の両方が揃った時点で、semantic boundary と編集上の自然さを再確認する
 
 運用（例）:
 1) `video_manifest.md` を cuts 前提で書く（`scenes[].cuts[]` でも、sceneをカットとして扱ってもよい）
@@ -413,7 +410,7 @@ ffmpeg -i sceneXX_compiled.mp4 \
 1. まず自然長で TTS を生成する
 2. `ffprobe` 等で音声の実秒を測る
 3. cut の役割に応じた余白を足して `video_generation.duration_seconds` を決める
-4. その結果が `main 5–15秒 / sub 3–15秒` を外れる場合だけ、原稿短縮または cut 再設計を行う
+4. その結果が選択 provider / model / input mode の capability を外れる場合は、まず原稿短縮または同一 authored cut 内の render unit / provider clip 分割で調整する。新しい authored cut への再設計は、未被覆の required beat または既存 one-intent cut に載せられない distinct semantic obligation がある場合だけ行う
 
 補足:
 - 聞き比べテストなどで `--duration-seconds` を使って音声を固定長にそろえることはあるが、これは比較用の例外運用であり、実制作の標準ではない

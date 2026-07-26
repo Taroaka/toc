@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -259,6 +260,30 @@ class TestSemanticPackFoundation(unittest.TestCase):
                 self.assertEqual(entry_count, 1)
                 self.assertEqual(scope["entry_ids"], [f"{stage}:foundation"])
                 self.assertEqual(scope["source_artifacts"], expected_sources)
+                self.assertEqual(scope["semantic_review_input_schema"], "semantic_review_input_v1")
+                self.assertEqual(
+                    scope["source_artifact_digests"],
+                    [
+                        {
+                            "path": source,
+                            "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
+                        }
+                        for source in expected_sources
+                    ],
+                )
+                self.assertEqual(
+                    scope["collection_sha256"],
+                    hashlib.sha256(_collection.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(
+                    scope["prompt_sha256"],
+                    hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+                )
+                self.assertRegex(scope["semantic_review_input_digest"], r"^sha256:[0-9a-f]{64}$")
+                self.assertIn(
+                    f"semantic_review_input_digest: `{scope['semantic_review_input_digest']}`",
+                    report,
+                )
                 self.assertIn("Do not browse or validate external URLs, editions, translations, rights, or factual fidelity", prompt)
                 self.assertIn("timeline", prompt)
                 self.assertIn("characters", prompt)
@@ -269,8 +294,11 @@ class TestSemanticPackFoundation(unittest.TestCase):
                     self.assertIn("sky brightness", prompt)
                     self.assertIn("scene_location_route_statuses", prompt)
                     self.assertIn("scene_location_route_incomplete", prompt)
-                self.assertIn("MUST edit exactly one file", prompt)
-                self.assertIn("Do not return the verdict only in chat", prompt)
+                self.assertIn("workspace is read-only", prompt)
+                self.assertIn(
+                    "Return the complete machine-readable report as your final response",
+                    prompt,
+                )
                 for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]:
                     self.assertIn(f"`{criterion_id}`", prompt)
                 self.assertIn("criteria_results_json: []", report)

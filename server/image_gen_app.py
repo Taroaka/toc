@@ -156,11 +156,18 @@ from toc.runtime_locks import (
 )
 from toc.semantic_review import (
     IMAGE_PROMPT_JUDGMENT_REPORT,
+    SEMANTIC_REVIEW_INPUT_SCHEMA,
     SemanticReviewStatus,
     check_semantic_review,
     check_image_prompt_judgment,
     parse_judgment_report_status,
     review_status_to_state,
+    safe_semantic_write_text,
+    semantic_report_required_field_issues,
+    semantic_review_file_sha256,
+    semantic_review_input_digest,
+    semantic_review_sources_are_current,
+    semantic_review_scope_binding_sha256,
     semantic_state_updates,
     semantic_review_relpaths,
 )
@@ -2355,6 +2362,17 @@ def _validate_p650_run_core(
         raise RuntimeError(
             "ToC run did not reach p650: image prompt request freeze state is missing"
         )
+    if (
+        not require_provider_ready_freeze
+        and freeze_status == "reviewed_draft"
+        and state.get(
+            "review.image_prompt.request_freeze.reviewed_request_revision"
+        )
+        != image_prompt_request_revision
+    ):
+        raise RuntimeError(
+            "ToC run did not reach p650: reviewed image prompt request revision is stale"
+        )
     if state.get("runtime.scaffold.content_status") == "placeholder":
         raise RuntimeError("ToC run did not reach p650: runtime scaffold content is still placeholder")
     scaffold_keys = [key for key, value in state.items() if key.startswith("artifact.") and value == "scaffold"]
@@ -2369,8 +2387,8 @@ def _validate_p650_run_core(
         if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
         and not (
             not require_provider_ready_freeze
-            and slot == "p650"
-            and (state.get("slot.p650.status") or "").lower() == "pending"
+            and slot in {"p560", "p570", "p650"}
+            and (state.get(f"slot.{slot}.status") or "").lower() == "pending"
         )
     ]
     if incomplete_slots:
@@ -10410,7 +10428,11 @@ def _project_image_prompt_reviews_to_p630_p640(
     # The legacy judgment path is still part of the p640 audit surface.  Mirror
     # the real semantic report rather than leaving its materialization template
     # in a misleading pending state.
-    _atomic_write_text(run_dir / "logs/review/image_prompt.judgment.md", semantic_text)
+    _write_semantic_artifact_text(
+        run_dir,
+        run_dir / "logs/review/image_prompt.judgment.md",
+        semantic_text,
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -10448,9 +10470,42 @@ def _project_image_prompt_reviews_to_p630_p640(
     )
 
 
+def _assert_image_prompt_request_revision_unchanged(
+    run_dir: Path,
+    *,
+    expected_request_revision: str,
+    require_resolved_references: bool,
+) -> str:
+    """Fail when the request reviewed by the agent is no longer current."""
+
+    expected = str(expected_request_revision or "").strip()
+    if not expected:
+        raise RuntimeError(
+            "image prompt semantic review is missing its expected request revision"
+        )
+    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+    current = _validate_image_prompt_request_revision(
+        run_dir,
+        manifest_data,
+        require_resolved_references=require_resolved_references,
+        require_compiled_v2=True,
+    )
+    if current != expected:
+        raise RuntimeError(
+            "image prompt request revision changed during semantic review "
+            f"(expected={expected}, current={current})"
+        )
+    return current
+
+
 def _mark_image_prompt_draft_reviewed(run_dir: Path, *, request_revision: str) -> None:
     """Record semantic approval without claiming provider-ready reference binding."""
 
+    request_revision = _assert_image_prompt_request_revision_unchanged(
+        run_dir,
+        expected_request_revision=request_revision,
+        require_resolved_references=False,
+    )
     deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
     if deterministic_errors:
         raise RuntimeError(
@@ -10462,6 +10517,10 @@ def _mark_image_prompt_draft_reviewed(run_dir: Path, *, request_revision: str) -
         raise RuntimeError(
             "draft image prompt semantic review is not passed: "
             + "; ".join(semantic_result.errors)
+        )
+    if not _semantic_review_report_sources_are_current(run_dir, "image_prompt"):
+        raise RuntimeError(
+            "draft image prompt semantic review is stale for the request revision"
         )
     _project_image_prompt_reviews_to_p630_p640(
         run_dir,
@@ -10484,13 +10543,15 @@ def _mark_image_prompt_draft_reviewed(run_dir: Path, *, request_revision: str) -
     )
 
 
-def _mark_image_prompt_request_freeze_done(run_dir: Path) -> None:
-    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
-    request_revision = _validate_image_prompt_request_revision(
+def _mark_image_prompt_request_freeze_done(
+    run_dir: Path,
+    *,
+    expected_request_revision: str,
+) -> None:
+    request_revision = _assert_image_prompt_request_revision_unchanged(
         run_dir,
-        manifest_data,
+        expected_request_revision=expected_request_revision,
         require_resolved_references=True,
-        require_compiled_v2=True,
     )
     deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
     if deterministic_errors:
@@ -10928,6 +10989,7 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
 
 
 async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, item: Any) -> None:
+    run_dir = run_dir.resolve()
     if not getattr(item, "output", None):
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -11035,7 +11097,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
         },
     )
     client = create_codex_app_server_client(
-        cwd=ROOT,
+        cwd=run_dir,
         scrub_sensitive_env=True,
         require_chatgpt_account=True,
         require_chatgpt_pro=True,
@@ -11118,7 +11180,12 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                         error=f"{type(exc).__name__}: {exc}",
                     )
                     await client.stop()
-                    client = create_codex_app_server_client(cwd=ROOT)
+                    client = create_codex_app_server_client(
+                        cwd=run_dir,
+                        scrub_sensitive_env=True,
+                        require_chatgpt_account=True,
+                        require_chatgpt_pro=True,
+                    )
                     await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         if result.saved_path is None:
             raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
@@ -11453,6 +11520,34 @@ def _validate_p560_asset_quality(run_dir: Path) -> None:
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"p560 bootstrap asset visual gate failed: {detail}")
+
+
+def _mark_asset_generation_handoff(
+    run_dir: Path,
+    *,
+    asset_quality_passed: bool,
+) -> None:
+    """Record p500 completion only after reusable asset generation returns."""
+
+    continuity_status = "done" if asset_quality_passed else "awaiting_approval"
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "slot.p550.status": "done",
+            "slot.p550.note": "frozen asset requests were submitted to the image provider",
+            "slot.p560.status": "done",
+            "slot.p560.note": "reusable asset image generation completed",
+            "slot.p570.status": continuity_status,
+            "slot.p570.note": (
+                "asset continuity and visual quality gate passed"
+                if asset_quality_passed
+                else "generated assets require frontend continuity review"
+            ),
+            "stage.asset.status": (
+                "done" if asset_quality_passed else "awaiting_approval"
+            ),
+        },
+    )
 
 
 def _bootstrap_asset_items(run_dir: Path) -> list[Any]:
@@ -11898,6 +11993,11 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
         if failure:
             semantic_failures.append(failure)
             failed_semantic_stages.add(stage)
+    if semantic_failures:
+        raise RuntimeError(
+            "semantic review failed before media generation: "
+            + " | ".join(semantic_failures)
+        )
     asset_quality_passed = False
     last_asset_gate_error = ""
     for attempt in range(1, BOOTSTRAP_ASSET_MAX_ATTEMPTS + 1):
@@ -11958,6 +12058,10 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                 },
             )
             break
+    _mark_asset_generation_handoff(
+        run_dir,
+        asset_quality_passed=asset_quality_passed,
+    )
     await _set_create_job(job_id, {"message": "画像プロンプトをsemantic QA中"})
     failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="image_prompt")
     if failure:
@@ -12273,7 +12377,10 @@ async def _run_semantic_review(
     if reusable_result is not None:
         _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
         if stage == "image_prompt" and image_prompt_provider_ready:
-            _mark_image_prompt_request_freeze_done(run_dir)
+            _mark_image_prompt_request_freeze_done(
+                run_dir,
+                expected_request_revision=image_prompt_request_revision,
+            )
         elif stage == "image_prompt":
             _mark_image_prompt_draft_reviewed(
                 run_dir,
@@ -12321,6 +12428,12 @@ async def _run_semantic_review(
             raise CodexAppServerTransportError(
                 f"{stage} semantic review timed out after no observable progress"
             ) from exc
+        if stage == "image_prompt":
+            _assert_image_prompt_request_revision_unchanged(
+                run_dir,
+                expected_request_revision=image_prompt_request_revision,
+                require_resolved_references=image_prompt_provider_ready,
+            )
         last_result = result
         if result.passed:
             append_state_snapshot(
@@ -12328,7 +12441,10 @@ async def _run_semantic_review(
                 semantic_loop_state_updates(stage, status="passed", attempt=attempt, max_attempts=attempts, error_count=0),
             )
             if stage == "image_prompt" and image_prompt_provider_ready:
-                _mark_image_prompt_request_freeze_done(run_dir)
+                _mark_image_prompt_request_freeze_done(
+                    run_dir,
+                    expected_request_revision=image_prompt_request_revision,
+                )
             elif stage == "image_prompt":
                 _mark_image_prompt_draft_reviewed(
                     run_dir,
@@ -12507,28 +12623,7 @@ def _reusable_passed_semantic_review(run_dir: Path, stage: str) -> SemanticRevie
 
 
 def _semantic_review_report_sources_are_current(run_dir: Path, stage: str) -> bool:
-    relpaths = semantic_review_relpaths(stage)
-    scope_path = run_dir / relpaths["scope"]
-    report_path = run_dir / relpaths["report"]
-    if not scope_path.exists() or not report_path.exists():
-        return False
-    try:
-        scope = json.loads(scope_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    source_artifacts = scope.get("source_artifacts")
-    if not isinstance(source_artifacts, list) or not source_artifacts:
-        return False
-    report_mtime_ns = report_path.stat().st_mtime_ns
-    for raw_rel in source_artifacts:
-        if not isinstance(raw_rel, str) or not raw_rel.strip():
-            return False
-        source_path = run_dir / raw_rel
-        if not source_path.exists():
-            return False
-        if source_path.stat().st_mtime_ns > report_mtime_ns:
-            return False
-    return True
+    return semantic_review_sources_are_current(run_dir, stage)
 
 
 _SEMANTIC_REPAIR_HASH_LIMIT_BYTES = 2_000_000
@@ -12814,9 +12909,12 @@ def _semantic_turn_activity_relpath(report_relpath: Path) -> Path:
     return report_relpath.with_name(f"{report_relpath.name}.app_server_activity.json")
 
 
-def _write_semantic_turn_activity_marker(report_path: Path, notification: dict[str, Any]) -> None:
+def _write_semantic_turn_activity_marker(
+    run_dir: Path,
+    report_path: Path,
+    notification: dict[str, Any],
+) -> None:
     path = report_path.with_name(f"{report_path.name}.app_server_activity.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "updated_at": now_iso(),
         "method": str(notification.get("method") or ""),
@@ -12826,7 +12924,11 @@ def _write_semantic_turn_activity_marker(report_path: Path, notification: dict[s
         turn_id = params.get("turnId")
         if turn_id:
             payload["turn_id"] = str(turn_id)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_semantic_artifact_text(
+        run_dir,
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 async def _await_semantic_operation_with_progress_watchdog(
@@ -13065,6 +13167,10 @@ async def _run_semantic_review_once(
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
+    # API callers commonly hold output/<run_id> as a relative path.  App-server
+    # cwd is process-relative, so resolve it once to avoid duplicating the run
+    # path when the reviewer opens artifacts or writes its report.
+    run_dir = run_dir.resolve()
     if stage == "scene_detail":
         return await _run_scene_detail_sharded_semantic_review_once(
             job_id,
@@ -13097,6 +13203,8 @@ async def _run_semantic_review_once(
         text=True,
     )
     relpaths = semantic_review_relpaths(stage)
+    collection_path = run_dir / relpaths["collection"]
+    scope_path = run_dir / relpaths["scope"]
     prompt_path = run_dir / relpaths["prompt"]
     report_path = run_dir / relpaths["report"]
     prompt = _semantic_review_prompt_for_attempt(
@@ -13104,19 +13212,34 @@ async def _run_semantic_review_once(
         stage=stage,
         final_attempt=final_attempt,
     )
-    prompt_path.write_text(prompt.rstrip() + "\n", encoding="utf-8")
-    client = create_codex_app_server_client(cwd=ROOT)
+    _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
+    _refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=collection_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
+    )
+    client = create_codex_app_server_client(
+        cwd=run_dir,
+        scrub_sensitive_env=True,
+    )
     transcript: list[dict[str, Any]] = []
+    completed_from_report = False
     try:
         thread_id = await asyncio.wait_for(
-            client.start_thread(cwd=ROOT, approval_policy="never"),
+            client.start_thread(
+                cwd=run_dir,
+                approval_policy="never",
+                sandbox="read-only",
+            ),
             timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
         )
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
             text=prompt,
-            cwd=ROOT,
+            cwd=run_dir,
             timeout_seconds=semantic_review_timeout_seconds(),
             report_path=report_path,
             is_completed=_semantic_review_report_completed,
@@ -13124,7 +13247,7 @@ async def _run_semantic_review_once(
         if not _semantic_review_report_completed(report_path):
             report_from_agent = _semantic_report_text_from_transcript(transcript, stage)
             if report_from_agent is not None:
-                report_path.write_text(report_from_agent, encoding="utf-8")
+                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
                 append_state_snapshot(
                     run_dir / "state.txt",
                     {
@@ -13202,8 +13325,34 @@ async def _run_semantic_review_once(
             raise
     finally:
         await client.stop()
+    if report_path.exists() and _semantic_review_report_completed(report_path):
+        report_text = report_path.read_text(encoding="utf-8", errors="replace")
+        if not re.search(
+            r"(?im)^-?\s*semantic_review_input_digest\s*:",
+            report_text,
+        ):
+            input_digest = _semantic_scope_input_digest(scope_path)
+            if input_digest:
+                _write_semantic_artifact_text(
+                    run_dir,
+                    report_path,
+                    _report_with_semantic_input_digest(report_text, input_digest),
+                )
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        f"review.semantic.{stage}.report.source": (
+                            "trusted_current_turn_legacy_report_binding"
+                        ),
+                        f"review.semantic.{stage}.report.materialized_at": now_iso(),
+                    },
+                )
     if stage == "image_prompt" and report_path.exists():
-        (run_dir / IMAGE_PROMPT_JUDGMENT_REPORT).write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
+        _write_semantic_artifact_text(
+            run_dir,
+            run_dir / IMAGE_PROMPT_JUDGMENT_REPORT,
+            report_path.read_text(encoding="utf-8"),
+        )
     result = check_semantic_review(run_dir, stage)
     state_updates = review_status_to_state(stage, result)
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
@@ -13316,6 +13465,195 @@ def _load_semantic_scope(scope_path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _semantic_scope_input_digest(scope_path: Path) -> str:
+    value = str(_load_semantic_scope(scope_path).get("semantic_review_input_digest") or "").strip()
+    return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else ""
+
+
+def _write_semantic_artifact_text(run_dir: Path, path: Path, text: str) -> Path:
+    return safe_semantic_write_text(run_dir.resolve(), path, text)
+
+
+def _semantic_scope_artifact_path(
+    run_dir: Path,
+    artifacts: dict[str, Any],
+    key: str,
+) -> Path:
+    raw = artifacts.get(key)
+    if not isinstance(raw, str) or not raw.strip() or "\\" in raw:
+        raise RuntimeError(f"semantic shard artifact {key} is not a safe run-relative path")
+    relative = Path(raw.strip())
+    if relative.is_absolute() or relative.as_posix() != raw.strip() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise RuntimeError(f"semantic shard artifact {key} is not a safe run-relative path")
+    run_root = run_dir.resolve(strict=True)
+    candidate = run_root / relative
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(run_root)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"semantic shard artifact {key} escapes or is missing") from exc
+    if resolved != candidate or not candidate.is_file():
+        raise RuntimeError(f"semantic shard artifact {key} must be a regular non-symlink file")
+    return candidate
+
+
+def _report_with_semantic_input_digest(report_text: str, input_digest: str) -> str:
+    """Return one report digest line, bound to the exact scope revision."""
+
+    digest_line = f"semantic_review_input_digest: {input_digest}"
+    lines = [
+        line
+        for line in report_text.splitlines()
+        if not re.match(r"^-?\s*semantic_review_input_digest\s*:", line.strip())
+    ]
+    insert_at = next(
+        (
+            index + 1
+            for index, line in enumerate(lines)
+            if re.match(r"^-?\s*status\s*:", line.strip())
+        ),
+        min(2, len(lines)),
+    )
+    lines.insert(insert_at, digest_line)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _refresh_semantic_review_input_digest(
+    *,
+    run_dir: Path,
+    scope_path: Path,
+    collection_path: Path,
+    prompt_path: Path,
+    report_path: Path,
+) -> str:
+    """Rebind a review scope after its visible prompt bytes change."""
+
+    scope = _load_semantic_scope(scope_path)
+    inferred_stage = scope_path.name.removesuffix(".scope.json")
+    stage = str(scope.get("stage") or inferred_stage).strip()
+    raw_entry_ids = scope.get("entry_ids")
+    raw_source_digests = scope.get("source_artifact_digests")
+    if not isinstance(raw_entry_ids, list):
+        raw_selectors = scope.get("selectors")
+        if isinstance(raw_selectors, list):
+            raw_entry_ids = raw_selectors
+        else:
+            entry_count = scope.get("entry_count")
+            if isinstance(entry_count, int) and entry_count > 0:
+                prefix = {
+                    "scene_set": "scene",
+                    "scene_detail": "scene",
+                    "asset_plan": "asset",
+                }.get(stage, stage)
+                raw_entry_ids = [f"{prefix}_{index}" for index in range(1, entry_count + 1)]
+    if not stage or not isinstance(raw_entry_ids, list):
+        raise RuntimeError(f"semantic review scope lacks digest metadata: {scope_path}")
+    entry_ids = [str(value).strip() for value in raw_entry_ids if str(value).strip()]
+    if isinstance(raw_source_digests, list):
+        source_digests = [
+            {"path": str(record.get("path") or ""), "sha256": str(record.get("sha256") or "")}
+            for record in raw_source_digests
+            if isinstance(record, dict)
+        ]
+    else:
+        raw_sources = scope.get("source_artifacts")
+        if raw_sources is None:
+            raw_sources = []
+        if not isinstance(raw_sources, list):
+            raise RuntimeError(f"semantic review scope has invalid source artifacts: {scope_path}")
+        scope["source_artifacts"] = raw_sources
+        source_digests = []
+        run_root = run_dir.resolve(strict=True)
+        for raw_source in raw_sources:
+            if not isinstance(raw_source, str) or not raw_source.strip():
+                raise RuntimeError(f"semantic review scope has an invalid source artifact: {scope_path}")
+            relative_source = Path(raw_source)
+            if (
+                "\\" in raw_source
+                or relative_source.is_absolute()
+                or relative_source.as_posix() != raw_source
+                or any(part in {"", ".", ".."} for part in relative_source.parts)
+            ):
+                raise RuntimeError(
+                    f"semantic review source artifact is not a safe run-relative path: {raw_source}"
+                )
+            lexical_source_path = run_root / relative_source
+            source_path = lexical_source_path.resolve(strict=True)
+            try:
+                source_path.relative_to(run_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"semantic review source artifact escapes run directory: {raw_source}"
+                ) from exc
+            if lexical_source_path != source_path or not source_path.is_file():
+                raise RuntimeError(
+                    f"semantic review source artifact must be a regular non-symlink file: {raw_source}"
+                )
+            source_digests.append(
+                {
+                    "path": raw_source,
+                    "sha256": semantic_review_file_sha256(source_path),
+                }
+            )
+    collection_sha256 = semantic_review_file_sha256(collection_path)
+    prompt_sha256 = semantic_review_file_sha256(prompt_path)
+    request_revision = scope.get("request_revision")
+    run_root = run_dir.resolve(strict=True)
+    scope.setdefault("review_scope", "all_entries")
+    scope.setdefault(
+        "artifacts",
+        {
+            "collection": collection_path.resolve(strict=True).relative_to(run_root).as_posix(),
+            "scope": scope_path.resolve(strict=True).relative_to(run_root).as_posix(),
+            "prompt": prompt_path.resolve(strict=True).relative_to(run_root).as_posix(),
+            "report": report_path.resolve(strict=True).relative_to(run_root).as_posix(),
+        },
+    )
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(scope)
+    input_digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=collection_sha256,
+        prompt_sha256=prompt_sha256,
+        source_artifact_digests=source_digests,
+        request_revision=(
+            str(request_revision).strip()
+            if isinstance(request_revision, str) and request_revision.strip()
+            else None
+        ),
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    scope.update(
+        {
+            "stage": stage,
+            "entry_ids": entry_ids,
+            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+            "source_artifact_digests": source_digests,
+            "collection_sha256": collection_sha256,
+            "prompt_sha256": prompt_sha256,
+            "scope_binding_sha256": scope_binding_sha256,
+            "semantic_review_input_digest": input_digest,
+        }
+    )
+    _write_semantic_artifact_text(
+        run_dir,
+        scope_path,
+        json.dumps(scope, ensure_ascii=False, indent=2) + "\n",
+    )
+    if report_path.exists():
+        _write_semantic_artifact_text(
+            run_dir,
+            report_path,
+            _report_with_semantic_input_digest(
+                report_path.read_text(encoding="utf-8", errors="replace"),
+                input_digest,
+            ),
+        )
+    return input_digest
 
 
 def _scope_string_list(scope: dict[str, Any], key: str) -> list[str]:
@@ -13431,14 +13769,19 @@ def _image_prompt_scope_shards(scope: dict[str, Any]) -> list[dict[str, Any]]:
                 "shard_id": str(raw_shard.get("shard_id") or "").strip(),
                 "scene_id": str(raw_shard.get("scene_id") or "").strip(),
                 "entry_ids": _scope_string_list(raw_shard, "entry_ids"),
+                "artifacts": dict(raw_shard.get("artifacts"))
+                if isinstance(raw_shard.get("artifacts"), dict)
+                else None,
             }
         )
     return shards
 
 
 def _write_image_prompt_shard_aggregate_report(
+    run_dir: Path,
     report_path: Path,
     *,
+    semantic_review_input_digest_value: str,
     status: str,
     reviewed_entries: list[str],
     blocked_entries: list[str],
@@ -13446,12 +13789,12 @@ def _write_image_prompt_shard_aggregate_report(
     reason_keys: list[str],
     notes: list[str],
 ) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_text = "\n".join(
         [
             "# Semantic Review Report: image_prompt",
             "",
             f"status: {status}",
+            f"semantic_review_input_digest: {semantic_review_input_digest_value}",
             "reviewed_entries:",
             *[f"  - {entry}" for entry in reviewed_entries],
             "blocked_entries:",
@@ -13467,10 +13810,9 @@ def _write_image_prompt_shard_aggregate_report(
             "",
         ]
     )
-    report_path.write_text(report_text, encoding="utf-8")
+    _write_semantic_artifact_text(run_dir, report_path, report_text)
     legacy_report_path = report_path.parents[3] / IMAGE_PROMPT_JUDGMENT_REPORT
-    legacy_report_path.parent.mkdir(parents=True, exist_ok=True)
-    legacy_report_path.write_text(report_text, encoding="utf-8")
+    _write_semantic_artifact_text(run_dir, legacy_report_path, report_text)
 
 
 def _image_prompt_shard_failure_result(
@@ -13610,7 +13952,9 @@ async def _run_image_prompt_sharded_semantic_review_once(
     if validation_errors:
         blocked_entries = entry_ids or ["image_prompt"]
         _write_image_prompt_shard_aggregate_report(
+            run_dir,
             report_path,
+            semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
             status="failed",
             reviewed_entries=[],
             blocked_entries=blocked_entries,
@@ -13867,7 +14211,9 @@ async def _run_image_prompt_sharded_semantic_review_once(
         f"transport retry attempts: {transport_retry_attempts}",
     ]
     _write_image_prompt_shard_aggregate_report(
+        run_dir,
         report_path,
+        semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
         status="failed" if blocked_entries else "passed",
         reviewed_entries=entry_ids,
         blocked_entries=blocked_entries,
@@ -13955,7 +14301,9 @@ def _write_image_prompt_scene_shard_artifacts(
     entry_ids = [str(item) for item in shard.get("entry_ids") or []]
     collection_path.parent.mkdir(parents=True, exist_ok=True)
     sections = [collection_sections[entry_id].strip() for entry_id in entry_ids]
-    collection_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        collection_path,
         "\n".join(
             [
                 "# Semantic Review Collection: image_prompt scene shard",
@@ -13969,9 +14317,12 @@ def _write_image_prompt_scene_shard_artifacts(
                 "",
             ]
         ),
-        encoding="utf-8",
     )
+    canonical_scope = _load_semantic_scope(canonical_scope_path)
     source_artifacts = _semantic_scope_source_artifacts(canonical_scope_path)
+    source_artifact_digests = canonical_scope.get("source_artifact_digests")
+    if not isinstance(source_artifact_digests, list):
+        raise RuntimeError("canonical image_prompt scope is missing source artifact digests")
     scope_payload = {
         "stage": "image_prompt",
         "run_dir": str(run_dir.resolve()),
@@ -13983,6 +14334,8 @@ def _write_image_prompt_scene_shard_artifacts(
         "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
         "canonical_report": str(canonical_report_path.relative_to(run_dir)),
         "source_artifacts": source_artifacts,
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
         "artifacts": {
             "collection": str(collection_path.relative_to(run_dir)),
             "scope": str(scope_path.relative_to(run_dir)),
@@ -13991,14 +14344,23 @@ def _write_image_prompt_scene_shard_artifacts(
         },
         "generated_at": now_iso(),
     }
-    scope_path.write_text(json.dumps(scope_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    request_revision = canonical_scope.get("request_revision")
+    if isinstance(request_revision, str) and request_revision.strip():
+        scope_payload["request_revision"] = request_revision.strip()
+    _write_semantic_artifact_text(
+        run_dir,
+        scope_path,
+        json.dumps(scope_payload, ensure_ascii=False, indent=2) + "\n",
+    )
     source_lines = [f"- `{(run_dir / rel).resolve()}`" for rel in source_artifacts]
-    prompt_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        prompt_path,
         "\n".join(
             [
                 "You are a contextless semantic review agent for one ToC `image_prompt` scene shard.",
                 "",
-                "Do semantic judgment only. Do not edit source artifacts and do not repair outputs.",
+                "Do semantic judgment only. The workspace is read-only; do not edit any artifact or repair outputs.",
                 f"Review only image_prompt scene shard `{shard_id}`.",
                 "Expected reviewed_entries exactly once: " + json.dumps(entry_ids, ensure_ascii=False),
                 "Do not report selectors from any other scene.",
@@ -14011,7 +14373,8 @@ def _write_image_prompt_scene_shard_artifacts(
                 "Use these source artifacts as cross-check context when present:",
                 *(source_lines or ["- `(none discovered)`"]),
                 "",
-                f"Write the final report to `{report_path}` and replace the pending template.",
+                "Return the complete machine-readable report as your final response. The trusted orchestrator will validate and save it.",
+                f"The pending report path is `{report_path}`; do not write it yourself.",
                 "",
                 "Review every cut entry and the scene_composite entry together as one scene-local gate.",
                 "Judge api_prompt_payload.prompt only as the provider prompt; design/debug fields are review evidence and must not be required verbatim in the provider prompt.",
@@ -14026,6 +14389,7 @@ def _write_image_prompt_scene_shard_artifacts(
                 "",
                 "Report format:",
                 "status: passed|failed",
+                "semantic_review_input_digest: copy the exact semantic_review_input_digest from the scope",
                 "reviewed_entries: [...]",
                 "blocked_entries: [...]",
                 "findings: [...]",
@@ -14037,9 +14401,10 @@ def _write_image_prompt_scene_shard_artifacts(
                 "",
             ]
         ),
-        encoding="utf-8",
     )
-    report_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        report_path,
         "\n".join(
             [
                 "# Semantic Review Report: image_prompt scene shard",
@@ -14054,18 +14419,26 @@ def _write_image_prompt_scene_shard_artifacts(
                 "",
             ]
         ),
-        encoding="utf-8",
+    )
+    _refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=collection_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
     )
 
 
 def _touch_image_prompt_canonical_progress(
+    run_dir: Path,
     canonical_report_path: Path,
     *,
     message: str,
 ) -> None:
-    canonical_report_path.parent.mkdir(parents=True, exist_ok=True)
     with _scene_detail_canonical_progress_lock:
-        canonical_report_path.write_text(
+        _write_semantic_artifact_text(
+            run_dir,
+            canonical_report_path,
             "\n".join(
                 [
                     "# Semantic Review Report: image_prompt",
@@ -14080,19 +14453,19 @@ def _touch_image_prompt_canonical_progress(
                     "",
                 ]
             ),
-            encoding="utf-8",
         )
 
 
 def _write_image_prompt_shard_activity(
     *,
+    run_dir: Path,
     report_path: Path,
     canonical_report_path: Path,
     notification: dict[str, Any],
 ) -> None:
-    _write_semantic_turn_activity_marker(report_path, notification)
+    _write_semantic_turn_activity_marker(run_dir, report_path, notification)
     with _scene_detail_canonical_progress_lock:
-        _write_semantic_turn_activity_marker(canonical_report_path, notification)
+        _write_semantic_turn_activity_marker(run_dir, canonical_report_path, notification)
 
 
 async def _run_image_prompt_scene_shard_review(
@@ -14116,12 +14489,13 @@ async def _run_image_prompt_scene_shard_review(
     async with semaphore:
         shard_id = str(shard.get("shard_id") or "")
         entry_ids = [str(item) for item in shard.get("entry_ids") or []]
-        shard_label = _safe_scene_detail_shard_label(shard_id)
-        base = shard_dir / f"{shard_index:03d}_{shard_label}"
-        collection_path = base.with_suffix(".collection.md")
-        scope_path = base.with_suffix(".scope.json")
-        prompt_path = base.with_suffix(".prompt.md")
-        report_path = base.with_suffix(".report.md")
+        artifacts = shard.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise RuntimeError(f"image_prompt shard {shard_id or shard_index} is missing artifact paths")
+        collection_path = _semantic_scope_artifact_path(run_dir, artifacts, "collection")
+        scope_path = _semantic_scope_artifact_path(run_dir, artifacts, "scope")
+        prompt_path = _semantic_scope_artifact_path(run_dir, artifacts, "prompt")
+        report_path = _semantic_scope_artifact_path(run_dir, artifacts, "report")
         _write_image_prompt_scene_shard_artifacts(
             run_dir=run_dir,
             shard=shard,
@@ -14136,14 +14510,22 @@ async def _run_image_prompt_scene_shard_review(
             canonical_report_path=canonical_report_path,
         )
         _touch_image_prompt_canonical_progress(
+            run_dir,
             canonical_report_path,
             message=f"image_prompt shard {shard_index}/{total_shards} started: {shard_id}",
         )
-        client = create_codex_app_server_client(cwd=ROOT)
+        client = create_codex_app_server_client(
+            cwd=run_dir,
+            scrub_sensitive_env=True,
+        )
         transcript: list[dict[str, Any]] = []
         try:
             thread_id = await asyncio.wait_for(
-                client.start_thread(cwd=ROOT, approval_policy="never"),
+                client.start_thread(
+                    cwd=run_dir,
+                    approval_policy="never",
+                    sandbox="read-only",
+                ),
                 timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
             )
             prompt = _semantic_review_prompt_for_attempt(
@@ -14151,16 +14533,24 @@ async def _run_image_prompt_scene_shard_review(
                 stage="image_prompt",
                 final_attempt=final_attempt,
             )
-            prompt_path.write_text(prompt.rstrip() + "\n", encoding="utf-8")
+            _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
+            _refresh_semantic_review_input_digest(
+                run_dir=run_dir,
+                scope_path=scope_path,
+                collection_path=collection_path,
+                prompt_path=prompt_path,
+                report_path=report_path,
+            )
             transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
                 client,
                 thread_id=thread_id,
                 text=prompt,
-                cwd=ROOT,
+                cwd=run_dir,
                 timeout_seconds=semantic_review_timeout_seconds(),
                 report_path=report_path,
                 is_completed=_semantic_review_report_completed,
                 progress_callback=lambda notification: _write_image_prompt_shard_activity(
+                    run_dir=run_dir,
                     report_path=report_path,
                     canonical_report_path=canonical_report_path,
                     notification=notification,
@@ -14220,15 +14610,34 @@ async def _run_image_prompt_scene_shard_review(
         finally:
             await client.stop()
 
+        if not _semantic_review_report_completed(report_path):
+            report_from_agent = _semantic_report_text_from_transcript(
+                transcript if isinstance(transcript, list) else [],
+                "image_prompt",
+            )
+            if report_from_agent is not None:
+                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
         report_text = report_path.read_text(encoding="utf-8", errors="replace") if report_path.exists() else ""
         reported_status = parse_judgment_report_status(report_text) if report_text else ""
+        expected_input_digest = _semantic_scope_input_digest(scope_path)
+        reported_input_digests = _semantic_report_list_values(
+            report_text,
+            "semantic_review_input_digest",
+        )
         reviewed_entries = _semantic_report_list_values_with_duplicates(report_text, "reviewed_entries")
         coverage_errors = _image_prompt_reviewed_entry_coverage_errors(entry_ids, reviewed_entries)
         reported_blocked_entries = _semantic_report_list_values(report_text, "blocked_entries")
         reported_failed_selectors = _semantic_report_list_values(report_text, "failed_selectors")
         findings = _semantic_report_list_values(report_text, "findings")
         reason_keys = _semantic_report_list_values(report_text, "reason_keys")
-        errors: list[str] = []
+        errors: list[str] = list(
+            semantic_report_required_field_issues(
+                report_text,
+                require_digest=True,
+            )
+        )
+        if reported_input_digests != [expected_input_digest] or not expected_input_digest:
+            errors.append("shard report semantic_review_input_digest must exactly match the current scope")
         if reported_status != "passed":
             errors.append(f"shard report status must be passed, got {reported_status or '(missing)'}")
         if reported_blocked_entries:
@@ -14270,6 +14679,7 @@ async def _run_image_prompt_scene_shard_review(
                 reason_keys=_dedupe_preserve_order(reason_keys),
             )
         _touch_image_prompt_canonical_progress(
+            run_dir,
             canonical_report_path,
             message=f"image_prompt shard {shard_index}/{total_shards} completed: {shard_id} -> {status}",
         )
@@ -14340,7 +14750,9 @@ async def _run_scene_detail_sharded_semantic_review_once(
     entry_ids = _semantic_review_scope_entry_ids(scope_path)
     if not entry_ids:
         _write_scene_detail_shard_aggregate_report(
+            run_dir,
             report_path,
+            semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
             status="failed",
             reviewed_entries=[],
             blocked_entries=["scene_detail"],
@@ -14390,6 +14802,49 @@ async def _run_scene_detail_sharded_semantic_review_once(
             error="; ".join(result.errors) if result.errors else None,
         )
         return result
+
+    canonical_scope = _load_semantic_scope(scope_path)
+    scene_detail_shards = [
+        _scene_detail_shard_descriptor(
+            run_dir,
+            shard_dir,
+            entry_id=entry_id,
+            entry_index=index,
+        )
+        for index, entry_id in enumerate(entry_ids, start=1)
+    ]
+    assigned_entry_ids = [
+        entry_id
+        for shard in scene_detail_shards
+        for entry_id in shard["entry_ids"]
+    ]
+    canonical_scope.update(
+        {
+            "review_scope": "per_scene_shards",
+            "shards": scene_detail_shards,
+            "coverage": {
+                "status": "valid",
+                "expected_entry_count": len(entry_ids),
+                "assigned_entry_count": len(assigned_entry_ids),
+                "expected_entry_ids": entry_ids,
+                "assigned_entry_ids": assigned_entry_ids,
+                "missing_entry_ids": [],
+                "duplicate_entry_ids": [],
+            },
+        }
+    )
+    _write_semantic_artifact_text(
+        run_dir,
+        scope_path,
+        json.dumps(canonical_scope, ensure_ascii=False, indent=2) + "\n",
+    )
+    _refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=collection_path,
+        prompt_path=run_dir / relpaths["prompt"],
+        report_path=report_path,
+    )
 
     collection_text = collection_path.read_text(encoding="utf-8", errors="replace")
     sections = _semantic_collection_sections_by_entry(collection_text)
@@ -14579,7 +15034,9 @@ async def _run_scene_detail_sharded_semantic_review_once(
         reason_keys.append("scene_detail_shard_failed")
 
     _write_scene_detail_shard_aggregate_report(
+        run_dir,
         report_path,
+        semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
         status="failed" if blocked_entries else "passed",
         reviewed_entries=reviewed_entries,
         blocked_entries=blocked_entries,
@@ -14688,11 +15145,17 @@ async def _run_scene_detail_shard_review(
     transport_max_attempts: int = 1,
 ) -> dict[str, Any]:
     async with semaphore:
-        shard_label = _safe_scene_detail_shard_label(entry_id)
-        collection_path = shard_dir / f"{entry_index:03d}_{shard_label}.collection.md"
-        scope_path = shard_dir / f"{entry_index:03d}_{shard_label}.scope.json"
-        prompt_path = shard_dir / f"{entry_index:03d}_{shard_label}.prompt.md"
-        report_path = shard_dir / f"{entry_index:03d}_{shard_label}.report.md"
+        shard_descriptor = _scene_detail_shard_descriptor(
+            run_dir,
+            shard_dir,
+            entry_id=entry_id,
+            entry_index=entry_index,
+        )
+        artifacts = shard_descriptor["artifacts"]
+        collection_path = run_dir / artifacts["collection"]
+        scope_path = run_dir / artifacts["scope"]
+        prompt_path = run_dir / artifacts["prompt"]
+        report_path = run_dir / artifacts["report"]
         _write_scene_detail_shard_artifacts(
             run_dir=run_dir,
             entry_id=entry_id,
@@ -14705,17 +15168,27 @@ async def _run_scene_detail_shard_review(
             report_path=report_path,
             canonical_scope_path=canonical_scope_path,
             canonical_report_path=canonical_report_path,
+            shard_id=str(shard_descriptor["shard_id"]),
+            scene_id=str(shard_descriptor["scene_id"]),
         )
         _touch_scene_detail_canonical_progress(
+            run_dir,
             canonical_report_path,
             status="pending",
             message=f"scene_detail shard {entry_index}/{total_entries} started: {entry_id}",
         )
-        client = create_codex_app_server_client(cwd=ROOT)
+        client = create_codex_app_server_client(
+            cwd=run_dir,
+            scrub_sensitive_env=True,
+        )
         transcript: list[dict[str, Any]] = []
         try:
             thread_id = await asyncio.wait_for(
-                client.start_thread(cwd=ROOT, approval_policy="never"),
+                client.start_thread(
+                    cwd=run_dir,
+                    approval_policy="never",
+                    sandbox="read-only",
+                ),
                 timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
             )
             prompt = prompt_path.read_text(encoding="utf-8")
@@ -14724,16 +15197,24 @@ async def _run_scene_detail_shard_review(
                 stage="scene_detail",
                 final_attempt=final_attempt,
             )
-            prompt_path.write_text(prompt.rstrip() + "\n", encoding="utf-8")
+            _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
+            _refresh_semantic_review_input_digest(
+                run_dir=run_dir,
+                scope_path=scope_path,
+                collection_path=collection_path,
+                prompt_path=prompt_path,
+                report_path=report_path,
+            )
             transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
                 client,
                 thread_id=thread_id,
                 text=prompt,
-                cwd=ROOT,
+                cwd=run_dir,
                 timeout_seconds=semantic_review_timeout_seconds(),
                 report_path=report_path,
                 is_completed=_semantic_review_report_completed,
                 progress_callback=lambda notification: _write_scene_detail_shard_activity(
+                    run_dir=run_dir,
                     report_path=report_path,
                     canonical_report_path=canonical_report_path,
                     notification=notification,
@@ -14837,34 +15318,71 @@ async def _run_scene_detail_shard_review(
                 raise
         finally:
             await client.stop()
+        if not _semantic_review_report_completed(report_path):
+            report_from_agent = _semantic_report_text_from_transcript(
+                transcript if isinstance(transcript, list) else [],
+                "scene_detail",
+            )
+            if report_from_agent is not None:
+                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
         report_text = report_path.read_text(encoding="utf-8", errors="replace") if report_path.exists() else ""
         status = parse_judgment_report_status(report_text) if report_text else ""
+        expected_input_digest = _semantic_scope_input_digest(scope_path)
+        reported_input_digests = _semantic_report_list_values(
+            report_text,
+            "semantic_review_input_digest",
+        )
+        reviewed_entries = _semantic_report_list_values_with_duplicates(
+            report_text,
+            "reviewed_entries",
+        )
         failed_selectors = _semantic_report_list_values(report_text, "failed_selectors")
         blocked_entries = _semantic_report_list_values(report_text, "blocked_entries")
         findings = _semantic_report_list_values(report_text, "findings")
         reason_keys = _semantic_report_list_values(report_text, "reason_keys")
+        errors: list[str] = list(
+            semantic_report_required_field_issues(
+                report_text,
+                require_digest=True,
+            )
+        )
+        if reported_input_digests != [expected_input_digest] or not expected_input_digest:
+            errors.append("shard report semantic_review_input_digest must exactly match the current scope")
         if status != "passed":
+            errors.append(f"shard report status must be passed, got {status or '(missing)'}")
+        if reviewed_entries != [entry_id]:
+            errors.append(
+                "shard reviewed_entries must exactly match the scene-detail entry "
+                f"(expected={[entry_id]}, got={reviewed_entries})"
+            )
+        if blocked_entries:
+            errors.append("passed shard report must not contain blocked_entries")
+        if failed_selectors:
+            errors.append("passed shard report must not contain failed_selectors")
+        effective_status = "passed" if not errors else "failed"
+        if effective_status != "passed":
             if not blocked_entries and not failed_selectors:
                 blocked_entries = [entry_id]
             if not reason_keys:
-                reason_keys = ["scene_detail_shard_failed"]
+                reason_keys = ["scene_detail_shard_report_inconsistent"]
         result = {
             "entry_id": entry_id,
-            "status": status,
-            "errors": [] if status == "passed" else [f"shard report status must be passed, got {status or '(missing)'}"],
-            "blocked_entries": _dedupe_preserve_order([*failed_selectors, *blocked_entries]) if status != "passed" else [],
-            "findings": findings if status != "passed" else [],
-            "reason_keys": _dedupe_preserve_order(reason_keys) if status != "passed" else [],
+            "status": effective_status,
+            "errors": errors,
+            "blocked_entries": _dedupe_preserve_order([*failed_selectors, *blocked_entries]) if errors else [],
+            "findings": findings if errors else [],
+            "reason_keys": _dedupe_preserve_order(reason_keys) if errors else [],
         }
         _touch_scene_detail_canonical_progress(
+            run_dir,
             canonical_report_path,
             status="pending",
-            message=f"scene_detail shard {entry_index}/{total_entries} completed: {entry_id} -> {status or 'missing'}",
+            message=f"scene_detail shard {entry_index}/{total_entries} completed: {entry_id} -> {effective_status}",
         )
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="semantic_review",
-            status="completed" if status == "passed" else "changes_requested",
+            status="completed" if effective_status == "passed" else "changes_requested",
             item_id=job_id,
             request={
                 "stage": "scene_detail",
@@ -14878,7 +15396,9 @@ async def _run_scene_detail_shard_review(
                 "report": str(report_path.relative_to(run_dir)),
             },
             response={
-                "status": status,
+                "status": effective_status,
+                "reportedStatus": status,
+                "reviewedEntries": reviewed_entries,
                 "entryCount": 1,
                 "blockedEntries": result["blocked_entries"],
                 "reasonKeys": result["reason_keys"],
@@ -14902,11 +15422,15 @@ def _write_scene_detail_shard_artifacts(
     report_path: Path,
     canonical_scope_path: Path,
     canonical_report_path: Path,
+    shard_id: str,
+    scene_id: str,
 ) -> None:
     collection_path.parent.mkdir(parents=True, exist_ok=True)
     if not collection_section:
         collection_section = f"## {entry_id}\n\n```json\n{{\"id\": {json.dumps(entry_id, ensure_ascii=False)}}}\n```\n"
-    collection_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        collection_path,
         "\n".join(
             [
                 "# Semantic Review Collection: scene_detail shard",
@@ -14918,19 +15442,26 @@ def _write_scene_detail_shard_artifacts(
                 "",
             ]
         ),
-        encoding="utf-8",
     )
+    canonical_scope = _load_semantic_scope(canonical_scope_path)
     source_artifacts = _semantic_scope_source_artifacts(canonical_scope_path)
+    source_artifact_digests = canonical_scope.get("source_artifact_digests")
+    if not isinstance(source_artifact_digests, list):
+        raise RuntimeError("canonical scene_detail scope is missing source artifact digests")
     scope_payload = {
         "stage": "scene_detail",
         "run_dir": str(run_dir.resolve()),
         "entry_count": 1,
         "entry_ids": [entry_id],
         "review_scope": "single_scene_entry",
+        "shard_id": shard_id,
+        "scene_id": scene_id,
         "canonical_stage": "scene_detail",
         "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
         "canonical_report": str(canonical_report_path.relative_to(run_dir)),
         "source_artifacts": source_artifacts,
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
         "artifacts": {
             "collection": str(collection_path.relative_to(run_dir)),
             "scope": str(scope_path.relative_to(run_dir)),
@@ -14939,14 +15470,23 @@ def _write_scene_detail_shard_artifacts(
         },
         "generated_at": now_iso(),
     }
-    scope_path.write_text(json.dumps(scope_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    request_revision = canonical_scope.get("request_revision")
+    if isinstance(request_revision, str) and request_revision.strip():
+        scope_payload["request_revision"] = request_revision.strip()
+    _write_semantic_artifact_text(
+        run_dir,
+        scope_path,
+        json.dumps(scope_payload, ensure_ascii=False, indent=2) + "\n",
+    )
     source_lines = [f"- `{(run_dir / rel).resolve()}`" for rel in source_artifacts]
-    prompt_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        prompt_path,
         "\n".join(
             [
                 "You are a contextless semantic review agent for a single ToC `scene_detail` entry.",
                 "",
-                "Do semantic judgment only. Do not edit source artifacts and do not repair outputs.",
+                "Do semantic judgment only. The workspace is read-only; do not edit any artifact or repair outputs.",
                 f"Review only shard entry `{entry_id}`. Ignore other scene ids except as source context for neighbor handoff.",
                 "",
                 "Read these artifacts in order:",
@@ -14957,7 +15497,8 @@ def _write_scene_detail_shard_artifacts(
                 "Use these source artifacts as cross-check context when present:",
                 *(source_lines or ["- `(none discovered)`"]),
                 "",
-                f"Write the final report to `{report_path}` and replace the pending template.",
+                "Return the complete machine-readable report as your final response. The trusted orchestrator will validate and save it.",
+                f"The pending report path is `{report_path}`; do not write it yourself.",
                 "",
                 "Gate this scene_detail entry on scene necessity, internal pressure, value_shift visibility, causal_turn visibility, scene_event sequence, scene_generation prompt separation, story-specific concrete grounding, non_replaceable_elements, concrete detail story_function, source grounding confidence, canonical event coverage, turning_event/end_situation alignment, cut summary support, reveal order, and neighbor handoff.",
                 "Treat `scene_generation.scene_prompt_payload.prompt` as the canonical scene authoring prompt. This review prompt is only a display/review artifact, not the scene generation canon.",
@@ -14969,6 +15510,7 @@ def _write_scene_detail_shard_artifacts(
                 "",
                 "Report format:",
                 "status: passed|failed",
+                "semantic_review_input_digest: copy the exact semantic_review_input_digest from the scope",
                 "reviewed_entries: [...]",
                 "blocked_entries: [...]",
                 "findings: [...]",
@@ -14980,9 +15522,10 @@ def _write_scene_detail_shard_artifacts(
             ]
         )
         + "\n",
-        encoding="utf-8",
     )
-    report_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        report_path,
         "\n".join(
             [
                 "# Semantic Review Report: scene_detail shard",
@@ -15000,7 +15543,13 @@ def _write_scene_detail_shard_artifacts(
                 "",
             ]
         ),
-        encoding="utf-8",
+    )
+    _refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=collection_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
     )
 
 
@@ -15102,10 +15651,40 @@ def _safe_scene_detail_shard_label(entry_id: str) -> str:
     return label or "entry"
 
 
-def _touch_scene_detail_canonical_progress(canonical_report_path: Path, *, status: str, message: str) -> None:
-    canonical_report_path.parent.mkdir(parents=True, exist_ok=True)
+def _scene_detail_shard_descriptor(
+    run_dir: Path,
+    shard_dir: Path,
+    *,
+    entry_id: str,
+    entry_index: int,
+) -> dict[str, Any]:
+    shard_label = _safe_scene_detail_shard_label(entry_id)
+    base = shard_dir / f"{entry_index:03d}_{shard_label}"
+    return {
+        "shard_id": f"scene_detail_{entry_index:03d}_{shard_label}",
+        "scene_id": entry_id,
+        "entry_count": 1,
+        "entry_ids": [entry_id],
+        "artifacts": {
+            "collection": str(Path(f"{base}.collection.md").relative_to(run_dir)),
+            "scope": str(Path(f"{base}.scope.json").relative_to(run_dir)),
+            "prompt": str(Path(f"{base}.prompt.md").relative_to(run_dir)),
+            "report": str(Path(f"{base}.report.md").relative_to(run_dir)),
+        },
+    }
+
+
+def _touch_scene_detail_canonical_progress(
+    run_dir: Path,
+    canonical_report_path: Path,
+    *,
+    status: str,
+    message: str,
+) -> None:
     with _scene_detail_canonical_progress_lock:
-        canonical_report_path.write_text(
+        _write_semantic_artifact_text(
+            run_dir,
+            canonical_report_path,
             "\n".join(
                 [
                     "# Semantic Review Report: scene_detail",
@@ -15118,24 +15697,26 @@ def _touch_scene_detail_canonical_progress(canonical_report_path: Path, *, statu
                     "",
                 ]
             ),
-            encoding="utf-8",
         )
 
 
 def _write_scene_detail_shard_activity(
     *,
+    run_dir: Path,
     report_path: Path,
     canonical_report_path: Path,
     notification: dict[str, Any],
 ) -> None:
-    _write_semantic_turn_activity_marker(report_path, notification)
+    _write_semantic_turn_activity_marker(run_dir, report_path, notification)
     with _scene_detail_canonical_progress_lock:
-        _write_semantic_turn_activity_marker(canonical_report_path, notification)
+        _write_semantic_turn_activity_marker(run_dir, canonical_report_path, notification)
 
 
 def _write_scene_detail_shard_aggregate_report(
+    run_dir: Path,
     report_path: Path,
     *,
+    semantic_review_input_digest_value: str,
     status: str,
     reviewed_entries: list[str],
     blocked_entries: list[str],
@@ -15143,13 +15724,15 @@ def _write_scene_detail_shard_aggregate_report(
     reason_keys: list[str],
     notes: list[str],
 ) -> None:
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
+    _write_semantic_artifact_text(
+        run_dir,
+        report_path,
         "\n".join(
             [
                 "# Semantic Review Report: scene_detail",
                 "",
                 f"status: {status}",
+                f"semantic_review_input_digest: {semantic_review_input_digest_value}",
                 "reviewed_entries:",
                 *[f"  - {entry}" for entry in reviewed_entries],
                 "blocked_entries:",
@@ -15165,7 +15748,6 @@ def _write_scene_detail_shard_aggregate_report(
                 "",
             ]
         ),
-        encoding="utf-8",
     )
 
 
@@ -15216,17 +15798,17 @@ def _semantic_report_text_from_transcript(
                 text,
             )
             status = match.group(1).lower() if match else ""
-        required_fields = ("reviewed_entries:", "blocked_entries:", "failed_selectors:")
+        required_fields = (
+            "semantic_review_input_digest:",
+            "reviewed_entries:",
+            "blocked_entries:",
+            "failed_selectors:",
+        )
         if status not in {"passed", "failed"} or any(field not in text for field in required_fields):
             continue
         if stage in {"research", "story"} and "criteria_results_json:" not in text:
             continue
-        return (
-            f"status: {status}\n"
-            "report_transport: agent_message_fallback\n"
-            + text
-            + "\n"
-        )
+        return text.rstrip() + "\n"
     return None
 
 
@@ -15241,7 +15823,13 @@ async def _run_turn_until_semantic_artifact_completed(
     is_completed,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    progress_writer = progress_callback or (lambda notification: _write_semantic_turn_activity_marker(report_path, notification))
+    progress_writer = progress_callback or (
+        lambda notification: _write_semantic_turn_activity_marker(
+            cwd,
+            report_path,
+            notification,
+        )
+    )
     turn_task = asyncio.create_task(
         client.run_turn(
             thread_id=thread_id,
@@ -15288,6 +15876,7 @@ async def _run_semantic_review_producer_repair(
     max_attempts: int,
     errors: tuple[str, ...],
 ) -> None:
+    run_dir = run_dir.resolve()
     paths = write_semantic_repair_prompt(
         run_dir,
         stage,
@@ -15360,18 +15949,25 @@ async def _run_semantic_review_producer_repair(
     completion_log_status = "completed"
     completion_log_response: dict[str, Any] = {"errorCount": len(errors)}
     prompt = paths["prompt"].read_text(encoding="utf-8")
-    client = create_codex_app_server_client(cwd=ROOT)
+    client = create_codex_app_server_client(
+        cwd=run_dir,
+        scrub_sensitive_env=True,
+    )
     transcript: list[dict[str, Any]] = []
     try:
         thread_id = await asyncio.wait_for(
-            client.start_thread(cwd=ROOT, approval_policy="never"),
+            client.start_thread(
+                cwd=run_dir,
+                approval_policy="never",
+                sandbox="workspace-write",
+            ),
             timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
         )
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
             text=prompt,
-            cwd=ROOT,
+            cwd=run_dir,
             timeout_seconds=semantic_repair_timeout_seconds(),
             report_path=paths["report"],
             is_completed=_semantic_repair_report_completed,
@@ -17810,6 +18406,7 @@ async def _run_bulk_generation_job(
             )
     finally:
         _bulk_generation_tasks.pop(job_id, None)
+        await _release_run_execution_lease(job_id)
 
 
 async def _create_bulk_generation_job(
@@ -17865,17 +18462,33 @@ async def _create_bulk_generation_job(
             groups=groups,
             fingerprint=fingerprint,
         )
+        try:
+            await _acquire_run_execution_lease(str(job["jobId"]), run_dir)
+        except FileLockUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="run create/resume is already active",
+            ) from exc
         _bulk_generation_jobs[str(job["jobId"])] = job
-        _persist_bulk_generation_job(job)
+        try:
+            _persist_bulk_generation_job(job)
+        except Exception:
+            _bulk_generation_jobs.pop(str(job["jobId"]), None)
+            await _release_run_execution_lease(str(job["jobId"]))
+            raise
 
-    task = asyncio.create_task(
-        _run_bulk_generation_job(
-            job_id=str(job["jobId"]),
-            run_dir=run_dir,
-            groups=groups,
-            requested_concurrency=int(req.concurrency),
+    try:
+        task = asyncio.create_task(
+            _run_bulk_generation_job(
+                job_id=str(job["jobId"]),
+                run_dir=run_dir,
+                groups=groups,
+                requested_concurrency=int(req.concurrency),
+            )
         )
-    )
+    except Exception:
+        await _release_run_execution_lease(str(job["jobId"]))
+        raise
     _bulk_generation_tasks[str(job["jobId"])] = task
     return deepcopy(job)
 
@@ -18156,8 +18769,87 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
 @router.post("/api/image-gen/generate")
 async def api_generate(req: GenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
-    candidates = await asyncio.gather(*(_generate_one(run_dir, req, index) for index in range(1, req.candidate_count + 1)))
-    return {"itemId": req.item_id, "candidates": candidates}
+    lease_id = f"image-foreground-{uuid.uuid4().hex}"
+    try:
+        await _acquire_run_execution_lease(lease_id, run_dir)
+    except FileLockUnavailable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="run create/resume is already active",
+        ) from exc
+    try:
+        candidates = await asyncio.gather(
+            *(
+                _generate_one(run_dir, req, index)
+                for index in range(1, req.candidate_count + 1)
+            )
+        )
+        return {"itemId": req.item_id, "candidates": candidates}
+    finally:
+        await _release_run_execution_lease(lease_id)
+
+
+async def _run_foreground_bulk_generation(
+    *,
+    run_dir: Path,
+    req: BulkGenerateRequest,
+    total_candidates: int,
+) -> dict[str, Any]:
+    normalized_items = [
+        item.model_copy(update={"run_id": req.run_id, "kind": req.kind})
+        for item in req.items
+    ]
+    candidates_by_item: list[list[dict[str, Any]]] = [[] for _ in normalized_items]
+    semaphore = asyncio.Semaphore(min(req.concurrency, max(total_candidates, 1)))
+    jobs = [
+        (item_position, item, candidate_index)
+        for item_position, item in enumerate(normalized_items)
+        for candidate_index in range(1, item.candidate_count + 1)
+    ]
+
+    async def guarded(
+        item_position: int,
+        item: GenerateRequest,
+        candidate_index: int,
+    ) -> tuple[int, dict[str, Any]]:
+        async with semaphore:
+            try:
+                return item_position, await _generate_one(
+                    run_dir,
+                    item,
+                    candidate_index,
+                )
+            except Exception as exc:
+                return item_position, {
+                    "index": candidate_index,
+                    "status": "failed",
+                    "path": None,
+                    "error": str(exc),
+                }
+
+    for item_position, candidate in await asyncio.gather(
+        *(guarded(*job) for job in jobs)
+    ):
+        candidates_by_item[item_position].append(candidate)
+
+    payload = []
+    for item, candidates in zip(
+        normalized_items,
+        candidates_by_item,
+        strict=False,
+    ):
+        candidates.sort(key=lambda candidate: int(candidate.get("index") or 0))
+        has_error = candidates and not any(
+            candidate.get("path") for candidate in candidates
+        )
+        result: dict[str, Any] = {
+            "itemId": item.item_id,
+            "candidates": candidates,
+        }
+        if has_error:
+            result["error"] = "generation failed"
+        payload.append(result)
+    return {"runId": req.run_id, "kind": req.kind, "results": payload}
 
 
 @router.post("/api/image-gen/generate-bulk")
@@ -18172,39 +18864,22 @@ async def api_generate_bulk(req: BulkGenerateRequest) -> Any:
         except (FileNotFoundError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(status_code=202, content=job)
-    normalized_items = [item.model_copy(update={"run_id": req.run_id, "kind": req.kind}) for item in req.items]
-    candidates_by_item: list[list[dict[str, Any]]] = [[] for _ in normalized_items]
-    semaphore = asyncio.Semaphore(min(req.concurrency, max(total_candidates, 1)))
-    jobs = [
-        (item_position, item, candidate_index)
-        for item_position, item in enumerate(normalized_items)
-        for candidate_index in range(1, item.candidate_count + 1)
-    ]
-
-    async def guarded(item_position: int, item: GenerateRequest, candidate_index: int) -> tuple[int, dict[str, Any]]:
-        async with semaphore:
-            try:
-                return item_position, await _generate_one(run_dir, item, candidate_index)
-            except Exception as exc:
-                return item_position, {
-                    "index": candidate_index,
-                    "status": "failed",
-                    "path": None,
-                    "error": str(exc),
-                }
-
-    for item_position, candidate in await asyncio.gather(*(guarded(*job) for job in jobs)):
-        candidates_by_item[item_position].append(candidate)
-
-    payload = []
-    for item, candidates in zip(normalized_items, candidates_by_item, strict=False):
-        candidates.sort(key=lambda candidate: int(candidate.get("index") or 0))
-        has_error = candidates and not any(candidate.get("path") for candidate in candidates)
-        result: dict[str, Any] = {"itemId": item.item_id, "candidates": candidates}
-        if has_error:
-            result["error"] = "generation failed"
-        payload.append(result)
-    return {"runId": req.run_id, "kind": req.kind, "results": payload}
+    lease_id = f"bulk-foreground-{uuid.uuid4().hex}"
+    try:
+        await _acquire_run_execution_lease(lease_id, run_dir)
+    except FileLockUnavailable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="run create/resume is already active",
+        ) from exc
+    try:
+        return await _run_foreground_bulk_generation(
+            run_dir=run_dir,
+            req=req,
+            total_candidates=total_candidates,
+        )
+    finally:
+        await _release_run_execution_lease(lease_id)
 
 
 @router.get("/api/image-gen/generate-bulk/{job_id}")

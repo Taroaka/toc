@@ -1,4 +1,5 @@
 import json
+import hashlib
 import importlib.util
 import re
 import subprocess
@@ -23,7 +24,12 @@ from toc.grounding import (
     load_grounding_contract,
     stage_contract,
 )
-from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
+from toc.review_loop import (
+    REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
+    build_review_input_snapshot,
+    review_input_digest,
+    write_review_input_snapshot,
+)
 
 VERIFY_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify-pipeline.py"
 SPEC = importlib.util.spec_from_file_location("verify_pipeline", VERIFY_SCRIPT_PATH)
@@ -832,26 +838,88 @@ def _write_semantic_judgment_pack(run_dir: Path, *, status: str = "passed", entr
     review_dir.mkdir(parents=True, exist_ok=True)
     (review_dir / "image_prompt.review_collection.md").write_text("# Collection\n\n## scene10\n", encoding="utf-8")
     (review_dir / "image_prompt.review_scope.json").write_text(
-        json.dumps({"entry_count": entry_count, "selectors": ["scene10"]}, ensure_ascii=False) + "\n",
+        json.dumps(
+            {"entry_count": entry_count, "entry_ids": ["scene10"], "selectors": ["scene10"]},
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (review_dir / "image_prompt.judgment_prompt.md").write_text("semantic prompt\n", encoding="utf-8")
-    report = f"status: {status}\nreviewed_entries: [scene10]\nblocked_entries: []\nfindings: []\nnotes: []\n"
+    report = f"status: {status}\nreviewed_entries: [scene10]\nblocked_entries: []\nfailed_selectors: []\nfindings: []\nnotes: []\n"
     if placeholder:
         report = "# Image Prompt Judgment Review\n\n- status: `pending`\n\n## Findings\n\n- `...`\n"
     (review_dir / "image_prompt.judgment.md").write_text(report, encoding="utf-8")
 
 
 def _write_semantic_review_passed(run_dir: Path, stage: str, *, entry_count: int = 1) -> None:
-    from toc.semantic_review import semantic_review_relpaths, semantic_state_updates
+    from toc.semantic_review import (
+        SEMANTIC_REVIEW_INPUT_SCHEMA,
+        semantic_review_input_digest,
+        semantic_review_relpaths,
+        semantic_review_scope_binding_sha256,
+        semantic_state_updates,
+    )
 
     paths = semantic_review_relpaths(stage)
+    entry_ids = [f"entry_{index}" for index in range(1, entry_count + 1)]
     for rel in paths.values():
         (run_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths["collection"]).write_text(f"# {stage} Collection\n\n## entry\n", encoding="utf-8")
-    (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": entry_count, "selectors": ["entry"]}), encoding="utf-8")
-    (run_dir / paths["prompt"]).write_text(f"# {stage} Prompt\n", encoding="utf-8")
-    (run_dir / paths["report"]).write_text("status: passed\nreviewed_entries: [entry]\nblocked_entries: []\nfindings: []\n", encoding="utf-8")
+    collection_path = run_dir / paths["collection"]
+    scope_path = run_dir / paths["scope"]
+    prompt_path = run_dir / paths["prompt"]
+    report_path = run_dir / paths["report"]
+    collection_path.write_text(
+        f"# {stage} Collection\n\n"
+        + "\n".join(f"## {entry_id}\n" for entry_id in entry_ids),
+        encoding="utf-8",
+    )
+    prompt_path.write_text(f"# {stage} Prompt\n", encoding="utf-8")
+    source_path = scope_path.with_name(f"{stage}.fixture-source.md")
+    source_path.write_text(f"# {stage} fixture source\n", encoding="utf-8")
+    source_relpath = source_path.relative_to(run_dir).as_posix()
+    source_digests = [
+        {
+            "path": source_relpath,
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+    ]
+    scope = {
+        "stage": stage,
+        "entry_count": entry_count,
+        "entry_ids": entry_ids,
+        "review_scope": "all_entries",
+        "source_artifacts": [source_relpath],
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_digests,
+        "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+        "artifacts": {
+            "collection": paths["collection"].as_posix(),
+            "scope": paths["scope"].as_posix(),
+            "prompt": paths["prompt"].as_posix(),
+            "report": paths["report"].as_posix(),
+        },
+    }
+    binding = semantic_review_scope_binding_sha256(scope)
+    digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=source_digests,
+        scope_binding_sha256=binding,
+    )
+    scope["scope_binding_sha256"] = binding
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(json.dumps(scope) + "\n", encoding="utf-8")
+    report_path.write_text(
+        "status: passed\n"
+        + f"semantic_review_input_digest: {digest}\n"
+        + f"reviewed_entries: [{', '.join(entry_ids)}]\n"
+        + "blocked_entries: []\nfailed_selectors: []\nfindings: []\n",
+        encoding="utf-8",
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         semantic_state_updates(stage, status="passed", entry_count=entry_count, error_count=0),
@@ -883,15 +951,55 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
     for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
         round_dir = run_dir / "logs" / "eval" / stage / "round_01"
         round_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = build_review_input_snapshot(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+        )
         prompt_dir = round_dir / "prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
         stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
         for idx in range(1, 6):
             focus_name = stage_focus.get(idx, ("", ""))[0]
-            focus_line = f"- critic_focus: {focus_name}\n" if focus_name else ""
-            (round_dir / f"critic_{idx}.md").write_text(f"{focus_line}- status: passed\n", encoding="utf-8")
             (prompt_dir / f"critic_{idx}.prompt.md").write_text(
                 f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
+                encoding="utf-8",
+            )
+        (prompt_dir / "aggregator.prompt.md").write_text(
+            "Aggregate the five bound critic reports.\n",
+            encoding="utf-8",
+        )
+        prompt_relpaths = tuple(
+            path.relative_to(run_dir)
+            for path in [
+                *[prompt_dir / f"critic_{idx}.prompt.md" for idx in range(1, 6)],
+                prompt_dir / "aggregator.prompt.md",
+            ]
+        )
+        write_review_input_snapshot(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+            snapshot=snapshot,
+            prompt_relpaths=prompt_relpaths,
+        )
+        input_digest = review_input_digest(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+        )
+        critic_texts: list[str] = []
+        for idx in range(1, 6):
+            focus_name = stage_focus.get(idx, ("", ""))[0]
+            focus_line = f"- critic_focus: {focus_name}\n" if focus_name else ""
+            critic_text = (
+                f"- critic_id: critic_{idx}\n"
+                f"- review_input_digest: {input_digest}\n"
+                f"{focus_line}- status: passed\n"
+            )
+            critic_texts.append(critic_text)
+            (round_dir / f"critic_{idx}.md").write_text(
+                critic_text,
                 encoding="utf-8",
             )
         heading = "Design Owner Patch Brief" if stage == "production_readiness" else "Generator Patch Brief"
@@ -927,10 +1035,17 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- internal_pressure: pressure escalates before the turn\n"
                 "- value_shift_visibility: value shift is visible\n"
                 "- causal_turn_visibility: causal turn is visible\n"
-                "- scene_event_sequence: setup, pressure, turn, and payoff are present\n"
+                "- scene_event_sequence: authored event IDs/functions are inventoried and assigned where must_be_seen\n"
                 "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details\n"
                 "- scene_generation_debug_source: source beats and adaptation choices are recorded\n"
                 "- scene_generation_contract: required scene outputs are declared\n"
+                "- story_specific_grounding: passed\n"
+                "- non_replaceable_elements: passed\n"
+                "- concrete_story_function: passed\n"
+                "- specificity_budget: passed\n"
+                "- canonical_event_coverage: passed\n"
+                "- scene_character_state_timeline: passed\n"
+                "- scene_film_coverage_plan: passed\n"
                 "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
                 "- end_situation_alignment: end_situation matches scene_intent.value_shift.to\n"
                 "- neighbor_handoff: neighboring handoffs are checked\n\n"
@@ -964,7 +1079,16 @@ def _write_p400_review_artifacts(run_dir: Path) -> None:
                 "- triangulation_review_ready: passed\n\n"
             )
         (round_dir / "aggregated_review.md").write_text(
-            f"- status: passed\n\n## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n## Rejected Suggestions\n\n[]\n\n{scene_count_gate}## {heading}\n\nNo changes.\n\n## Round Summary\n\npassed\n",
+            f"- status: passed\n- review_input_digest: {input_digest}\n\n"
+            + "- critic_report_sha256s:\n"
+            + "\n".join(
+                f"  - critic_{idx}: {hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+                for idx, text in enumerate(critic_texts, start=1)
+            )
+            + "\n\n"
+            f"## Blocking Findings\n\n[]\n\n## Recommended Changes\n\n[]\n\n"
+            f"## Rejected Suggestions\n\n[]\n\n{scene_count_gate}## {heading}\n\n"
+            "No changes.\n\n## Round Summary\n\npassed\n",
             encoding="utf-8",
         )
     for semantic_stage in ("scene_set", "scene_detail", "cut_blueprint"):
