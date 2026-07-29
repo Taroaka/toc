@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import inspect
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -51,6 +53,7 @@ from server.codex_app_server import (
 from server.image_gen_app import (
     _toc_immersive_command,
     _toc_run_command,
+    _toc_world_walk_command,
     _validate_created_run,
     _validate_frontend_create_run,
     _validate_materialized_p650_run,
@@ -61,7 +64,12 @@ from toc.video_provider_capabilities import resolve_video_provider_capabilities
 from toc.harness import load_structured_document
 from toc.grounding import build_stage_grounding_readset, resolve_stage_grounding
 from toc.semantic_review_loop import semantic_repair_relpaths
-from toc.runtime_locks import FileLockUnavailable
+from toc.review_loop import (
+    build_review_input_snapshot,
+    review_input_snapshot_issues,
+    write_review_input_snapshot,
+)
+from toc.runtime_locks import FileLockUnavailable, sync_file_lock
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
     load_request_snapshot,
@@ -195,6 +203,156 @@ def write_semantic_review_artifacts(run_dir: Path, stage: str, *, entry_count: i
     )
 
 
+def write_failed_semantic_review_artifacts(
+    run_dir: Path,
+    stage: str,
+    *,
+    reviewed_entries: list[str],
+    failed_selectors: list[str],
+    blocked_entries: list[str],
+) -> None:
+    """Write a current, fully accounted terminal failure for media routing tests."""
+
+    write_semantic_review_artifacts(
+        run_dir,
+        stage,
+        entry_count=len(reviewed_entries),
+    )
+    relpaths = image_gen_app.semantic_review_relpaths(stage)
+    scope_path = run_dir / relpaths["scope"]
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["entry_count"] = len(reviewed_entries)
+    scope["entry_ids"] = reviewed_entries
+    scope["selectors"] = reviewed_entries
+    if stage == "image_prompt":
+        snapshot = load_request_snapshot(
+            run_dir / "image_generation_request_snapshot.json",
+            run_dir=run_dir,
+            verify_references=True,
+        )
+        scope["request_revision"] = snapshot.request_revision
+    scope.pop("source_artifact_digests", None)
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    report_path = run_dir / relpaths["report"]
+    report_path.write_text(
+        "\n".join(
+            [
+                "status: failed",
+                f"reviewed_entries: [{', '.join(reviewed_entries)}]",
+                f"blocked_entries: [{', '.join(blocked_entries)}]",
+                f"failed_selectors: [{', '.join(failed_selectors)}]",
+                "reason_keys: [scene_detail_obligation_missing]",
+                "findings: [localized semantic failure]",
+                "notes: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image_gen_app._refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=run_dir / relpaths["collection"],
+        prompt_path=run_dir / relpaths["prompt"],
+        report_path=report_path,
+    )
+
+
+def activate_localized_partial_media_fixture(
+    run_dir: Path,
+    stage: str,
+    *,
+    blocked_item_ids: list[str],
+    extra_state: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Record the exact production state and projection for a localized failure."""
+
+    blocked_values = ", ".join(blocked_item_ids)
+    updates = {
+        f"review.semantic.{stage}.status": "failed",
+        f"review.semantic.{stage}.partial_media_allowed": "true",
+        f"review.semantic.{stage}.blocked_image_items": blocked_values,
+        f"review.semantic.{stage}.blocked_image_item_count": str(
+            len(blocked_item_ids)
+        ),
+        f"review.semantic.{stage}.localization.status": (
+            "localized_to_image_items"
+        ),
+        f"review.semantic.{stage}.localization.blocked_image_items": (
+            blocked_values
+        ),
+        f"review.semantic.{stage}.localization.validation": "passed",
+    }
+    if stage == "image_prompt":
+        snapshot = load_request_snapshot(
+            run_dir / "image_generation_request_snapshot.json",
+            run_dir=run_dir,
+            verify_references=True,
+        )
+        updates.update(
+            {
+                "review.image_prompt.request_freeze.status": "frozen",
+                "review.image_prompt.request_freeze.semantic_status": (
+                    "localized_failure"
+                ),
+                "review.image_prompt.request_freeze.request_revision": (
+                    snapshot.request_revision
+                ),
+                (
+                    "review.image_prompt.request_freeze."
+                    "reviewed_request_revision"
+                ): snapshot.request_revision,
+            }
+        )
+    updates.update(extra_state or {})
+    image_gen_app.append_state_snapshot(run_dir / "state.txt", updates)
+    return image_gen_app._refresh_partial_media_projection_artifact(run_dir)
+
+
+def bind_semantic_review_to_sources(
+    run_dir: Path,
+    stage: str,
+    source_artifacts: list[str],
+) -> None:
+    relpaths = image_gen_app.semantic_review_relpaths(stage)
+    scope_path = run_dir / relpaths["scope"]
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["source_artifacts"] = source_artifacts
+    scope.pop("source_artifact_digests", None)
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    image_gen_app._refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=run_dir / relpaths["collection"],
+        prompt_path=run_dir / relpaths["prompt"],
+        report_path=run_dir / relpaths["report"],
+    )
+
+
+def refresh_existing_semantic_review_digest(run_dir: Path, stage: str) -> None:
+    relpaths = image_gen_app.semantic_review_relpaths(stage)
+    scope_path = run_dir / relpaths["scope"]
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.pop("source_artifact_digests", None)
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    image_gen_app._refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=run_dir / relpaths["collection"],
+        prompt_path=run_dir / relpaths["prompt"],
+        report_path=run_dir / relpaths["report"],
+    )
+
+
 def semantic_agent_report_transcript(
     text: str,
     *,
@@ -236,22 +394,6 @@ def write_valid_p650_artifacts(root: Path, run_id: str) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "characters").mkdir(parents=True, exist_ok=True)
     (run_dir / "assets" / "characters" / "hero.png").write_bytes(PNG_BYTES)
-    image_gen.write_app_server_image_debug_log(
-        run_dir=run_dir,
-        item_id="hero",
-        index=1,
-        destination=run_dir / "assets" / "characters" / "hero.png",
-        references=[],
-        prompt="実写映画風の主人公参照画像。",
-        kind="asset",
-        result=ImageGenerationResult(
-            saved_path=run_dir / "assets" / "characters" / "hero.png",
-            revised_prompt=None,
-            status="completed",
-            transcript=[],
-            source="app_server",
-        ),
-    )
     terminal_slots = {
         "p110": "done",
         "p120": "done",
@@ -317,13 +459,16 @@ assets:
 scenes:
   - scene_id: 10
     cuts:
-      - cut_id: 10-1
+      - cut_id: 1
+        duration_seconds: 8
         image_generation:
           output: assets/scenes/scene10_cut1.png
-      - cut_id: 10-2
+      - cut_id: 2
+        duration_seconds: 8
         image_generation:
           output: assets/scenes/scene10_cut2.png
-      - cut_id: 10-3
+      - cut_id: 3
+        duration_seconds: 8
         image_generation:
           output: assets/scenes/scene10_cut3.png
 ```
@@ -336,6 +481,7 @@ scenes:
 ## hero
 
 - tool: `codex_builtin_image`
+- prompt_policy_version: `asset_prompt_v1`
 - execution_lane: `bootstrap_builtin`
 - reference_count: `0`
 - output: `assets/characters/hero.png`
@@ -345,6 +491,62 @@ scenes:
 ```
 """,
         encoding="utf-8",
+    )
+    asset_prompt = "実写映画風の主人公参照画像。顔、衣装、体格、色彩を後続カットで固定する。"
+    asset_source_digest = hashlib.sha256(b"hero:asset-fixture").hexdigest()
+    asset_snapshot = materialize_request_snapshot(
+        run_dir,
+        kind="asset",
+        items=[
+            {
+                "item_id": "hero",
+                "destination": "assets/characters/hero.png",
+                "prompt": asset_prompt,
+                "prompt_policy_version": "asset_prompt_v1",
+                "compiler_version": "test_fixture_v1",
+                "source_digest": asset_source_digest,
+                "references": [],
+            }
+        ],
+        source_artifact="asset_generation_requests.md",
+    )
+    write_request_snapshot_atomic(
+        run_dir / "asset_generation_request_snapshot.json",
+        asset_snapshot,
+        run_dir=run_dir,
+    )
+    asset_snapshot_item = asset_snapshot.item("hero")
+    asset_output = run_dir / "assets" / "characters" / "hero.png"
+    image_gen.write_app_server_image_debug_log(
+        run_dir=run_dir,
+        item_id="hero",
+        index=1,
+        destination=asset_output,
+        references=[],
+        prompt=asset_prompt,
+        kind="asset",
+        prompt_policy_version="asset_prompt_v1",
+        request_revision=asset_snapshot.request_revision,
+        request_digest=asset_snapshot_item.request_digest,
+        compiler_version=asset_snapshot_item.compiler_version,
+        source_digest=asset_snapshot_item.source_digest,
+        result=ImageGenerationResult(
+            saved_path=asset_output,
+            revised_prompt=None,
+            status="completed",
+            transcript=[],
+            source="app_server",
+            generation_job_id="fixture-asset-job",
+            item_id="hero",
+            turn_id="fixture-asset-turn",
+            prompt_sha256=asset_snapshot_item.prompt_sha256,
+            reference_sha256s=[],
+            image_generation_item_id="fixture-asset-image",
+            image_generation_item_count=1,
+            destination=str(asset_output),
+            provenance_authoritative=True,
+            provenance_policy="request_bound_v2",
+        ),
     )
     (run_dir / "asset_generation_manifest.md").write_text(
         "- hero -> assets/characters/hero.png / bootstrap_builtin / generated reusable character reference for p560 validation and downstream scene prompts\n",
@@ -501,6 +703,18 @@ def refresh_scene_request_snapshot_fixture(run_dir: Path) -> None:
         run_dir / "image_generation_request_snapshot.json",
         snapshot,
         run_dir=run_dir,
+    )
+    image_gen_app.append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.image_prompt.request_freeze.status": "frozen",
+            "review.image_prompt.request_freeze.request_revision": (
+                snapshot.request_revision
+            ),
+            "review.image_prompt.request_freeze.reviewed_request_revision": (
+                snapshot.request_revision
+            ),
+        },
     )
 
 
@@ -839,6 +1053,21 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(payload["stop_target"], "p650")
         self.assertIn("Run the canonical p100-p650 frontend-review workflow in one skill invocation.", command)
 
+    def test_toc_world_walk_command_includes_source_run_payload(self) -> None:
+        command = _toc_world_walk_command(
+            topic="桃太郎の世界観を散歩してみた",
+            run_id="桃太郎の世界観を散歩してみた_20260509_1200",
+            source_run_id="桃太郎_20260509_1100",
+            target_duration_seconds=600,
+        )
+
+        payload = json.loads(command.split("Request JSON:\n", 1)[1])
+        self.assertEqual(payload["experience"], "world_walk")
+        self.assertEqual(payload["source_run"], "output/桃太郎_20260509_1100")
+        self.assertEqual(payload["target_duration_seconds"], 600)
+        self.assertEqual(payload["run_dir"], "output/桃太郎の世界観を散歩してみた_20260509_1200")
+        self.assertEqual(payload["stop_target"], "p680")
+
     def test_create_run_error_message_preserves_app_server_detail(self) -> None:
         message = image_gen_app._create_run_error_message(
             RuntimeError("stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)")
@@ -907,6 +1136,45 @@ class ImageGenParserTests(unittest.TestCase):
             with patch("server.image_gen_app.ROOT", root):
                 with self.assertRaisesRegex(RuntimeError, "image_generation_request_snapshot.json"):
                     _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_p650_run_requires_asset_request_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            (run_dir / "asset_generation_request_snapshot.json").unlink()
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "asset_generation_request_snapshot.json",
+                ):
+                    _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_p650_run_rejects_asset_without_snapshot_bound_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
+            shutil.rmtree(run_dir / "logs" / "app_server" / "image_gen")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "strict request-bound provenance",
+                ):
+                    _validate_p650_run("桃太郎_20260509_1200")
+
+    def test_validate_generated_asset_outputs_requires_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = write_valid_p650_artifacts(Path(tmp), "sample_run")
+            (run_dir / "asset_generation_request_snapshot.json").unlink()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "asset_generation_request_snapshot.json",
+            ):
+                image_gen_app._validate_generated_outputs(run_dir, "asset")
 
     def test_validate_p650_run_rejects_draft_freeze_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1203,6 +1471,28 @@ class ImageGenParserTests(unittest.TestCase):
             ):
                 _validate_frontend_create_run("桃太郎_20260509_1200")
 
+    def test_validate_frontend_create_run_uses_terminal_p680_verifier_mode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p680_artifacts(root, "桃太郎_20260509_1200")
+            modes: list[str] = []
+
+            def validate_p680(_run_dir: Path, *, mode: str) -> None:
+                modes.append(mode)
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_p680_visual_quality",
+                    side_effect=validate_p680,
+                ),
+            ):
+                _validate_frontend_create_run("桃太郎_20260509_1200")
+
+        self.assertEqual(modes, ["terminal"])
+
     def test_validate_frontend_create_run_requires_scene_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1294,6 +1584,142 @@ class ImageGenParserTests(unittest.TestCase):
             result = image_gen_app.check_semantic_review(run_dir, "research")
         self.assertTrue(result.passed, result.errors)
 
+    def test_semantic_report_can_be_materialized_from_complete_json_agent_verdict(self) -> None:
+        verdict = {
+            "status": "failed",
+            "semantic_review_input_digest": "sha256:" + ("a" * 64),
+            "reviewed_entries": ["scene:10", "scene:20"],
+            "blocked_entries": ["scene:20"],
+            "findings": [
+                {
+                    "selectors": ["scene20"],
+                    "reason_keys": ["semantic_reveal_order_mismatch"],
+                    "detail": "scene20 reveals the next scene too early",
+                }
+            ],
+            "failed_selectors": ["scene20"],
+            "reason_keys": ["semantic_reveal_order_mismatch"],
+            "notes": ["scene10 is usable"],
+        }
+        transcript = [
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": json.dumps(verdict, ensure_ascii=False),
+                    }
+                },
+            }
+        ]
+
+        report = image_gen_app._semantic_report_text_from_transcript(
+            transcript,
+            "scene_set",
+        )
+
+        self.assertIsNotNone(report)
+        self.assertIn("status: failed\n", report)
+        self.assertIn(
+            "semantic_review_input_digest: sha256:" + ("a" * 64),
+            report,
+        )
+        self.assertIn('reviewed_entries: ["scene:10", "scene:20"]', report)
+        self.assertIn('blocked_entries: ["scene:20"]', report)
+        self.assertIn('failed_selectors: ["scene20"]', report)
+        self.assertIn(
+            'reason_keys: ["semantic_reveal_order_mismatch"]',
+            report,
+        )
+        self.assertIn(
+            'findings:\n  - {"selectors": ["scene20"], '
+            '"reason_keys": ["semantic_reveal_order_mismatch"], '
+            '"detail": "scene20 reveals the next scene too early"}',
+            report,
+        )
+
+    def test_semantic_report_never_uses_commentary_when_explicit_final_is_missing_or_malformed(
+        self,
+    ) -> None:
+        verdict = {
+            "status": "passed",
+            "semantic_review_input_digest": "sha256:" + ("a" * 64),
+            "reviewed_entries": ["scene:10"],
+            "blocked_entries": [],
+            "findings": [],
+            "failed_selectors": [],
+            "reason_keys": [],
+            "notes": [],
+        }
+        valid_text = json.dumps(verdict, ensure_ascii=False)
+        cases = {
+            "explicit_commentary_without_final": [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "commentary",
+                            "text": valid_text,
+                        }
+                    },
+                }
+            ],
+            "explicit_commentary_then_malformed_final": [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "commentary",
+                            "text": valid_text,
+                        }
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": '{"status": "passed"',
+                        }
+                    },
+                },
+            ],
+            "legacy_message_then_malformed_explicit_final": [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "text": valid_text,
+                        }
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": "not a complete verdict",
+                        }
+                    },
+                },
+            ],
+        }
+
+        for label, transcript in cases.items():
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    image_gen_app._semantic_report_text_from_transcript(
+                        transcript,
+                        "scene_set",
+                    )
+                )
+
     def test_semantic_report_agent_fallback_rejects_incomplete_chat_message(self) -> None:
         transcript = [
             {
@@ -1342,7 +1768,11 @@ class ImageGenParserTests(unittest.TestCase):
             manifest_data["scenes"][0]["scene_intent"] = {
                 "review_only_visualizable_action": review_only_scene_action,
             }
-            for cut in manifest_data["scenes"][0]["cuts"]:
+            for cut_index, cut in enumerate(
+                manifest_data["scenes"][0]["cuts"],
+                start=1,
+            ):
+                cut["cut_id"] = f"{cut_index:02d}"
                 cut["duration_seconds"] = 6
             image_gen_app._write_manifest_data(manifest_path, manifest_text, manifest_data)
             write_test_png(run_dir / "assets" / "scenes" / "scene10_cut1.png", (220, 40, 40))
@@ -1380,7 +1810,10 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(result["unitCount"], 2)
         self.assertTrue(storyboard_exists)
         self.assertEqual(timeline_issues, [])
-        self.assertEqual([cut["cut_id"] for cut in data["scenes"][0]["cuts"]], ["1", "2", "3"])
+        self.assertEqual(
+            [cut["cut_id"] for cut in data["scenes"][0]["cuts"]],
+            ["01", "02", "03"],
+        )
         self.assertEqual([unit["unit_id"] for unit in render_units], ["1", "2"])
         self.assertEqual(render_units[0]["source_cut_ids"], ["1", "2"])
         self.assertEqual(render_units[1]["source_cut_ids"], ["3"])
@@ -1466,6 +1899,921 @@ class ImageGenParserTests(unittest.TestCase):
             state["review.video_prompt.item.scene10_unit2.status"],
             "pending",
         )
+
+    def test_storyboard_materializer_rejects_missing_or_invalid_canonical_cut_fields(
+        self,
+    ) -> None:
+        cases = {
+            "missing_cut_id": lambda cut: cut.pop("cut_id"),
+            "invalid_cut_id": lambda cut: cut.__setitem__("cut_id", "cut-01"),
+            "missing_duration": lambda cut: cut.pop("duration_seconds"),
+            "invalid_duration": lambda cut: cut.__setitem__(
+                "duration_seconds",
+                0,
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    run_id = f"storyboard_{label}"
+                    run_dir = write_valid_p680_artifacts(root, run_id)
+                    for cut_index in range(1, 4):
+                        write_test_png(
+                            run_dir
+                            / "assets"
+                            / "scenes"
+                            / f"scene10_cut{cut_index}.png"
+                        )
+                    manifest_path = run_dir / "video_manifest.md"
+                    original_text = manifest_path.read_text(encoding="utf-8")
+                    manifest = yaml.safe_load(
+                        image_gen_app._extract_manifest_yaml_text(original_text)
+                    )
+                    mutate(manifest["scenes"][0]["cuts"][0])
+                    image_gen_app._write_manifest_data(
+                        manifest_path,
+                        original_text,
+                        manifest,
+                    )
+                    manifest_before = manifest_path.read_bytes()
+
+                    with (
+                        patch("server.image_gen_app.ROOT", root),
+                        self.assertRaisesRegex(
+                            RuntimeError,
+                            "cut_id|duration",
+                        ),
+                    ):
+                        image_gen_app._materialize_scene_storyboard_video_requests(
+                            run_id
+                        )
+
+                    self.assertEqual(
+                        manifest_path.read_bytes(),
+                        manifest_before,
+                    )
+                    self.assertFalse(
+                        (run_dir / "video_generation_requests.md").is_file()
+                    )
+
+    def test_storyboard_transaction_rolls_back_when_review_projection_drifts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "storyboard_projection_drift"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            manifest_path = run_dir / "video_manifest.md"
+            tracked = {
+                path: path.read_bytes() if path.is_file() else None
+                for path in (
+                    manifest_path,
+                    run_dir / "video_generation_requests.md",
+                    run_dir / "state.txt",
+                    run_dir / "run_status.json",
+                    run_dir / "p000_index.md",
+                )
+            }
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.video_manifest_review_projection_sha256",
+                    side_effect=("stable", "stable", "drift"),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "review projection changed",
+                ),
+            ):
+                image_gen_app._materialize_scene_storyboard_video_requests(
+                    run_id
+                )
+
+            for path, before in tracked.items():
+                if before is None:
+                    self.assertFalse(path.exists(), path)
+                else:
+                    self.assertEqual(path.read_bytes(), before, path)
+            self.assertEqual(
+                list(
+                    (run_dir / "assets" / "storyboards").glob("*.png")
+                ),
+                [],
+            )
+
+    def test_storyboard_materializer_detaches_aliased_scene_mapping(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "storyboard_scene_alias"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            manifest_path, original_text, manifest = (
+                image_gen_app._read_manifest_data(run_dir)
+            )
+            manifest["shared_scene"] = manifest["scenes"][0]
+            image_gen_app._write_manifest_data(
+                manifest_path,
+                original_text,
+                manifest,
+            )
+            projection_before = (
+                image_gen_app.video_manifest_review_projection_sha256(
+                    manifest_path
+                )
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                image_gen_app._materialize_scene_storyboard_video_requests(
+                    run_id
+                )
+
+            _path, _text, materialized = (
+                image_gen_app._read_manifest_data(run_dir)
+            )
+            self.assertNotIn(
+                "render_units",
+                materialized["shared_scene"],
+            )
+            self.assertTrue(
+                materialized["scenes"][0]["render_units"]
+            )
+            self.assertEqual(
+                image_gen_app.video_manifest_review_projection_sha256(
+                    manifest_path
+                ),
+                projection_before,
+            )
+
+    def test_scene_storyboard_p680_finalizer_uses_strict_transaction_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "storyboard_finalizer"
+            (root / "output" / run_id).mkdir(parents=True)
+            events: list[str] = []
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_frontend_create_run",
+                    side_effect=lambda *_args, **_kwargs: events.append(
+                        "generic"
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._scene_storyboard_materialization_is_current",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("currentness") or False
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app.video_manifest_review_projection_sha256",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("projection") or "stable"
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._materialize_scene_storyboard_video_requests",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("materialize")
+                        or {"unitCount": 2}
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._validate_scene_storyboard_create_run",
+                    side_effect=lambda *_args, **_kwargs: events.append(
+                        "specialized"
+                    ),
+                ),
+            ):
+                result = image_gen_app._finalize_scene_storyboard_p680(run_id)
+
+            self.assertEqual(
+                events,
+                [
+                    "generic",
+                    "currentness",
+                    "projection",
+                    "materialize",
+                    "projection",
+                    "specialized",
+                    "generic",
+                ],
+            )
+            self.assertEqual(result["unitCount"], 2)
+            self.assertFalse(result["alreadyCurrent"])
+
+    def test_scene_storyboard_p680_finalizer_avoids_duplicate_materialization(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "storyboard_finalizer_current"
+            (root / "output" / run_id).mkdir(parents=True)
+            materialize = Mock()
+            generic = Mock()
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_frontend_create_run",
+                    generic,
+                ),
+                patch(
+                    "server.image_gen_app._scene_storyboard_materialization_is_current",
+                    return_value=True,
+                ),
+                patch(
+                    "server.image_gen_app._materialize_scene_storyboard_video_requests",
+                    materialize,
+                ),
+            ):
+                result = image_gen_app._finalize_scene_storyboard_p680(run_id)
+
+            materialize.assert_not_called()
+            self.assertEqual(generic.call_count, 2)
+            self.assertTrue(result["alreadyCurrent"])
+
+    def test_scene_storyboard_currentness_rejects_incomplete_or_reordered_cut_ownership(
+        self,
+    ) -> None:
+        mutations = {
+            "dropped": lambda units: units.pop(1),
+            "reordered": lambda units: units[0].__setitem__(
+                "source_cut_ids",
+                ["2", "1"],
+            ),
+            "duplicate": lambda units: units[1].__setitem__(
+                "source_cut_ids",
+                ["2", "3"],
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    run_id = f"storyboard_currentness_{label}"
+                    run_dir = write_valid_p680_artifacts(root, run_id)
+                    for cut_index in range(1, 4):
+                        write_test_png(
+                            run_dir
+                            / "assets"
+                            / "scenes"
+                            / f"scene10_cut{cut_index}.png"
+                        )
+                    with patch("server.image_gen_app.ROOT", root):
+                        image_gen_app._materialize_scene_storyboard_video_requests(
+                            run_id
+                        )
+                        manifest_path, original_text, manifest = (
+                            image_gen_app._read_manifest_data(run_dir)
+                        )
+                        mutate(manifest["scenes"][0]["render_units"])
+                        image_gen_app._write_manifest_data(
+                            manifest_path,
+                            original_text,
+                            manifest,
+                        )
+
+                        self.assertFalse(
+                            image_gen_app._scene_storyboard_materialization_is_current(
+                                run_id
+                            )
+                        )
+
+    def test_scene_storyboard_currentness_recompiles_source_cut_contracts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "storyboard_currentness_contract"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            with patch("server.image_gen_app.ROOT", root):
+                image_gen_app._materialize_scene_storyboard_video_requests(
+                    run_id
+                )
+                self.assertTrue(
+                    image_gen_app._scene_storyboard_materialization_is_current(
+                        run_id
+                    )
+                )
+                manifest_path, original_text, manifest = (
+                    image_gen_app._read_manifest_data(run_dir)
+                )
+                manifest["scenes"][0]["cuts"][0].setdefault(
+                    "cut_contract",
+                    {},
+                )["reviewed_motion_fact"] = (
+                    "changed after storyboard materialization"
+                )
+                image_gen_app._write_manifest_data(
+                    manifest_path,
+                    original_text,
+                    manifest,
+                )
+
+                self.assertFalse(
+                    image_gen_app._scene_storyboard_materialization_is_current(
+                        run_id
+                    )
+                )
+
+    def test_storyboard_materialization_rejects_sanitized_scene_selector_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            manifest_path, original_text, manifest = image_gen_app._read_manifest_data(
+                run_dir
+            )
+            first_scene = manifest["scenes"][0]
+            first_scene["scene_id"] = "scene/10"
+            duplicate_scene = copy.deepcopy(first_scene)
+            duplicate_scene["scene_id"] = "scene 10"
+            manifest["scenes"].append(duplicate_scene)
+            for cut in first_scene["cuts"]:
+                write_test_png(run_dir / cut["image_generation"]["output"])
+            image_gen_app._write_manifest_data(
+                manifest_path,
+                original_text,
+                manifest,
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "duplicate storyboard scene selector",
+                ):
+                    image_gen_app._materialize_scene_storyboard_video_requests(
+                        run_id
+                    )
+
+    def test_storyboard_validator_rejects_request_section_identity_and_binding_tampering(
+        self,
+    ) -> None:
+        mutations = {
+            "prefix_collision": lambda text: text.replace(
+                "## scene10_unit1\n",
+                "## scene10_unit10\n",
+                1,
+            ),
+            "duplicate_section": lambda text: (
+                text.rstrip()
+                + "\n\n"
+                + "\n".join(
+                    image_gen_app._split_video_request_sections(text)[1][0][1]
+                )
+                + "\n"
+            ),
+            "prompt_body": lambda text: text.replace(
+                "一つの連続した映画的な動き",
+                "契約にない不正な別の動き",
+                1,
+            ),
+            "references": lambda text: text.replace(
+                "- references:\n"
+                "  - `assets/scenes/scene10_cut1.png`",
+                "- references:\n"
+                "  - `assets/scenes/scene10_cut2.png`",
+                1,
+            ),
+            "negative_prompt": lambda text: text.replace(
+                "```negative_prompt\n",
+                "```negative_prompt\n契約外の不正なnegative指定\n",
+                1,
+            ),
+            "prompt_sha256": lambda text: re.sub(
+                r"(?m)^- prompt_sha256: `[^`]+`$",
+                "- prompt_sha256: `" + ("0" * 64) + "`",
+                text,
+                count=1,
+            ),
+            "references_digest": lambda text: re.sub(
+                r"(?m)^- references_digest: `[^`]+`$",
+                "- references_digest: `" + ("0" * 64) + "`",
+                text,
+                count=1,
+            ),
+            "output": lambda text: re.sub(
+                r"(?m)^- output: `[^`]+`$",
+                "- output: `assets/scenes/tampered/output.mp4`",
+                text,
+                count=1,
+            ),
+            "source_cuts": lambda text: text.replace(
+                "- source_cuts:\n  - `1`",
+                "- source_cuts:\n  - `999`",
+                1,
+            ),
+            "duplicate_output": lambda text: re.sub(
+                r"(?m)(^- output: `[^`]+`$)",
+                r"\1\n- output: `assets/scenes/duplicate/output.mp4`",
+                text,
+                count=1,
+            ),
+            "duplicate_references": lambda text: re.sub(
+                r"(?ms)(^- references:\n(?:  - `[^\n]+`\n?)+)",
+                lambda match: (
+                    match.group(1)
+                    + "- references:\n"
+                    + "  - `assets/scenes/scene10_cut1.png`\n"
+                ),
+                text,
+                count=1,
+            ),
+            "duplicate_video_prompt": lambda text: re.sub(
+                r"(?ms)(```video_prompt\n.*?\n```)",
+                lambda match: (
+                    match.group(1)
+                    + "\n\n```video_prompt\n"
+                    + "不正な重複prompt\n```"
+                ),
+                text,
+                count=1,
+            ),
+            "mixed_prompt_types_with_empty_api_prompt": (
+                lambda text: re.sub(
+                    r"(?ms)(```video_prompt\n.*?\n```)",
+                    lambda match: (
+                        match.group(1)
+                        + "\n\n```api_prompt\n\n```"
+                    ),
+                    text,
+                    count=1,
+                )
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    run_id = "桃太郎_20260509_1200"
+                    run_dir = write_valid_p680_artifacts(root, run_id)
+                    for cut_index in range(1, 4):
+                        write_test_png(
+                            run_dir
+                            / "assets"
+                            / "scenes"
+                            / f"scene10_cut{cut_index}.png"
+                        )
+                    with patch("server.image_gen_app.ROOT", root):
+                        image_gen_app._materialize_scene_storyboard_video_requests(
+                            run_id
+                        )
+                        request_path = run_dir / "video_generation_requests.md"
+                        request_path.write_text(
+                            mutate(request_path.read_text(encoding="utf-8")),
+                            encoding="utf-8",
+                        )
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "storyboard create incomplete",
+                        ):
+                            image_gen_app._validate_scene_storyboard_create_run(
+                                run_id,
+                                strict_visual_quality=False,
+                            )
+
+    def test_storyboard_validator_rejects_corrupt_or_wrong_size_storyboard_png(
+        self,
+    ) -> None:
+        mutations = {
+            "corrupt": lambda path: path.write_bytes(b"not-a-png"),
+            "wrong_size": lambda path: write_test_png(
+                path,
+                size=(320, 180),
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    run_id = "桃太郎_20260509_1200"
+                    run_dir = write_valid_p680_artifacts(root, run_id)
+                    for cut_index in range(1, 4):
+                        write_test_png(
+                            run_dir
+                            / "assets"
+                            / "scenes"
+                            / f"scene10_cut{cut_index}.png"
+                        )
+                    with patch("server.image_gen_app.ROOT", root):
+                        result = (
+                            image_gen_app._materialize_scene_storyboard_video_requests(
+                                run_id
+                            )
+                        )
+                        storyboard = run_dir / result["storyboards"][0]
+                        mutate(storyboard)
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "storyboard image",
+                        ):
+                            image_gen_app._validate_scene_storyboard_create_run(
+                                run_id,
+                                strict_visual_quality=False,
+                            )
+
+    def test_storyboard_materialization_rejects_symlinked_storyboard_root(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as external_tmp,
+        ):
+            root = Path(tmp)
+            external = Path(external_tmp)
+            sentinel = external / "sentinel.txt"
+            sentinel.write_text("preserve", encoding="utf-8")
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            (run_dir / "assets" / "storyboards").symlink_to(
+                external,
+                target_is_directory=True,
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "storyboard storage path must not be a symlink",
+                ):
+                    image_gen_app._materialize_scene_storyboard_video_requests(
+                        run_id
+                    )
+
+            self.assertEqual(
+                sentinel.read_text(encoding="utf-8"),
+                "preserve",
+            )
+            self.assertEqual(
+                list(external.iterdir()),
+                [sentinel],
+            )
+
+    def test_storyboard_validator_rejects_manifest_drift_after_request_materialization(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            with patch("server.image_gen_app.ROOT", root):
+                image_gen_app._materialize_scene_storyboard_video_requests(
+                    run_id
+                )
+                manifest_path, original_text, manifest = (
+                    image_gen_app._read_manifest_data(run_dir)
+                )
+                manifest["scenes"][0]["render_units"][0][
+                    "video_generation"
+                ]["output"] = "assets/scenes/tampered/output.mp4"
+                image_gen_app._write_manifest_data(
+                    manifest_path,
+                    original_text,
+                    manifest,
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "request binding mismatch: output",
+                ):
+                    image_gen_app._validate_scene_storyboard_create_run(
+                        run_id,
+                        strict_visual_quality=False,
+                    )
+
+    def test_storyboard_materialization_rolls_back_manifest_request_and_images_on_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            manifest_path = run_dir / "video_manifest.md"
+            request_path = run_dir / "video_generation_requests.md"
+            manifest_before = manifest_path.read_bytes()
+            request_before = (
+                request_path.read_bytes()
+                if request_path.is_file()
+                else None
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._write_scene_storyboard_video_generation_requests",
+                    side_effect=RuntimeError("injected request write failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected request write failure",
+                ):
+                    image_gen_app._materialize_scene_storyboard_video_requests(
+                        run_id
+                    )
+
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            if request_before is None:
+                self.assertFalse(request_path.exists())
+            else:
+                self.assertEqual(request_path.read_bytes(), request_before)
+            self.assertEqual(
+                list((run_dir / "assets" / "storyboards").glob("*.png")),
+                [],
+            )
+
+    def test_storyboard_materialization_rolls_back_after_later_compose_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            preexisting = (
+                run_dir
+                / "assets"
+                / "storyboards"
+                / "scene10_unit1_storyboard.png"
+            )
+            write_test_png(preexisting, (1, 2, 3))
+            preexisting_bytes = preexisting.read_bytes()
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_before = manifest_path.read_bytes()
+            original_compose = (
+                image_gen_app._compose_storyboard_image
+            )
+            compose_calls = 0
+
+            def fail_second_compose(*args: Any, **kwargs: Any) -> None:
+                nonlocal compose_calls
+                compose_calls += 1
+                if compose_calls == 2:
+                    raise RuntimeError("injected second compose failure")
+                original_compose(*args, **kwargs)
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._compose_storyboard_image",
+                    side_effect=fail_second_compose,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected second compose failure",
+                ):
+                    image_gen_app._materialize_scene_storyboard_video_requests(
+                        run_id
+                    )
+
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertFalse(
+                (run_dir / "video_generation_requests.md").exists()
+            )
+            self.assertEqual(preexisting.read_bytes(), preexisting_bytes)
+            self.assertEqual(
+                list(
+                    (
+                        run_dir / "assets" / "storyboards"
+                    ).glob("*.png")
+                ),
+                [preexisting],
+            )
+
+    def test_storyboard_materialization_rolls_back_after_state_commit_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            tracked = {
+                path: path.read_bytes() if path.is_file() else None
+                for path in (
+                    run_dir / "video_manifest.md",
+                    run_dir / "video_generation_requests.md",
+                    run_dir / "state.txt",
+                    run_dir / "run_status.json",
+                    run_dir / "p000_index.md",
+                )
+            }
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.append_state_snapshot",
+                    side_effect=RuntimeError(
+                        "injected state commit failure"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected state commit failure",
+                ):
+                    image_gen_app._materialize_scene_storyboard_video_requests(
+                        run_id
+                    )
+
+            for path, before in tracked.items():
+                if before is None:
+                    self.assertFalse(path.exists(), path)
+                else:
+                    self.assertEqual(path.read_bytes(), before, path)
+            self.assertEqual(
+                list(
+                    (
+                        run_dir / "assets" / "storyboards"
+                    ).glob("*.png")
+                ),
+                [],
+            )
+
+    def test_storyboard_transaction_marker_recovers_interrupted_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_before = manifest_path.read_bytes()
+            new_storyboard = (
+                run_dir
+                / "assets"
+                / "storyboards"
+                / "interrupted_storyboard.png"
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                transaction_dir = (
+                    image_gen_app._prepare_storyboard_transaction(
+                        run_dir,
+                        [
+                            "video_manifest.md",
+                            "assets/storyboards/interrupted_storyboard.png",
+                        ],
+                    )
+                )
+                manifest_path.write_text(
+                    "interrupted manifest",
+                    encoding="utf-8",
+                )
+                write_test_png(new_storyboard)
+
+                image_gen_app._recover_storyboard_transaction(run_dir)
+
+            self.assertEqual(
+                manifest_path.read_bytes(),
+                manifest_before,
+            )
+            self.assertFalse(new_storyboard.exists())
+            self.assertFalse(transaction_dir.exists())
+
+    def test_storyboard_transaction_rejects_traversal_and_symlink_targets(
+        self,
+    ) -> None:
+        self.assertFalse(
+            image_gen_app._storyboard_transaction_target_allowed(
+                "assets/storyboards/../../assets/characters/hero.png"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            protected = run_dir / "assets" / "characters" / "hero.png"
+            write_test_png(protected)
+            protected_bytes = protected.read_bytes()
+            storyboard_root = run_dir / "assets" / "storyboards"
+            storyboard_root.mkdir(parents=True)
+            linked = storyboard_root / "linked.png"
+            linked.symlink_to(protected)
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "must not contain symlinks",
+                ):
+                    image_gen_app._prepare_storyboard_transaction(
+                        run_dir,
+                        ["assets/storyboards/linked.png"],
+                    )
+
+            self.assertEqual(protected.read_bytes(), protected_bytes)
+            self.assertTrue(linked.is_symlink())
+
+    def test_storyboard_transaction_recovery_rejects_symlinked_marker(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as external_tmp,
+        ):
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_before = manifest_path.read_bytes()
+            transaction_dir = (
+                run_dir
+                / "logs"
+                / "transactions"
+                / "storyboard_create_pending"
+            )
+            transaction_dir.mkdir(parents=True)
+            external_marker = Path(external_tmp) / "marker.json"
+            external_marker.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "storyboard_transaction_v1",
+                        "targets": [
+                            {
+                                "path": "video_manifest.md",
+                                "existed": False,
+                                "backup": "",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (transaction_dir / "marker.json").symlink_to(
+                external_marker
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "marker must not be a symlink",
+                ):
+                    image_gen_app._recover_storyboard_transaction(
+                        run_dir
+                    )
+
+            self.assertEqual(
+                manifest_path.read_bytes(),
+                manifest_before,
+            )
 
     def test_storyboard_materialization_preserves_explicit_unit_reveal_authorization(
         self,
@@ -3010,6 +4358,335 @@ class ImageGenParserTests(unittest.TestCase):
         create_start = next(call for call in debug_log.call_args_list if call.kwargs.get("operation") == "create_job_start")
         self.assertEqual(create_start.kwargs["request"]["targetDurationSeconds"], 1200)
 
+    def test_create_storyboard_run_endpoint_rejects_p650(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            async def noop_create_job(*_args: Any, **_kwargs: Any) -> None:
+                return None
+
+            with patch.dict(
+                os.environ,
+                {
+                    "TOC_SERVER_AUTH_DISABLED": "1",
+                    "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback",
+                },
+            ):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._create_jobs", {}),
+                    patch(
+                        "server.image_gen_app._run_create_job",
+                        noop_create_job,
+                    ),
+                ):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/runs/create/storyboard",
+                            json={
+                                "title": "桃太郎",
+                                "source": "桃太郎",
+                                "stop_target": "p650",
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_run_create_job_defensively_rejects_storyboard_p650(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "scene_storyboard create requires stop_target p680",
+        ):
+            asyncio.run(
+                image_gen_app._run_create_job(
+                    "job-id",
+                    title="桃太郎",
+                    source="桃太郎",
+                    run_id="not-created",
+                    generate_images=True,
+                    create_mode="scene_storyboard",
+                    stop_target="p650",
+                    target_duration_seconds=300,
+                )
+            )
+
+    def test_run_create_job_preserves_p570_non_visual_gate_failure_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260728_1200"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.stage": "p570_non_visual_gate_failed",
+                    "runtime.failure.stage": "p570",
+                    "runtime.failure.phase": "asset_validation",
+                    "runtime.failure.error_kind": "non_visual_validation",
+                },
+            )
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._run_execution_leases", {}),
+                patch(
+                    "server.image_gen_app._acquire_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._release_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._sync_process_current_process",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
+                    new=AsyncMock(
+                        side_effect=RuntimeError(
+                            "p560 asset gate failed: p400.review_loop_integrity"
+                        )
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._cleanup_unscaffolded_run",
+                    new=Mock(),
+                ),
+                patch(
+                    "server.image_gen_app._set_create_job",
+                    new=AsyncMock(),
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_create_job(
+                        "job-id",
+                        title="桃太郎",
+                        source="桃太郎",
+                        run_id=run_id,
+                        generate_images=True,
+                        stop_target="p680",
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            state["runtime.stage"],
+            "p570_non_visual_gate_failed",
+        )
+        self.assertEqual(state["runtime.create_job.status"], "failed")
+
+    def test_run_create_job_materializes_and_validates_storyboard_before_completed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_storyboard_20260727_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            updates: list[dict[str, Any]] = []
+            validation_calls: list[tuple[str, bool, bool]] = []
+            generic_validator = Mock()
+            original_storyboard_validator = (
+                image_gen_app._validate_scene_storyboard_create_run
+            )
+
+            async def record_update(
+                _job_id: str,
+                patch_value: dict[str, Any],
+            ) -> None:
+                updates.append(dict(patch_value))
+
+            def validate_storyboard(
+                validated_run_id: str,
+                *,
+                strict_visual_quality: bool,
+                run_dir_override: Path | None = None,
+                validate_base: bool = True,
+            ) -> None:
+                original_storyboard_validator(
+                    validated_run_id,
+                    strict_visual_quality=False,
+                    run_dir_override=run_dir_override,
+                    validate_base=validate_base,
+                )
+                validation_calls.append(
+                    (
+                        validated_run_id,
+                        strict_visual_quality,
+                        validate_base,
+                    )
+                )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_execution_leases",
+                    {},
+                ),
+                patch(
+                    "server.image_gen_app._acquire_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._release_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._sync_process_current_process",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._set_create_job",
+                    side_effect=record_update,
+                ),
+                patch(
+                    "server.image_gen_app._validate_frontend_create_run",
+                    generic_validator,
+                ),
+                patch(
+                    "server.image_gen_app._validate_scene_storyboard_create_run",
+                    side_effect=validate_storyboard,
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_create_job(
+                        "job-id",
+                        title="桃太郎",
+                        source="桃太郎",
+                        run_id=run_id,
+                        generate_images=True,
+                        create_mode="scene_storyboard",
+                        stop_target="p680",
+                        target_duration_seconds=300,
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(
+                run_dir / "state.txt"
+            )
+            request_exists = (
+                run_dir / "video_generation_requests.md"
+            ).is_file()
+
+        self.assertEqual(
+            validation_calls,
+            [
+                (run_id, False, False),
+                (run_id, False, False),
+                (run_id, True, True),
+            ],
+        )
+        self.assertEqual(generic_validator.call_count, 3)
+        self.assertEqual(
+            [
+                generic_call.kwargs["strict_visual_quality"]
+                for generic_call in generic_validator.call_args_list
+            ],
+            [True, True, False],
+        )
+        self.assertEqual(updates[-1]["status"], "completed")
+        self.assertEqual(updates[-1]["currentProcess"], "p680")
+        self.assertEqual(
+            state["runtime.create_mode"],
+            "scene_storyboard",
+        )
+        self.assertTrue(request_exists)
+
+    def test_fresh_storyboard_create_uses_common_finalizer_before_terminal_validation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "fresh_storyboard_order"
+            (root / "output" / run_id).mkdir(parents=True)
+            events: list[str] = []
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_execution_leases",
+                    {},
+                ),
+                patch(
+                    "server.image_gen_app._acquire_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._release_run_execution_lease",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._sync_process_current_process",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
+                    new=AsyncMock(
+                        side_effect=lambda **_kwargs: events.append(
+                            "generate_images"
+                        )
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._finalize_scene_storyboard_p680",
+                    side_effect=lambda _run_id: (
+                        events.append("storyboard_finalizer")
+                        or {"alreadyCurrent": False}
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._validate_created_run",
+                    side_effect=lambda _run_id: events.append(
+                        "base_validation"
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._validate_scene_storyboard_create_run",
+                    side_effect=lambda *_args, **_kwargs: events.append(
+                        "terminal_storyboard_validation"
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._set_create_job",
+                    new=AsyncMock(),
+                ),
+                patch(
+                    "server.image_gen_app.write_app_server_debug_log",
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_create_job(
+                        "job-id",
+                        title="桃太郎",
+                        source="桃太郎",
+                        run_id=run_id,
+                        generate_images=True,
+                        create_mode="scene_storyboard",
+                        stop_target="p680",
+                    )
+                )
+
+            self.assertEqual(
+                events,
+                [
+                    "generate_images",
+                    "storyboard_finalizer",
+                    "base_validation",
+                    "terminal_storyboard_validation",
+                ],
+            )
+
     def test_run_toc_skill_helper_requires_visible_skill_exact_path_when_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3175,6 +4852,270 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertEqual(progress["currentStage"]["code"], "p650")
         self.assertEqual(progress["percent"], 75)
+
+    def test_read_run_progress_treats_corrupt_request_snapshot_as_missing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text("topic=ガリバー旅行記\nstatus=SCRIPT\n", encoding="utf-8")
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## character_hero
+
+- tool: `codex_builtin_image`
+- output: `assets/characters/hero.png`
+
+```text
+cinematic character portrait
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_request_snapshot.json").write_text(
+                "{not valid json",
+                encoding="utf-8",
+            )
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p100` | Research | `done` |
+| `p500` | Asset Stage | `done` |
+| `p600` | Scene Implementation / Image Stage | `done` |
+| `p800` | Video Stage | `not_started` |
+""",
+                encoding="utf-8",
+            )
+
+            progress = image_gen.read_run_progress(run_dir)
+
+        self.assertEqual(progress["currentStage"], {"code": "p560", "label": "Asset Generation", "state": "pending"})
+
+    def test_read_run_progress_treats_unreadable_request_markdown_as_missing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text("topic=ガリバー旅行記\nstatus=SCRIPT\n", encoding="utf-8")
+            (run_dir / "asset_generation_requests.md").write_bytes(b"\xff\xfe\xfa")
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p100` | Research | `done` |
+| `p500` | Asset Stage | `done` |
+| `p600` | Scene Implementation / Image Stage | `done` |
+| `p800` | Video Stage | `not_started` |
+""",
+                encoding="utf-8",
+            )
+
+            progress = image_gen.read_run_progress(run_dir)
+
+        self.assertEqual(progress["currentStage"], {"code": "p560", "label": "Asset Generation", "state": "pending"})
+
+    def test_read_run_progress_prefers_latest_failed_slot_state_over_stale_later_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "topic=シンデレラ",
+                        "status=FAILED",
+                        "runtime.stage=semantic_review_failed_before_media_generation",
+                        "slot.p410.status=failed",
+                        "slot.p640.status=awaiting_approval",
+                        "slot.p650.status=pending",
+                        "slot.p660.status=pending",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_requests.md").write_text("# Asset Generation Requests\n", encoding="utf-8")
+            (run_dir / "image_generation_requests.md").write_text("# Image Generation Requests\n", encoding="utf-8")
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p100` | Research | `done` |
+| `p400` | Script / Narration Text / Human Changes | `done` |
+| `p600` | Scene Implementation / Image Stage | `awaiting_approval` |
+| `p800` | Video Stage | `not_started` |
+
+## Fixed Slot Contract
+
+| Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
+| --- | --- | --- | --- | --- |
+| `p410` | Script / Narration Text / Human Changes | `required` | Scene Completion | - |
+| `p640` | Scene Implementation / Image Stage | `optional` | Judgment Review | - |
+| `p650` | Scene Implementation / Image Stage | `optional` | Generation Ready | `image_generation_requests.md` |
+| `p660` | Scene Implementation / Image Stage | `optional` | Image Generation | - |
+
+#### p410 Scene Completion
+
+- status: `done`
+
+#### p640 Judgment Review
+
+- status: `awaiting_approval`
+
+#### p650 Generation Ready
+
+- status: `pending`
+
+#### p660 Image Generation
+
+- status: `pending`
+""",
+                encoding="utf-8",
+            )
+
+            progress = image_gen.read_run_progress(run_dir)
+
+        self.assertEqual(progress["currentStage"]["code"], "p410")
+        self.assertEqual(progress["currentStage"]["state"], "failed")
+        self.assertEqual(next(slot for slot in progress["slots"] if slot["code"] == "p410")["state"], "failed")
+        self.assertEqual(next(stage for stage in progress["stages"] if stage["code"] == "p400")["state"], "failed")
+
+    def test_read_run_progress_prefers_latest_in_progress_slot_over_stale_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "topic=シンデレラ",
+                        "status=SCRIPT",
+                        "runtime.stage=image_prompt_semantic_review",
+                        "slot.p410.status=done",
+                        "slot.p640.status=in_progress",
+                        "slot.p650.status=pending",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_requests.md").write_text("# Asset Generation Requests\n", encoding="utf-8")
+            (run_dir / "image_generation_requests.md").write_text("# Image Generation Requests\n", encoding="utf-8")
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p100` | Research | `done` |
+| `p400` | Script / Narration Text / Human Changes | `done` |
+| `p600` | Scene Implementation / Image Stage | `done` |
+| `p800` | Video Stage | `not_started` |
+
+## Fixed Slot Contract
+
+| Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
+| --- | --- | --- | --- | --- |
+| `p410` | Script / Narration Text / Human Changes | `required` | Scene Completion | - |
+| `p640` | Scene Implementation / Image Stage | `optional` | Judgment Review | - |
+| `p650` | Scene Implementation / Image Stage | `optional` | Generation Ready | `image_generation_requests.md` |
+
+#### p410 Scene Completion
+
+- status: `done`
+
+#### p640 Judgment Review
+
+- status: `awaiting_approval`
+
+#### p650 Generation Ready
+
+- status: `pending`
+""",
+                encoding="utf-8",
+            )
+
+            progress = image_gen.read_run_progress(run_dir)
+
+        self.assertEqual(progress["currentStage"]["code"], "p640")
+        self.assertEqual(progress["currentStage"]["state"], "in_progress")
+        self.assertEqual(next(slot for slot in progress["slots"] if slot["code"] == "p640")["state"], "in_progress")
+        self.assertEqual(next(stage for stage in progress["stages"] if stage["code"] == "p600")["state"], "in_progress")
+
+    def test_read_run_progress_stops_at_pending_frontier_before_stale_later_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "topic=シンデレラ",
+                        "status=FAILED",
+                        "slot.p660.status=done",
+                        "slot.p670.status=pending",
+                        "slot.p680.status=failed",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_requests.md").write_text(
+                "# Asset Generation Requests\n",
+                encoding="utf-8",
+            )
+            (run_dir / "image_generation_requests.md").write_text(
+                "# Image Generation Requests\n",
+                encoding="utf-8",
+            )
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p600` | Scene Implementation / Image Stage | `failed` |
+| `p800` | Video Stage | `not_started` |
+
+## Fixed Slot Contract
+
+| Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
+| --- | --- | --- | --- | --- |
+| `p660` | Scene Implementation / Image Stage | `required` | Image Generation | - |
+| `p670` | Scene Implementation / Image Stage | `required` | Image QA | - |
+| `p680` | Scene Implementation / Image Stage | `required` | Image Handoff | - |
+
+#### p660 Image Generation
+
+- status: `done`
+
+#### p670 Image QA
+
+- status: `pending`
+
+#### p680 Image Handoff
+
+- status: `failed`
+""",
+                encoding="utf-8",
+            )
+
+            progress = image_gen.read_run_progress(run_dir)
+
+        self.assertEqual(
+            progress["currentStage"],
+            {"code": "p670", "label": "Image QA", "state": "pending"},
+        )
 
     def test_find_image_generation_items_handles_app_server_notification_shapes(self) -> None:
         message = {
@@ -3783,6 +5724,40 @@ class ImageGenParserTests(unittest.TestCase):
             self.assertEqual((run_dir / "logs/frontend_create_cli/stdout.log").read_text(encoding="utf-8"), "frontend stdout\n")
             self.assertEqual((run_dir / "logs/frontend_create_cli/stderr.log").read_text(encoding="utf-8"), "frontend stderr\n")
 
+    def test_frontend_create_cli_helper_passes_world_walk_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "散歩_20260606_1200"
+            (root / "output" / run_id).mkdir(parents=True)
+            argv: list[str] = []
+
+            class FakeProcess:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"ok\n", b""
+
+            async def fake_create_subprocess_exec(*args, **_kwargs):
+                argv.extend(str(value) for value in args)
+                return FakeProcess()
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.asyncio.create_subprocess_exec", fake_create_subprocess_exec),
+            ):
+                asyncio.run(
+                    image_gen_app._run_toc_immersive_frontend_cli_helper(
+                        topic="桃太郎の世界観を散歩してみた",
+                        run_id=run_id,
+                        experience="world_walk",
+                        source_run_id="桃太郎_20260606_1100",
+                        target_duration_seconds=600,
+                    )
+                )
+
+        self.assertEqual(argv[argv.index("--experience") + 1], "world_walk")
+        self.assertEqual(argv[argv.index("--source-run") + 1], "output/桃太郎_20260606_1100")
+
     def test_headless_create_route_sends_target_duration(self) -> None:
         module = load_headless_create_module()
         posted_payloads: list[dict[str, Any]] = []
@@ -3841,6 +5816,98 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertEqual(job["status"], "completed")
         self.assertEqual(posted_payloads[0]["target_duration_seconds"], 1200)
+
+    def test_headless_create_route_uses_storyboard_endpoint_and_contract(self) -> None:
+        module = load_headless_create_module()
+        posted: list[tuple[str, dict[str, Any]]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, Any]):
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return self.payload
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, path: str, *, json: dict[str, Any]):
+                posted.append((path, json))
+                return FakeResponse(
+                    {
+                        "jobId": "storyboard-job",
+                        "runId": "headless-storyboard-route-test",
+                        "path": "output/headless-storyboard-route-test",
+                        "status": "running",
+                        "createMode": "scene_storyboard",
+                    }
+                )
+
+            async def get(self, _path: str):
+                return FakeResponse(
+                    {
+                        "jobId": "storyboard-job",
+                        "runId": "headless-storyboard-route-test",
+                        "path": "output/headless-storyboard-route-test",
+                        "status": "completed",
+                        "createMode": "scene_storyboard",
+                    }
+                )
+
+        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
+            job = asyncio.run(
+                module.create_run_via_frontend_route(
+                    title="桃太郎",
+                    source="鬼退治",
+                    generate_images=True,
+                    create_mode="scene_storyboard",
+                    target_duration_seconds=300,
+                    timeout_seconds=1,
+                    poll_interval=0,
+                    base_url="http://toc.test",
+                )
+            )
+
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(
+            posted,
+            [
+                (
+                    "/api/image-gen/runs/create/storyboard",
+                    {
+                        "title": "桃太郎",
+                        "source": "鬼退治",
+                        "target_duration_seconds": 300,
+                    },
+                )
+            ],
+        )
+
+    def test_headless_storyboard_route_rejects_no_images(self) -> None:
+        module = load_headless_create_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "storyboard create requires image generation",
+        ):
+            asyncio.run(
+                module.create_run_via_frontend_route(
+                    title="桃太郎",
+                    source="鬼退治",
+                    generate_images=False,
+                    create_mode="scene_storyboard",
+                    target_duration_seconds=300,
+                    timeout_seconds=1,
+                    poll_interval=0,
+                    base_url="http://toc.test",
+                )
+            )
 
     def test_headless_create_route_rejects_status_identity_substitution(self) -> None:
         module = load_headless_create_module()
@@ -4063,6 +6130,83 @@ class ImageGenParserTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls[0]["target_duration_seconds"], 900)
+
+    def test_headless_cli_passes_storyboard_mode_to_frontend_route(self) -> None:
+        module = load_headless_create_module()
+        calls: list[dict[str, Any]] = []
+
+        async def fake_create_run(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {
+                "jobId": "job-1",
+                "runId": "run-1",
+                "path": "output/run-1",
+                "status": "completed",
+                "createMode": "scene_storyboard",
+            }
+
+        with (
+            patch.object(
+                module,
+                "create_run_via_frontend_route",
+                fake_create_run,
+            ),
+            patch.object(
+                module,
+                "_resolve_completed_run_dir",
+                return_value=Path("output/run-1"),
+            ),
+            patch.object(
+                module,
+                "_check_storyboard_v1",
+                return_value=[],
+                create=True,
+            ),
+            patch.object(
+                module,
+                "_write_report",
+                return_value=Path("report.md"),
+            ),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-create-run-headless.py",
+                    "--title",
+                    "桃太郎",
+                    "--create-mode",
+                    "scene_storyboard",
+                    "--assert-profile",
+                    "storyboard_v1",
+                ],
+            ),
+        ):
+            exit_code = module.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[0]["create_mode"], "scene_storyboard")
+
+    def test_headless_storyboard_profile_checks_materialized_contract(self) -> None:
+        module = load_headless_create_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_storyboard_20260727_1200"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            for cut_index in range(1, 4):
+                write_test_png(
+                    run_dir
+                    / "assets"
+                    / "scenes"
+                    / f"scene10_cut{cut_index}.png"
+                )
+            with patch("server.image_gen_app.ROOT", root):
+                image_gen_app._materialize_scene_storyboard_video_requests(
+                    run_id
+                )
+
+            failures = module._check_storyboard_v1(run_dir)
+
+        self.assertEqual(failures, [])
 
     def test_headless_cut_contract_check_ignores_motion_terms_in_debug_only(self) -> None:
         module = load_headless_create_module()
@@ -5294,8 +7438,256 @@ scene one
             with self.assertRaises(ValueError):
                 image_gen.insert_candidate(run_dir, candidate, "video_manifest.md")
 
+    def test_insert_candidate_rejects_symlink_canonical_output_without_touching_upload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            candidate = image_gen.candidate_path(run_dir, "scene01", 1)
+            upload = run_dir / "assets/uploads/user.png"
+            output = run_dir / "assets/scenes/scene01.png"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(PNG_BYTES)
+            upload.parent.mkdir(parents=True)
+            upload.write_bytes(PNG_BYTES + b"user-upload")
+            original_upload = upload.read_bytes()
+            output.parent.mkdir(parents=True)
+            output.symlink_to(upload)
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                image_gen.insert_candidate(
+                    run_dir,
+                    candidate,
+                    "assets/scenes/scene01.png",
+                )
+
+            persisted_upload = upload.read_bytes()
+
+        self.assertEqual(persisted_upload, original_upload)
+
 
 class ImageGenApiTests(unittest.TestCase):
+    def test_current_process_stops_at_failed_slot_and_ignores_stale_later_terminals(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "シンデレラ_20260728_2211"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            statuses = {
+                "p110": "done",
+                "p120": "done",
+                "p130": "done",
+                "p210": "done",
+                "p220": "done",
+                "p230": "done",
+                "p310": "done",
+                "p320": "done",
+                "p330": "done",
+                "p410": "failed",
+                # These terminal values are stale materialization state and must
+                # not make the failed run look as though it reached p640.
+                "p420": "done",
+                "p430": "awaiting_approval",
+                "p440": "done",
+                "p450": "done",
+                "p510": "done",
+                "p520": "done",
+                "p530": "done",
+                "p540": "awaiting_approval",
+                "p550": "done",
+                "p560": "done",
+                "p570": "awaiting_approval",
+                "p610": "done",
+                "p620": "done",
+                "p630": "awaiting_approval",
+                "p640": "awaiting_approval",
+            }
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        *(f"slot.{slot}.status={status}" for slot, status in statuses.items()),
+                        "runtime.failure.stage=scene_set",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                current = image_gen_app._current_process_number_for_run(run_id)
+
+        self.assertEqual(current, 410)
+
+    def test_current_process_uses_explicit_runtime_failure_stage_mapping(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "シンデレラ_20260728_2211"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "slot.p110.status=done",
+                        "slot.p120.status=done",
+                        "slot.p130.status=done",
+                        "slot.p210.status=done",
+                        "slot.p220.status=done",
+                        "slot.p230.status=done",
+                        "slot.p310.status=done",
+                        "slot.p320.status=done",
+                        "slot.p330.status=done",
+                        # A transport failure may record the runtime stage before
+                        # its corresponding slot failure snapshot is appended.
+                        "runtime.failure.stage=scene_detail",
+                        "slot.p640.status=awaiting_approval",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                current = image_gen_app._current_process_number_for_run(run_id)
+
+        self.assertEqual(current, 410)
+
+    def test_current_process_requires_contiguous_terminal_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260728_2211"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "slot.p110.status=done",
+                        "slot.p120.status=pending",
+                        "slot.p130.status=done",
+                        "slot.p640.status=awaiting_approval",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                current = image_gen_app._current_process_number_for_run(run_id)
+
+        self.assertEqual(current, 110)
+
+    def test_current_process_preserves_valid_p650_and_p680_resume_boundaries(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            p650_run_id = "桃太郎_20260728_2211"
+            p680_run_id = "浦島太郎_20260728_2211"
+            for run_id, final_slot, final_status in (
+                (p650_run_id, "p650", "done"),
+                (p680_run_id, "p680", "awaiting_approval"),
+            ):
+                run_dir = root / "output" / run_id
+                run_dir.mkdir(parents=True)
+                final_index = image_gen_app.P680_FIXED_SLOTS.index(final_slot)
+                (run_dir / "state.txt").write_text(
+                    "\n".join(
+                        [
+                            *(
+                                f"slot.{slot}.status="
+                                + (
+                                    final_status
+                                    if slot == final_slot
+                                    else (
+                                        "awaiting_approval"
+                                        if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
+                                        else "done"
+                                    )
+                                )
+                                for slot in image_gen_app.P680_FIXED_SLOTS[: final_index + 1]
+                            ),
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+            with patch("server.image_gen_app.ROOT", root):
+                p650_current = image_gen_app._current_process_number_for_run(p650_run_id)
+                p680_current = image_gen_app._current_process_number_for_run(p680_run_id)
+
+        self.assertEqual(p650_current, 650)
+        self.assertEqual(p680_current, 680)
+
+    def test_current_process_ignores_stale_runtime_failure_after_p650_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260728_2211"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            p650_index = image_gen_app.P680_FIXED_SLOTS.index("p650")
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        *(
+                            f"slot.{slot}.status="
+                            + (
+                                "awaiting_approval"
+                                if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
+                                else "done"
+                            )
+                            for slot in image_gen_app.P680_FIXED_SLOTS[: p650_index + 1]
+                        ),
+                        # state.txt is append-only, so an older failed attempt
+                        # can remain after a successful resume.
+                        "runtime.failure.stage=scene_detail",
+                        "slot.p660.status=pending",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                current = image_gen_app._current_process_number_for_run(run_id)
+
+        self.assertEqual(current, 650)
+
+    def test_current_process_keeps_failed_p680_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260728_2211"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        *(
+                            f"slot.{slot}.status="
+                            + (
+                                "awaiting_approval"
+                                if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
+                                else "done"
+                            )
+                            for slot in image_gen_app.P680_FIXED_SLOTS[:-1]
+                        ),
+                        "slot.p680.status=failed",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("server.image_gen_app.ROOT", root):
+                current = image_gen_app._current_process_number_for_run(run_id)
+
+        self.assertEqual(current, 670)
+
     def test_video_prompt_currentness_rejects_blocking_compiler_quality_issues(self) -> None:
         item = image_gen_app.FrontendReviewItem(
             item_id="scene10_cut1",
@@ -5672,6 +8064,179 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("runs", response.json())
 
+    def test_world_walk_sources_endpoint_lists_only_completed_story_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p650_artifacts(root, "桃太郎_20260509_1100")
+            incomplete = root / "output" / "scratch_20260509_1100"
+            (incomplete / "assets").mkdir(parents=True)
+            (incomplete / "story.md").write_text("# scaffold\n", encoding="utf-8")
+
+            with (
+                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
+                patch("server.image_gen_app.ROOT", root),
+            ):
+                with TestClient(app) as client:
+                    response = client.get("/api/image-gen/runs/world-walk-sources")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["sources"],
+            [
+                {
+                    "id": "桃太郎_20260509_1100",
+                    "title": "桃太郎",
+                    "worldWalkTitle": "桃太郎の世界観を散歩してみた",
+                    "path": "output/桃太郎_20260509_1100",
+                    "hasAssetRequests": True,
+                    "hasSceneRequests": True,
+                }
+            ],
+        )
+
+    def test_create_world_walk_endpoint_uses_existing_job_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p650_artifacts(root, "桃太郎_20260509_1100")
+            scheduled: list[dict[str, Any]] = []
+
+            def fake_world_walk_job(*_args: Any, **kwargs: Any):
+                scheduled.append(kwargs)
+
+                async def noop() -> None:
+                    return None
+
+                return noop()
+
+            with (
+                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._create_jobs", {}),
+                patch("server.image_gen_app._run_world_walk_create_job", fake_world_walk_job),
+                patch("server.image_gen_app._acquire_run_execution_lease", new_callable=AsyncMock),
+                patch("server.image_gen_app._create_process_record_best_effort", return_value=None),
+            ):
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/image-gen/runs/create-world-walk",
+                        json={
+                            "source_run_id": "桃太郎_20260509_1100",
+                            "target_duration_seconds": 600,
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["createMode"], "world_walk")
+        self.assertEqual(payload["sourceRunId"], "桃太郎_20260509_1100")
+        self.assertEqual(payload["targetDurationSeconds"], 600)
+        self.assertTrue(payload["runId"].startswith("桃太郎の世界観を散歩してみた_"))
+        self.assertEqual(scheduled[0]["source_run_id"], "桃太郎_20260509_1100")
+        self.assertEqual(scheduled[0]["target_duration_seconds"], 600)
+
+    def test_create_world_walk_endpoint_rejects_invalid_or_incomplete_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            partial = root / "output" / "partial_20260509_1100"
+            (partial / "assets").mkdir(parents=True)
+            (partial / "story.md").write_text("# Partial\n", encoding="utf-8")
+
+            with (
+                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
+                patch("server.image_gen_app.ROOT", root),
+            ):
+                with TestClient(app) as client:
+                    escaped = client.post(
+                        "/api/image-gen/runs/create-world-walk",
+                        json={"source_run_id": "../outside"},
+                    )
+                    partial_response = client.post(
+                        "/api/image-gen/runs/create-world-walk",
+                        json={"source_run_id": "partial_20260509_1100"},
+                    )
+
+        self.assertEqual(escaped.status_code, 400)
+        self.assertEqual(partial_response.status_code, 400)
+        self.assertIn("source run is not selectable", partial_response.text)
+
+    def test_world_walk_source_rejects_nested_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "output" / "source_20260509_1100"
+            outside = root / "outside-story.md"
+            outside.write_text("# outside\n", encoding="utf-8")
+            (source / "assets").mkdir(parents=True)
+            (source / "story.md").symlink_to(outside)
+
+            with (
+                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
+                patch("server.image_gen_app.ROOT", root),
+            ):
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/image-gen/runs/create-world-walk",
+                        json={"source_run_id": source.name},
+                    )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("source run is not selectable", response.text)
+
+    def test_world_walk_create_job_runs_direct_frontend_runner_to_p680(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_valid_p650_artifacts(root, "桃太郎_20260509_1100")
+            run_id = "桃太郎の世界観を散歩してみた_20260509_1200"
+            (root / "output" / run_id).mkdir(parents=True)
+            job_id = "world-walk-job"
+            job = {
+                "jobId": job_id,
+                "runId": run_id,
+                "status": "running",
+                "message": "フォルダを作成中",
+            }
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._create_jobs", {job_id: job}),
+                patch(
+                    "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
+                    new_callable=AsyncMock,
+                ) as run_frontend,
+                patch(
+                    "server.image_gen_app._sync_process_current_process",
+                    new_callable=AsyncMock,
+                ),
+                patch("server.image_gen_app._validate_created_run"),
+                patch("server.image_gen_app._validate_frontend_create_run"),
+                patch(
+                    "server.image_gen_app._acquire_run_execution_lease",
+                    new_callable=AsyncMock,
+                ),
+                patch(
+                    "server.image_gen_app._release_run_execution_lease",
+                    new_callable=AsyncMock,
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_world_walk_create_job(
+                        job_id,
+                        title="桃太郎の世界観を散歩してみた",
+                        source_run_id="桃太郎_20260509_1100",
+                        run_id=run_id,
+                        target_duration_seconds=600,
+                    )
+                )
+
+        run_frontend.assert_awaited_once_with(
+            topic="桃太郎の世界観を散歩してみた",
+            run_id=run_id,
+            experience="world_walk",
+            source_run_id="桃太郎_20260509_1100",
+            target_duration_seconds=600,
+        )
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["currentProcess"], "p680")
+
     def test_api_requires_token_when_not_configured(self) -> None:
         with patch.dict(os.environ, {"TOC_SERVER_TOKEN": "", "TOC_SERVER_AUTH_DISABLED": ""}):
             with TestClient(app) as client:
@@ -5864,52 +8429,7 @@ class ImageGenApiTests(unittest.TestCase):
         runner = load_frontend_runner_module()
 
         def write_passing_foundation_review(run_dir: Path, stage: str) -> None:
-            review_dir = run_dir / "logs" / "review" / "semantic"
-            review_dir.mkdir(parents=True, exist_ok=True)
-            entry_id = f"{stage}:foundation"
-            (review_dir / f"{stage}.collection.md").write_text(
-                f"# Semantic Review Collection\n\n## {entry_id}\n",
-                encoding="utf-8",
-            )
-            (review_dir / f"{stage}.scope.json").write_text(
-                json.dumps(
-                    {
-                        "entry_count": 1,
-                        "entry_ids": [entry_id],
-                        "source_artifacts": ["research.md"] if stage == "research" else ["research.md", "story.md"],
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            (review_dir / f"{stage}.prompt.md").write_text(
-                f"# Mocked transport boundary for {stage}\n",
-                encoding="utf-8",
-            )
-            criteria_results = [
-                {
-                    "criterion_id": criterion_id,
-                    "status": "passed",
-                    "evidence": f"{stage}.md:{criterion_id}",
-                }
-                for criterion_id in FOUNDATION_SEMANTIC_CRITERIA.get(stage, ())
-            ]
-            (review_dir / f"{stage}.report.md").write_text(
-                "\n".join(
-                    [
-                        "status: passed",
-                        f"reviewed_entries: [{entry_id}]",
-                        "blocked_entries: []",
-                        "failed_selectors: []",
-                        "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False),
-                        "findings: []",
-                        "notes: []",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            write_semantic_review_artifacts(run_dir, stage)
 
         with tempfile.TemporaryDirectory(prefix="frontend_create_1200_", dir=output_root) as tmp:
             run_dir = Path(tmp)
@@ -5934,6 +8454,14 @@ class ImageGenApiTests(unittest.TestCase):
                             )
                         },
                     )
+
+            async def write_passing_pre_asset_fixed_point(
+                _job_id: str,
+                *,
+                run_dir: Path,
+            ) -> None:
+                for stage in image_gen_app.PRE_ASSET_SEMANTIC_STAGES:
+                    write_passing_foundation_review(run_dir, stage)
 
             async def materializing_frontend_helper(**kwargs):
                 helper_calls.append(kwargs)
@@ -5973,6 +8501,10 @@ class ImageGenApiTests(unittest.TestCase):
                     patch(
                         "server.image_gen_app._run_semantic_review",
                         side_effect=write_passing_semantic_review,
+                    ),
+                    patch(
+                        "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                        side_effect=write_passing_pre_asset_fixed_point,
                     ),
                     patch("server.image_gen_app._create_process_record_best_effort", return_value=None),
                     patch("server.image_gen_app._update_process_record_best_effort", return_value=None),
@@ -6315,7 +8847,9 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", validate_asset_gate),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 ):
                     asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
@@ -6323,14 +8857,223 @@ class ImageGenApiTests(unittest.TestCase):
             scene_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
 
         self.assertTrue(scene_exists)
-        self.assertEqual(generated, [("hero", []), ("scene10_cut1", ["hero.png"]), ("scene10_cut2", ["hero.png"]), ("scene10_cut3", ["hero.png"])])
+        self.assertEqual(
+            generated,
+            [
+                ("scene10_cut1", ["hero.png"]),
+                ("scene10_cut2", ["hero.png"]),
+                ("scene10_cut3", ["hero.png"]),
+            ],
+        )
         validate_asset_gate.assert_called_once()
         self.assertEqual(validate_asset_gate.call_args.args[0].resolve(), run_dir.resolve())
         self.assertIn("slot.p660.status=done", state)
         self.assertIn("slot.p680.status=awaiting_approval", state)
         self.assertIn("review.image.status=pending", state)
 
-    def test_generate_create_images_blocks_all_scenes_on_scene_detail_transport_failure(self) -> None:
+    def test_scene_generation_validates_current_revision_outputs_and_visuals_before_p680_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            order: list[str] = []
+
+            def fake_validate_p650(received_run_id: str) -> None:
+                self.assertEqual(received_run_id, run_id)
+                order.append("p650")
+
+            async def fake_set_create_job(_job_id: str, _updates: dict[str, Any]) -> None:
+                order.append("job")
+
+            async def fake_generate(*, run_dir: Path, kind: str) -> None:
+                self.assertEqual(kind, "scene")
+                order.append("generate")
+
+            def fake_validate_outputs(_run_dir: Path, kind: str) -> None:
+                order.append(f"outputs:{kind}")
+
+            def fake_visual_gate(_run_dir: Path) -> None:
+                order.append("visual")
+
+            def fake_mark_ready(received_run_id: str) -> None:
+                self.assertEqual(received_run_id, run_id)
+                order.append("handoff")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._validate_p650_run", fake_validate_p650),
+                patch("server.image_gen_app._set_create_job", fake_set_create_job),
+                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate),
+                patch("server.image_gen_app._validate_generated_outputs", fake_validate_outputs),
+                patch("server.image_gen_app._validate_p680_visual_quality", fake_visual_gate),
+                patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_ready),
+            ):
+                asyncio.run(
+                    image_gen_app._generate_scene_outputs_after_p650_preflight(
+                        "job-1",
+                        run_id=run_id,
+                        run_dir=run_dir,
+                    )
+                )
+
+        self.assertEqual(
+            order,
+            [
+                "p650",
+                "job",
+                "generate",
+                "p650",
+                "outputs:asset",
+                "outputs:scene",
+                "visual",
+                "handoff",
+            ],
+        )
+
+    def test_scene_generation_records_p650_preflight_failure_for_all_validation_exceptions(
+        self,
+    ) -> None:
+        validation_errors = (
+            ImageRequestSnapshotError("asset snapshot is stale"),
+            ValueError("invalid request destination"),
+            OSError("request snapshot is unreadable"),
+        )
+        for validation_error in validation_errors:
+            with (
+                self.subTest(error_type=type(validation_error).__name__),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                run_id = "桃太郎_20260509_1200"
+                run_dir = write_valid_p650_artifacts(root, run_id)
+                provider = AsyncMock()
+                mark_ready = Mock()
+
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app._validate_p650_run",
+                        side_effect=validation_error,
+                    ),
+                    patch(
+                        "server.image_gen_app._generate_request_outputs_unlocked",
+                        provider,
+                    ),
+                    patch(
+                        "server.image_gen_app._mark_image_generation_review_ready",
+                        mark_ready,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "scene image generation blocked by p650 gate",
+                    ):
+                        asyncio.run(
+                            image_gen_app._generate_scene_outputs_after_p650_preflight(
+                                "job-1",
+                                run_id=run_id,
+                                run_dir=run_dir,
+                            )
+                        )
+
+                state = image_gen_app.parse_state_file(run_dir / "state.txt")
+                provider.assert_not_awaited()
+                mark_ready.assert_not_called()
+                self.assertEqual(
+                    state["runtime.stage"],
+                    "p650_gate_failed_before_scene_generation",
+                )
+                self.assertEqual(state["slot.p660.status"], "pending")
+                self.assertEqual(state["slot.p680.status"], "pending")
+                self.assertEqual(
+                    state["image_generation.blocked_by"],
+                    "p650_revision_gate",
+                )
+
+    def test_scene_generation_keeps_p680_pending_when_pre_handoff_gate_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {"slot.p680.status": "awaiting_approval"},
+            )
+            mark_ready = Mock()
+
+            async def fake_set_create_job(_job_id: str, _updates: dict[str, Any]) -> None:
+                return None
+
+            async def fake_generate(*, run_dir: Path, kind: str) -> None:
+                return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._validate_p650_run", Mock()),
+                patch("server.image_gen_app._set_create_job", fake_set_create_job),
+                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate),
+                patch("server.image_gen_app._validate_generated_outputs", Mock()),
+                patch(
+                    "server.image_gen_app._validate_p680_visual_quality",
+                    Mock(side_effect=RuntimeError("visual image stage failed")),
+                ),
+                patch("server.image_gen_app._mark_image_generation_review_ready", mark_ready),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "visual image stage failed"):
+                    asyncio.run(
+                        image_gen_app._generate_scene_outputs_after_p650_preflight(
+                            "job-1",
+                            run_id=run_id,
+                            run_dir=run_dir,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        mark_ready.assert_not_called()
+        self.assertEqual(state["slot.p680.status"], "pending")
+        self.assertEqual(state["image_generation.status"], "failed")
+        self.assertEqual(state["image_generation.started"], "true")
+        self.assertEqual(state["image_generation.blocked_by"], "p680_pre_handoff_gate")
+
+    def test_successful_scene_generation_records_completed_image_generation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+
+            async def fake_set_create_job(_job_id: str, _updates: dict[str, Any]) -> None:
+                return None
+
+            async def fake_generate(*, run_dir: Path, kind: str) -> None:
+                return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app._validate_p650_run", Mock()),
+                patch("server.image_gen_app._set_create_job", fake_set_create_job),
+                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate),
+                patch("server.image_gen_app._validate_generated_outputs", Mock()),
+                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                patch("server.image_gen_app._finalize_p600_supervisor_result", Mock()),
+            ):
+                asyncio.run(
+                    image_gen_app._generate_scene_outputs_after_p650_preflight(
+                        "job-1",
+                        run_id=run_id,
+                        run_dir=run_dir,
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+        self.assertEqual(state["image_generation.status"], "completed")
+        self.assertEqual(state["image_generation.started"], "true")
+        self.assertEqual(state["image_generation.generated_count"], "3")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "true")
+
+    def test_generate_create_images_continues_unblocked_scenes_on_localized_scene_detail_transport_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
@@ -6356,92 +9099,19 @@ transport blocked scene should not generate.
 """,
                 encoding="utf-8",
             )
-            refresh_scene_request_snapshot_fixture(run_dir)
-            saved = root / "generated.png"
-            saved.write_bytes(PNG_BYTES)
-            generated: list[str] = []
-
-            class FakeResult:
-                saved_path = saved
-                revised_prompt = None
-                status = "completed"
-                transcript = []
-                source = "app_server"
-                provenance_authoritative = True
-                turn_id = "turn-1"
-
-            class FakeClient:
-                def __init__(self, **_kwargs):
-                    pass
-
-                async def start(self):
-                    return None
-
-                async def stop(self):
-                    return None
-
-                async def generate_image(self, **kwargs):
-                    generated.append(kwargs["item_id"])
-                    return FakeResult()
-
-            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
-                if stage == "scene_detail":
-                    image_gen_app.append_state_snapshot(
-                        run_dir / "state.txt",
-                        {
-                            "review.semantic.scene_detail.shards.scene_40.transport.status": "failed",
-                            "review.semantic.scene_detail.shards.scene_40.transport.error_kind": "timeout",
-                            "review.semantic.scene_detail.shards.scene_40.transport.error": "CodexAppServerTransportError: turn timed out",
-                        },
-                    )
-                    raise CodexAppServerTransportError("scene_detail shard transport failed after 3 attempt(s): scene:40")
-
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
-                with (
-                    patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
-                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
-                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
-                ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
-                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
-
-            state = image_gen_app.parse_state_file(run_dir / "state.txt")
-            scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
-            scene40_exists = (run_dir / "assets/scenes/scene40_cut1.png").exists()
-
-        self.assertFalse(scene10_exists)
-        self.assertFalse(scene40_exists)
-        self.assertEqual(generated, [])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
-        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "false")
-        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
-        self.assertIn("scene40_cut1", state["review.semantic.scene_detail.blocked_image_items"])
-
-    def test_generate_create_images_blocks_all_scenes_on_scene_detail_semantic_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_id = "桃太郎_20260509_1200"
-            run_dir = write_valid_p650_artifacts(root, run_id)
-            request_path = run_dir / "image_generation_requests.md"
-            request_path.write_text(
-                request_path.read_text(encoding="utf-8")
-                + """
-
-## scene20_cut1
-
-- tool: `codex_builtin_image`
-- prompt_policy_version: `image_api_prompt_v1`
-- execution_lane: `standard`
-- reference_count: `1`
-- output: `assets/scenes/scene20_cut1.png`
-- references:
-  - `主人公`: `assets/characters/hero.png`
-
-```api_prompt
-semantic blocked scene should not generate.
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    "```\n",
+                    """  - scene_id: 40
+    cuts:
+      - cut_id: 1
+        duration_seconds: 8
+        image_generation:
+          output: assets/scenes/scene40_cut1.png
 ```
 """,
+                ),
                 encoding="utf-8",
             )
             refresh_scene_request_snapshot_fixture(run_dir)
@@ -6474,23 +9144,142 @@ semantic blocked scene should not generate.
 
             async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
                 if stage == "scene_detail":
-                    relpaths = image_gen_app.semantic_review_relpaths(stage)
-                    report_path = run_dir / relpaths["report"]
-                    report_path.parent.mkdir(parents=True, exist_ok=True)
-                    report_path.write_text(
-                        "\n".join(
-                            [
-                                "status: failed",
-                                "failed_selectors:",
-                                "  - scene:20",
-                                "blocked_entries:",
-                                "  - scene20_cut1",
-                                "reason_keys:",
-                                "  - scene_detail_obligation_missing",
-                                "",
-                            ]
-                        ),
-                        encoding="utf-8",
+                    write_failed_semantic_review_artifacts(
+                        run_dir,
+                        stage,
+                        reviewed_entries=["scene:10", "scene:40"],
+                        failed_selectors=["scene:40"],
+                        blocked_entries=["scene:40"],
+                    )
+                    image_gen_app.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.semantic.scene_detail.shards.scene_40.transport.status": "failed",
+                            "review.semantic.scene_detail.shards.scene_40.transport.error_kind": "timeout",
+                            "review.semantic.scene_detail.shards.scene_40.transport.error": "CodexAppServerTransportError: turn timed out",
+                        },
+                    )
+                    raise CodexAppServerTransportError("scene_detail shard transport failed after 3 attempt(s): scene:40")
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1", "TOC_IMAGE_GEN_PROVENANCE_POLICY": "serial_fallback"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                    patch(
+                        "server.image_gen_app._deterministic_image_prompt_hard_gate_errors",
+                        return_value=[],
+                    ),
+                ):
+                    asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
+            scene40_exists = (run_dir / "assets/scenes/scene40_cut1.png").exists()
+            with patch("server.image_gen_app.ROOT", root):
+                payload = asyncio.run(
+                    image_gen_app.api_requests(run_id=run_id, kind="scene")
+                )
+
+        self.assertTrue(scene10_exists)
+        self.assertFalse(scene40_exists)
+        self.assertEqual(
+            [item_id for item_id in generated if item_id.startswith("scene")],
+            ["scene10_cut1", "scene10_cut2", "scene10_cut3"],
+        )
+        self.assertEqual(
+            state["runtime.stage"],
+            "scene_images_partial_ready_for_review",
+        )
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "true")
+        self.assertEqual(state["review.semantic.create_media_generated"], "true")
+        self.assertEqual(state["image_generation.status"], "partial")
+        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+        self.assertIn("scene40_cut1", state["review.semantic.scene_detail.blocked_image_items"])
+        blocked = next(item for item in payload["items"] if item["id"] == "scene40_cut1")
+        self.assertEqual(blocked["generationStatus"], "blocked")
+        self.assertEqual(blocked["candidates"][0]["status"], "failed")
+
+    def test_generate_create_images_continues_unblocked_scenes_on_localized_scene_detail_semantic_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            request_path = run_dir / "image_generation_requests.md"
+            request_path.write_text(
+                request_path.read_text(encoding="utf-8")
+                + """
+
+## scene20_cut1
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v1`
+- execution_lane: `standard`
+- reference_count: `1`
+- output: `assets/scenes/scene20_cut1.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```api_prompt
+semantic blocked scene should not generate.
+```
+""",
+                encoding="utf-8",
+            )
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    "```\n",
+                    """  - scene_id: 20
+    cuts:
+      - cut_id: 1
+        duration_seconds: 8
+        image_generation:
+          output: assets/scenes/scene20_cut1.png
+```
+""",
+                ),
+                encoding="utf-8",
+            )
+            refresh_scene_request_snapshot_fixture(run_dir)
+            saved = root / "generated.png"
+            saved.write_bytes(PNG_BYTES)
+            generated: list[str] = []
+
+            class FakeResult:
+                saved_path = saved
+                revised_prompt = None
+                status = "completed"
+                transcript = []
+                source = "app_server"
+                provenance_authoritative = True
+                turn_id = "turn-1"
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    generated.append(kwargs["item_id"])
+                    return FakeResult()
+
+            async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
+                if stage == "scene_detail":
+                    write_failed_semantic_review_artifacts(
+                        run_dir,
+                        stage,
+                        reviewed_entries=["scene:10", "scene:20"],
+                        failed_selectors=["scene:20"],
+                        blocked_entries=["scene20_cut1"],
                     )
                     raise RuntimeError("scene_detail semantic review failed after 1 attempt(s)")
 
@@ -6500,21 +9289,270 @@ semantic blocked scene should not generate.
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                    patch(
+                        "server.image_gen_app._deterministic_image_prompt_hard_gate_errors",
+                        return_value=[],
+                    ),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
-                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+                    asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             scene10_exists = (run_dir / "assets/scenes/scene10_cut1.png").exists()
             scene20_exists = (run_dir / "assets/scenes/scene20_cut1.png").exists()
 
-        self.assertFalse(scene10_exists)
+        self.assertTrue(scene10_exists)
         self.assertFalse(scene20_exists)
-        self.assertEqual(generated, [])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
-        self.assertNotIn("review.semantic.create_scene_media_generated", state)
+        self.assertEqual(
+            [item_id for item_id in generated if item_id.startswith("scene")],
+            ["scene10_cut1", "scene10_cut2", "scene10_cut3"],
+        )
+        self.assertEqual(state["runtime.stage"], "scene_images_partial_ready_for_review")
+        self.assertEqual(
+            state["review.semantic.create_scene_media_generated"],
+            "true",
+        )
         self.assertIn("scene20_cut1", state["review.semantic.scene_detail.blocked_image_items"])
-        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "false")
+        self.assertEqual(state["review.semantic.scene_detail.partial_media_allowed"], "true")
+        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+
+    def test_unmapped_scene_detail_failure_remains_globally_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+
+            async def fake_run_semantic_review(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> None:
+                write_failed_semantic_review_artifacts(
+                    run_dir,
+                    stage,
+                    reviewed_entries=["scene:10"],
+                    failed_selectors=["unknown_scene"],
+                    blocked_entries=["unknown_scene"],
+                )
+                raise RuntimeError("scene_detail semantic review failed")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_semantic_review",
+                    fake_run_semantic_review,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "semantic review failed before media generation",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_for_media_generation(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="scene_detail",
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            state["review.semantic.scene_detail.partial_media_allowed"],
+            "false",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_detail.localization.status"],
+            "not_localized",
+        )
+        self.assertEqual(
+            state["runtime.stage"],
+            "semantic_review_failed_before_media_generation",
+        )
+
+    def test_stale_localized_failure_report_remains_globally_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            write_failed_semantic_review_artifacts(
+                run_dir,
+                "scene_detail",
+                reviewed_entries=["scene:10"],
+                failed_selectors=["scene:10"],
+                blocked_entries=["scene10_cut1"],
+            )
+            source_path = (
+                run_dir
+                / "logs/review/semantic/scene_detail.source.md"
+            )
+            source_path.write_text(
+                source_path.read_text(encoding="utf-8") + "\nstale mutation\n",
+                encoding="utf-8",
+            )
+
+            async def fake_run_semantic_review(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> None:
+                raise RuntimeError(f"{stage} semantic review failed")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_semantic_review",
+                    fake_run_semantic_review,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "semantic review failed before media generation",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_for_media_generation(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="scene_detail",
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            state["review.semantic.scene_detail.partial_media_allowed"],
+            "false",
+        )
+        self.assertIn(
+            "SHA-256 mismatch",
+            state["review.semantic.scene_detail.localization.reason"],
+        )
+
+    def test_incomplete_reviewed_entry_accounting_remains_globally_blocking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            stage = "scene_detail"
+            write_failed_semantic_review_artifacts(
+                run_dir,
+                stage,
+                reviewed_entries=["scene:10", "scene:20"],
+                failed_selectors=["scene:20"],
+                blocked_entries=["scene20_cut1"],
+            )
+            relpaths = image_gen_app.semantic_review_relpaths(stage)
+            report_path = run_dir / relpaths["report"]
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8").replace(
+                    "reviewed_entries: [scene:10, scene:20]",
+                    "reviewed_entries: [scene:10]",
+                ),
+                encoding="utf-8",
+            )
+            image_gen_app._refresh_semantic_review_input_digest(
+                run_dir=run_dir,
+                scope_path=run_dir / relpaths["scope"],
+                collection_path=run_dir / relpaths["collection"],
+                prompt_path=run_dir / relpaths["prompt"],
+                report_path=report_path,
+            )
+
+            async def fake_run_semantic_review(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> None:
+                raise RuntimeError(f"{stage} semantic review failed")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_semantic_review",
+                    fake_run_semantic_review,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "semantic review failed before media generation",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_for_media_generation(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            state["review.semantic.scene_detail.partial_media_allowed"],
+            "false",
+        )
+        self.assertIn(
+            "reviewed_entries coverage",
+            state["review.semantic.scene_detail.localization.reason"],
+        )
+
+    def test_cut_blueprint_failure_localizes_to_one_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+
+            async def fake_run_semantic_review(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> None:
+                write_failed_semantic_review_artifacts(
+                    run_dir,
+                    stage,
+                    reviewed_entries=[
+                        "cut:scene10_cut01",
+                        "cut:scene10_cut02",
+                        "cut:scene10_cut03",
+                    ],
+                    failed_selectors=["scene10_cut2"],
+                    blocked_entries=["scene10_cut2"],
+                )
+                raise RuntimeError("cut_blueprint semantic review failed")
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._run_semantic_review",
+                    fake_run_semantic_review,
+                ),
+            ):
+                failure = asyncio.run(
+                    image_gen_app._run_semantic_review_for_media_generation(
+                        "job-1",
+                        run_dir=run_dir,
+                        stage="cut_blueprint",
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertIsNone(failure)
+        self.assertEqual(
+            state["review.semantic.cut_blueprint.partial_media_allowed"],
+            "true",
+        )
+        self.assertEqual(
+            state["review.semantic.cut_blueprint.blocked_image_items"],
+            "scene10_cut2",
+        )
+        self.assertEqual(state["slot.p420.status"], "done")
 
     def test_api_requests_marks_scene_detail_transport_blocked_items_as_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6541,9 +9579,18 @@ transport blocked scene should show as failed.
                 encoding="utf-8",
             )
             refresh_scene_request_snapshot_fixture(run_dir)
-            image_gen_app.append_state_snapshot(
-                run_dir / "state.txt",
-                {
+            write_failed_semantic_review_artifacts(
+                run_dir,
+                "scene_detail",
+                reviewed_entries=["scene:10", "scene:40"],
+                failed_selectors=["scene:40"],
+                blocked_entries=["scene:40"],
+            )
+            activate_localized_partial_media_fixture(
+                run_dir,
+                "scene_detail",
+                blocked_item_ids=["scene40_cut1"],
+                extra_state={
                     "review.semantic.scene_detail.shards.scene_40.transport.status": "failed",
                     "review.semantic.scene_detail.shards.scene_40.transport.error_kind": "timeout",
                     "review.semantic.scene_detail.shards.scene_40.transport.error": "CodexAppServerTransportError: turn timed out",
@@ -6557,7 +9604,8 @@ transport blocked scene should show as failed.
         normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
         self.assertEqual(blocked["generationStatus"], "blocked")
         self.assertEqual(blocked["candidates"][0]["status"], "failed")
-        self.assertIn("semantic scene_detail transport timeout", blocked["candidates"][0]["error"])
+        self.assertIn("scene_detail", blocked["candidates"][0]["error"])
+        self.assertIn("image generation skipped", blocked["candidates"][0]["error"])
         self.assertIsNone(normal["generationStatus"])
         self.assertEqual(normal["candidates"], [])
 
@@ -6586,9 +9634,18 @@ semantic blocked scene should show as failed.
                 encoding="utf-8",
             )
             refresh_scene_request_snapshot_fixture(run_dir)
-            image_gen_app.append_state_snapshot(
-                run_dir / "state.txt",
-                {
+            write_failed_semantic_review_artifacts(
+                run_dir,
+                "scene_detail",
+                reviewed_entries=["scene:10", "scene:20"],
+                failed_selectors=["scene:20"],
+                blocked_entries=["scene20_cut1"],
+            )
+            activate_localized_partial_media_fixture(
+                run_dir,
+                "scene_detail",
+                blocked_item_ids=["scene20_cut1"],
+                extra_state={
                     "review.semantic.scene_detail.failure.failed_selectors": "scene:20",
                     "review.semantic.scene_detail.failure.blocked_entries": "scene20_cut1",
                     "review.semantic.scene_detail.failure.reason_keys": "scene_detail_obligation_missing",
@@ -6604,15 +9661,52 @@ semantic blocked scene should show as failed.
         blocked = next(item for item in payload["items"] if item["id"] == "scene20_cut1")
         normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
         self.assertEqual(blocked["generationStatus"], "blocked")
-        self.assertEqual(blocked["candidates"][0]["status"], "completed")
+        self.assertEqual(blocked["candidates"][0]["status"], "failed")
         self.assertEqual(
-            blocked["candidates"][0]["path"],
+            blocked["candidates"][0]["blocking_stages"],
+            ["scene_detail"],
+        )
+        self.assertEqual(
+            blocked["previousCandidates"][0]["path"],
             "assets/test/image_gen_candidates/scene20_cut1/scene20_cut1_candidate_01.png",
         )
         self.assertIsNone(normal["generationStatus"])
         self.assertEqual(normal["candidates"], [])
 
-    def test_generate_create_images_blocks_all_scenes_when_image_prompt_review_fails(self) -> None:
+    def test_passed_semantic_stage_ignores_stale_failure_selectors_and_transport_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.scene_detail.failure.failed_selectors": "scene:10",
+                    "review.semantic.scene_detail.failure.blocked_entries": "scene10_cut1",
+                    "review.semantic.scene_detail.shards.scene_10.transport.status": "failed",
+                    "review.semantic.image_prompt.failure.failed_selectors": "scene10_cut02",
+                    "review.semantic.image_prompt.failure.blocked_entries": "scene10_cut02",
+                },
+            )
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.scene_detail.status": "passed",
+                    "review.semantic.scene_detail.loop.status": "passed",
+                    "review.semantic.image_prompt.status": "passed",
+                    "review.semantic.image_prompt.loop.status": "passed",
+                },
+            )
+            items = image_gen_app.load_request_items(run_dir, "scene")
+
+            blocked = image_gen_app._semantic_blocked_image_item_ids(
+                run_dir,
+                items,
+            )
+
+        self.assertEqual(blocked, set())
+
+    def test_generate_create_images_continues_other_cuts_when_image_prompt_review_is_localized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
@@ -6659,23 +9753,16 @@ semantic blocked scene should show as failed.
 
             async def fake_run_semantic_review(job_id: str, *, run_dir: Path, stage: str) -> None:
                 if stage == "image_prompt":
-                    relpaths = image_gen_app.semantic_review_relpaths(stage)
-                    report_path = run_dir / relpaths["report"]
-                    report_path.parent.mkdir(parents=True, exist_ok=True)
-                    report_path.write_text(
-                        "\n".join(
-                            [
-                                "status: failed",
-                                "failed_selectors:",
-                                "  - scene10_cut02",
-                                "blocked_entries:",
-                                "  - scene10_cut02",
-                                "reason_keys:",
-                                "  - api_prompt_emotion_is_abstract_not_performable",
-                                "",
-                            ]
-                        ),
-                        encoding="utf-8",
+                    write_failed_semantic_review_artifacts(
+                        run_dir,
+                        stage,
+                        reviewed_entries=[
+                            "scene10_cut01",
+                            "scene10_cut02",
+                            "scene10_cut03",
+                        ],
+                        failed_selectors=["scene10_cut02"],
+                        blocked_entries=["scene10_cut02"],
                     )
                     raise RuntimeError("image_prompt semantic review failed after 1 attempt(s)")
 
@@ -6685,9 +9772,14 @@ semantic blocked scene should show as failed.
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                    patch(
+                        "server.image_gen_app._deterministic_image_prompt_hard_gate_errors",
+                        return_value=[],
+                    ),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
-                        asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
+                    asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             supervisor_result = json.loads(supervisor_result_path.read_text(encoding="utf-8"))
@@ -6695,22 +9787,25 @@ semantic blocked scene should show as failed.
             scene10_cut2_exists = (run_dir / "assets/scenes/scene10_cut2.png").exists()
             scene10_cut3_exists = (run_dir / "assets/scenes/scene10_cut3.png").exists()
 
-        self.assertFalse(scene10_cut1_exists)
+        self.assertTrue(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
-        self.assertFalse(scene10_cut3_exists)
-        self.assertEqual(generated, ["hero"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
-        self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "false")
-        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
+        self.assertTrue(scene10_cut3_exists)
+        self.assertEqual(
+            [item_id for item_id in generated if item_id.startswith("scene")],
+            ["scene10_cut1", "scene10_cut3"],
+        )
+        self.assertEqual(state["runtime.stage"], "scene_images_partial_ready_for_review")
+        self.assertEqual(state["review.semantic.image_prompt.partial_media_allowed"], "true")
+        self.assertEqual(state["review.semantic.create_scene_media_generated"], "true")
         self.assertIn("scene10_cut2", state["review.semantic.image_prompt.blocked_image_items"])
-        self.assertEqual(state["review.image_prompt.request_freeze.status"], "draft")
-        self.assertEqual(state["review.image_prompt.request_freeze.invalidated_by"], "semantic.image_prompt.failed")
-        self.assertEqual(state["slot.p650.status"], "pending")
-        self.assertEqual(state["orchestration.p600.supervisor.status"], "invalidated")
-        self.assertEqual(state["orchestration.p600.supervisor.invalidated_by"], "semantic.image_prompt.failed")
-        self.assertEqual(supervisor_result["status"], "invalidated")
-        self.assertEqual(supervisor_result["previous_status"], "done")
-        self.assertEqual(supervisor_result["invalidated_by"], "semantic.image_prompt.failed")
+        self.assertEqual(state["review.image_prompt.request_freeze.status"], "frozen")
+        self.assertEqual(
+            state["review.image_prompt.request_freeze.semantic_status"],
+            "localized_failure",
+        )
+        self.assertEqual(state["slot.p650.status"], "done")
+        self.assertEqual(state["orchestration.p600.supervisor.status"], "done")
+        self.assertEqual(supervisor_result["status"], "done")
 
     def test_generate_create_images_blocks_all_scenes_when_asset_plan_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6798,6 +9893,7 @@ assets:
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
@@ -6811,12 +9907,13 @@ assets:
         self.assertFalse(scene10_cut1_exists)
         self.assertFalse(scene10_cut2_exists)
         self.assertFalse(scene10_cut3_exists)
-        self.assertEqual(generated, ["hero"])
-        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_scene_generation")
+        # The asset-plan semantic gate runs before any provider submission.
+        self.assertEqual(generated, [])
+        self.assertEqual(state["runtime.stage"], "semantic_review_failed_before_media_generation")
         self.assertEqual(state["review.semantic.asset_plan.partial_media_allowed"], "false")
-        self.assertEqual(state["review.semantic.create_scene_media_generated"], "false")
-        self.assertEqual(state["review.semantic.asset_plan.localization.status"], "localized_to_image_items")
-        self.assertIn("scene10_cut2", state["review.semantic.asset_plan.blocked_image_items"])
+        self.assertEqual(state["review.semantic.create_media_generated"], "false")
+        self.assertEqual(state["review.semantic.asset_plan.localization.status"], "not_eligible")
+        self.assertNotIn("review.semantic.asset_plan.blocked_image_items", state)
         self.assertEqual(state["review.image_prompt.request_freeze.status"], "draft")
         self.assertEqual(state["review.image_prompt.request_freeze.invalidated_by"], "semantic.asset_plan.failed")
         self.assertEqual(state["slot.p650.status"], "pending")
@@ -6831,9 +9928,22 @@ assets:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
             run_dir = write_valid_p650_artifacts(root, run_id)
-            image_gen_app.append_state_snapshot(
-                run_dir / "state.txt",
-                {
+            write_failed_semantic_review_artifacts(
+                run_dir,
+                "image_prompt",
+                reviewed_entries=[
+                    "scene10_cut01",
+                    "scene10_cut02",
+                    "scene10_cut03",
+                ],
+                failed_selectors=["scene10_cut02"],
+                blocked_entries=["scene10_cut02"],
+            )
+            activate_localized_partial_media_fixture(
+                run_dir,
+                "image_prompt",
+                blocked_item_ids=["scene10_cut2"],
+                extra_state={
                     "review.semantic.image_prompt.failure.failed_selectors": "scene10_cut02",
                     "review.semantic.image_prompt.failure.blocked_entries": "scene10_cut02",
                     "review.semantic.image_prompt.failure.reason_keys": "api_prompt_emotion_is_abstract_not_performable",
@@ -6847,7 +9957,8 @@ assets:
         normal = next(item for item in payload["items"] if item["id"] == "scene10_cut1")
         self.assertEqual(blocked["generationStatus"], "blocked")
         self.assertEqual(blocked["candidates"][0]["status"], "failed")
-        self.assertIn("semantic image_prompt failed", blocked["candidates"][0]["error"])
+        self.assertIn("image_prompt", blocked["candidates"][0]["error"])
+        self.assertIn("image generation skipped", blocked["candidates"][0]["error"])
         self.assertIsNone(normal["generationStatus"])
         self.assertEqual(normal["candidates"], [])
 
@@ -7082,7 +10193,14 @@ base b prompt
             write_valid_p650_artifacts(root, run_id)
             generated_kinds: list[str] = []
             repair_prompts = AsyncMock()
-            gate = Mock(side_effect=[RuntimeError("bootstrap asset visual gate failed"), RuntimeError("bootstrap asset visual gate failed"), None])
+            visual_gate_error = image_gen_app.P560AssetGateError(
+                "p560 asset gate failed: bootstrap asset is vector-like",
+                failed_check_ids=("asset.visual_not_vector_like",),
+                retryable_visual_quality=True,
+            )
+            gate = Mock(
+                side_effect=[visual_gate_error, visual_gate_error, None]
+            )
 
             async def fake_generate_request_outputs(*, run_dir, kind):
                 generated_kinds.append(kind)
@@ -7096,6 +10214,9 @@ base b prompt
                     patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
                     patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
                     patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
+                    patch("server.image_gen_app._validate_generated_outputs", Mock()),
+                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                 ):
                     result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
@@ -7104,13 +10225,938 @@ base b prompt
         self.assertEqual(gate.call_count, 3)
         self.assertEqual(repair_prompts.await_count, 2)
 
-    def test_generate_create_images_sends_to_frontend_after_ten_failed_asset_repairs(self) -> None:
+    def test_asset_generation_handoff_finalizes_p500_supervisor(self) -> None:
+        for asset_quality_passed, terminal_status in (
+            (True, "done"),
+            (False, "awaiting_approval"),
+        ):
+            with self.subTest(
+                asset_quality_passed=asset_quality_passed
+            ), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                result_path = (
+                    run_dir
+                    / "logs"
+                    / "orchestration"
+                    / "p500.supervisor_result.json"
+                )
+                result_path.parent.mkdir(parents=True)
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "bucket": "p500",
+                            "status": "pending",
+                            "completed_slots": ["p520", "p530"],
+                            "required_artifacts": [],
+                            "state_keys": {
+                                "slot.p570.status": "pending"
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                image_gen_app._mark_asset_generation_handoff(
+                    run_dir,
+                    asset_quality_passed=asset_quality_passed,
+                )
+
+                state = image_gen_app.parse_state_file(
+                    run_dir / "state.txt"
+                )
+                result = json.loads(
+                    result_path.read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(
+                    state["orchestration.p500.supervisor.status"],
+                    "done",
+                )
+                self.assertEqual(result["status"], "done")
+                self.assertEqual(
+                    result["completed_slots"],
+                    [
+                        "p520",
+                        "p530",
+                        "p510",
+                        "p540",
+                        "p550",
+                        "p560",
+                        "p570",
+                    ],
+                )
+                self.assertEqual(
+                    result["state_keys"]["slot.p570.status"],
+                    terminal_status,
+                )
+
+    def test_p680_visual_gate_reads_fresh_image_stage_before_handoff(self) -> None:
+        cases = {
+            "orchestration_pending_image_passed": (
+                {
+                    "orchestration": {
+                        "passed": False,
+                        "checks": [
+                            {
+                                "id": "orchestration.state_terminal",
+                                "passed": False,
+                                "kind": "rubric",
+                                "message": "p680 is intentionally not published yet",
+                            }
+                        ],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "image.visual_not_vector_like",
+                                "passed": True,
+                                "kind": "rubric",
+                                "message": "visual quality passed",
+                            }
+                        ],
+                    },
+                    "asset": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "asset.generation_provenance_app_server",
+                                "passed": True,
+                                "kind": "rubric",
+                                "message": "asset provenance passed",
+                            }
+                        ],
+                    },
+                },
+                False,
+            ),
+            "asset_stage_failed": (
+                {
+                    "asset": {
+                        "passed": False,
+                        "checks": [
+                            {
+                                "id": "asset.generation_provenance_app_server",
+                                "passed": False,
+                                "kind": "rubric",
+                                "message": "asset provenance failed",
+                            }
+                        ],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [],
+                    },
+                },
+                True,
+            ),
+            "image_checks_empty": (
+                {
+                    "asset": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "asset.generation_provenance_app_server",
+                                "passed": True,
+                            }
+                        ],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [],
+                    },
+                },
+                True,
+            ),
+            "image_check_missing_result": (
+                {
+                    "asset": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "asset.generation_provenance_app_server",
+                                "passed": True,
+                            }
+                        ],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "image.generation_provenance_app_server",
+                                "passed": None,
+                            }
+                        ],
+                    },
+                },
+                True,
+            ),
+            "image_check_missing_id": (
+                {
+                    "asset": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "asset.generation_provenance_app_server",
+                                "passed": True,
+                            }
+                        ],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "id": "",
+                                "passed": True,
+                            }
+                        ],
+                    },
+                },
+                True,
+            ),
+            "image_stage_missing": (
+                {
+                    "orchestration": {
+                        "passed": False,
+                        "checks": [],
+                    }
+                },
+                True,
+            ),
+        }
+
+        for label, (stages, should_raise) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+
+                def fake_verify(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                    (run_dir / "eval_report.json").write_text(
+                        json.dumps(
+                            {
+                                "run_dir": str(run_dir.resolve()),
+                                "stage_target": "p680",
+                                "overall": {"passed": False},
+                                "stages": stages,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(
+                        [],
+                        1,
+                        "",
+                        "orchestration is not terminal before p680 handoff",
+                    )
+
+                with patch("server.image_gen_app.subprocess.run", fake_verify):
+                    if should_raise:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "p680 visual quality gate failed",
+                        ):
+                            image_gen_app._validate_p680_visual_quality(run_dir)
+                    else:
+                        image_gen_app._validate_p680_visual_quality(run_dir)
+
+    def test_p680_terminal_gate_requires_successful_complete_verifier_report(
+        self,
+    ) -> None:
+        passing_stages = {
+            "orchestration": {
+                "passed": True,
+                "checks": [],
+            },
+            "asset": {
+                "passed": True,
+                "checks": [
+                    {
+                        "id": "asset.generation_provenance_app_server",
+                        "passed": True,
+                    }
+                ],
+            },
+            "image": {
+                "passed": True,
+                "checks": [
+                    {
+                        "id": "image.generation_provenance_app_server",
+                        "passed": True,
+                    }
+                ],
+            },
+        }
+        cases = {
+            "verifier_process_failed": (
+                1,
+                {"passed": True},
+                passing_stages,
+                True,
+            ),
+            "overall_failed": (
+                0,
+                {"passed": False},
+                passing_stages,
+                True,
+            ),
+            "emitted_stage_failed": (
+                0,
+                {"passed": True},
+                {
+                    **passing_stages,
+                    "orchestration": {
+                        "passed": False,
+                        "checks": [
+                            {
+                                "id": "orchestration.state_terminal",
+                                "passed": False,
+                            }
+                        ],
+                    },
+                },
+                True,
+            ),
+            "all_emitted_stages_passed": (
+                0,
+                {"passed": True},
+                passing_stages,
+                False,
+            ),
+        }
+
+        for label, (returncode, overall, stages, should_raise) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+
+                def fake_verify(
+                    *_args: Any,
+                    **_kwargs: Any,
+                ) -> subprocess.CompletedProcess[str]:
+                    (run_dir / "eval_report.json").write_text(
+                        json.dumps(
+                            {
+                                "run_dir": str(run_dir.resolve()),
+                                "stage_target": "p680",
+                                "overall": overall,
+                                "stages": stages,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(
+                        [],
+                        returncode,
+                        "",
+                        "terminal verifier failed" if returncode else "",
+                    )
+
+                with patch("server.image_gen_app.subprocess.run", fake_verify):
+                    if should_raise:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "p680 terminal verification failed",
+                        ):
+                            image_gen_app._validate_p680_visual_quality(
+                                run_dir,
+                                mode="terminal",
+                            )
+                    else:
+                        image_gen_app._validate_p680_visual_quality(
+                            run_dir,
+                            mode="terminal",
+                        )
+
+    def test_p680_gate_rejects_all_failed_checks_including_partial_media(self) -> None:
+        for unexpected_visual_failure in (False, True):
+            with (
+                self.subTest(
+                    unexpected_visual_failure=unexpected_visual_failure
+                ),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                run_id = "桃太郎_20260509_1200"
+                run_dir = write_valid_p650_artifacts(root, run_id)
+                write_failed_semantic_review_artifacts(
+                    run_dir,
+                    "image_prompt",
+                    reviewed_entries=[
+                        "scene10_cut01",
+                        "scene10_cut02",
+                        "scene10_cut03",
+                    ],
+                    failed_selectors=["scene10_cut2"],
+                    blocked_entries=["scene10_cut2"],
+                )
+                image_gen_app.append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.semantic.image_prompt.partial_media_allowed": "true",
+                        "review.semantic.image_prompt.blocked_image_items": "scene10_cut2",
+                        "review.semantic.image_prompt.blocked_image_item_count": "1",
+                        "review.semantic.image_prompt.localization.status": "localized_to_image_items",
+                    },
+                )
+
+                image_checks = [
+                    {
+                        "id": "image.output_files",
+                        "passed": False,
+                    },
+                    {
+                        "id": "image.generation_provenance_app_server",
+                        "passed": False,
+                    },
+                    {
+                        "id": "image.semantic_review_subagent_passed",
+                        "passed": False,
+                    },
+                    {
+                        "id": "image.visual_not_vector_like",
+                        "passed": not unexpected_visual_failure,
+                    },
+                ]
+
+                def fake_verify(
+                    *_args: Any,
+                    **_kwargs: Any,
+                ) -> subprocess.CompletedProcess[str]:
+                    (run_dir / "eval_report.json").write_text(
+                        json.dumps(
+                            {
+                                "run_dir": str(run_dir.resolve()),
+                                "stage_target": "p680",
+                                "overall": {
+                                    "passed": False,
+                                    "failed_stages": ["image"],
+                                },
+                                "stages": {
+                                    "orchestration": {
+                                        "passed": True,
+                                        "checks": [],
+                                    },
+                                    "asset": {
+                                        "passed": True,
+                                        "checks": [
+                                            {
+                                                "id": "asset.generation_provenance_app_server",
+                                                "passed": True,
+                                            }
+                                        ],
+                                    },
+                                    "image": {
+                                        "passed": False,
+                                        "checks": image_checks,
+                                    },
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(
+                        [],
+                        1,
+                        "",
+                        "partial image output verification",
+                    )
+
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app.subprocess.run",
+                        fake_verify,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "p680 terminal verification failed",
+                    ):
+                        image_gen_app._validate_p680_visual_quality(
+                            run_dir,
+                            mode="terminal",
+                        )
+
+    def test_p680_visual_gate_fails_closed_when_existing_report_baseline_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "overall": {"passed": False},
+                        "stages": {
+                            "orchestration": {
+                                "passed": False,
+                                "checks": [],
+                            },
+                            "asset": {
+                                "passed": True,
+                                "checks": [
+                                    {
+                                        "id": "asset.generation_provenance_app_server",
+                                        "passed": True,
+                                    }
+                                ],
+                            },
+                            "image": {
+                                "passed": True,
+                                "checks": [
+                                    {
+                                        "id": "image.generation_provenance_app_server",
+                                        "passed": True,
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            original_sha256 = image_gen_app._file_sha256
+            hash_calls = 0
+
+            def flaky_sha256(path: Path) -> str:
+                nonlocal hash_calls
+                hash_calls += 1
+                if hash_calls == 1:
+                    raise OSError("baseline read failed")
+                return original_sha256(path)
+
+            with (
+                patch(
+                    "server.image_gen_app.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        [],
+                        1,
+                        "",
+                        "orchestration is pending",
+                    ),
+                ),
+                patch(
+                    "server.image_gen_app._file_sha256",
+                    side_effect=flaky_sha256,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "p680 visual quality gate failed",
+                ):
+                    image_gen_app._validate_p680_visual_quality(run_dir)
+
+    def test_validate_p560_asset_quality_classifies_only_visual_check_failures_as_retryable(self) -> None:
+        cases = {
+            "visual_only": (
+                [
+                    {
+                        "id": "asset.visual_not_vector_like",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "generated asset is vector-like",
+                    }
+                ],
+                True,
+                "vector-like or low-detail raster image",
+                "hero",
+            ),
+            "visual_and_provenance": (
+                [
+                    {
+                        "id": "asset.visual_not_vector_like",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "generated asset is vector-like",
+                    },
+                    {
+                        "id": "asset.generation_provenance_app_server",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "strict provenance is missing",
+                    },
+                ],
+                False,
+                "vector-like or low-detail raster image",
+                "hero",
+            ),
+            "visual_with_non_blocking_warning": (
+                [
+                    {
+                        "id": "asset.visual_not_vector_like",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "generated asset is vector-like",
+                    },
+                    {
+                        "id": "asset.optional_visual_warning",
+                        "passed": False,
+                        "kind": "warning",
+                        "message": "optional visual observation",
+                    },
+                ],
+                True,
+                "vector-like or low-detail raster image",
+                "hero",
+            ),
+            "inspector_unavailable": (
+                [
+                    {
+                        "id": "asset.visual_not_vector_like",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "asset inspection failed",
+                    }
+                ],
+                False,
+                "Pillow is unavailable",
+                "hero",
+            ),
+            "non_bootstrap_asset": (
+                [
+                    {
+                        "id": "asset.visual_not_vector_like",
+                        "passed": False,
+                        "kind": "rubric",
+                        "message": "generated asset is vector-like",
+                    }
+                ],
+                False,
+                "vector-like or low-detail raster image",
+                "referenced_asset",
+            ),
+            "p400_integrity": (
+                [
+                    {
+                        "id": "p400.review_loop_integrity",
+                        "passed": False,
+                        "kind": "deterministic",
+                        "message": "review digest is stale",
+                    }
+                ],
+                False,
+                "vector-like or low-detail raster image",
+                "hero",
+            ),
+        }
+
+        for label, (
+            failed_checks,
+            expected_retryable,
+            visual_issue,
+            failed_asset_id,
+        ) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                eval_report = run_dir / "eval_report.json"
+                (run_dir / "asset_generation_requests.md").write_text(
+                    """# Asset Generation Requests
+
+## hero
+
+- tool: `codex_builtin_image`
+- execution_lane: `bootstrap_builtin`
+- reference_count: `0`
+- output: `assets/characters/hero.png`
+
+```api_prompt
+実写映画風の主人公参照画像。
+```
+""",
+                    encoding="utf-8",
+                )
+
+                def fake_verify(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                    stage_names = (
+                        "orchestration",
+                        "research",
+                        "story",
+                        "visual_value",
+                        "script",
+                        "manifest",
+                        "asset",
+                    )
+                    stages = {
+                        stage_name: {
+                            "stage": stage_name,
+                            "passed": True,
+                            "checks": [
+                                {
+                                    "id": f"{stage_name}.placeholder_pass",
+                                    "passed": True,
+                                    "kind": "rubric",
+                                    "message": "passed",
+                                }
+                            ],
+                            "details": {},
+                        }
+                        for stage_name in stage_names
+                    }
+                    stages["asset"] = {
+                        "stage": "asset",
+                        "passed": False,
+                        "checks": failed_checks,
+                        "details": {
+                            "asset_visual_quality_samples": [
+                                {
+                                    "asset_id": failed_asset_id,
+                                    "path": f"assets/characters/{failed_asset_id}.png",
+                                    "issue": visual_issue,
+                                }
+                            ],
+                            "asset_visual_quality_issues": [
+                                f"{failed_asset_id}: {visual_issue}"
+                            ],
+                        },
+                    }
+                    payload = {
+                        "run_dir": str(run_dir.resolve()),
+                        "flow": "immersive",
+                        "profile": "standard",
+                        "stage_target": "p570",
+                        "overall": {
+                            "passed": False,
+                            "failed_stages": ["asset"],
+                        },
+                        "stages": stages,
+                    }
+                    eval_report.write_text(
+                        json.dumps(payload, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess([], 1, "", "verification failed")
+
+                with patch("server.image_gen_app.subprocess.run", fake_verify):
+                    with self.assertRaises(image_gen_app.P560AssetGateError) as raised:
+                        image_gen_app._validate_p560_asset_quality(run_dir)
+
+                self.assertEqual(
+                    raised.exception.retryable_visual_quality,
+                    expected_retryable,
+                )
+                self.assertEqual(
+                    set(raised.exception.failed_check_ids),
+                    {
+                        str(check["id"])
+                        for check in failed_checks
+                        if check.get("kind") != "warning"
+                    },
+                )
+
+    def test_generate_create_images_fails_closed_on_non_visual_p570_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "slot.p550.status": "pending",
+                    "slot.p560.status": "pending",
+                    "slot.p570.status": "pending",
+                },
+            )
+            generated_kinds: list[str] = []
+            repair_prompts = AsyncMock()
+
+            async def fake_generate_request_outputs(*, run_dir, kind):
+                generated_kinds.append(kind)
+
+            gate_error = image_gen_app.P560AssetGateError(
+                "p560 asset gate failed: p400.review_loop_integrity",
+                failed_check_ids=("p400.review_loop_integrity",),
+                retryable_visual_quality=False,
+            )
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
+                    patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
+                    patch("server.image_gen_app._validate_p560_asset_quality", Mock(side_effect=gate_error)),
+                    patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
+                    patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
+                    patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "p400.review_loop_integrity",
+                    ):
+                        asyncio.run(
+                            image_gen_app._generate_create_images(
+                                "job-1",
+                                run_id=run_id,
+                            )
+                        )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(generated_kinds, ["asset"])
+        repair_prompts.assert_not_awaited()
+        self.assertEqual(
+            state["review.asset_visual_gate.status"],
+            "blocked_non_visual_validation",
+        )
+        self.assertEqual(
+            state["review.asset_visual_gate.failed_check_ids"],
+            "p400.review_loop_integrity",
+        )
+        self.assertEqual(
+            state["runtime.stage"],
+            "p570_non_visual_gate_failed",
+        )
+        self.assertEqual(state["slot.p550.status"], "done")
+        self.assertEqual(state["slot.p560.status"], "done")
+        self.assertEqual(state["slot.p570.status"], "failed")
+        self.assertEqual(state["slot.p660.status"], "pending")
+        self.assertEqual(state["slot.p670.status"], "pending")
+        self.assertEqual(state["slot.p680.status"], "pending")
+        self.assertEqual(
+            state["review.semantic.create_scene_media_generated"],
+            "false",
+        )
+
+    def test_validate_p560_asset_quality_fails_closed_when_existing_report_baseline_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            report_path = run_dir / "eval_report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p570",
+                        "overall": {"passed": False},
+                        "stages": {
+                            "asset": {
+                                "passed": False,
+                                "checks": [
+                                    {
+                                        "id": "asset.visual_not_vector_like",
+                                        "passed": False,
+                                        "kind": "rubric",
+                                        "message": "stale visual failure",
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stale_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
+
+            with (
+                patch(
+                    "server.image_gen_app._file_sha256",
+                    side_effect=[OSError("baseline read failed"), stale_sha256],
+                ),
+                patch(
+                    "server.image_gen_app.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        [],
+                        1,
+                        "",
+                        "verifier crashed before rewriting eval report",
+                    ),
+                ),
+            ):
+                with self.assertRaises(image_gen_app.P560AssetGateError) as raised:
+                    image_gen_app._validate_p560_asset_quality(run_dir)
+
+        self.assertFalse(raised.exception.retryable_visual_quality)
+        self.assertEqual(
+            raised.exception.failed_check_ids,
+            ("eval_report.baseline_unreadable",),
+        )
+
+    def test_validate_p560_asset_quality_fails_closed_on_inconsistent_eval_report_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            def fake_verify(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                (run_dir / "eval_report.json").write_text(
+                    json.dumps(
+                        {
+                            "run_dir": str(run_dir.resolve()),
+                            "stage_target": "p570",
+                            "overall": {"passed": True},
+                            "stages": {
+                                "asset": {
+                                    "passed": False,
+                                    "checks": [
+                                        {
+                                            "id": "asset.visual_not_vector_like",
+                                            "passed": False,
+                                            "kind": "rubric",
+                                            "message": "inconsistent report",
+                                        }
+                                    ],
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess([], 1, "", "verification failed")
+
+            with patch("server.image_gen_app.subprocess.run", fake_verify):
+                with self.assertRaises(image_gen_app.P560AssetGateError) as raised:
+                    image_gen_app._validate_p560_asset_quality(run_dir)
+
+        self.assertFalse(raised.exception.retryable_visual_quality)
+        self.assertEqual(
+            raised.exception.failed_check_ids,
+            ("eval_report.contract_mismatch",),
+        )
+
+    def test_validate_p560_asset_quality_normalizes_verifier_runtime_failures(self) -> None:
+        cases = {
+            "timeout": (
+                subprocess.TimeoutExpired(cmd=["verify-pipeline"], timeout=300),
+                "verifier.timeout",
+            ),
+            "spawn_failed": (
+                OSError("python executable unavailable"),
+                "verifier.spawn_failed",
+            ),
+        }
+        for label, (verifier_error, expected_check_id) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                with patch(
+                    "server.image_gen_app.subprocess.run",
+                    side_effect=verifier_error,
+                ):
+                    with self.assertRaises(
+                        image_gen_app.P560AssetGateError
+                    ) as raised:
+                        image_gen_app._validate_p560_asset_quality(run_dir)
+
+                self.assertFalse(
+                    raised.exception.retryable_visual_quality
+                )
+                self.assertEqual(
+                    raised.exception.failed_check_ids,
+                    (expected_check_id,),
+                )
+
+    def test_generate_create_images_stops_at_p570_after_ten_failed_asset_repairs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "桃太郎_20260509_1200"
             run_dir = write_valid_p650_artifacts(root, run_id)
             generated_kinds: list[str] = []
             repair_prompts = AsyncMock()
+            semantic_review = AsyncMock()
 
             async def fake_generate_request_outputs(*, run_dir, kind):
                 generated_kinds.append(kind)
@@ -7120,20 +11166,39 @@ base b prompt
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
                     patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
-                    patch("server.image_gen_app._validate_p560_asset_quality", Mock(side_effect=RuntimeError("bootstrap asset visual gate failed"))),
+                    patch(
+                        "server.image_gen_app._validate_p560_asset_quality",
+                        Mock(
+                            side_effect=image_gen_app.P560AssetGateError(
+                                "p560 asset gate failed: bootstrap asset is vector-like",
+                                failed_check_ids=("asset.visual_not_vector_like",),
+                                retryable_visual_quality=True,
+                            )
+                        ),
+                    ),
                     patch("server.image_gen_app._repair_bootstrap_asset_prompts", repair_prompts),
                     patch("server.image_gen_app._remove_bootstrap_asset_outputs", Mock()),
-                    patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                    patch("server.image_gen_app._run_semantic_review", semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 ):
                     result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
 
-            state = (run_dir / "state.txt").read_text(encoding="utf-8")
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
 
         self.assertFalse(result)
-        self.assertEqual(generated_kinds, ["asset"] * 10 + ["scene"])
+        self.assertEqual(generated_kinds, ["asset"] * 10)
         self.assertEqual(repair_prompts.await_count, 9)
-        self.assertIn("review.asset_visual_gate.status=needs_frontend_review", state)
-        self.assertIn("review.asset_visual_gate.attempts=10", state)
+        # Initial six-stage fixed point plus one complete six-stage
+        # re-entry after each of the nine request/snapshot prompt repairs.
+        self.assertEqual(semantic_review.await_count, 60)
+        self.assertEqual(
+            state["review.asset_visual_gate.status"],
+            "needs_frontend_review",
+        )
+        self.assertEqual(state["review.asset_visual_gate.attempts"], "10")
+        self.assertEqual(state["slot.p570.status"], "awaiting_approval")
+        self.assertEqual(state["slot.p660.status"], "pending")
+        self.assertEqual(state["slot.p680.status"], "pending")
 
     def test_generate_create_images_blocks_media_generation_when_semantic_review_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7165,6 +11230,7 @@ base b prompt
                     patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                     patch("server.image_gen_app._mark_image_generation_review_ready", mark_ready),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "semantic review failed before media generation"):
@@ -7225,6 +11291,7 @@ base b prompt
                     patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", fake_run_semantic_review),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                     patch("server.image_gen_app._mark_image_generation_review_ready", mark_ready),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "semantic review blocked by Codex app-server transport failure"):
@@ -7745,7 +11812,15 @@ base b prompt
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
                 (run_dir / paths["scope"]).write_text(
-                    json.dumps({"entry_count": 2, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                    json.dumps(
+                        {
+                            "entry_count": 2,
+                            "entry_ids": ["scene:10", "scene:20"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
@@ -7857,6 +11932,631 @@ base b prompt
         self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertFalse(repair_prompt_exists)
+
+    def test_semantic_review_retries_missing_output_then_accepts_json_without_repair(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            stage = "scene_set"
+            repair = AsyncMock()
+            review_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "# collection\n\nscene meaning under review\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal review_turns
+                    review_turns += 1
+                    if review_turns == 1:
+                        return [
+                            {
+                                "method": "item/completed",
+                                "params": {
+                                    "item": {
+                                        "type": "agentMessage",
+                                        "phase": "final_answer",
+                                        "text": (
+                                            "Review completed without the "
+                                            "required verdict."
+                                        ),
+                                    }
+                                },
+                            }
+                        ]
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    scope = json.loads(
+                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                    )
+                    verdict = {
+                        "status": "passed",
+                        "semantic_review_input_digest": scope[
+                            "semantic_review_input_digest"
+                        ],
+                        "reviewed_entries": ["scene:10"],
+                        "blocked_entries": [],
+                        "findings": [],
+                        "failed_selectors": [],
+                        "reason_keys": [],
+                        "notes": [],
+                    }
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": json.dumps(
+                                        verdict,
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            },
+                        }
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_producer_repair",
+                    repair,
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_semantic_review(
+                        "job-1",
+                        run_dir=run_dir,
+                        stage=stage,
+                        max_attempts=2,
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            report_text = (
+                run_dir / image_gen_app.semantic_review_relpaths(stage)["report"]
+            ).read_text(encoding="utf-8")
+
+        repair.assert_not_awaited()
+        self.assertEqual(review_turns, 2)
+        self.assertIn("status: passed", report_text)
+        self.assertEqual(
+            state["review.semantic.scene_set.report.source"],
+            "agent_message_transport_fallback",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.output_contract.status"],
+            "recovered",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.output_contract.retry_count"],
+            "1",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.status"],
+            "passed",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.loop.status"],
+            "passed",
+        )
+
+    def test_semantic_review_missing_final_verdict_is_output_contract_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            stage = "scene_set"
+            repair = AsyncMock()
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "# collection\n\nscene meaning under review\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": "Review finished, but no report was emitted.",
+                                }
+                            },
+                        }
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_producer_repair",
+                    repair,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "semantic review output contract",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                            max_attempts=2,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        repair.assert_not_awaited()
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.status"],
+            "failed",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.error_kind"],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.loop.status"],
+            "blocked_transport",
+        )
+
+    def test_semantic_review_does_not_promote_commentary_when_final_answer_is_malformed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            stage = "scene_set"
+            repair = AsyncMock()
+            review_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "# collection\n\nscene meaning under review\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal review_turns
+                    review_turns += 1
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    scope = json.loads(
+                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                    )
+                    verdict = {
+                        "status": "passed",
+                        "semantic_review_input_digest": scope[
+                            "semantic_review_input_digest"
+                        ],
+                        "reviewed_entries": ["scene:10"],
+                        "blocked_entries": [],
+                        "findings": [],
+                        "failed_selectors": [],
+                        "reason_keys": [],
+                        "notes": [],
+                    }
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "commentary",
+                                    "text": json.dumps(
+                                        verdict,
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            },
+                        },
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": '{"status": "passed"',
+                                }
+                            },
+                        },
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_producer_repair",
+                    repair,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "semantic review output contract",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                            max_attempts=2,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        repair.assert_not_awaited()
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.error_kind"],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.loop.status"],
+            "blocked_transport",
+        )
+
+    def test_semantic_review_wrong_digest_is_output_contract_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            stage = "scene_set"
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "# collection\n\nscene meaning under review\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    verdict = {
+                        "status": "passed",
+                        "semantic_review_input_digest": "sha256:" + ("0" * 64),
+                        "reviewed_entries": ["scene:10"],
+                        "blocked_entries": [],
+                        "findings": [],
+                        "failed_selectors": [],
+                        "reason_keys": [],
+                        "notes": [],
+                    }
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": json.dumps(
+                                        verdict,
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            },
+                        }
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "semantic review output contract",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.error_kind"],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state["review.semantic.scene_set.loop.status"],
+            "blocked_transport",
+        )
+
+    def test_semantic_review_salvages_json_verdict_from_transport_exception_transcript(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            stage = "scene_set"
+
+            def fake_build_pack(cmd, **_kwargs):
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "# collection\n\nscene meaning under review\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    scope = json.loads(
+                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                    )
+                    verdict = {
+                        "status": "passed",
+                        "semantic_review_input_digest": scope[
+                            "semantic_review_input_digest"
+                        ],
+                        "reviewed_entries": ["scene:10"],
+                        "blocked_entries": [],
+                        "findings": [],
+                        "failed_selectors": [],
+                        "reason_keys": [],
+                        "notes": [],
+                    }
+                    transcript = [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": json.dumps(
+                                        verdict,
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            },
+                        }
+                    ]
+                    raise CodexAppServerTransportError(
+                        "stream disconnected before turn/completed",
+                        transcript=transcript,
+                    )
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+            ):
+                result = asyncio.run(
+                    image_gen_app._run_semantic_review_once(
+                        "job-1",
+                        run_dir=run_dir,
+                        stage=stage,
+                        attempt=1,
+                        max_attempts=1,
+                        final_attempt=True,
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertTrue(result.passed, result.errors)
+        self.assertEqual(
+            state["review.semantic.scene_set.transport.status"],
+            "passed",
+        )
 
     def test_semantic_review_no_progress_timeout_blocks_as_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8353,6 +13053,141 @@ base b prompt
         self.assertIn("status: passed", report)
         self.assertNotIn("scene_detail_shard_transport_failed", report)
 
+    def test_scene_detail_missing_final_verdict_retries_as_output_contract_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "script.md").write_text(
+                "# script\n",
+                encoding="utf-8",
+            )
+            stage = "scene_detail"
+            paths = image_gen_app.semantic_review_relpaths(stage)
+            review_turns = 0
+
+            def fake_build_pack(cmd, **_kwargs):
+                (run_dir / paths["collection"]).parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                (run_dir / paths["collection"]).write_text(
+                    "\n".join(
+                        [
+                            "# Semantic Review Collection: scene_detail",
+                            "",
+                            "## scene:10",
+                            "",
+                            "```json",
+                            json.dumps(
+                                {
+                                    "id": "scene:10",
+                                    "selector": "scene10",
+                                },
+                                ensure_ascii=False,
+                            ),
+                            "```",
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene:10"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["prompt"]).write_text(
+                    "# review prompt\n",
+                    encoding="utf-8",
+                )
+                (run_dir / paths["report"]).write_text(
+                    "status: pending\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal review_turns
+                    review_turns += 1
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": "Review completed without a verdict.",
+                                }
+                            },
+                        }
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "1",
+                        "TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "2",
+                    },
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "scene_detail shard transport failed",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage=stage,
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(review_turns, 2)
+        self.assertEqual(
+            state[
+                "review.semantic.scene_detail.shards.scene_10.transport.error_kind"
+            ],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state[
+                "review.semantic.scene_detail.shards.scene_10.transport.retry_count"
+            ],
+            "1",
+        )
+
     def test_scene_detail_missing_entry_ids_records_shard_state_and_debuggable_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -8832,6 +13667,7 @@ base b prompt
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
                     patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "scene generation group 1 incomplete|did not return an image"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
@@ -9257,13 +14093,13 @@ base b prompt
             client_constructor_kwargs,
             [
                 {
-                    "cwd": run_dir,
+                    "cwd": run_dir.resolve(),
                     "scrub_sensitive_env": True,
                     "require_chatgpt_account": True,
                     "require_chatgpt_pro": True,
                 },
                 {
-                    "cwd": run_dir,
+                    "cwd": run_dir.resolve(),
                     "scrub_sensitive_env": True,
                     "require_chatgpt_account": True,
                     "require_chatgpt_pro": True,
@@ -9417,6 +14253,1255 @@ base b prompt
 
         self.assertEqual(result["deletedCount"], 0)
         self.assertEqual(result["preservedCount"], 1)
+
+    def test_p680_regeneration_classifier_rejects_stale_or_unowned_plan(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "different_run",
+                "/tmp/different-run",
+                False,
+                "eval_report.json belongs to a different run",
+            ),
+            (
+                "unbound_output",
+                None,
+                False,
+                "regeneration target is not bound to the current requests",
+            ),
+            (
+                "malformed_passed_state",
+                None,
+                "false",
+                "image stage passed state is malformed",
+            ),
+            (
+                "passed_stage_with_regeneration_plan",
+                None,
+                True,
+                "passed image stage contains a regeneration plan",
+            ),
+        )
+        for label, report_run_dir, passed, expected_error in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / "eval_report.json").write_text(
+                        json.dumps(
+                            {
+                                "run_dir": (
+                                    report_run_dir
+                                    if report_run_dir is not None
+                                    else str(run_dir.resolve())
+                                ),
+                                "stage_target": "p680",
+                                "stages": {
+                                    "image": {
+                                        "passed": passed,
+                                        "details": {
+                                            "image_regeneration_plan": [
+                                                {
+                                                    "output": "assets/scenes/missing.png",
+                                                    "action": "regenerate_p600_scene",
+                                                    "vector_like_references": [],
+                                                }
+                                            ]
+                                        },
+                                    }
+                                },
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    classification = (
+                        image_gen_app._classify_p680_regeneration_plan(run_dir)
+                    )
+
+                self.assertEqual(classification.targets, {})
+                self.assertTrue(
+                    any(
+                        expected_error in error
+                        for error in classification.errors
+                    )
+                )
+
+    def test_image_resume_refuses_asset_repair_plan_before_deleting_any_outputs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            bad_scene = run_dir / "assets/scenes/bad_scene.png"
+            dependent_scene = run_dir / "assets/scenes/dependent_scene.png"
+            good_scene = run_dir / "assets/scenes/good_scene.png"
+            bad_reference = run_dir / "assets/characters/bad_reference.png"
+            unrelated_upload = run_dir / "assets/uploads/unrelated.png"
+            for path in (
+                bad_scene,
+                dependent_scene,
+                good_scene,
+                bad_reference,
+                unrelated_upload,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(PNG_BYTES)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## bad_reference
+
+- output: `assets/characters/bad_reference.png`
+
+```text
+bad reference
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+
+## dependent_scene
+
+- output: `assets/scenes/dependent_scene.png`
+- references:
+  - `人物参照画像1`: `assets/characters/bad_reference.png`
+  - `ユーザー参照画像`: `assets/uploads/unrelated.png`
+
+```text
+scene using bad reference
+```
+
+## good_scene
+
+- output: `assets/scenes/good_scene.png`
+- references: `[]`
+
+```text
+good scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "selector": "bad_scene",
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                            "vector_like_references": [],
+                                        },
+                                        {
+                                            "selector": "dependent_scene",
+                                            "output": "assets/scenes/dependent_scene.png",
+                                                "action": "regenerate_p500_reference_first",
+                                                "vector_like_references": [
+                                                    "assets/characters/bad_reference.png",
+                                                ],
+                                            },
+                                        ]
+                                    },
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(
+                run_dir
+            )
+
+            self.assertTrue(bad_scene.exists())
+            self.assertTrue(dependent_scene.exists())
+            self.assertTrue(bad_reference.exists())
+            self.assertTrue(good_scene.exists())
+            self.assertTrue(unrelated_upload.exists())
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertTrue(
+            any(
+                "canonical p500" in error.lower()
+                for error in result["errors"]
+            )
+        )
+        self.assertTrue(result["requiresCanonicalP500"])
+        self.assertEqual(
+            result["assetTargets"],
+            ["assets/characters/bad_reference.png"],
+        )
+        self.assertEqual(
+            set(result["regenerationActions"]),
+            {
+                "regenerate_p500_reference_first",
+                "regenerate_p600_scene",
+            },
+        )
+        self.assertEqual(result["preservedCount"], 5)
+
+    def test_image_resume_deletes_current_scene_only_regeneration_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            bad_scene = run_dir / "assets/scenes/bad_scene.png"
+            good_scene = run_dir / "assets/scenes/good_scene.png"
+            bad_scene.parent.mkdir(parents=True)
+            bad_scene.write_bytes(PNG_BYTES)
+            good_scene.write_bytes(PNG_BYTES)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+
+## good_scene
+
+- output: `assets/scenes/good_scene.png`
+- references: `[]`
+
+```text
+good scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                            "vector_like_references": [],
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(
+                run_dir
+            )
+
+            self.assertFalse(bad_scene.exists())
+            self.assertTrue(good_scene.exists())
+        self.assertEqual(result["deleted"], ["assets/scenes/bad_scene.png"])
+        self.assertEqual(result["errors"], [])
+
+    def test_image_resume_does_not_follow_scene_output_symlink_to_user_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            upload = run_dir / "assets/uploads/user.png"
+            output = run_dir / "assets/scenes/bad_scene.png"
+            upload.parent.mkdir(parents=True)
+            output.parent.mkdir(parents=True)
+            upload.write_bytes(PNG_BYTES)
+            output.symlink_to(upload)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
+
+            self.assertTrue(output.is_symlink())
+            self.assertEqual(upload.read_bytes(), PNG_BYTES)
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertTrue(any("symlink" in error for error in result["errors"]))
+
+    def test_image_resume_rejects_noncanonical_scene_output_targeting_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            upload = run_dir / "assets/uploads/user.png"
+            upload.parent.mkdir(parents=True)
+            upload.write_bytes(PNG_BYTES)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/../uploads/user.png`
+- references: `[]`
+
+```text
+bad scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/../uploads/user.png",
+                                            "action": "regenerate_p600_scene",
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
+
+            self.assertEqual(upload.read_bytes(), PNG_BYTES)
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertTrue(any("unsafe" in error for error in result["errors"]))
+
+    def test_image_resume_does_not_follow_symlink_output_directory_outside_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            run_dir.mkdir()
+            outside.mkdir()
+            outside_image = outside / "bad_scene.png"
+            outside_image.write_bytes(PNG_BYTES)
+            assets_dir = run_dir / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "scenes").symlink_to(outside, target_is_directory=True)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
+
+            self.assertEqual(outside_image.read_bytes(), PNG_BYTES)
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertTrue(any("unsafe" in error for error in result["errors"]))
+
+    def test_image_resume_never_treats_upload_as_generated_asset_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            upload = run_dir / "assets/uploads/user.png"
+            upload.parent.mkdir(parents=True)
+            upload.write_bytes(PNG_BYTES)
+            (run_dir / "asset_generation_requests.md").write_text(
+                """# Asset Generation Requests
+
+## claimed_upload
+
+- output: `assets/uploads/user.png`
+- references: `[]`
+
+```text
+claimed upload
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## dependent_scene
+
+- output: `assets/scenes/dependent_scene.png`
+- references:
+  - `人物参照画像1`: `assets/uploads/user.png`
+
+```text
+dependent scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/dependent_scene.png",
+                                            "action": "regenerate_p500_reference_first",
+                                            "vector_like_references": [
+                                                "assets/uploads/user.png"
+                                            ],
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
+
+            self.assertEqual(upload.read_bytes(), PNG_BYTES)
+        self.assertEqual(result["deletedCount"], 0)
+        self.assertTrue(any("unsafe" in error for error in result["errors"]))
+
+    def test_serialized_run_write_rejects_symlink_lock_path(self) -> None:
+        async def run_case(run_dir: Path) -> None:
+            victim = run_dir / "victim.txt"
+            victim.write_text("preserve\n", encoding="utf-8")
+            lock_dir = run_dir / ".locks"
+            lock_dir.mkdir()
+            (lock_dir / "scene_request_revision.lock").symlink_to(victim)
+
+            with self.assertRaisesRegex(FileLockUnavailable, "unsafe"):
+                async with image_gen_app._serialized_run_write(
+                    run_dir,
+                    "scene_request_revision",
+                ):
+                    self.fail("unsafe cross-process lock must not be entered")
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "preserve\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(run_case(Path(tmp)))
+
+    def test_request_generation_rejects_symlink_destination_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            upload = run_dir / "assets/uploads/user.png"
+            destination = run_dir / "assets/scenes/cut.png"
+            upload.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True)
+            upload.write_bytes(b"user-upload")
+            destination.symlink_to(upload)
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image="assets/scenes/cut.png",
+            )
+
+            with patch(
+                "server.image_gen_app.create_codex_app_server_client"
+            ) as create_provider:
+                with self.assertRaisesRegex(RuntimeError, "unsafe.*symlink"):
+                    asyncio.run(
+                        image_gen_app._generate_request_item_output_with_slot(
+                            run_dir=run_dir,
+                            kind="scene",
+                            item=item,
+                        )
+                    )
+
+            self.assertEqual(upload.read_bytes(), b"user-upload")
+            self.assertTrue(destination.is_symlink())
+        create_provider.assert_not_called()
+
+    def test_request_generation_rejects_symlink_destination_parent_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            run_dir.mkdir()
+            outside.mkdir()
+            assets = run_dir / "assets"
+            assets.mkdir()
+            (assets / "scenes").symlink_to(outside, target_is_directory=True)
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with patch(
+                "server.image_gen_app.create_codex_app_server_client"
+            ) as create_provider:
+                with self.assertRaisesRegex(RuntimeError, "unsafe.*symlink"):
+                    asyncio.run(
+                        image_gen_app._generate_request_item_output_with_slot(
+                            run_dir=run_dir,
+                            kind="scene",
+                            item=item,
+                        )
+                    )
+
+            self.assertFalse((outside / "cut.png").exists())
+        create_provider.assert_not_called()
+
+    def test_request_generation_rejects_destination_parent_swap_before_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            scenes = run_dir / "assets" / "scenes"
+            detached_scenes = root / "detached-scenes"
+            scenes.mkdir(parents=True)
+            outside.mkdir()
+            outside_destination = outside / "cut.png"
+            outside_destination.write_bytes(b"outside-file-must-not-change")
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            original_validate = (
+                image_gen_app._validate_generation_destination_nofollow
+            )
+            validation_calls = 0
+
+            def validate_then_swap_parent(
+                checked_run_dir: Path,
+                value: str,
+                *,
+                kind: str,
+            ) -> tuple[str, Path]:
+                nonlocal validation_calls
+                result = original_validate(
+                    checked_run_dir,
+                    value,
+                    kind=kind,
+                )
+                validation_calls += 1
+                if validation_calls == 2:
+                    scenes.rename(detached_scenes)
+                    scenes.symlink_to(outside, target_is_directory=True)
+                return result
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    return ImageGenerationResult(
+                        saved_path=generated,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        provenance_authoritative=True,
+                        turn_id="turn-1",
+                        generation_job_id=str(kwargs["generation_job_id"]),
+                        item_id=str(kwargs["item_id"]),
+                        prompt_sha256=hashlib.sha256(
+                            str(kwargs["prompt"]).encode("utf-8")
+                        ).hexdigest(),
+                        reference_sha256s=[],
+                        image_generation_item_id="image-1",
+                        image_generation_item_count=1,
+                        destination=str(kwargs["output_path"]),
+                        provenance_policy="request_bound_v2",
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch(
+                    "server.image_gen_app._validate_generation_destination_nofollow",
+                    validate_then_swap_parent,
+                ),
+                patch(
+                    "server.image_gen_app.retain_first_image",
+                    return_value={"created": True},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "unsafe.*destination",
+                ):
+                    asyncio.run(
+                        image_gen_app._generate_request_item_output_with_slot(
+                            run_dir=run_dir,
+                            kind="scene",
+                            item=item,
+                        )
+                    )
+
+            self.assertEqual(
+                outside_destination.read_bytes(),
+                b"outside-file-must-not-change",
+            )
+            self.assertFalse((detached_scenes / "cut.png").exists())
+            failure_logs = sorted(
+                (
+                    run_dir
+                    / "logs"
+                    / "app_server"
+                    / "image_gen"
+                ).glob("*.json")
+            )
+            self.assertTrue(failure_logs)
+            failure_log = json.loads(
+                failure_logs[-1].read_text(encoding="utf-8")
+            )
+            self.assertIsNone(failure_log["outputSha256"])
+            self.assertEqual(
+                failure_log["destinationDetails"]["inspectionSkipped"],
+                "unsafe_destination",
+            )
+
+    def test_provider_failure_after_parent_swap_does_not_inspect_destination(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            scenes = run_dir / "assets" / "scenes"
+            detached_scenes = root / "detached-scenes"
+            scenes.mkdir(parents=True)
+            outside.mkdir()
+            outside_destination = outside / "cut.png"
+            outside_destination.write_bytes(b"outside-file-must-not-read")
+
+            class FailingClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    scenes.rename(detached_scenes)
+                    scenes.symlink_to(
+                        outside,
+                        target_is_directory=True,
+                    )
+                    raise RuntimeError("provider failed after parent swap")
+
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FailingClient,
+                ),
+                patch(
+                    "server.image_gen_app.IMAGE_GENERATION_ITEM_MAX_ATTEMPTS",
+                    1,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "provider failed after parent swap",
+                ):
+                    asyncio.run(
+                        image_gen_app._generate_request_item_output_with_slot(
+                            run_dir=run_dir,
+                            kind="scene",
+                            item=item,
+                        )
+                    )
+
+            failure_logs = sorted(
+                (
+                    run_dir
+                    / "logs"
+                    / "app_server"
+                    / "image_gen"
+                ).glob("*.json")
+            )
+            self.assertTrue(failure_logs)
+            failure_log = json.loads(
+                failure_logs[-1].read_text(encoding="utf-8")
+            )
+            self.assertIsNone(failure_log["outputSha256"])
+            self.assertEqual(
+                failure_log["destinationDetails"]["inspectionSkipped"],
+                "unsafe_destination",
+            )
+            self.assertEqual(
+                outside_destination.read_bytes(),
+                b"outside-file-must-not-read",
+            )
+
+    def test_success_logging_uses_descriptor_bound_copy_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            scenes = run_dir / "assets" / "scenes"
+            detached_scenes = root / "detached-scenes"
+            scenes.mkdir(parents=True)
+            outside.mkdir()
+            outside_destination = outside / "cut.png"
+            outside_destination.write_bytes(b"outside-file-must-not-read")
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            original_copy = (
+                image_gen_app
+                ._copy_saved_image_to_generation_destination_nofollow
+            )
+
+            def copy_then_swap_parent(**kwargs):
+                result = original_copy(**kwargs)
+                scenes.rename(detached_scenes)
+                scenes.symlink_to(
+                    outside,
+                    target_is_directory=True,
+                )
+                return result
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    return None
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **kwargs):
+                    return ImageGenerationResult(
+                        saved_path=generated,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        provenance_authoritative=True,
+                        turn_id="turn-1",
+                        generation_job_id=str(kwargs["generation_job_id"]),
+                        item_id=str(kwargs["item_id"]),
+                        prompt_sha256=hashlib.sha256(
+                            str(kwargs["prompt"]).encode("utf-8")
+                        ).hexdigest(),
+                        reference_sha256s=[],
+                        image_generation_item_id="image-1",
+                        image_generation_item_count=1,
+                        destination=str(kwargs["output_path"]),
+                        provenance_policy="request_bound_v2",
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ),
+                patch(
+                    "server.image_gen_app._copy_saved_image_to_generation_destination_nofollow",
+                    copy_then_swap_parent,
+                ),
+                patch(
+                    "server.image_gen_app.retain_first_image",
+                    return_value={"created": True},
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._generate_request_item_output_with_slot(
+                        run_dir=run_dir,
+                        kind="scene",
+                        item=item,
+                    )
+                )
+
+            success_logs = sorted(
+                (
+                    run_dir
+                    / "logs"
+                    / "app_server"
+                    / "image_gen"
+                ).glob("*.json")
+            )
+            self.assertTrue(success_logs)
+            success_log = json.loads(
+                success_logs[-1].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                success_log["outputSha256"],
+                hashlib.sha256(PNG_BYTES).hexdigest(),
+            )
+            self.assertEqual(
+                success_log["destinationDetails"]["inspectionSkipped"],
+                "descriptor_verified_copy",
+            )
+            self.assertEqual(
+                outside_destination.read_bytes(),
+                b"outside-file-must-not-read",
+            )
+            self.assertEqual(
+                (detached_scenes / "cut.png").read_bytes(),
+                PNG_BYTES,
+            )
+
+    def test_generation_copy_keeps_temp_descriptor_bound_through_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            scenes = run_dir / "assets" / "scenes"
+            scenes.mkdir(parents=True)
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            replacement = root / "replacement.png"
+            replacement.write_bytes(PNG_BYTES + b"replacement")
+            original_open = os.open
+            original_close = os.close
+            original_replace = os.replace
+            temporary_descriptor: int | None = None
+            temporary_name: str | None = None
+            temporary_swapped = False
+
+            def track_temporary_open(
+                path,
+                flags,
+                mode=0o777,
+                *,
+                dir_fd=None,
+            ):
+                nonlocal temporary_descriptor, temporary_name
+                descriptor = original_open(
+                    path,
+                    flags,
+                    mode,
+                    dir_fd=dir_fd,
+                )
+                if (
+                    isinstance(path, str)
+                    and path.startswith(".toc-image-")
+                    and bool(flags & os.O_CREAT)
+                ):
+                    temporary_descriptor = descriptor
+                    temporary_name = path
+                return descriptor
+
+            def swap_temporary_after_close(descriptor: int) -> None:
+                nonlocal temporary_swapped
+                original_close(descriptor)
+                if (
+                    not temporary_swapped
+                    and descriptor == temporary_descriptor
+                    and temporary_name is not None
+                    and (scenes / temporary_name).exists()
+                ):
+                    original_replace(
+                        replacement,
+                        scenes / temporary_name,
+                    )
+                    temporary_swapped = True
+
+            with (
+                patch(
+                    "server.image_gen_app.os.open",
+                    track_temporary_open,
+                ),
+                patch(
+                    "server.image_gen_app.os.close",
+                    swap_temporary_after_close,
+                ),
+            ):
+                receipt = (
+                    image_gen_app
+                    ._copy_saved_image_to_generation_destination_nofollow(
+                        run_dir=run_dir,
+                        saved_path=generated,
+                        output="assets/scenes/cut.png",
+                        kind="scene",
+                    )
+                )
+
+            destination = scenes / "cut.png"
+            self.assertEqual(destination.read_bytes(), PNG_BYTES)
+            self.assertEqual(
+                receipt.output_sha256,
+                hashlib.sha256(destination.read_bytes()).hexdigest(),
+            )
+
+    def test_generation_copy_rejects_swapped_temp_name_at_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            scenes = run_dir / "assets" / "scenes"
+            destination = scenes / "cut.png"
+            scenes.mkdir(parents=True)
+            destination.write_bytes(b"existing-canonical-bytes")
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            replacement_name = ".attacker-replacement.png"
+            (scenes / replacement_name).write_bytes(
+                PNG_BYTES + b"replacement"
+            )
+            original_replace = os.replace
+            replacements = 0
+
+            def replace_after_temp_name_swap(
+                source,
+                target,
+                *,
+                src_dir_fd=None,
+                dst_dir_fd=None,
+            ) -> None:
+                nonlocal replacements
+                replacements += 1
+                if replacements == 1:
+                    original_replace(
+                        replacement_name,
+                        source,
+                        src_dir_fd=src_dir_fd,
+                        dst_dir_fd=src_dir_fd,
+                    )
+                original_replace(
+                    source,
+                    target,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+
+            with patch(
+                "server.image_gen_app.os.replace",
+                replace_after_temp_name_swap,
+            ):
+                with self.assertRaisesRegex(
+                    image_gen_app._UnsafeGenerationDestinationError,
+                    "rollback failed.*changed before rollback",
+                ):
+                    image_gen_app._copy_saved_image_to_generation_destination_nofollow(
+                        run_dir=run_dir,
+                        saved_path=generated,
+                        output="assets/scenes/cut.png",
+                        kind="scene",
+                    )
+
+            self.assertEqual(
+                destination.read_bytes(),
+                PNG_BYTES + b"replacement",
+            )
+            backups = list(
+                scenes.glob(".toc-image-backup-*.tmp.png")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                backups[0].read_bytes(),
+                b"existing-canonical-bytes",
+            )
+
+    def test_generation_copy_rolls_back_parent_swap_after_precheck(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            scenes = run_dir / "assets" / "scenes"
+            detached_scenes = root / "detached-scenes"
+            destination = scenes / "cut.png"
+            scenes.mkdir(parents=True)
+            outside.mkdir()
+            destination.write_bytes(b"existing-canonical-bytes")
+            outside_destination = outside / "cut.png"
+            outside_destination.write_bytes(b"outside-file-must-not-change")
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            original_replace = os.replace
+            replacements = 0
+
+            def replace_after_parent_swap(*args, **kwargs) -> None:
+                nonlocal replacements
+                replacements += 1
+                if replacements == 1:
+                    scenes.rename(detached_scenes)
+                    scenes.symlink_to(outside, target_is_directory=True)
+                original_replace(*args, **kwargs)
+
+            with patch(
+                "server.image_gen_app.os.replace",
+                replace_after_parent_swap,
+            ):
+                with self.assertRaisesRegex(
+                    image_gen_app._UnsafeGenerationDestinationError,
+                    "parent.*unsafe|parent changed",
+                ):
+                    image_gen_app._copy_saved_image_to_generation_destination_nofollow(
+                        run_dir=run_dir,
+                        saved_path=generated,
+                        output="assets/scenes/cut.png",
+                        kind="scene",
+                    )
+
+            self.assertEqual(
+                (detached_scenes / "cut.png").read_bytes(),
+                b"existing-canonical-bytes",
+            )
+            self.assertEqual(
+                outside_destination.read_bytes(),
+                b"outside-file-must-not-change",
+            )
+            self.assertEqual(
+                list(detached_scenes.glob(".toc-image-*")),
+                [],
+            )
+
+    def test_generation_copy_removes_new_output_after_parent_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            outside = root / "outside"
+            scenes = run_dir / "assets" / "scenes"
+            detached_scenes = root / "detached-scenes"
+            scenes.mkdir(parents=True)
+            outside.mkdir()
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            original_assert_parent = (
+                image_gen_app._assert_generation_parent_is_current
+            )
+            parent_checks = 0
+
+            def assert_parent_then_swap(*args, **kwargs) -> None:
+                nonlocal parent_checks
+                original_assert_parent(*args, **kwargs)
+                parent_checks += 1
+                if parent_checks == 1:
+                    scenes.rename(detached_scenes)
+                    scenes.symlink_to(outside, target_is_directory=True)
+
+            with patch(
+                "server.image_gen_app._assert_generation_parent_is_current",
+                assert_parent_then_swap,
+            ):
+                with self.assertRaises(
+                    image_gen_app._UnsafeGenerationDestinationError
+                ):
+                    image_gen_app._copy_saved_image_to_generation_destination_nofollow(
+                        run_dir=run_dir,
+                        saved_path=generated,
+                        output="assets/scenes/cut.png",
+                        kind="scene",
+                    )
+
+            self.assertFalse((detached_scenes / "cut.png").exists())
+            self.assertFalse((outside / "cut.png").exists())
+            self.assertEqual(
+                list(detached_scenes.glob(".toc-image-*")),
+                [],
+            )
+
+    def test_generation_copy_preserves_concurrent_leaf_on_rollback_conflict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            scenes = run_dir / "assets" / "scenes"
+            destination = scenes / "cut.png"
+            concurrent_leaf = scenes / "concurrent.png"
+            scenes.mkdir(parents=True)
+            destination.write_bytes(b"existing-canonical-bytes")
+            concurrent_leaf.write_bytes(b"concurrent-leaf-bytes")
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+            original_replace = os.replace
+            replacements = 0
+
+            def replace_then_swap_leaf(*args, **kwargs) -> None:
+                nonlocal replacements
+                replacements += 1
+                original_replace(*args, **kwargs)
+                if replacements == 1:
+                    original_replace(concurrent_leaf, destination)
+
+            with patch(
+                "server.image_gen_app.os.replace",
+                replace_then_swap_leaf,
+            ):
+                with self.assertRaisesRegex(
+                    image_gen_app._UnsafeGenerationDestinationError,
+                    "rollback failed.*changed before rollback",
+                ):
+                    image_gen_app._copy_saved_image_to_generation_destination_nofollow(
+                        run_dir=run_dir,
+                        saved_path=generated,
+                        output="assets/scenes/cut.png",
+                        kind="scene",
+                    )
+
+            self.assertEqual(
+                destination.read_bytes(),
+                b"concurrent-leaf-bytes",
+            )
+            backups = list(
+                scenes.glob(".toc-image-backup-*.tmp.png")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                backups[0].read_bytes(),
+                b"existing-canonical-bytes",
+            )
 
     def test_v2_compiled_prompt_is_not_rewritten_by_generic_quality_upgrade(self) -> None:
         item = image_gen.ImageRequestItem(
@@ -9708,18 +15793,29 @@ base b prompt
                 calls.append(kind)
 
             def fake_validate_p560_asset_quality(_run_dir: Path) -> None:
-                raise RuntimeError("p560 bootstrap asset visual gate failed: low detail raster")
+                raise image_gen_app.P560AssetGateError(
+                    "p560 asset gate failed: low detail raster",
+                    failed_check_ids=("asset.visual_not_vector_like",),
+                    retryable_visual_quality=True,
+                )
 
             async def fake_repair_bootstrap_asset_prompts(*_args: Any, **_kwargs: Any) -> None:
                 raise TimeoutError("repair timed out")
 
+            semantic_review = AsyncMock()
+            fixed_point = AsyncMock()
             with (
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
                 patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
                 patch("server.image_gen_app._validate_p560_asset_quality", fake_validate_p560_asset_quality),
                 patch("server.image_gen_app._repair_bootstrap_asset_prompts", fake_repair_bootstrap_asset_prompts),
-                patch("server.image_gen_app._run_semantic_review", AsyncMock()),
+                patch(
+                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                    fixed_point,
+                ),
+                patch("server.image_gen_app._run_semantic_review", semantic_review),
+                patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 patch("server.image_gen_app._validate_p650_run"),
             ):
                 result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id="sample_run"))
@@ -9728,10 +15824,13 @@ base b prompt
             event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
 
         self.assertFalse(result)
-        self.assertEqual(calls, ["asset", "scene"])
+        self.assertEqual(calls, ["asset"])
+        fixed_point.assert_awaited_once_with("job-1", run_dir=run_dir.resolve())
+        semantic_review.assert_not_awaited()
         self.assertEqual(state["review.asset_visual_gate.status"], "needs_frontend_review")
         self.assertEqual(state["review.asset_visual_gate.repair.status"], "failed")
-        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+        self.assertEqual(state["slot.p570.status"], "awaiting_approval")
+        self.assertEqual(state["slot.p680.status"], "pending")
         self.assertIn('"operation": "prompt_repair"', event_payload)
         self.assertIn('"status": "failed"', event_payload)
 
@@ -12647,6 +18746,506 @@ location beta
         self.assertEqual(response.status_code, 400)
         self.assertIn("candidate item mismatch", response.text)
 
+    def test_insert_bulk_rejects_active_create_resume_lease_without_overwriting_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            output = run_dir / "assets/scenes/scene01.png"
+            candidate = image_gen.candidate_path(run_dir, "scene01", 1)
+            write_test_png(output, color=(10, 20, 30))
+            write_test_png(candidate, color=(200, 210, 220))
+            original_bytes = output.read_bytes()
+
+            with sync_file_lock(
+                run_dir / ".locks" / "create_resume.lock",
+                wait=False,
+            ):
+                with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                    with patch("server.image_gen_app.ROOT", root):
+                        with TestClient(app) as client:
+                            response = client.post(
+                                "/api/image-gen/insert-bulk",
+                                json={
+                                    "items": [
+                                        {
+                                            "run_id": "sample_run",
+                                            "candidate_path": candidate.relative_to(
+                                                run_dir
+                                            ).as_posix(),
+                                            "output": output.relative_to(
+                                                run_dir
+                                            ).as_posix(),
+                                        }
+                                    ]
+                                },
+                            )
+
+            persisted_bytes = output.read_bytes()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(persisted_bytes, original_bytes)
+
+    def test_insert_bulk_waits_for_scene_request_revision_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## scene01
+
+- output: `assets/scenes/scene01.png`
+- references: `[]`
+
+```text
+scene one
+```
+""",
+                encoding="utf-8",
+            )
+            output = run_dir / "assets/scenes/scene01.png"
+            candidate = image_gen.candidate_path(run_dir, "scene01", 1)
+            write_test_png(output, color=(10, 20, 30))
+            write_test_png(candidate, color=(200, 210, 220))
+            original_bytes = output.read_bytes()
+            candidate_bytes = candidate.read_bytes()
+
+            def post_insert() -> Any:
+                with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                    with patch("server.image_gen_app.ROOT", root):
+                        with TestClient(app) as client:
+                            return client.post(
+                                "/api/image-gen/insert-bulk",
+                                json={
+                                    "items": [
+                                        {
+                                            "run_id": "sample_run",
+                                            "candidate_path": candidate.relative_to(
+                                                run_dir
+                                            ).as_posix(),
+                                            "output": output.relative_to(
+                                                run_dir
+                                            ).as_posix(),
+                                        }
+                                    ]
+                                },
+                            )
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with sync_file_lock(
+                    run_dir / ".locks" / "scene_request_revision.lock",
+                    wait=False,
+                ):
+                    future = executor.submit(post_insert)
+                    time.sleep(0.1)
+                    self.assertFalse(future.done())
+                    self.assertEqual(output.read_bytes(), original_bytes)
+                response = future.result(timeout=5)
+
+            persisted_bytes = output.read_bytes()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(persisted_bytes, candidate_bytes)
+
+    def test_insert_bulk_preflights_every_item_before_any_canonical_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## scene01
+
+- output: `assets/scenes/scene01.png`
+- references: `[]`
+
+```text
+scene one
+```
+
+## scene02
+
+- output: `assets/scenes/scene02.png`
+- references: `[]`
+
+```text
+scene two
+```
+""",
+                encoding="utf-8",
+            )
+            output_one = run_dir / "assets/scenes/scene01.png"
+            output_two = run_dir / "assets/scenes/scene02.png"
+            candidate_one = image_gen.candidate_path(run_dir, "scene01", 1)
+            candidate_two = image_gen.candidate_path(run_dir, "scene02", 1)
+            write_test_png(output_one, color=(10, 20, 30))
+            write_test_png(output_two, color=(30, 20, 10))
+            write_test_png(candidate_one, color=(200, 210, 220))
+            candidate_two.parent.mkdir(parents=True)
+            candidate_two.write_bytes(b"not-a-png")
+            original_one = output_one.read_bytes()
+            original_two = output_two.read_bytes()
+            state_file = run_dir / "state.txt"
+            state_file.write_text(
+                "slot.p650.status=done\nslot.p680.status=awaiting_approval\n",
+                encoding="utf-8",
+            )
+            original_state = state_file.read_bytes()
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with patch("server.image_gen_app.ROOT", root):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/insert-bulk",
+                            json={
+                                "items": [
+                                    {
+                                        "run_id": "sample_run",
+                                        "candidate_path": candidate_one.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                        "output": output_one.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                    },
+                                    {
+                                        "run_id": "sample_run",
+                                        "candidate_path": candidate_two.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                        "output": output_two.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                    },
+                                ]
+                            },
+                        )
+
+            persisted_one = output_one.read_bytes()
+            persisted_two = output_two.read_bytes()
+            persisted_state = state_file.read_bytes()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(persisted_one, original_one)
+        self.assertEqual(persisted_two, original_two)
+        self.assertEqual(persisted_state, original_state)
+
+    def test_insert_bulk_rolls_back_earlier_output_when_later_copy_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## scene01
+
+- output: `assets/scenes/scene01.png`
+- references: `[]`
+
+```text
+scene one
+```
+
+## scene02
+
+- output: `assets/scenes/scene02.png`
+- references: `[]`
+
+```text
+scene two
+```
+""",
+                encoding="utf-8",
+            )
+            outputs = (
+                run_dir / "assets/scenes/scene01.png",
+                run_dir / "assets/scenes/scene02.png",
+            )
+            candidates = (
+                image_gen.candidate_path(run_dir, "scene01", 1),
+                image_gen.candidate_path(run_dir, "scene02", 1),
+            )
+            for index, output in enumerate(outputs):
+                write_test_png(output, color=(10 + index, 20, 30))
+                write_test_png(candidates[index], color=(200 + index, 210, 220))
+            originals = tuple(output.read_bytes() for output in outputs)
+            real_insert = image_gen_app.insert_candidate
+            call_count = 0
+
+            def fail_second_insert(
+                insert_run_dir: Path,
+                candidate: Path,
+                output: str,
+            ) -> dict[str, str | None]:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise OSError("synthetic second copy failure")
+                return real_insert(insert_run_dir, candidate, output)
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch(
+                        "server.image_gen_app.insert_candidate",
+                        side_effect=fail_second_insert,
+                    ),
+                ):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/insert-bulk",
+                            json={
+                                "items": [
+                                    {
+                                        "run_id": "sample_run",
+                                        "candidate_path": candidate.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                        "output": output.relative_to(
+                                            run_dir
+                                        ).as_posix(),
+                                    }
+                                    for candidate, output in zip(
+                                        candidates,
+                                        outputs,
+                                        strict=True,
+                                    )
+                                ]
+                            },
+                        )
+
+            persisted = tuple(output.read_bytes() for output in outputs)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(persisted, originals)
+        self.assertEqual(call_count, 2)
+
+    def test_insert_bulk_invalidates_old_provenance_and_p650_p680_for_asset_and_scene_outputs(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "asset",
+                "asset_generation_requests.md",
+                "asset_generation_request_snapshot.json",
+                "hero_ref",
+                "assets/characters/hero_ref.png",
+            ),
+            (
+                "scene",
+                "image_generation_requests.md",
+                "image_generation_request_snapshot.json",
+                "scene01_cut01",
+                "assets/scenes/scene01_cut01.png",
+            ),
+        )
+        for kind, request_filename, snapshot_filename, item_id, output_text in cases:
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    run_dir = root / "output" / f"{kind}_run"
+                    run_dir.mkdir(parents=True)
+                    prompt = f"{kind} cinematic prompt"
+                    (run_dir / request_filename).write_text(
+                        f"""# {kind.title()} Generation Requests
+
+## {item_id}
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `{output_text}`
+- references: `[]`
+
+```api_prompt
+{prompt}
+```
+""",
+                        encoding="utf-8",
+                    )
+                    source_digest = hashlib.sha256(
+                        f"{kind}-source".encode("utf-8")
+                    ).hexdigest()
+                    snapshot = materialize_request_snapshot(
+                        run_dir,
+                        kind=kind,
+                        items=[
+                            {
+                                "item_id": item_id,
+                                "destination": output_text,
+                                "prompt": prompt,
+                                "prompt_policy_version": "image_api_prompt_v2",
+                                "compiler_version": "conditional_drawable_prompt_compiler_v1",
+                                "source_digest": source_digest,
+                                "references": [],
+                            }
+                        ],
+                        source_artifact=request_filename,
+                    )
+                    write_request_snapshot_atomic(
+                        run_dir / snapshot_filename,
+                        snapshot,
+                        run_dir=run_dir,
+                    )
+                    item = image_gen.load_request_items(run_dir, kind)[0]
+                    output = run_dir / output_text
+                    candidate = image_gen.candidate_path(run_dir, item_id, 1)
+                    # Deliberately preserve the byte hash: a new canonical
+                    # insertion must invalidate older provenance even when the
+                    # selected candidate happens to be byte-identical.
+                    output.parent.mkdir(parents=True)
+                    output.write_bytes(PNG_BYTES)
+                    candidate.parent.mkdir(parents=True)
+                    candidate.write_bytes(PNG_BYTES)
+                    result = ImageGenerationResult(
+                        saved_path=output,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        generation_job_id=f"{kind}-job-old",
+                        item_id=item_id,
+                        turn_id=f"{kind}-turn-old",
+                        prompt_sha256=hashlib.sha256(
+                            prompt.encode("utf-8")
+                        ).hexdigest(),
+                        reference_sha256s=[],
+                        image_generation_item_id=f"{kind}-image-old",
+                        image_generation_item_count=1,
+                        destination=str(output),
+                        provenance_authoritative=True,
+                        provenance_policy="request_bound_v2",
+                    )
+                    image_gen.write_app_server_image_debug_log(
+                        run_dir=run_dir,
+                        item_id=item_id,
+                        index=1,
+                        destination=output,
+                        references=[],
+                        prompt=prompt,
+                        kind=kind,
+                        prompt_policy_version="image_api_prompt_v2",
+                        request_revision=item.request_revision,
+                        request_digest=item.request_digest,
+                        compiler_version=item.compiler_version,
+                        source_digest=item.source_digest,
+                        result=result,
+                    )
+                    (run_dir / "state.txt").write_text(
+                        "\n".join(
+                            (
+                                "review.image_prompt.request_freeze.status=frozen",
+                                f"review.image_prompt.request_freeze.request_revision={item.request_revision}",
+                                "slot.p650.status=done",
+                                "slot.p660.status=done",
+                                "slot.p670.status=skipped",
+                                "slot.p680.status=awaiting_approval",
+                                "review.image.status=pending",
+                                "image_generation.status=completed",
+                            )
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    image_gen_app._validate_generated_outputs(run_dir, kind)
+                    with patch.dict(
+                        os.environ,
+                        {"TOC_SERVER_AUTH_DISABLED": "1"},
+                    ):
+                        with patch("server.image_gen_app.ROOT", root):
+                            with TestClient(app) as client:
+                                response = client.post(
+                                    "/api/image-gen/insert-bulk",
+                                    json={
+                                        "items": [
+                                            {
+                                                "run_id": run_dir.name,
+                                                "candidate_path": candidate.relative_to(
+                                                    run_dir
+                                                ).as_posix(),
+                                                "output": output_text,
+                                            }
+                                        ]
+                                    },
+                                )
+                    state = image_gen_app.parse_state_file(
+                        run_dir / "state.txt"
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        response.json()["inserted"][0]["kind"],
+                        kind,
+                    )
+                    self.assertEqual(
+                        state["review.image_prompt.request_freeze.status"],
+                        "draft",
+                    )
+                    self.assertEqual(state["status"], "P650")
+                    self.assertEqual(
+                        state["review.image_prompt.request_freeze.invalidated_by"],
+                        "candidate_insertion",
+                    )
+                    self.assertEqual(state["slot.p650.status"], "pending")
+                    self.assertEqual(state["slot.p660.status"], "pending")
+                    self.assertEqual(state["slot.p670.status"], "pending")
+                    self.assertEqual(state["slot.p680.status"], "pending")
+                    self.assertEqual(
+                        state["review.semantic.create_scene_media_generated"],
+                        "false",
+                    )
+                    self.assertEqual(
+                        state["image_generation.status"],
+                        "not_started",
+                    )
+                    self.assertEqual(
+                        state[f"image_generation.provenance.{kind}.{item_id}.status"],
+                        "invalidated",
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "strict request-bound provenance",
+                    ):
+                        image_gen_app._validate_generated_outputs(run_dir, kind)
+                    replacement_result = ImageGenerationResult(
+                        saved_path=output,
+                        revised_prompt=None,
+                        status="completed",
+                        transcript=[],
+                        source="app_server",
+                        generation_job_id=f"{kind}-job-revalidated",
+                        item_id=item_id,
+                        turn_id=f"{kind}-turn-revalidated",
+                        prompt_sha256=hashlib.sha256(
+                            prompt.encode("utf-8")
+                        ).hexdigest(),
+                        reference_sha256s=[],
+                        image_generation_item_id=f"{kind}-image-revalidated",
+                        image_generation_item_count=1,
+                        destination=str(output),
+                        provenance_authoritative=True,
+                        provenance_policy="request_bound_v2",
+                    )
+                    image_gen.write_app_server_image_debug_log(
+                        run_dir=run_dir,
+                        item_id=item_id,
+                        index=2,
+                        destination=output,
+                        references=[],
+                        prompt=prompt,
+                        kind=kind,
+                        prompt_policy_version="image_api_prompt_v2",
+                        request_revision=item.request_revision,
+                        request_digest=item.request_digest,
+                        compiler_version=item.compiler_version,
+                        source_digest=item.source_digest,
+                        result=replacement_result,
+                    )
+                    image_gen_app._validate_generated_outputs(run_dir, kind)
+
     def test_bulk_generation_flattens_candidates_across_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -12854,6 +19453,8 @@ location beta
                 patch("server.image_gen_app._validate_p650_run", fake_validate),
                 patch("server.image_gen_app._set_create_job", fake_set_create_job),
                 patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_unlocked),
+                patch("server.image_gen_app._validate_generated_outputs", Mock()),
+                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                 patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_review_ready),
             ):
                 generation = asyncio.create_task(
@@ -12875,7 +19476,7 @@ location beta
 
         self.assertEqual(
             order,
-            ["validate", "job_state", "provider_submission", "review_handoff", "prompt_edit"],
+            ["validate", "job_state", "provider_submission", "validate", "review_handoff", "prompt_edit"],
         )
 
     def test_image_prompt_shard_passed_status_with_blocked_entries_fails_closed(self) -> None:
@@ -12967,9 +19568,10 @@ location beta
                     )
                 )
 
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "transport_failed")
         self.assertEqual(result["blocked_entries"], ["scene01_cut01", "scene01_composite"])
-        self.assertIn("api_prompt_drawable_dependency_missing", result["reason_keys"])
+        self.assertEqual(result["transport_error_kind"], "output_contract_failed")
+        self.assertIn("image_prompt_shard_transport_failed", result["reason_keys"])
 
     def test_p680_generated_output_rejects_v2_snapshot_without_strict_provenance(self) -> None:
         request_text = """# Image Generation Requests
@@ -13165,6 +19767,612 @@ location beta
         self.assertTrue(all(payload["status"] == "failed" for payload in image_payloads))
         self.assertIn("copy failed", event_lines)
         self.assertNotIn('"status": "completed"', event_lines)
+
+    def test_pre_asset_semantic_fixed_point_returns_to_earliest_stale_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            passed = {"research", "story"}
+            calls: list[str] = []
+            scene_detail_calls = 0
+
+            def is_current(_run_dir: Path, stage: str) -> bool:
+                return stage in passed
+
+            async def review(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> str | None:
+                nonlocal scene_detail_calls
+                calls.append(stage)
+                passed.add(stage)
+                if stage == "scene_detail":
+                    scene_detail_calls += 1
+                    if scene_detail_calls == 1:
+                        passed.discard("scene_set")
+                return None
+
+            with (
+                patch(
+                    "server.image_gen_app._semantic_review_stage_is_current_passed",
+                    side_effect=is_current,
+                    create=True,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_for_media_generation",
+                    side_effect=review,
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._run_pre_asset_semantic_fixed_point(
+                        "job-1",
+                        run_dir=run_dir,
+                    )
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                "research",
+                "story",
+                "scene_set",
+                "scene_detail",
+                "scene_set",
+                "cut_blueprint",
+                "asset_plan",
+            ],
+        )
+
+    def test_non_image_semantic_repair_reconciles_dependencies_in_safe_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            calls: list[str] = []
+            for relpath in (
+                "research.md",
+                "story.md",
+                "visual_value.md",
+                "script.md",
+                "video_manifest.md",
+                "asset_inventory.md",
+                "asset_plan.md",
+            ):
+                (run_dir / relpath).write_text(
+                    f"# {relpath}\n",
+                    encoding="utf-8",
+                )
+
+            class FakeFrontend:
+                @staticmethod
+                def _prepare_authoring_grounding(_run_dir: Path) -> None:
+                    calls.append("authoring_grounding")
+
+                @staticmethod
+                def _refresh_p400_review_artifacts(_run_dir: Path) -> None:
+                    calls.append("p400_reviews")
+
+                @staticmethod
+                def _require_fresh_p400_readiness(_run_dir: Path) -> None:
+                    calls.append("p400_gate")
+
+                @staticmethod
+                def prepare_grounding(_run_dir: Path) -> None:
+                    calls.append("downstream_grounding")
+
+                @staticmethod
+                def _refresh_downstream_review_artifacts(_run_dir: Path) -> None:
+                    calls.append("downstream_reviews")
+
+            def sync(_run_dir: Path) -> None:
+                calls.append("request_sync")
+
+            with (
+                patch(
+                    "server.image_gen_app._load_frontend_review_runner",
+                    return_value=FakeFrontend,
+                    create=True,
+                ),
+                patch(
+                    "server.image_gen_app._synchronize_image_prompt_repair_outputs",
+                    side_effect=sync,
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._reconcile_after_semantic_repair(
+                        run_dir,
+                        stage="scene_detail",
+                        changed_artifacts=["script.md", "video_manifest.md"],
+                    )
+                )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(
+            calls,
+            [
+                "authoring_grounding",
+                "p400_reviews",
+                "p400_gate",
+                "request_sync",
+                "authoring_grounding",
+                "p400_reviews",
+                "p400_gate",
+                "downstream_grounding",
+                "downstream_reviews",
+                "p400_gate",
+            ],
+        )
+        self.assertEqual(
+            state["review.semantic.scene_detail.dependency_sync.status"],
+            "done",
+        )
+        self.assertEqual(state["slot.p650.status"], "pending")
+        self.assertEqual(state["slot.p680.status"], "pending")
+
+    def test_image_prompt_manifest_repair_reaches_upstream_fixed_point_before_asset_refresh(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            (run_dir / "asset_inventory.md").write_text(
+                "# Asset Inventory\n\nhero\n",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_plan.md").write_text(
+                "# Asset Plan\n\nhero\n",
+                encoding="utf-8",
+            )
+            asset_items = image_gen.load_request_items(run_dir, "asset")
+            asset_snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="asset",
+                items=[
+                    {
+                        "item_id": item.id,
+                        "destination": item.output,
+                        "prompt": item.prompt,
+                        "prompt_policy_version": "asset_prompt_v1",
+                        "compiler_version": "test_fixture_v1",
+                        "source_digest": hashlib.sha256(
+                            f"{item.id}:asset".encode()
+                        ).hexdigest(),
+                        "references": list(item.references),
+                    }
+                    for item in asset_items
+                ],
+                source_artifact="asset_generation_requests.md",
+            )
+            write_request_snapshot_atomic(
+                run_dir / "asset_generation_request_snapshot.json",
+                asset_snapshot,
+                run_dir=run_dir,
+            )
+            for stage in ("scene_set", "scene_detail", "cut_blueprint"):
+                bind_semantic_review_to_sources(
+                    run_dir,
+                    stage,
+                    ["script.md", "video_manifest.md"],
+                )
+            bind_semantic_review_to_sources(
+                run_dir,
+                "asset_plan",
+                [
+                    "video_manifest.md",
+                    "asset_generation_requests.md",
+                    "asset_generation_request_snapshot.json",
+                ],
+            )
+            write_review_input_snapshot(
+                run_dir=run_dir,
+                stage="scene_set",
+                round_number=1,
+                snapshot=build_review_input_snapshot(
+                    run_dir=run_dir,
+                    stage="scene_set",
+                    round_number=1,
+                ),
+            )
+
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8")
+                + "\n# image prompt producer changed the canonical manifest\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any(
+                    "stale review source sha256" in issue
+                    for issue in review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage="scene_set",
+                        round_number=1,
+                    )
+                )
+            )
+            for stage in (
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "asset_plan",
+            ):
+                self.assertFalse(
+                    image_gen_app.check_semantic_review(run_dir, stage).passed
+                )
+
+            order: list[str] = []
+            stale_semantic_stages: list[str] = []
+            sync_count = 0
+
+            class FakeFrontend:
+                @staticmethod
+                def _prepare_authoring_grounding(_run_dir: Path) -> None:
+                    order.append("authoring_grounding")
+
+                @staticmethod
+                def _refresh_p400_review_artifacts(_run_dir: Path) -> None:
+                    order.append("p400_refresh")
+                    write_review_input_snapshot(
+                        run_dir=run_dir,
+                        stage="scene_set",
+                        round_number=1,
+                        snapshot=build_review_input_snapshot(
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            round_number=1,
+                        ),
+                    )
+
+                @staticmethod
+                def _require_fresh_p400_readiness(_run_dir: Path) -> None:
+                    order.append("p400_gate")
+                    self.assertFalse(
+                        any(
+                            "stale review source sha256" in issue
+                            for issue in review_input_snapshot_issues(
+                                run_dir=run_dir,
+                                stage="scene_set",
+                                round_number=1,
+                            )
+                        ),
+                        review_input_snapshot_issues(
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            round_number=1,
+                        ),
+                    )
+
+                @staticmethod
+                def prepare_grounding(_run_dir: Path) -> None:
+                    order.append("downstream_grounding")
+
+                @staticmethod
+                def _refresh_downstream_review_artifacts(
+                    _run_dir: Path,
+                ) -> None:
+                    order.append("downstream_reviews")
+
+            def synchronize(_run_dir: Path) -> None:
+                nonlocal sync_count
+                sync_count += 1
+                order.append(f"sync_{sync_count}")
+                image_gen_app.append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.semantic.image_prompt.repair.asset_refresh_required": (
+                            "true" if sync_count == 1 else "false"
+                        )
+                    },
+                )
+
+            async def review_stage(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> str | None:
+                if not image_gen_app.check_semantic_review(
+                    run_dir,
+                    stage,
+                ).passed:
+                    stale_semantic_stages.append(stage)
+                    refresh_existing_semantic_review_digest(run_dir, stage)
+                return None
+
+            def provider_gate(_run_dir: Path) -> None:
+                order.append("provider_gate")
+                self.assertFalse(
+                    any(
+                        "stale review source sha256" in issue
+                        for issue in review_input_snapshot_issues(
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            round_number=1,
+                        )
+                    ),
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage="scene_set",
+                        round_number=1,
+                    ),
+                )
+                for stage in image_gen_app.PRE_ASSET_SEMANTIC_STAGES:
+                    self.assertTrue(
+                        image_gen_app.check_semantic_review(
+                            run_dir,
+                            stage,
+                        ).passed,
+                        stage,
+                    )
+
+            async def refresh_assets(_run_dir: Path) -> None:
+                order.append("asset_provider")
+                self.assertIn("provider_gate", order)
+                image_gen_app.append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.semantic.image_prompt.repair.asset_refresh_required": "false"
+                    },
+                )
+
+            with (
+                patch(
+                    "server.image_gen_app._load_frontend_review_runner",
+                    return_value=FakeFrontend,
+                ),
+                patch(
+                    "server.image_gen_app._synchronize_image_prompt_repair_outputs",
+                    side_effect=synchronize,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_for_media_generation",
+                    side_effect=review_stage,
+                ),
+                patch(
+                    "server.image_gen_app._validate_pre_asset_provider_gate",
+                    side_effect=provider_gate,
+                ),
+                patch(
+                    "server.image_gen_app._refresh_image_prompt_repair_assets_if_required",
+                    side_effect=refresh_assets,
+                ),
+                patch(
+                    "server.image_gen_app._prepare_image_prompt_request_revision_for_review",
+                    return_value="review-revision",
+                ),
+            ):
+                asyncio.run(
+                    image_gen_app._reconcile_after_semantic_repair(
+                        run_dir,
+                        stage="image_prompt",
+                        changed_artifacts=["video_manifest.md"],
+                        job_id="job-1",
+                    )
+                )
+
+        self.assertEqual(
+            stale_semantic_stages,
+            ["scene_set", "scene_detail", "cut_blueprint", "asset_plan"],
+        )
+        self.assertLess(order.index("provider_gate"), order.index("asset_provider"))
+        self.assertLess(order.index("p400_refresh"), order.index("provider_gate"))
+
+    def test_p560_prompt_repair_rereviews_real_asset_snapshot_before_next_provider_call(
+        self,
+    ) -> None:
+        class StopAfterSecondAssetSubmission(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "sample_run"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            asset_items = image_gen.load_request_items(run_dir, "asset")
+            asset_snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="asset",
+                items=[
+                    {
+                        "item_id": item.id,
+                        "destination": item.output,
+                        "prompt": item.prompt,
+                        "prompt_policy_version": "asset_prompt_v1",
+                        "compiler_version": "test_fixture_v1",
+                        "source_digest": hashlib.sha256(
+                            f"{item.id}:asset".encode()
+                        ).hexdigest(),
+                        "references": list(item.references),
+                    }
+                    for item in asset_items
+                ],
+                source_artifact="asset_generation_requests.md",
+            )
+            write_request_snapshot_atomic(
+                run_dir / "asset_generation_request_snapshot.json",
+                asset_snapshot,
+                run_dir=run_dir,
+            )
+            bind_semantic_review_to_sources(
+                run_dir,
+                "asset_plan",
+                [
+                    "asset_generation_requests.md",
+                    "asset_generation_request_snapshot.json",
+                ],
+            )
+            self.assertTrue(
+                image_gen_app.check_semantic_review(
+                    run_dir,
+                    "asset_plan",
+                ).passed
+            )
+
+            provider_calls = 0
+            provider_gate_calls = 0
+            stale_asset_plan_reviews = 0
+
+            async def generate_outputs(
+                *,
+                run_dir: Path,
+                kind: str,
+            ) -> None:
+                nonlocal provider_calls
+                if kind != "asset":
+                    raise AssertionError("scene provider must not be reached")
+                provider_calls += 1
+                self.assertTrue(
+                    image_gen_app.check_semantic_review(
+                        run_dir,
+                        "asset_plan",
+                    ).passed,
+                    "asset provider received a request with stale asset_plan evidence",
+                )
+                if provider_calls == 2:
+                    raise StopAfterSecondAssetSubmission
+
+            async def repair_prompts(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                failure_detail: str,
+                attempt: int,
+            ) -> None:
+                del failure_detail, attempt
+                result = image_gen.update_request_prompts(
+                    run_dir,
+                    "asset",
+                    {
+                        "hero": (
+                            "修正版の実写映画調の人物参照。自然な肌、布、髪、"
+                            "立体的な映画照明を持つ。"
+                        )
+                    },
+                    allow_inline_prompt=True,
+                )
+                self.assertEqual(result["updated"], ["hero"])
+                self.assertFalse(
+                    image_gen_app.check_semantic_review(
+                        run_dir,
+                        "asset_plan",
+                    ).passed
+                )
+
+            async def review_stage(
+                _job_id: str,
+                *,
+                run_dir: Path,
+                stage: str,
+            ) -> str | None:
+                nonlocal stale_asset_plan_reviews
+                if not image_gen_app.check_semantic_review(
+                    run_dir,
+                    stage,
+                ).passed:
+                    if stage == "asset_plan":
+                        stale_asset_plan_reviews += 1
+                    refresh_existing_semantic_review_digest(run_dir, stage)
+                return None
+
+            def provider_gate(_run_dir: Path) -> None:
+                nonlocal provider_gate_calls
+                provider_gate_calls += 1
+                self.assertTrue(
+                    image_gen_app.check_semantic_review(
+                        run_dir,
+                        "asset_plan",
+                    ).passed
+                )
+
+            retryable_error = image_gen_app.P560AssetGateError(
+                "p560 asset gate failed: bootstrap asset is vector-like",
+                failed_check_ids=("asset.visual_not_vector_like",),
+                retryable_visual_quality=True,
+            )
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._generate_request_outputs",
+                    side_effect=generate_outputs,
+                ),
+                patch(
+                    "server.image_gen_app._run_semantic_review_for_media_generation",
+                    side_effect=review_stage,
+                ),
+                patch(
+                    "server.image_gen_app._validate_pre_asset_provider_gate",
+                    side_effect=provider_gate,
+                ),
+                patch(
+                    "server.image_gen_app._validate_p560_asset_quality",
+                    side_effect=retryable_error,
+                ),
+                patch(
+                    "server.image_gen_app._repair_bootstrap_asset_prompts",
+                    side_effect=repair_prompts,
+                ),
+                patch(
+                    "server.image_gen_app._remove_bootstrap_asset_outputs",
+                ),
+                patch(
+                    "server.image_gen_app._set_create_job",
+                    new=AsyncMock(),
+                ),
+            ):
+                try:
+                    asyncio.run(
+                        image_gen_app._generate_create_images(
+                            "job-1",
+                            run_id=run_id,
+                        )
+                    )
+                except StopAfterSecondAssetSubmission:
+                    pass
+                else:
+                    state = image_gen_app.parse_state_file(
+                        run_dir / "state.txt"
+                    )
+                    self.fail(
+                        "second provider submission was not reached: "
+                        f"provider_calls={provider_calls}, "
+                        f"repair_error={state.get('review.asset_visual_gate.repair.error')}"
+                    )
+
+        self.assertEqual(provider_calls, 2)
+        self.assertGreaterEqual(provider_gate_calls, 2)
+        self.assertEqual(stale_asset_plan_reviews, 1)
+
+    def test_pre_asset_provider_gate_blocks_asset_provider_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            generate_outputs = AsyncMock()
+
+            with (
+                patch("server.image_gen_app.safe_run_dir", return_value=run_dir),
+                patch(
+                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                    new=AsyncMock(),
+                    create=True,
+                ),
+                patch(
+                    "server.image_gen_app._validate_pre_asset_provider_gate",
+                    side_effect=RuntimeError("stale p400 review"),
+                    create=True,
+                ),
+                patch(
+                    "server.image_gen_app._generate_request_outputs",
+                    new=generate_outputs,
+                ),
+                patch("server.image_gen_app._set_create_job", new=AsyncMock()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stale p400"):
+                    asyncio.run(
+                        image_gen_app._generate_create_images(
+                            "job-1",
+                            run_id="sample_run",
+                        )
+                    )
+
+        generate_outputs.assert_not_awaited()
 
 
 if __name__ == "__main__":

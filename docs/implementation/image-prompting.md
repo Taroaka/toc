@@ -134,7 +134,8 @@ Codex app-server へは snapshot item 単位で request を渡す。runtime が 
 - reference dependency から DAG group を作り、依存先の無い同一 group 内だけを並列化する。参照 asset を作る group は、それを読む group より先に完了させる
 - process 内 semaphore と process 間 global slot で同時 provider turn 数を制限する。authoritative request-bound provenance を利用できない互換 lane は serial fallback にする
 - 各 item の送信直前に `prompt_sha256` と reference content hash を snapshot と照合する
-- image prompt を含むいずれかの semantic stage が最終 fail した run では、asset 成功分を保持しても p660 の scene image generation は一件も開始しない。`partial_media_allowed=false` とし、修復後に p650 を再通過させる
+- `asset_plan` など scene/cut request item へ局所化できない semantic stage が最終 fail した run では、asset 成功分を保持しても p660 の scene image generation は一件も開始しない。`partial_media_allowed=false` とし、修復後に p650 を再通過させる
+- `scene_detail` / `cut_blueprint` / `image_prompt` の失敗は、failed selector / blocked entry の全件が current request-bound scene/cut item へ一意に局所化できる場合だけ `partial_media_allowed=true` にできる。該当 item は provider に送らず synthetic failed candidate として残し、他 item の生成を続ける。未解決 selector、stale request、曖昧な対応、対象外 stage が一つでもあれば全体を止める
 - provider result は `generation_job_id` / `item_id` / `turn_id` / `image_generation_item_id` / destination / hash が request と一致し、生成 item が exactly one の場合だけ atomic copy する
 - destination は snapshot 内で一意にする。既存 output は request revision、request digest、prompt/reference/output hash、compiler version、source digest が一致する場合だけ再利用する
 - edit-style regeneration で destination 自身を明示的に参照する場合は、materialize 時点で既存画像がある場合だけ許可し、その入力 bytes の hash を snapshot に固定する。生成時は同じ bytes を退避して provider に渡し、未生成 output への循環依存として扱わない
@@ -745,6 +746,26 @@ v2 の `style` / `composition` / `constraints` fragment に必要なものだけ
 - `手の崩れ / 指の増殖`
 - `画面内テキスト / 字幕 / ウォーターマーク / ロゴ`
 - `三人称 / 肩越し / 自撮り`
+
+## 3.3 /toc-world-walk（world_walk）向け invariants（推奨セット）
+
+`world_walk` は既存 run の asset 内を「世界観を散歩してみた」形式で歩く体験テンプレ。
+`全体 / 不変条件` の定番:
+
+- `観察者POV`
+- `少し遠目、中景〜遠景中心`
+- `自然な歩行速度、水平線安定、カメラ高さ一定`
+- `実写、シネマティック、生活感のある世界散歩`
+- `物語が進まない asset 内散歩`（序盤）
+- `参照キャラが遠景に現れる`（中盤以降）
+- `画面内テキストなし、字幕なし、ウォーターマークなし`
+
+早めに禁止しておく:
+- `主人公本人の主観視点`
+- `自撮り / 肩越し密着 / 顔の大写し`
+- `急接近 / 劇的な手持ちブレ`
+- `派手なエフェクト / 爆発や戦闘の強調`
+- `観察者が物語へ介入する構図`
 
 ## 3.1 character_bible を scene で選ぶ（混ざり防止）
 

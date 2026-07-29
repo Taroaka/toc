@@ -3,22 +3,27 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from copy import deepcopy
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
+import signal
+import stat
 import threading
 import time
 import shutil
 import subprocess
 import sys
+import tempfile
+import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -146,13 +151,33 @@ from toc.narration_continuity import (
     reconcile_audio_story_text,
     tts_continuity_contexts,
 )
+from toc.partial_media import (
+    PARTIAL_MEDIA_SEMANTIC_STAGES,
+    PARTIAL_MEDIA_PROJECTION_RELPATH,
+    PARTIAL_MEDIA_RECEIPT_RELPATH,
+    PartialMediaProjectionError,
+    derive_partial_media_projection,
+    load_partial_media_generation_receipt,
+    load_partial_media_projection,
+    run_relative_entry_exists_no_follow,
+    write_partial_media_generation_receipt,
+    write_partial_media_projection,
+)
 from toc.story_duration import audit_duration, measure_manifest_runtime, normalize_target_duration
+from scripts.world_walk_source import validate_world_walk_source_path
 from toc.runtime_locks import (
     FileLockLease,
     FileLockUnavailable,
     acquire_file_lock,
+    async_file_lock,
     async_file_slot,
     release_file_lock,
+)
+from toc.review_projection import (
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
+    review_source_fingerprint,
+    video_manifest_review_projection_sha256,
 )
 from toc.semantic_review import (
     IMAGE_PROMPT_JUDGMENT_REPORT,
@@ -188,9 +213,9 @@ from .image_gen import (
     IMAGE_API_PROMPT_POLICY_VERSION,
     IMAGE_API_PROMPT_POLICY_PREFIX,
     IMAGE_SUFFIXES,
+    MAX_IMAGE_BYTES,
     build_zip,
     candidate_path,
-    copy_saved_image,
     copy_saved_image_to_new_candidate,
     insert_candidate,
     item_to_api,
@@ -217,9 +242,11 @@ from .image_gen import (
     target_matches_item,
     target_to_request_kind,
     update_request_prompts,
+    validate_candidate_insertion,
     validate_image_bytes,
     write_app_server_debug_log,
     write_app_server_image_debug_log,
+    write_app_server_image_provenance_invalidation_log,
     write_prompt_setting,
 )
 
@@ -269,10 +296,43 @@ P650_FIXED_SLOTS = (
 P680_FIXED_SLOTS = (*P650_FIXED_SLOTS, "p660", "p670", "p680")
 CREATE_MODE_NORMAL = "normal"
 CREATE_MODE_SCENE_STORYBOARD = "scene_storyboard"
+CREATE_MODE_WORLD_WALK = "world_walk"
 CREATE_MODE_SCENE_STORYBOARD_RUN_SUFFIX = "storyboard"
 CREATE_STOP_TARGETS = {"p650", "p680"}
+DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION = (
+    "deterministic_image_prompt_review_v3"
+)
+LEGACY_DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION = (
+    "deterministic_image_prompt_review_v2"
+)
+DETERMINISTIC_MANIFEST_FINGERPRINT_POLICY_KEY = (
+    "manifest_fingerprint_policy"
+)
 VIDEO_GENERATION_DURATION_MAX_SECONDS = 60
 BOOTSTRAP_ASSET_MAX_ATTEMPTS = 10
+P560_PROMPT_REPAIRABLE_CHECK_IDS = frozenset(
+    {
+        "asset.visual_not_vector_like",
+    }
+)
+P560_EVAL_EXPECTED_STAGES = frozenset(
+    {
+        "orchestration",
+        "research",
+        "story",
+        "visual_value",
+        "script",
+        "manifest",
+        "asset",
+    }
+)
+P560_PROMPT_REPAIRABLE_VISUAL_ISSUES = frozenset(
+    {
+        "vector-like or low-detail raster image",
+        "noise-masked vector-like or low-structure raster image",
+        "flat-region vector-like or cel-shaded raster image",
+    }
+)
 # Request-bound provenance is the canonical production image-generation route.
 # The generated_images time-order fallback remains only as an explicit legacy
 # recovery mode because it cannot prove which request produced a file.
@@ -295,6 +355,16 @@ IMAGE_GENERATION_QUEUE_TIMEOUT_SECONDS = max(
 FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS = max(
     1.0,
     float(os.environ.get("TOC_FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS", "28800") or "28800"),
+)
+RESUME_SUBPROCESS_TERMINATION_GRACE_SECONDS = max(
+    0.1,
+    float(
+        os.environ.get(
+            "TOC_RESUME_SUBPROCESS_TERMINATION_GRACE_SECONDS",
+            "5",
+        )
+        or "5"
+    ),
 )
 CODEX_APP_SERVER_START_TIMEOUT_SECONDS = max(
     1.0,
@@ -324,6 +394,29 @@ TRANSIENT_CODEX_IMAGE_ERRORS = (
     "timed out during turn/start",
     "turn timed out",
 )
+
+
+class P560AssetGateError(RuntimeError):
+    """A p570 verifier failure with structured prompt-retry classification."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failed_check_ids: Iterable[str],
+        retryable_visual_quality: bool,
+    ) -> None:
+        super().__init__(message)
+        self.failed_check_ids = tuple(
+            str(check_id).strip()
+            for check_id in failed_check_ids
+            if str(check_id).strip()
+        )
+        self.retryable_visual_quality = retryable_visual_quality
+
+
+class CanonicalP500ResumeRequiredError(RuntimeError):
+    """Image-only resume cannot safely repair current p500 references."""
 
 
 def _codex_failure_context(exc: Exception, *, client: CodexAppServerClient | None = None) -> dict[str, Any]:
@@ -433,7 +526,13 @@ class CreateRunRequest(BaseModel):
 class CreateStoryboardRunRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     source: str | None = Field(default=None, max_length=4000)
-    stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
+    stop_target: Literal["p680"] = "p680"
+    target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
+
+
+class CreateWorldWalkRunRequest(BaseModel):
+    source_run_id: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, max_length=120)
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
 
 
@@ -645,6 +744,7 @@ _chat_threads: dict[str, str] = {}
 _create_jobs: dict[str, dict[str, Any]] = {}
 _bulk_generation_jobs: dict[str, dict[str, Any]] = {}
 _bulk_generation_tasks: dict[str, asyncio.Task[None]] = {}
+_resume_tasks: dict[str, asyncio.Task[None]] = {}
 _codex_client: CodexAppServerClient | None = None
 _client_lock = asyncio.Lock()
 _create_jobs_lock = asyncio.Lock()
@@ -786,15 +886,11 @@ async def _serialized_run_write(run_dir: Path, resource: str):
     safe_resource = re.sub(r"[^A-Za-z0-9_.-]+", "_", resource).strip("._") or "artifact"
     process_lock = await _run_write_lock(run_dir.name, safe_resource)
     async with process_lock:
-        lock_dir = run_dir / ".locks"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = (lock_dir / f"{safe_resource}.lock").open("a+", encoding="utf-8")
-        try:
-            await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX)
+        async with async_file_lock(
+            run_dir / ".locks" / f"{safe_resource}.lock",
+            wait=True,
+        ):
             yield
-        finally:
-            await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
-            lock_file.close()
 
 
 async def _acquire_run_execution_lease(job_id: str, run_dir: Path) -> None:
@@ -827,12 +923,16 @@ async def get_codex_client() -> CodexAppServerClient:
 
 async def shutdown_codex_client() -> None:
     global _codex_client
-    tasks = list(_bulk_generation_tasks.values())
+    tasks = [
+        *list(_bulk_generation_tasks.values()),
+        *list(_resume_tasks.values()),
+    ]
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _bulk_generation_tasks.clear()
+    _resume_tasks.clear()
     if _codex_client:
         await _codex_client.stop()
         _codex_client = None
@@ -844,26 +944,42 @@ def _toc_run_command(*, topic: str, run_id: str) -> str:
     return f"/toc-run {topic_arg} --dry-run --review-policy drafts --run-dir {run_dir_arg}"
 
 
-def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str, stop_target: str = "p680") -> str:
+def _toc_immersive_command(
+    *,
+    topic: str,
+    source: str | None = None,
+    run_id: str,
+    stop_target: str = "p680",
+    experience: str = "cinematic_story",
+    source_run_id: str | None = None,
+    target_duration_seconds: int = 300,
+) -> str:
     source_text = (source or "").strip() or topic
     if stop_target not in {"p650", "p680"}:
         raise ValueError("stop_target must be p650 or p680")
+    if not 300 <= target_duration_seconds <= 1200:
+        raise ValueError("target_duration_seconds must be between 300 and 1200")
+    if experience == CREATE_MODE_WORLD_WALK and not source_run_id:
+        raise ValueError("source_run_id is required for world_walk")
     payload = {
         "topic": topic,
         "source": source_text,
         "run_dir": f"output/{run_id}",
         "stop_target": stop_target,
-        "experience": "cinematic_story",
+        "experience": experience,
+        "target_duration_seconds": target_duration_seconds,
         "review_policy": "frontend",
         "handoff": "frontend_image_review",
         "required_skill": "toc-immersive-runner",
         "expected_skill_path": str(_toc_immersive_skill_path().relative_to(ROOT)),
     }
+    if source_run_id:
+        payload["source_run"] = f"output/{source_run_id}"
     return "\n".join(
         [
             "Use $toc-immersive-runner.",
             "",
-            "Create a ToC immersive cinematic story run from this request.",
+            f"Create a ToC immersive {experience} run from this request.",
             f"Run the canonical p100-{stop_target} frontend-review workflow in one skill invocation.",
             "Do not execute or depend on Claude slash commands.",
             "Do not create a second run directory.",
@@ -874,6 +990,22 @@ def _toc_immersive_command(*, topic: str, source: str | None = None, run_id: str
             "Request JSON:",
             json.dumps(payload, ensure_ascii=False, indent=2),
         ]
+    )
+
+
+def _toc_world_walk_command(
+    *,
+    topic: str,
+    run_id: str,
+    source_run_id: str,
+    target_duration_seconds: int = 300,
+) -> str:
+    return _toc_immersive_command(
+        topic=topic,
+        run_id=run_id,
+        experience=CREATE_MODE_WORLD_WALK,
+        source_run_id=source_run_id,
+        target_duration_seconds=target_duration_seconds,
     )
 
 
@@ -1316,16 +1448,51 @@ def _process_number(process: str | int | None) -> int:
         return 0
 
 
+def _slot_reaches_process(slot: str, status: str) -> bool:
+    if slot == "p680":
+        # p680 is a handoff boundary.  Only a real review handoff/completion
+        # reaches it; a failed or skipped placeholder must remain resumable.
+        return status in {"awaiting_approval", "approved", "done"}
+    if status in {"done", "skipped"}:
+        return True
+    if status in {"awaiting_approval", "approved"}:
+        return slot in SLOT_AWAITING_APPROVAL_ALLOWED
+    return False
+
+
+def _runtime_failure_process_number(state: dict[str, str]) -> int:
+    failure_stage = str(state.get("runtime.failure.stage") or "").strip().lower()
+    if not failure_stage:
+        return 0
+    mapped_slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(failure_stage, failure_stage)
+    process_number = _process_number(mapped_slot)
+    if _process_label(process_number) not in P680_FIXED_SLOTS:
+        return 0
+    # A failure while publishing p680 has not reached the handoff boundary.
+    return 0 if process_number >= 680 else process_number
+
+
 def _current_process_number_for_run(run_id: str) -> int:
     try:
         state = parse_state_file(safe_run_dir(run_id, ROOT) / "state.txt")
     except Exception:
         return 0
     current = 0
+    first_unreached = 0
     for slot in P680_FIXED_SLOTS:
         status = (state.get(f"slot.{slot}.status") or "").strip().lower()
-        if status in SLOT_TERMINAL_STATES:
+        if _slot_reaches_process(slot, status):
             current = _process_number(slot)
+            continue
+        first_unreached = _process_number(slot)
+        if status == "failed" and slot != "p680":
+            current = first_unreached
+        break
+    if current == 680:
+        return current
+    failure_process = _runtime_failure_process_number(state)
+    if failure_process and failure_process == first_unreached:
+        return failure_process
     return current
 
 
@@ -1393,23 +1560,1086 @@ async def _sync_process_current_process(job_id: str, run_id: str) -> None:
     await _set_create_job(job_id, {"currentProcess": _process_label(process_number), "currentProcessNumber": process_number})
 
 
+_REGENERATABLE_ASSET_OUTPUT_DIRS = {
+    "characters",
+    "location",
+    "locations",
+    "objects",
+    "scenes",
+    "style",
+    "styles",
+}
+
+
+def _canonical_regeneration_output(
+    run_dir: Path,
+    value: str,
+    *,
+    kind: str,
+) -> tuple[str, Path]:
+    raw = str(value or "").strip()
+    if not raw or "\\" in raw:
+        raise ValueError("output is not a canonical POSIX path")
+    parts = raw.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("output contains a non-canonical path segment")
+    if len(parts) < 3 or parts[0] != "assets":
+        raise ValueError("output must be a canonical assets path")
+    if kind == "scene":
+        if parts[1] != "scenes":
+            raise ValueError("scene output must be under assets/scenes")
+    elif kind == "asset":
+        if parts[1] not in _REGENERATABLE_ASSET_OUTPUT_DIRS:
+            raise ValueError("asset output is not in a generated asset directory")
+    else:
+        raise ValueError("request kind must be asset or scene")
+    if Path(parts[-1]).suffix.lower() not in IMAGE_SUFFIXES:
+        raise ValueError("output must use a supported image suffix")
+    relative = "/".join(parts)
+    return relative, run_dir.resolve().joinpath(*parts)
+
+
+def _validate_generation_destination_nofollow(
+    run_dir: Path,
+    value: str,
+    *,
+    kind: str,
+) -> tuple[str, Path]:
+    relative, destination = _canonical_regeneration_output(
+        run_dir,
+        value,
+        kind=kind,
+    )
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if not nofollow or not directory:
+        raise ValueError("platform lacks no-follow directory operations")
+
+    parts = relative.split("/")
+    current_fd = -1
+    try:
+        current_fd = os.open(
+            run_dir.resolve(),
+            os.O_RDONLY | directory | cloexec | nofollow,
+        )
+        for index, part in enumerate(parts):
+            is_destination = index == len(parts) - 1
+            try:
+                current_stat = os.stat(
+                    part,
+                    dir_fd=current_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return relative, destination
+            if stat.S_ISLNK(current_stat.st_mode):
+                raise ValueError(f"generation destination is a symlink at {part}")
+            if is_destination:
+                if not stat.S_ISREG(current_stat.st_mode):
+                    raise ValueError("generation destination is not a regular file")
+                if current_stat.st_nlink != 1:
+                    raise ValueError("generation destination has multiple hard links")
+                return relative, destination
+            if not stat.S_ISDIR(current_stat.st_mode):
+                raise ValueError(f"generation destination parent is not a directory at {part}")
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | directory | cloexec | nofollow,
+                dir_fd=current_fd,
+            )
+            os.close(current_fd)
+            current_fd = next_fd
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"unsafe generation destination: {exc}") from exc
+    finally:
+        if current_fd >= 0:
+            os.close(current_fd)
+    return relative, destination
+
+
+class _UnsafeGenerationDestinationError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class _GenerationDestinationCopyReceipt:
+    destination: Path
+    output_sha256: str
+    size_bytes: int
+
+
+def _validate_image_descriptor(
+    descriptor: int,
+    *,
+    suffix: str,
+    label: str,
+) -> os.stat_result:
+    file_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"{label} is not a regular file")
+    if file_stat.st_size <= 0:
+        raise ValueError(f"{label} is empty")
+    if file_stat.st_size > MAX_IMAGE_BYTES:
+        raise ValueError(f"{label} is too large")
+    header = os.pread(descriptor, 16, 0)
+    normalized_suffix = suffix.lower()
+    if (
+        normalized_suffix == ".png"
+        and not header.startswith(b"\x89PNG\r\n\x1a\n")
+    ):
+        raise ValueError(f"{label} has invalid png magic bytes")
+    if (
+        normalized_suffix in {".jpg", ".jpeg"}
+        and not header.startswith(b"\xff\xd8\xff")
+    ):
+        raise ValueError(f"{label} has invalid jpeg magic bytes")
+    if normalized_suffix == ".webp" and not (
+        header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+    ):
+        raise ValueError(f"{label} has invalid webp magic bytes")
+    return file_stat
+
+
+def _sha256_stable_image_descriptor(
+    descriptor: int,
+    *,
+    label: str,
+) -> tuple[str, int]:
+    before = os.fstat(descriptor)
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < before.st_size:
+        chunk = os.pread(
+            descriptor,
+            min(1024 * 1024, before.st_size - offset),
+            offset,
+        )
+        if not chunk:
+            raise _UnsafeGenerationDestinationError(
+                f"{label} changed while hashing"
+            )
+        digest.update(chunk)
+        offset += len(chunk)
+    after = os.fstat(descriptor)
+    if (
+        (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+        or after.st_ctime_ns != before.st_ctime_ns
+        or os.pread(descriptor, 1, offset)
+    ):
+        raise _UnsafeGenerationDestinationError(
+            f"{label} changed while hashing"
+        )
+    return digest.hexdigest(), offset
+
+
+def _open_generation_directory_nofollow(
+    parent_descriptor: int,
+    parts: list[str],
+    *,
+    create: bool,
+) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    current_descriptor = os.dup(parent_descriptor)
+    try:
+        for part in parts:
+            try:
+                next_descriptor = os.open(
+                    part,
+                    os.O_RDONLY | directory | cloexec | nofollow,
+                    dir_fd=current_descriptor,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o755, dir_fd=current_descriptor)
+                except FileExistsError:
+                    pass
+                next_descriptor = os.open(
+                    part,
+                    os.O_RDONLY | directory | cloexec | nofollow,
+                    dir_fd=current_descriptor,
+                )
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        return current_descriptor
+    except BaseException:
+        os.close(current_descriptor)
+        raise
+
+
+def _assert_generation_parent_is_current(
+    run_dir: Path,
+    *,
+    root_identity: tuple[int, int],
+    parent_parts: list[str],
+    parent_identity: tuple[int, int],
+) -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    fresh_root_descriptor = -1
+    fresh_parent_descriptor = -1
+    try:
+        fresh_root_descriptor = os.open(
+            run_dir,
+            os.O_RDONLY | directory | cloexec | nofollow,
+        )
+        fresh_root_stat = os.fstat(fresh_root_descriptor)
+        if (fresh_root_stat.st_dev, fresh_root_stat.st_ino) != root_identity:
+            raise _UnsafeGenerationDestinationError(
+                "generation run directory changed during copy"
+            )
+        fresh_parent_descriptor = _open_generation_directory_nofollow(
+            fresh_root_descriptor,
+            parent_parts,
+            create=False,
+        )
+        fresh_parent_stat = os.fstat(fresh_parent_descriptor)
+        if (
+            fresh_parent_stat.st_dev,
+            fresh_parent_stat.st_ino,
+        ) != parent_identity:
+            raise _UnsafeGenerationDestinationError(
+                "generation destination parent changed during copy"
+            )
+    except _UnsafeGenerationDestinationError:
+        raise
+    except OSError as exc:
+        raise _UnsafeGenerationDestinationError(
+            f"generation destination parent became unsafe during copy: {exc}"
+        ) from exc
+    finally:
+        if fresh_parent_descriptor >= 0:
+            os.close(fresh_parent_descriptor)
+        if fresh_root_descriptor >= 0:
+            os.close(fresh_root_descriptor)
+
+
+def _ensure_generation_destination_entry_is_safe(
+    parent_descriptor: int,
+    name: str,
+) -> os.stat_result | None:
+    try:
+        destination_stat = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(destination_stat.st_mode):
+        raise _UnsafeGenerationDestinationError(
+            "generation destination is a symlink"
+        )
+    if not stat.S_ISREG(destination_stat.st_mode):
+        raise _UnsafeGenerationDestinationError(
+            "generation destination is not a regular file"
+        )
+    if destination_stat.st_nlink != 1:
+        raise _UnsafeGenerationDestinationError(
+            "generation destination has multiple hard links"
+        )
+    return destination_stat
+
+
+def _copy_saved_image_to_generation_destination_nofollow(
+    *,
+    run_dir: Path,
+    saved_path: Path,
+    output: str,
+    kind: str,
+) -> _GenerationDestinationCopyReceipt:
+    relative, destination = _canonical_regeneration_output(
+        run_dir,
+        output,
+        kind=kind,
+    )
+    require_image_file(saved_path)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if not nofollow or not directory:
+        raise _UnsafeGenerationDestinationError(
+            "platform lacks no-follow directory operations"
+        )
+
+    source_descriptor = -1
+    root_descriptor = -1
+    parent_descriptor = -1
+    temporary_descriptor = -1
+    temporary_name = ""
+    backup_name = ""
+    preserve_backup = False
+    parts = relative.split("/")
+    parent_parts = parts[:-1]
+    destination_name = parts[-1]
+    try:
+        try:
+            source_descriptor = os.open(
+                saved_path,
+                os.O_RDONLY | cloexec | nofollow,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"saved image not found: {saved_path}"
+            ) from exc
+        except OSError as exc:
+            raise ValueError(f"saved image is unsafe: {exc}") from exc
+        source_stat = _validate_image_descriptor(
+            source_descriptor,
+            suffix=saved_path.suffix,
+            label="saved image",
+        )
+
+        try:
+            root_descriptor = os.open(
+                run_dir,
+                os.O_RDONLY | directory | cloexec | nofollow,
+            )
+            root_stat = os.fstat(root_descriptor)
+            root_identity = (root_stat.st_dev, root_stat.st_ino)
+            parent_descriptor = _open_generation_directory_nofollow(
+                root_descriptor,
+                parent_parts,
+                create=True,
+            )
+            parent_stat = os.fstat(parent_descriptor)
+            parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
+            _ensure_generation_destination_entry_is_safe(
+                parent_descriptor,
+                destination_name,
+            )
+        except _UnsafeGenerationDestinationError:
+            raise
+        except OSError as exc:
+            raise _UnsafeGenerationDestinationError(
+                f"unsafe generation destination: {exc}"
+            ) from exc
+
+        temporary_name = (
+            f".toc-image-{uuid.uuid4().hex}.tmp{destination.suffix.lower()}"
+        )
+        try:
+            temporary_descriptor = os.open(
+                temporary_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | cloexec
+                | nofollow,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise _UnsafeGenerationDestinationError(
+                f"could not create a safe destination temporary file: {exc}"
+            ) from exc
+
+        bytes_written = 0
+        copied_digest = hashlib.sha256()
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            bytes_written += len(chunk)
+            if bytes_written > MAX_IMAGE_BYTES:
+                raise ValueError("saved image is too large")
+            copied_digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(temporary_descriptor, view)
+                if written <= 0:
+                    raise OSError(
+                        "could not make progress writing destination image"
+                    )
+                view = view[written:]
+        os.fchmod(temporary_descriptor, stat.S_IMODE(source_stat.st_mode))
+        os.fsync(temporary_descriptor)
+        temporary_stat = _validate_image_descriptor(
+            temporary_descriptor,
+            suffix=destination.suffix,
+            label="copied image",
+        )
+
+        _assert_generation_parent_is_current(
+            run_dir,
+            root_identity=root_identity,
+            parent_parts=parent_parts,
+            parent_identity=parent_identity,
+        )
+        previous_destination_stat = (
+            _ensure_generation_destination_entry_is_safe(
+                parent_descriptor,
+                destination_name,
+            )
+        )
+        previous_destination_identity = (
+            (
+                previous_destination_stat.st_dev,
+                previous_destination_stat.st_ino,
+            )
+            if previous_destination_stat is not None
+            else None
+        )
+        # A held directory descriptor prevents symlink traversal, but the
+        # directory can still be renamed after the ancestry check. Preserve
+        # the old entry so a failed post-commit check can restore it through
+        # that same descriptor. For a previously absent entry, link-based
+        # publication lets rollback remove only the inode created here.
+        if previous_destination_stat is not None:
+            backup_name = (
+                f".toc-image-backup-{uuid.uuid4().hex}.tmp"
+                f"{destination.suffix.lower()}"
+            )
+            try:
+                os.link(
+                    destination_name,
+                    backup_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                backup_stat = os.stat(
+                    backup_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                current_destination_stat = os.stat(
+                    destination_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise _UnsafeGenerationDestinationError(
+                    f"could not preserve destination rollback state: {exc}"
+                ) from exc
+            backup_identity = (backup_stat.st_dev, backup_stat.st_ino)
+            current_destination_identity = (
+                current_destination_stat.st_dev,
+                current_destination_stat.st_ino,
+            )
+            if (
+                not stat.S_ISREG(backup_stat.st_mode)
+                or backup_identity != previous_destination_identity
+                or current_destination_identity
+                != previous_destination_identity
+            ):
+                raise _UnsafeGenerationDestinationError(
+                    "generation destination changed while preserving "
+                    "rollback state"
+                )
+        else:
+            current_destination_stat = (
+                _ensure_generation_destination_entry_is_safe(
+                    parent_descriptor,
+                    destination_name,
+                )
+            )
+            if current_destination_stat is not None:
+                raise _UnsafeGenerationDestinationError(
+                    "generation destination appeared during copy"
+                )
+
+        committed = False
+        committed_identity = (
+            temporary_stat.st_dev,
+            temporary_stat.st_ino,
+        )
+        try:
+            if previous_destination_stat is not None:
+                os.replace(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                temporary_name = ""
+                committed = True
+            else:
+                os.link(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                committed = True
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                temporary_name = ""
+
+            _assert_generation_parent_is_current(
+                run_dir,
+                root_identity=root_identity,
+                parent_parts=parent_parts,
+                parent_identity=parent_identity,
+            )
+            committed_stat = (
+                _ensure_generation_destination_entry_is_safe(
+                    parent_descriptor,
+                    destination_name,
+                )
+            )
+            if committed_stat is None or (
+                committed_stat.st_dev,
+                committed_stat.st_ino,
+            ) != committed_identity:
+                raise _UnsafeGenerationDestinationError(
+                    "generation destination changed after atomic copy"
+                )
+            _validate_image_descriptor(
+                temporary_descriptor,
+                suffix=destination.suffix,
+                label="committed image",
+            )
+            committed_output_sha256, committed_size_bytes = (
+                _sha256_stable_image_descriptor(
+                    temporary_descriptor,
+                    label="committed image",
+                )
+            )
+            if (
+                committed_output_sha256 != copied_digest.hexdigest()
+                or committed_size_bytes != bytes_written
+            ):
+                raise _UnsafeGenerationDestinationError(
+                    "committed image differs from copied image bytes"
+                )
+            if backup_name:
+                os.unlink(backup_name, dir_fd=parent_descriptor)
+                backup_name = ""
+        except BaseException as exc:
+            rollback_error: BaseException | None = None
+            if committed:
+                try:
+                    if backup_name:
+                        try:
+                            current_stat = os.stat(
+                                destination_name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError as missing_destination:
+                            raise _UnsafeGenerationDestinationError(
+                                "destination disappeared before rollback"
+                            ) from missing_destination
+                        if (
+                            current_stat.st_dev,
+                            current_stat.st_ino,
+                        ) != committed_identity:
+                            raise _UnsafeGenerationDestinationError(
+                                "destination changed before rollback"
+                            )
+                        rollback_stat = os.stat(
+                            backup_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISREG(rollback_stat.st_mode)
+                            or (
+                                rollback_stat.st_dev,
+                                rollback_stat.st_ino,
+                            )
+                            != previous_destination_identity
+                        ):
+                            raise _UnsafeGenerationDestinationError(
+                                "destination rollback state changed"
+                            )
+                        os.replace(
+                            backup_name,
+                            destination_name,
+                            src_dir_fd=parent_descriptor,
+                            dst_dir_fd=parent_descriptor,
+                        )
+                        backup_name = ""
+                    else:
+                        try:
+                            current_stat = os.stat(
+                                destination_name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            current_stat = None
+                        if current_stat is not None and (
+                            current_stat.st_dev,
+                            current_stat.st_ino,
+                        ) == committed_identity:
+                            os.unlink(
+                                destination_name,
+                                dir_fd=parent_descriptor,
+                            )
+                except BaseException as rollback_exc:
+                    rollback_error = rollback_exc
+            if rollback_error is not None:
+                preserve_backup = True
+                raise _UnsafeGenerationDestinationError(
+                    "atomic destination rollback failed: "
+                    f"{rollback_error}"
+                ) from exc
+            raise
+        with suppress(OSError):
+            os.fsync(parent_descriptor)
+        return _GenerationDestinationCopyReceipt(
+            destination=destination,
+            output_sha256=committed_output_sha256,
+            size_bytes=committed_size_bytes,
+        )
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_name and parent_descriptor >= 0:
+            with suppress(OSError):
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+        if (
+            backup_name
+            and not preserve_backup
+            and parent_descriptor >= 0
+        ):
+            with suppress(OSError):
+                os.unlink(backup_name, dir_fd=parent_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+
+
+def _current_image_request_paths(
+    run_dir: Path,
+) -> tuple[dict[str, dict[str, Path]], list[str]]:
+    paths: dict[str, dict[str, Path]] = {"asset": {}, "scene": {}}
+    errors: list[str] = []
+    for kind in ("asset", "scene"):
+        try:
+            items = load_request_items(run_dir, kind)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            errors.append(
+                f"current {kind} request snapshot is unreadable or malformed ({exc})"
+            )
+            continue
+        for item in items:
+            value = str(item.output or "").strip()
+            if not value:
+                continue
+            try:
+                relative, path = _validate_generation_destination_nofollow(
+                    run_dir,
+                    value,
+                    kind=kind,
+                )
+            except ValueError as exc:
+                errors.append(
+                    f"unsafe current {kind} request output ignored: {value} ({exc})"
+                )
+                continue
+            paths[kind][relative] = path
+    return paths, errors
+
+
+@dataclass(frozen=True)
+class _P680RegenerationPlanClassification:
+    targets: dict[str, Path]
+    asset_targets: frozenset[str]
+    actions: frozenset[str]
+    errors: tuple[str, ...]
+
+    @property
+    def requires_canonical_p500(self) -> bool:
+        return "regenerate_p500_reference_first" in self.actions
+
+
+def _p680_plan_classification_error(
+    message: str,
+) -> _P680RegenerationPlanClassification:
+    return _P680RegenerationPlanClassification(
+        targets={},
+        asset_targets=frozenset(),
+        actions=frozenset(),
+        errors=(message,),
+    )
+
+
+def _inspect_p680_regeneration_plan(
+    run_dir: Path,
+    *,
+    current_request_paths: dict[str, dict[str, Path]],
+) -> _P680RegenerationPlanClassification:
+    empty = _P680RegenerationPlanClassification(
+        targets={},
+        asset_targets=frozenset(),
+        actions=frozenset(),
+        errors=(),
+    )
+    report_path = run_dir / "eval_report.json"
+    if not report_path.is_file():
+        return empty
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _p680_plan_classification_error(
+            "eval_report.json is unreadable or malformed"
+        )
+    if not isinstance(report, dict) or report.get("stage_target") != "p680":
+        return _p680_plan_classification_error(
+            "eval_report.json is not a p680 report"
+        )
+    report_run_dir = str(report.get("run_dir") or "").strip()
+    try:
+        if not report_run_dir or Path(report_run_dir).resolve() != run_dir.resolve():
+            return _p680_plan_classification_error(
+                "eval_report.json belongs to a different run"
+            )
+    except OSError:
+        return _p680_plan_classification_error(
+            "eval_report.json run binding is unreadable"
+        )
+    stages = report.get("stages")
+    image_stage = stages.get("image") if isinstance(stages, dict) else None
+    if not isinstance(image_stage, dict):
+        return _p680_plan_classification_error(
+            "eval_report.json is missing the image stage"
+        )
+    image_stage_passed = image_stage.get("passed")
+    details = image_stage.get("details")
+    if details is not None and not isinstance(details, dict):
+        return _p680_plan_classification_error(
+            "eval_report.json image stage details are malformed"
+        )
+    has_regeneration_plan = (
+        isinstance(details, dict)
+        and "image_regeneration_plan" in details
+    )
+    raw_plan = (
+        details.get("image_regeneration_plan")
+        if has_regeneration_plan
+        else None
+    )
+    if has_regeneration_plan and not isinstance(raw_plan, list):
+        return _p680_plan_classification_error(
+            "image_regeneration_plan is not a list"
+        )
+    if image_stage_passed is True:
+        if raw_plan:
+            return _p680_plan_classification_error(
+                "eval_report.json passed image stage contains a regeneration plan"
+            )
+        return empty
+    if image_stage_passed is not False:
+        return _p680_plan_classification_error(
+            "eval_report.json image stage passed state is malformed"
+        )
+    if not isinstance(details, dict):
+        return _p680_plan_classification_error(
+            "eval_report.json image stage details are malformed"
+        )
+    if not has_regeneration_plan:
+        return empty
+
+    targets: dict[str, Path] = {}
+    asset_targets: set[str] = set()
+    actions: set[str] = set()
+    errors: list[str] = []
+    for index, raw_item in enumerate(raw_plan, start=1):
+        if not isinstance(raw_item, dict):
+            errors.append(f"image_regeneration_plan[{index}] is malformed")
+            continue
+        action = str(raw_item.get("action") or "").strip()
+        if action not in {
+            "regenerate_p600_scene",
+            "regenerate_p500_reference_first",
+        }:
+            errors.append(
+                f"image_regeneration_plan[{index}] has an unsupported action"
+            )
+            continue
+        actions.add(action)
+
+        requested_values: list[tuple[Any, str]] = []
+        raw_output = raw_item.get("output")
+        if action == "regenerate_p600_scene" and not (
+            isinstance(raw_output, str) and raw_output.strip()
+        ):
+            errors.append(
+                f"image_regeneration_plan[{index}] is missing its scene output"
+            )
+        elif raw_output is not None and str(raw_output).strip():
+            requested_values.append((raw_output, "scene"))
+
+        raw_references = raw_item.get("vector_like_references")
+        if action == "regenerate_p500_reference_first":
+            if not isinstance(raw_references, list) or not raw_references:
+                errors.append(
+                    f"image_regeneration_plan[{index}] has no valid p500 reference targets"
+                )
+            else:
+                requested_values.extend(
+                    (reference, "asset") for reference in raw_references
+                )
+        elif raw_references is not None and not isinstance(raw_references, list):
+            errors.append(
+                f"image_regeneration_plan[{index}] has malformed vector_like_references"
+            )
+        elif raw_references:
+            errors.append(
+                f"image_regeneration_plan[{index}] has p500 reference targets "
+                "under a scene-only action"
+            )
+
+        for raw_value, request_kind in requested_values:
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                errors.append(
+                    f"image_regeneration_plan[{index}] has a malformed "
+                    f"{request_kind} target"
+                )
+                continue
+            value = raw_value.strip()
+            try:
+                relative, _path = _canonical_regeneration_output(
+                    run_dir,
+                    value,
+                    kind=request_kind,
+                )
+            except ValueError as exc:
+                errors.append(f"unsafe regeneration target ignored: {value} ({exc})")
+                continue
+            request_kind_paths = current_request_paths.get(request_kind)
+            current_path = (
+                request_kind_paths.get(relative)
+                if isinstance(request_kind_paths, dict)
+                else None
+            )
+            if current_path is None:
+                errors.append(
+                    f"regeneration target is not bound to the current requests: {relative}"
+                )
+                continue
+            targets[relative] = current_path
+            if request_kind == "asset":
+                asset_targets.add(relative)
+    return _P680RegenerationPlanClassification(
+        targets=targets,
+        asset_targets=frozenset(asset_targets),
+        actions=frozenset(actions),
+        errors=tuple(errors),
+    )
+
+
+def _p680_regeneration_targets(
+    run_dir: Path,
+    *,
+    current_request_paths: dict[str, dict[str, Path]],
+) -> tuple[dict[str, Path], list[str]]:
+    classification = _inspect_p680_regeneration_plan(
+        run_dir,
+        current_request_paths=current_request_paths,
+    )
+    return classification.targets, list(classification.errors)
+
+
+def _classify_p680_regeneration_plan(
+    run_dir: Path,
+) -> _P680RegenerationPlanClassification:
+    current_request_paths, request_errors = _current_image_request_paths(run_dir)
+    classification = _inspect_p680_regeneration_plan(
+        run_dir,
+        current_request_paths=current_request_paths,
+    )
+    if not request_errors:
+        return classification
+    return _P680RegenerationPlanClassification(
+        targets=classification.targets,
+        asset_targets=classification.asset_targets,
+        actions=classification.actions,
+        errors=tuple([*request_errors, *classification.errors]),
+    )
+
+
+def _unlink_regeneration_output_nofollow(
+    run_dir: Path,
+    relative: str,
+) -> tuple[bool, str | None]:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if not nofollow or not directory:
+        return False, "platform lacks no-follow directory operations"
+
+    parts = relative.split("/")
+    current_fd = -1
+    try:
+        current_fd = os.open(
+            run_dir.resolve(),
+            os.O_RDONLY | directory | cloexec | nofollow,
+        )
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | directory | cloexec | nofollow,
+                dir_fd=current_fd,
+            )
+            os.close(current_fd)
+            current_fd = next_fd
+        try:
+            target_stat = os.stat(
+                parts[-1],
+                dir_fd=current_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False, None
+        if stat.S_ISLNK(target_stat.st_mode):
+            return False, "regeneration target is a symlink"
+        if not stat.S_ISREG(target_stat.st_mode):
+            return False, "regeneration target is not a regular file"
+        if target_stat.st_nlink != 1:
+            return False, "regeneration target has multiple hard links"
+        os.unlink(parts[-1], dir_fd=current_fd)
+        return True, None
+    except FileNotFoundError:
+        return False, None
+    except OSError as exc:
+        return False, f"unsafe regeneration path: {exc}"
+    finally:
+        if current_fd >= 0:
+            os.close(current_fd)
+
+
+def _preserved_image_outputs_nofollow(
+    run_dir: Path,
+    *,
+    image_suffixes: set[str],
+) -> tuple[list[str], str | None]:
+    assets_dir = run_dir / "assets"
+    preserved: list[str] = []
+    try:
+        for directory_path, directory_names, file_names, directory_fd in os.fwalk(
+            assets_dir,
+            topdown=True,
+            follow_symlinks=False,
+        ):
+            directory_names.sort()
+            for file_name in sorted(file_names):
+                if Path(file_name).suffix.lower() not in image_suffixes:
+                    continue
+                file_stat = os.stat(
+                    file_name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if not (
+                    stat.S_ISREG(file_stat.st_mode)
+                    or stat.S_ISLNK(file_stat.st_mode)
+                ):
+                    continue
+                preserved.append(
+                    (Path(directory_path) / file_name)
+                    .relative_to(run_dir)
+                    .as_posix()
+                )
+    except (OSError, ValueError) as exc:
+        return sorted(preserved), f"could not enumerate preserved images safely: {exc}"
+    return sorted(preserved), None
+
+
 def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
     assets_dir = run_dir / "assets"
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    deleted: list[str] = []
     preserved: list[str] = []
+    classification = _classify_p680_regeneration_plan(run_dir)
+    errors = list(classification.errors)
+    if classification.requires_canonical_p500:
+        errors.append(
+            "canonical p500 resume is required for the current p680 "
+            "asset/reference regeneration plan"
+        )
     if not assets_dir.exists():
-        return {"deletedCount": 0, "deleted": [], "preservedCount": 0, "preserved": [], "errors": []}
-    for path in sorted(assets_dir.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in image_suffixes:
+        return {
+            "deletedCount": 0,
+            "deleted": [],
+            "preservedCount": 0,
+            "preserved": [],
+            "errors": errors[:200],
+            "requiresCanonicalP500": classification.requires_canonical_p500,
+            "assetTargets": sorted(classification.asset_targets)[:200],
+            "regenerationActions": sorted(classification.actions),
+        }
+    if assets_dir.is_symlink():
+        return {
+            "deletedCount": 0,
+            "deleted": [],
+            "preservedCount": 0,
+            "preserved": [],
+            "errors": [*errors, "unsafe assets directory symlink"][:200],
+            "requiresCanonicalP500": classification.requires_canonical_p500,
+            "assetTargets": sorted(classification.asset_targets)[:200],
+            "regenerationActions": sorted(classification.actions),
+        }
+    regeneration_targets = (
+        {}
+        if classification.requires_canonical_p500
+        else classification.targets
+    )
+    deletion_targets: list[str] = []
+    for relative, path in sorted(regeneration_targets.items()):
+        if path.suffix.lower() not in image_suffixes:
+            errors.append(f"regeneration target is not a supported image: {relative}")
             continue
-        preserved.append(path.relative_to(run_dir).as_posix())
+        deletion_targets.append(relative)
+        try:
+            _validate_generation_destination_nofollow(
+                run_dir,
+                relative,
+                kind="scene" if relative.startswith("assets/scenes/") else "asset",
+            )
+        except ValueError as exc:
+            errors.append(f"unsafe regeneration target ignored: {relative} ({exc})")
+
+    # Validation is deliberately complete before the first unlink. A mixed
+    # plan containing one unsafe target must preserve every otherwise-safe
+    # image so the caller can fail closed without a partial regeneration set.
+    if not errors:
+        for relative in deletion_targets:
+            was_deleted, error = _unlink_regeneration_output_nofollow(
+                run_dir,
+                relative,
+            )
+            if was_deleted:
+                deleted.append(relative)
+            elif error:
+                errors.append(f"{error}: {relative}")
+                break
+    preserved, preserved_error = _preserved_image_outputs_nofollow(
+        run_dir,
+        image_suffixes=image_suffixes,
+    )
+    if preserved_error:
+        errors.append(preserved_error)
     return {
-        "deletedCount": 0,
-        "deleted": [],
+        "deletedCount": len(deleted),
+        "deleted": deleted[:200],
         "preservedCount": len(preserved),
         "preserved": preserved[:200],
-        "errors": [],
-        "reason": "hash-aware partial resume preserves existing outputs until each item is proven stale",
+        "errors": errors[:200],
+        "requiresCanonicalP500": classification.requires_canonical_p500,
+        "assetTargets": sorted(classification.asset_targets)[:200],
+        "regenerationActions": sorted(classification.actions),
+        "reason": (
+            "hash-aware partial resume deletes only current request paths named "
+            "by the p680 visual regeneration plan"
+        ),
     }
 
 
@@ -1674,8 +2904,17 @@ def _deterministic_image_prompt_review_sources_are_current(run_dir: Path) -> boo
     source_paths = [run_dir / name for name in ("story.md", "script.md", "video_manifest.md")]
     if not report_path.is_file() or any(not path.is_file() for path in source_paths):
         return False
-    report_mtime_ns = report_path.stat().st_mtime_ns
-    return all(path.stat().st_mtime_ns <= report_mtime_ns for path in source_paths)
+    try:
+        report_text = report_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return False
+    return not _deterministic_image_prompt_review_binding_errors(
+        run_dir,
+        report_text,
+    )
 
 
 def _deterministic_image_prompt_review_sections(
@@ -1706,7 +2945,10 @@ def _canonical_deterministic_image_prompt_selector(value: Any) -> str:
 def _deterministic_image_prompt_review_structure_errors(report_text: str) -> list[str]:
     errors: list[str] = []
     format_version = _image_prompt_story_review_scalar(report_text, "review_format_version")
-    if format_version != "deterministic_image_prompt_review_v2":
+    if format_version not in {
+        DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION,
+        LEGACY_DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION,
+    }:
         errors.append("deterministic image prompt story review format is missing or unsupported")
 
     scalar_values: dict[str, int] = {}
@@ -1951,6 +3193,36 @@ def _deterministic_image_prompt_review_binding_errors(
     report_text: str,
 ) -> list[str]:
     errors: list[str] = []
+    format_version = _image_prompt_story_review_scalar(
+        report_text,
+        "review_format_version",
+    )
+    manifest_policy = _image_prompt_story_review_scalar(
+        report_text,
+        DETERMINISTIC_MANIFEST_FINGERPRINT_POLICY_KEY,
+    )
+    if format_version == DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION:
+        if manifest_policy != VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA:
+            errors.append(
+                "deterministic image prompt story review manifest "
+                "fingerprint policy is missing or unsupported"
+            )
+        manifest_uses_projection = True
+    elif (
+        format_version
+        == LEGACY_DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION
+        and not manifest_policy
+    ):
+        # v2 reports predate explicit fingerprint policies and were bound to
+        # exact manifest bytes. They remain valid only while those bytes match.
+        manifest_uses_projection = False
+    else:
+        errors.append(
+            "deterministic image prompt story review manifest fingerprint "
+            "policy does not match its format version"
+        )
+        manifest_uses_projection = True
+
     canonical_manifest = (run_dir / "video_manifest.md").resolve()
     reported_manifest_text = _image_prompt_story_review_scalar(report_text, "manifest")
     if not reported_manifest_text:
@@ -1978,7 +3250,19 @@ def _deterministic_image_prompt_review_binding_errors(
                 f"deterministic image prompt story review {key} is missing or invalid"
             )
             continue
-        if not source_path.is_file() or _file_sha256(source_path) != reported_digest:
+        try:
+            current_digest = (
+                (
+                    video_manifest_review_projection_sha256(source_path)
+                    if manifest_uses_projection
+                    else _file_sha256(source_path)
+                )
+                if filename == "video_manifest.md"
+                else _file_sha256(source_path)
+            )
+        except (OSError, TypeError, ValueError):
+            current_digest = ""
+        if not source_path.is_file() or current_digest != reported_digest:
             errors.append(
                 f"deterministic image prompt story review {filename} digest is stale"
             )
@@ -2165,7 +3449,7 @@ def _refresh_deterministic_image_prompt_review_if_stale(run_dir: Path) -> None:
         report_text = report_path.read_text(encoding="utf-8", errors="replace")
         if (
             _image_prompt_story_review_scalar(report_text, "review_format_version")
-            == "deterministic_image_prompt_review_v2"
+            == DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION
             and not _deterministic_image_prompt_review_binding_errors(
                 run_dir,
                 report_text,
@@ -2199,7 +3483,7 @@ def _refresh_deterministic_image_prompt_review_if_stale(run_dir: Path) -> None:
         result.returncode != 0
         or not _deterministic_image_prompt_review_sources_are_current(run_dir)
         or _image_prompt_story_review_scalar(refreshed_text, "review_format_version")
-        != "deterministic_image_prompt_review_v2"
+        != DETERMINISTIC_IMAGE_PROMPT_REVIEW_VERSION
         or _deterministic_image_prompt_review_binding_errors(run_dir, refreshed_text)
     ):
         detail = result.stderr.strip() or result.stdout.strip()
@@ -2283,6 +3567,7 @@ def _validate_p650_run_core(
         "video_manifest.md",
         "asset_generation_requests.md",
         "asset_generation_manifest.md",
+        "asset_generation_request_snapshot.json",
         "image_generation_requests.md",
         "image_generation_request_snapshot.json",
         "p000_index.md",
@@ -2333,20 +3618,18 @@ def _validate_p650_run_core(
     )
     _validate_semantic_reviews(run_dir, ("research", "story"))
     if require_downstream_semantic_reviews:
-        _validate_semantic_reviews(
+        _validate_semantic_reviews_for_media_generation(
             run_dir,
             ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"),
         )
     if require_generated_asset_outputs:
-        missing_asset_outputs = [
-            str(item.output)
-            for item in asset_items
-            if item.output and not resolve_run_relative(run_dir, item.output).is_file()
-        ]
-        if missing_asset_outputs:
-            raise RuntimeError(f"ToC run did not reach p650: missing generated asset outputs {', '.join(missing_asset_outputs)}")
+        try:
+            _validate_generated_outputs(run_dir, "asset")
+        except RuntimeError as exc:
+            raise RuntimeError(f"ToC run did not reach p650: {exc}") from exc
 
     state = parse_state_file(run_dir / "state.txt")
+    localized_partial_slots = _localized_partial_semantic_slots(run_dir)
     freeze_status = (state.get("review.image_prompt.request_freeze.status") or "").lower()
     if require_provider_ready_freeze and freeze_status != "frozen":
         raise RuntimeError(
@@ -2386,6 +3669,10 @@ def _validate_p650_run_core(
         for slot in P650_FIXED_SLOTS
         if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
         and not (
+            slot in localized_partial_slots
+            and (state.get(f"slot.{slot}.status") or "").lower() == "failed"
+        )
+        and not (
             not require_provider_ready_freeze
             and slot in {"p560", "p570", "p650"}
             and (state.get(f"slot.{slot}.status") or "").lower() == "pending"
@@ -2421,18 +3708,80 @@ def _validate_materialized_p650_run(run_id: str) -> None:
     )
 
 
+def _source_title_from_run_id(run_id: str) -> str:
+    title = re.sub(r"_\d{8}_\d{4}(?:_\d+)?$", "", run_id).strip("_")
+    return title or run_id
+
+
+def _world_walk_title_from_source_run_id(source_run_id: str) -> str:
+    return f"{_source_title_from_run_id(source_run_id)}の世界観を散歩してみた"
+
+
+def _validate_world_walk_source_run(source_run_id: str) -> Path:
+    run_dir, _relative = validate_world_walk_source_path(ROOT, Path("output") / source_run_id)
+    _validate_p650_run(source_run_id)
+    return run_dir
+
+
+def _require_world_walk_source_run(source_run_id: str) -> Path:
+    try:
+        return _validate_world_walk_source_run(source_run_id)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source run is not selectable: {exc}",
+        ) from exc
+
+
+def _list_world_walk_source_runs() -> list[dict[str, Any]]:
+    base = ROOT / "output"
+    if not base.exists():
+        return []
+    candidates: list[Path] = []
+    for path in base.iterdir():
+        if path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            candidates.append(_validate_world_walk_source_run(path.name))
+        except (FileNotFoundError, ValueError, RuntimeError):
+            continue
+    sources: list[dict[str, Any]] = []
+    for run_dir in sorted(
+        candidates,
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ):
+        title = _source_title_from_run_id(run_dir.name)
+        sources.append(
+            {
+                "id": run_dir.name,
+                "title": title,
+                "worldWalkTitle": f"{title}の世界観を散歩してみた",
+                "path": f"output/{run_dir.name}",
+                "hasAssetRequests": (
+                    run_dir / "asset_generation_requests.md"
+                ).is_file(),
+                "hasSceneRequests": (
+                    run_dir / "image_generation_requests.md"
+                ).is_file(),
+            }
+        )
+    return sources
+
+
 def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
     _validate_p650_run(run_id)
     run_dir = safe_run_dir(run_id, ROOT)
-    _validate_semantic_reviews(
+    _validate_semantic_reviews_for_media_generation(
         run_dir,
         ("research", "story", "scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"),
     )
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
     if strict_visual_quality:
-        _validate_p680_visual_quality(run_dir)
+        _validate_p680_visual_quality(run_dir, mode="terminal")
     state = parse_state_file(run_dir / "state.txt")
+    localized_partial_slots = _localized_partial_semantic_slots(run_dir)
     missing_slots = [slot for slot in P680_FIXED_SLOTS if not state.get(f"slot.{slot}.status")]
     if missing_slots:
         raise RuntimeError(f"ToC run did not reach p680: missing fixed slot states {', '.join(missing_slots)}")
@@ -2440,6 +3789,10 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
         f"{slot}={state.get(f'slot.{slot}.status')}"
         for slot in P680_FIXED_SLOTS
         if (state.get(f"slot.{slot}.status") or "").lower() not in SLOT_TERMINAL_STATES
+        and not (
+            slot in localized_partial_slots
+            and (state.get(f"slot.{slot}.status") or "").lower() == "failed"
+        )
     ]
     if incomplete_slots:
         raise RuntimeError(f"ToC run did not reach p680: incomplete fixed slot states {', '.join(incomplete_slots)}")
@@ -2481,6 +3834,25 @@ def _validate_semantic_reviews(run_dir: Path, stages: Iterable[str]) -> None:
             errors.append(f"{stage}: {'; '.join(result.errors)}")
     if errors:
         raise RuntimeError("semantic review incomplete: " + " | ".join(errors))
+
+
+def _validate_semantic_reviews_for_media_generation(
+    run_dir: Path,
+    stages: Iterable[str],
+) -> None:
+    errors: list[str] = []
+    for stage in stages:
+        if _semantic_review_stage_is_media_ready(run_dir, stage):
+            continue
+        result = check_semantic_review(run_dir, stage)
+        errors.append(
+            f"{stage}: {'; '.join(result.errors) or result.status or 'not passed'}"
+        )
+    if errors:
+        raise RuntimeError(
+            "semantic review incomplete: media generation: "
+            + " | ".join(errors)
+        )
 
 
 def _cleanup_unscaffolded_run(run_id: str) -> None:
@@ -2546,6 +3918,8 @@ async def _run_toc_immersive_frontend_cli_helper(
     source: str | None = None,
     run_id: str,
     stop_target: str = "p680",
+    experience: str = "cinematic_story",
+    source_run_id: str | None = None,
     target_duration_seconds: int = 300,
     materialize_only: bool = False,
 ) -> str:
@@ -2562,7 +3936,11 @@ async def _run_toc_immersive_frontend_cli_helper(
         str(target_duration_seconds),
         "--stop-target",
         stop_target,
+        "--experience",
+        experience,
     ]
+    if source_run_id:
+        cmd.extend(["--source-run", f"output/{source_run_id}"])
     if materialize_only:
         cmd.append("--materialize-only")
     env = dict(os.environ)
@@ -2615,7 +3993,16 @@ def _is_skill_configuration_error(exc: Exception) -> bool:
     )
 
 
-async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id: str, stop_target: str = "p680") -> None:
+async def _run_toc_skill_helper(
+    *,
+    topic: str,
+    source: str | None = None,
+    run_id: str,
+    stop_target: str = "p680",
+    experience: str = "cinematic_story",
+    source_run_id: str | None = None,
+    target_duration_seconds: int = 300,
+) -> None:
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
     skill_path = _toc_immersive_skill_path()
@@ -2623,7 +4010,15 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
         raise RuntimeError(f"Codex skill not found: {skill_path}")
     run_dir = safe_run_dir(run_id, ROOT)
     client = create_codex_app_server_client(cwd=ROOT)
-    skill_text = _toc_immersive_command(topic=topic, source=source, run_id=run_id, stop_target=stop_target)
+    skill_text = _toc_immersive_command(
+        topic=topic,
+        source=source,
+        run_id=run_id,
+        stop_target=stop_target,
+        experience=experience,
+        source_run_id=source_run_id,
+        target_duration_seconds=target_duration_seconds,
+    )
     try:
         await client.start()
         write_app_server_debug_log(
@@ -2631,7 +4026,12 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             operation="skill_start",
             status="started",
             item_id="toc-immersive-runner",
-            request={"topic": topic, "stopTarget": stop_target, "skillPath": str(skill_path.relative_to(ROOT))},
+            request={
+                "topic": topic,
+                "experience": experience,
+                "stopTarget": stop_target,
+                "skillPath": str(skill_path.relative_to(ROOT)),
+            },
         )
         try:
             skills = await client.list_skills(cwd=ROOT, force_reload=True)
@@ -2680,6 +4080,11 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             transcript=transcript,
         )
         if not _stop_target_contract_reached(run_id, stop_target):
+            if experience == CREATE_MODE_WORLD_WALK:
+                raise RuntimeError(
+                    "world_walk skill completed without reaching the requested "
+                    f"{stop_target} contract"
+                )
             write_app_server_debug_log(
                 run_dir=run_dir,
                 operation="skill_contract_fallback",
@@ -2711,6 +4116,8 @@ async def _run_toc_skill_helper(*, topic: str, source: str | None = None, run_id
             error=str(exc),
         )
         if _is_skill_configuration_error(exc):
+            raise
+        if experience == CREATE_MODE_WORLD_WALK:
             raise
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -4164,8 +5571,10 @@ def _validate_review_item_paths(run_dir: Path, item: FrontendReviewItem, *, stri
         _validate_run_relative_video_path(run_dir, item.render_video_path, must_exist=False)
 
 
-def _validate_candidate_matches_output(run_dir: Path, candidate: Path, output: str) -> None:
-    expected_item_id: str | None = None
+def _canonical_image_request_owner(
+    run_dir: Path,
+    output: str,
+) -> tuple[str, str] | None:
     for kind in ("asset", "scene"):
         try:
             items = load_request_items(run_dir, kind)
@@ -4173,12 +5582,19 @@ def _validate_candidate_matches_output(run_dir: Path, candidate: Path, output: s
             continue
         for item in items:
             if item.output == output:
-                expected_item_id = item.id
-                break
-        if expected_item_id:
-            break
-    if expected_item_id is None:
-        return
+                return kind, str(item.id)
+    return None
+
+
+def _validate_candidate_matches_output(
+    run_dir: Path,
+    candidate: Path,
+    output: str,
+) -> tuple[str, str] | None:
+    owner = _canonical_image_request_owner(run_dir, output)
+    if owner is None:
+        return None
+    _kind, expected_item_id = owner
     expected_dir = candidate_path(run_dir, expected_item_id, 1).parent.name
     actual_dir = candidate.parent.name
     if actual_dir != expected_dir:
@@ -4186,6 +5602,7 @@ def _validate_candidate_matches_output(run_dir: Path, candidate: Path, output: s
             f"candidate item mismatch: {candidate.relative_to(run_dir).as_posix()} cannot be inserted into {output}; "
             f"expected candidate directory {expected_dir}"
         )
+    return owner
 
 
 def _frontend_review_dir(run_dir: Path) -> Path:
@@ -8358,7 +9775,10 @@ def _split_video_request_sections(text: str) -> tuple[list[str], list[tuple[str,
     return prefix, sections
 
 
-def _reviewed_video_request_binding(run_dir: Path, item_id: str) -> dict[str, str]:
+def _reviewed_video_request_binding(
+    run_dir: Path,
+    item_id: str,
+) -> dict[str, Any]:
     path = run_dir / "video_generation_requests.md"
     if not path.is_file():
         raise ValueError("reviewed video generation request is missing")
@@ -8371,12 +9791,50 @@ def _reviewed_video_request_binding(run_dir: Path, item_id: str) -> dict[str, st
     body = "\n".join(matches[0]).strip()
 
     def scalar(name: str) -> str:
-        match = re.search(rf"(?m)^- {re.escape(name)}: `([^`]*)`\s*$", body)
-        return match.group(1).strip() if match else ""
+        matches = re.findall(
+            rf"(?m)^- {re.escape(name)}: `([^`]*)`\s*$",
+            body,
+        )
+        if len(matches) > 1:
+            raise ValueError(
+                f"reviewed video generation request duplicates {name}"
+            )
+        return matches[0].strip() if matches else ""
 
-    def fenced(name: str) -> str:
-        match = re.search(rf"(?ms)```{re.escape(name)}\s*\n(.*?)\n```", body)
-        return match.group(1).strip() if match else ""
+    def fenced(name: str) -> tuple[str, int]:
+        matches = re.findall(
+            rf"(?ms)```{re.escape(name)}\s*\n(.*?)\n```",
+            body,
+        )
+        if len(matches) > 1:
+            raise ValueError(
+                f"reviewed video generation request duplicates {name}"
+            )
+        return (
+            matches[0].strip() if matches else "",
+            len(matches),
+        )
+
+    def list_values(name: str) -> list[str]:
+        matches = re.findall(
+            rf"(?ms)^- {re.escape(name)}:\s*\n"
+            r"((?:  - `[^`]*`\s*(?:\n|$))*)",
+            body,
+        )
+        if len(matches) > 1:
+            raise ValueError(
+                f"reviewed video generation request duplicates {name}"
+            )
+        if not matches:
+            return []
+        return [
+            value.strip()
+            for value in re.findall(
+                r"(?m)^  - `([^`]*)`\s*$",
+                matches[0],
+            )
+            if value.strip()
+        ]
 
     fields = (
         "tool",
@@ -8392,11 +9850,23 @@ def _reviewed_video_request_binding(run_dir: Path, item_id: str) -> dict[str, st
         "prompt_sha256",
         "negative_prompt_sha256",
         "references_digest",
+        "storyboard_image",
+    )
+    video_prompt, video_prompt_count = fenced("video_prompt")
+    api_prompt, api_prompt_count = fenced("api_prompt")
+    if video_prompt_count and api_prompt_count:
+        raise ValueError(
+            "reviewed video generation request has both video_prompt and api_prompt"
+        )
+    negative_prompt, _negative_prompt_count = fenced(
+        "negative_prompt"
     )
     return {
         **{field: scalar(field) for field in fields},
-        "prompt": fenced("video_prompt") or fenced("api_prompt"),
-        "negative_prompt": fenced("negative_prompt"),
+        "prompt": video_prompt or api_prompt,
+        "negative_prompt": negative_prompt,
+        "source_cuts": list_values("source_cuts"),
+        "references": list_values("references"),
         "request_section_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
     }
 
@@ -8923,36 +10393,36 @@ def _storyboard_scene_selector(scene: dict[str, Any], scene_index: int) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", selector).strip("._-") or f"scene{scene_index}"
 
 
-def _storyboard_cut_id(cut: dict[str, Any], cut_index: int, used_cut_ids: set[str]) -> str:
+def _storyboard_cut_id(
+    cut: dict[str, Any],
+    _cut_index: int,
+    used_cut_ids: set[str],
+) -> str:
     raw = str(cut.get("cut_id") or "").strip()
     normalized = normalize_dotted_id(raw)
-    if normalized and normalized not in used_cut_ids:
-        cut["cut_id"] = normalized
-        used_cut_ids.add(normalized)
-        return _require_markdown_scalar(normalized, field="source_cut_id")
-    if normalized and normalized in used_cut_ids:
+    if normalized is None:
+        raise RuntimeError(
+            "storyboard create failed: active cut has a missing or invalid "
+            f"canonical cut_id: {raw or '(missing)'}"
+        )
+    if normalized in used_cut_ids:
         raise RuntimeError(f"storyboard create failed: duplicate cut_id {normalized}")
-    candidate = cut_index
-    while str(candidate) in used_cut_ids:
-        candidate += 1
-    fallback = str(candidate)
-    cut["cut_id"] = fallback
-    used_cut_ids.add(fallback)
-    return _require_markdown_scalar(fallback, field="source_cut_id")
+    used_cut_ids.add(normalized)
+    return _require_markdown_scalar(normalized, field="source_cut_id")
 
 
 def _storyboard_cut_duration(cut: dict[str, Any]) -> int:
-    candidates: list[Any] = [cut.get("duration_seconds")]
-    video_generation = cut.get("video_generation") if isinstance(cut.get("video_generation"), dict) else {}
-    candidates.append(video_generation.get("duration_seconds"))
-    for value in candidates:
-        try:
-            duration = int(value)
-        except (TypeError, ValueError):
-            continue
-        if duration > 0:
-            return duration
-    return 8
+    duration = cut.get("duration_seconds")
+    if (
+        not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration <= 0
+    ):
+        raise RuntimeError(
+            "storyboard create failed: active cut has a missing or invalid "
+            "canonical duration_seconds"
+        )
+    return duration
 
 
 def _partition_storyboard_entries(
@@ -9095,8 +10565,16 @@ def _compose_storyboard_image(run_dir: Path, *, inputs: list[str], output: str) 
         cell.paste(frame, (paste_x, paste_y))
         canvas.paste(cell, (x, y))
 
-    canvas.save(out_path, format="PNG")
-    validate_image_bytes(out_path)
+    temporary = out_path.with_name(
+        f".{out_path.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        canvas.save(temporary, format="PNG")
+        validate_image_bytes(temporary)
+        os.replace(temporary, out_path)
+        validate_image_bytes(out_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list[dict[str, Any]]) -> Path:
@@ -9156,7 +10634,7 @@ def _write_scene_storyboard_video_generation_requests(run_dir: Path, units: list
                 "",
             ]
         )
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    _atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
     return path
 
 
@@ -9179,8 +10657,19 @@ def _explicit_storyboard_render_unit_contract(
     return {}
 
 
-def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
-    run_dir = safe_run_dir(run_id, ROOT)
+def _materialize_scene_storyboard_video_requests_unchecked(
+    run_id: str,
+    *,
+    run_dir_override: Path | None = None,
+    canonical_run_dir: Path | None = None,
+    write_state: bool = True,
+) -> dict[str, Any]:
+    run_dir = (
+        run_dir_override
+        if run_dir_override is not None
+        else safe_run_dir(run_id, ROOT)
+    )
+    artifact_run_dir = canonical_run_dir or run_dir
     manifest_path, original_text, data = _read_manifest_data(run_dir)
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
@@ -9220,6 +10709,11 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
     for scene_index, scene in enumerate(scenes, start=1):
         if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
             continue
+        # Detach the direct scene mapping before adding the execution overlay.
+        # YAML aliases otherwise let this assignment mutate a second,
+        # non-scene manifest location through shared object identity.
+        scene = dict(scene)
+        scenes[scene_index - 1] = scene
         cuts = scene.get("cuts")
         if not isinstance(cuts, list) or not cuts:
             raise RuntimeError(f"storyboard create failed: scene {scene_index} has no cuts")
@@ -9250,8 +10744,6 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
                     f"{storyboard_capabilities.duration_max_seconds}s Seedance "
                     "reference-image limit; split the cut"
                 )
-            if _int_value(cut.get("duration_seconds") or 0) <= 0:
-                cut["duration_seconds"] = cut_duration
             cut_durations.append(cut_duration)
         if not cut_outputs:
             raise RuntimeError(f"storyboard create failed: {scene_selector} has no active cut images")
@@ -9392,6 +10884,12 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
                 {
                     "unit_id": unit_id,
                     "source_cut_ids": group_source_ids,
+                    "source_cut_image_sha256s": (
+                        _video_reference_content_sha256(
+                            run_dir,
+                            group_outputs,
+                        )
+                    ),
                     "cut_contract": render_unit_contract,
                     "storyboard_image": storyboard_output,
                     "video_input_contract": {
@@ -9432,36 +10930,422 @@ def _materialize_scene_storyboard_video_requests(run_id: str) -> dict[str, Any]:
         [str(unit["request_id"]) for unit in units],
         approved=False,
     )
-    append_state_snapshot(
-        run_dir / "state.txt",
-        {
-            "runtime.create_mode": CREATE_MODE_SCENE_STORYBOARD,
-            "runtime.stage": "scene_storyboard_video_requests_ready",
-            "review.frontend.storyboard.status": "ready",
-            "slot.p820.status": "pending",
-            "slot.p820.note": "materialized storyboard video prompts await contextless semantic review",
-            "slot.p830.status": "in_progress",
-            "slot.p830.note": "storyboard video prompts are materialized; semantic review remains",
-            "stage.video_generation.status": "in_progress",
-            "review.video_prompt.status": "pending",
-            "gate.video_prompt_review": "required",
-            "artifact.scene_storyboards": ",".join(storyboard_paths),
-            "artifact.video_generation_requests": str(request_path.resolve()),
-            **approval_updates,
-        },
+    state_updates = {
+        "runtime.create_mode": CREATE_MODE_SCENE_STORYBOARD,
+        "runtime.stage": "scene_storyboard_video_requests_ready",
+        "review.frontend.storyboard.status": "ready",
+        "slot.p820.status": "pending",
+        "slot.p820.note": "materialized storyboard video prompts await contextless semantic review",
+        "slot.p830.status": "in_progress",
+        "slot.p830.note": "storyboard video prompts are materialized; semantic review remains",
+        "stage.video_generation.status": "in_progress",
+        "review.video_prompt.status": "pending",
+        "gate.video_prompt_review": "required",
+        "artifact.scene_storyboards": ",".join(storyboard_paths),
+        "artifact.video_generation_requests": str(
+            (artifact_run_dir / "video_generation_requests.md").resolve()
+        ),
+        **approval_updates,
+    }
+    if write_state:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            state_updates,
+        )
+    return {
+        "storyboards": storyboard_paths,
+        "videoRequestPath": request_path.relative_to(run_dir).as_posix(),
+        "unitCount": len(units),
+        "_stateUpdates": state_updates,
+    }
+
+
+def _validate_unique_storyboard_scene_selectors(
+    data: dict[str, Any],
+) -> None:
+    scenes = data.get("scenes")
+    if not isinstance(scenes, list):
+        raise RuntimeError(
+            "storyboard create failed: video_manifest.md scenes must be a list"
+        )
+    seen: dict[str, tuple[int, str]] = {}
+    for scene_index, scene in enumerate(scenes, start=1):
+        if (
+            not isinstance(scene, dict)
+            or str(scene.get("kind") or "").strip().endswith("_reference")
+        ):
+            continue
+        selector = _storyboard_scene_selector(scene, scene_index)
+        collision_key = unicodedata.normalize("NFC", selector).casefold()
+        previous = seen.get(collision_key)
+        if previous is not None:
+            previous_index, previous_selector = previous
+            raise RuntimeError(
+                "storyboard create failed: duplicate storyboard scene selector "
+                f"{selector!r} for scene {previous_index} "
+                f"({previous_selector!r}) and scene {scene_index}"
+            )
+        seen[collision_key] = (scene_index, selector)
+
+
+STORYBOARD_TRANSACTION_REL = Path(
+    "logs/transactions/storyboard_create_pending"
+)
+STORYBOARD_TRANSACTION_CORE_TARGETS = {
+    "video_manifest.md",
+    "video_generation_requests.md",
+    "state.txt",
+    "run_status.json",
+    "p000_index.md",
+}
+
+
+def _validate_storyboard_storage_paths(run_dir: Path) -> None:
+    for relative in (
+        Path("assets"),
+        Path("assets/storyboards"),
+        Path("logs"),
+        Path("logs/transactions"),
+        STORYBOARD_TRANSACTION_REL,
+    ):
+        current = run_dir
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise RuntimeError(
+                    "storyboard storage path must not be a symlink: "
+                    f"{current.relative_to(run_dir)}"
+                )
+
+
+def _storyboard_transaction_target_allowed(relative: str) -> bool:
+    path = Path(relative)
+    if (
+        not relative
+        or path.is_absolute()
+        or path.as_posix() != relative
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return False
+    normalized = path.as_posix()
+    return (
+        normalized in STORYBOARD_TRANSACTION_CORE_TARGETS
+        or (
+            path.parent == Path("assets/storyboards")
+            and path.suffix.lower() == ".png"
+        )
     )
-    return {"storyboards": storyboard_paths, "videoRequestPath": request_path.relative_to(run_dir).as_posix(), "unitCount": len(units)}
 
 
-def _validate_scene_storyboard_create_run(run_id: str, *, strict_visual_quality: bool = True) -> None:
-    _validate_frontend_create_run(run_id, strict_visual_quality=strict_visual_quality)
+def _storyboard_transaction_target_path(
+    run_dir: Path,
+    relative: str,
+) -> Path:
+    if not _storyboard_transaction_target_allowed(relative):
+        raise RuntimeError(
+            "storyboard transaction target is outside the allowed set"
+        )
+    current = run_dir
+    for part in Path(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise RuntimeError(
+                "storyboard transaction target path must not contain symlinks"
+            )
+    return current
+
+
+def _storyboard_transaction_dir(run_dir: Path) -> Path:
+    return run_dir / STORYBOARD_TRANSACTION_REL
+
+
+def _recover_storyboard_transaction(run_dir: Path) -> None:
+    _validate_storyboard_storage_paths(run_dir)
+    transaction_dir = _storyboard_transaction_dir(run_dir)
+    if not transaction_dir.exists():
+        return
+    if not transaction_dir.is_dir() or transaction_dir.is_symlink():
+        raise RuntimeError(
+            "storyboard transaction path must be a real directory"
+        )
+    marker_path = transaction_dir / "marker.json"
+    if not marker_path.is_file():
+        shutil.rmtree(transaction_dir)
+        return
+    if marker_path.is_symlink():
+        raise RuntimeError(
+            "storyboard transaction marker must not be a symlink"
+        )
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(marker_path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "storyboard transaction marker is unreadable"
+        ) from exc
+    targets = marker.get("targets")
+    if (
+        marker.get("schemaVersion") != "storyboard_transaction_v1"
+        or not isinstance(targets, list)
+    ):
+        raise RuntimeError(
+            "storyboard transaction marker is invalid"
+        )
+    for item in targets:
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "storyboard transaction target is invalid"
+            )
+        relative = str(item.get("path") or "")
+        target = _storyboard_transaction_target_path(
+            run_dir,
+            relative,
+        )
+        existed = item.get("existed")
+        if existed is True:
+            backup_name = str(item.get("backup") or "")
+            backup = transaction_dir / backup_name
+            if (
+                Path(backup_name).name != backup_name
+                or not backup.is_file()
+                or backup.is_symlink()
+            ):
+                raise RuntimeError(
+                    "storyboard transaction backup is missing or unsafe"
+                )
+            _atomic_write_bytes(target, backup.read_bytes())
+        elif existed is False:
+            target.unlink(missing_ok=True)
+        else:
+            raise RuntimeError(
+                "storyboard transaction target existence flag is invalid"
+            )
+    shutil.rmtree(transaction_dir)
+
+
+def _prepare_storyboard_transaction(
+    run_dir: Path,
+    relative_targets: Iterable[str],
+) -> Path:
+    _recover_storyboard_transaction(run_dir)
+    transaction_dir = _storyboard_transaction_dir(run_dir)
+    transaction_dir.mkdir(parents=True, exist_ok=False)
+    entries: list[dict[str, Any]] = []
+    try:
+        for index, relative in enumerate(
+            dict.fromkeys(relative_targets)
+        ):
+            if not _storyboard_transaction_target_allowed(relative):
+                raise RuntimeError(
+                    "storyboard transaction target is outside the allowed set"
+                )
+            target = _storyboard_transaction_target_path(
+                run_dir,
+                relative,
+            )
+            existed = target.is_file()
+            backup_name = ""
+            if existed:
+                backup_name = f"backup_{index:04d}.bin"
+                _atomic_write_bytes(
+                    transaction_dir / backup_name,
+                    target.read_bytes(),
+                )
+            entries.append(
+                {
+                    "path": relative,
+                    "existed": existed,
+                    "backup": backup_name,
+                }
+            )
+        _atomic_write_text(
+            transaction_dir / "marker.json",
+            json.dumps(
+                {
+                    "schemaVersion": "storyboard_transaction_v1",
+                    "status": "committing",
+                    "targets": entries,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    except Exception:
+        shutil.rmtree(transaction_dir, ignore_errors=True)
+        raise
+    return transaction_dir
+
+
+def _hardlink_or_copy(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+        return destination
+    except OSError:
+        return shutil.copy2(source, destination)
+
+
+def _materialize_scene_storyboard_video_requests(
+    run_id: str,
+) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
+    _recover_storyboard_transaction(run_dir)
+    _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    _validate_unique_storyboard_scene_selectors(data)
+    review_projection_before = (
+        video_manifest_review_projection_sha256(
+            run_dir / "video_manifest.md"
+        )
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=f".{run_id}.storyboard-stage-",
+        dir=run_dir.parent,
+    ) as staging_tmp:
+        staging_run_dir = Path(staging_tmp)
+        shutil.copytree(
+            run_dir,
+            staging_run_dir,
+            dirs_exist_ok=True,
+            copy_function=_hardlink_or_copy,
+            symlinks=True,
+        )
+        staged_result = (
+            _materialize_scene_storyboard_video_requests_unchecked(
+                run_id,
+                run_dir_override=staging_run_dir,
+                canonical_run_dir=run_dir,
+                write_state=False,
+            )
+        )
+        staged_review_projection = (
+            video_manifest_review_projection_sha256(
+                staging_run_dir / "video_manifest.md"
+            )
+        )
+        if staged_review_projection != review_projection_before:
+            raise RuntimeError(
+                "storyboard materialization review projection changed before "
+                "transaction commit"
+            )
+        _validate_scene_storyboard_create_run(
+            run_id,
+            strict_visual_quality=False,
+            run_dir_override=staging_run_dir,
+            validate_base=False,
+        )
+        storyboard_paths = [
+            str(path)
+            for path in staged_result.get("storyboards", [])
+        ]
+        relative_targets = [
+            *storyboard_paths,
+            "video_generation_requests.md",
+            "video_manifest.md",
+            "state.txt",
+            "run_status.json",
+            "p000_index.md",
+        ]
+        transaction_dir = _prepare_storyboard_transaction(
+            run_dir,
+            relative_targets,
+        )
+        try:
+            for relative in storyboard_paths:
+                staged_path = resolve_run_relative(
+                    staging_run_dir,
+                    relative,
+                )
+                validate_image_bytes(staged_path)
+                _atomic_write_bytes(
+                    _storyboard_transaction_target_path(
+                        run_dir,
+                        relative,
+                    ),
+                    staged_path.read_bytes(),
+                )
+            for relative in (
+                "video_generation_requests.md",
+                "video_manifest.md",
+            ):
+                _atomic_write_bytes(
+                    _storyboard_transaction_target_path(
+                        run_dir,
+                        relative,
+                    ),
+                    resolve_run_relative(
+                        staging_run_dir,
+                        relative,
+                    ).read_bytes(),
+                )
+            if (
+                video_manifest_review_projection_sha256(
+                    run_dir / "video_manifest.md"
+                )
+                != review_projection_before
+            ):
+                raise RuntimeError(
+                    "storyboard materialization review projection changed "
+                    "during transaction commit"
+                )
+            state_updates = staged_result.get("_stateUpdates")
+            if not isinstance(state_updates, dict):
+                raise RuntimeError(
+                    "storyboard staging did not return state updates"
+                )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    str(key): str(value)
+                    for key, value in state_updates.items()
+                },
+            )
+        except Exception:
+            _recover_storyboard_transaction(run_dir)
+            raise
+        shutil.rmtree(transaction_dir)
+        return {
+            key: value
+            for key, value in staged_result.items()
+            if not key.startswith("_")
+        }
+
+
+def _validate_scene_storyboard_create_run(
+    run_id: str,
+    *,
+    strict_visual_quality: bool = True,
+    run_dir_override: Path | None = None,
+    validate_base: bool = True,
+) -> None:
+    run_dir = (
+        run_dir_override
+        if run_dir_override is not None
+        else safe_run_dir(run_id, ROOT)
+    )
+    if run_dir_override is None:
+        _recover_storyboard_transaction(run_dir)
+    if validate_base:
+        _validate_frontend_create_run(
+            run_id,
+            strict_visual_quality=strict_visual_quality,
+        )
     _manifest_path, _original_text, data = _read_manifest_data(run_dir)
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
         raise RuntimeError("storyboard create incomplete: video_manifest.md scenes must be a list")
+    _validate_unique_storyboard_scene_selectors(data)
+    render_unit_issues = _render_unit_timeline_issues(data)
+    if render_unit_issues:
+        raise RuntimeError(
+            "storyboard create incomplete: invalid render-unit timeline: "
+            + "; ".join(render_unit_issues[:20])
+        )
     expected_units: list[str] = []
-    expected_storyboards: list[str] = []
+    expected_bindings: dict[str, dict[str, Any]] = {}
     for scene_index, scene in enumerate(scenes, start=1):
         if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
             continue
@@ -9503,6 +11387,34 @@ def _validate_scene_storyboard_create_run(run_id: str, *, strict_visual_quality:
                     f"storyboard create incomplete: {scene_selector} render_unit "
                     "is missing storyboard input"
                 )
+            try:
+                _validate_run_relative_image_path(
+                    run_dir,
+                    storyboard,
+                    must_exist=True,
+                )
+                storyboard_path = resolve_run_relative(
+                    run_dir,
+                    storyboard,
+                )
+                validate_image_bytes(storyboard_path)
+                from PIL import Image  # type: ignore[import-not-found]
+
+                with Image.open(storyboard_path) as storyboard_image:
+                    storyboard_size = storyboard_image.size
+                    storyboard_image.verify()
+            except Exception as exc:
+                raise RuntimeError(
+                    "storyboard create incomplete: "
+                    f"{scene_selector} render_unit storyboard image is invalid: "
+                    f"{exc}"
+                ) from exc
+            if storyboard_size != (1920, 1080):
+                raise RuntimeError(
+                    "storyboard create incomplete: "
+                    f"{scene_selector} render_unit storyboard image must be "
+                    f"1920x1080, got {storyboard_size[0]}x{storyboard_size[1]}"
+                )
             if first_frame:
                 raise RuntimeError(
                     f"storyboard create incomplete: {scene_selector} render_unit "
@@ -9527,21 +11439,270 @@ def _validate_scene_storyboard_create_run(run_id: str, *, strict_visual_quality:
                 raise RuntimeError(
                     f"storyboard create incomplete: {scene_selector} render_unit has invalid unit_id"
                 )
-            expected_units.append(f"{scene_selector}_unit{normalized_unit_id}")
-            expected_storyboards.append(storyboard)
+            request_id = f"{scene_selector}_unit{normalized_unit_id}"
+            if request_id in expected_bindings:
+                raise RuntimeError(
+                    "storyboard create incomplete: duplicate render unit request id "
+                    f"{request_id}"
+                )
+            source_cut_ids = [
+                str(value).strip()
+                for value in _list_value(unit.get("source_cut_ids"))
+                if str(value).strip()
+            ]
+            payload = _dict_value(
+                video_generation.get("api_prompt_payload")
+            )
+            prompt = str(payload.get("prompt") or "")
+            negative_prompt = str(payload.get("negative_prompt") or "")
+            declared_prompt_sha256 = str(payload.get("sha256") or "")
+            actual_prompt_sha256 = hashlib.sha256(
+                prompt.encode("utf-8")
+            ).hexdigest()
+            if declared_prompt_sha256 != actual_prompt_sha256:
+                raise RuntimeError(
+                    "storyboard create incomplete: "
+                    f"{request_id} manifest prompt_sha256 mismatch"
+                )
+            expected_units.append(request_id)
+            expected_bindings[request_id] = {
+                "tool": str(video_generation.get("tool") or "").strip(),
+                "output": str(video_generation.get("output") or "").strip(),
+                "duration_seconds": str(
+                    int(video_generation.get("duration_seconds") or 0)
+                ),
+                "quality": str(
+                    video_generation.get("quality") or ""
+                ).strip(),
+                "aspect_ratio": str(
+                    video_generation.get("aspect_ratio") or ""
+                ).strip(),
+                "first_frame": "",
+                "storyboard_image": storyboard,
+                "prompt_policy_version": str(
+                    payload.get("policy_version") or ""
+                ).strip(),
+                "compiler_version": str(
+                    payload.get("compiler_version") or ""
+                ).strip(),
+                "source_digest": str(
+                    payload.get("source_digest") or ""
+                ).strip(),
+                "prompt_sha256": declared_prompt_sha256,
+                "negative_prompt_sha256": hashlib.sha256(
+                    negative_prompt.encode("utf-8")
+                ).hexdigest(),
+                "references_digest": sha256_canonical_json(references),
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "source_cuts": source_cut_ids,
+                "references": references,
+            }
     if not expected_units:
         raise RuntimeError("storyboard create incomplete: no storyboard render_units found")
     request_path = run_dir / "video_generation_requests.md"
     if not request_path.is_file():
         raise RuntimeError("storyboard create incomplete: missing video_generation_requests.md")
     request_text = request_path.read_text(encoding="utf-8", errors="replace")
-    missing_units = [unit_id for unit_id in expected_units if f"## {unit_id}" not in request_text]
-    missing_storyboards = [path for path in expected_storyboards if path not in request_text]
-    if missing_units or missing_storyboards:
+    _prefix, sections = _split_video_request_sections(request_text)
+    actual_units = [title for title, _lines in sections]
+    if actual_units != expected_units:
         raise RuntimeError(
-            "storyboard create incomplete: video_generation_requests.md missing "
-            + ", ".join([*missing_units, *missing_storyboards])
+            "storyboard create incomplete: video_generation_requests.md section "
+            f"identity/order mismatch: expected={expected_units}, got={actual_units}"
         )
+    for request_id, expected in expected_bindings.items():
+        try:
+            binding = _reviewed_video_request_binding(
+                run_dir,
+                request_id,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "storyboard create incomplete: "
+                f"{request_id} request section is missing or duplicated"
+            ) from exc
+        mismatches = [
+            field
+            for field, expected_value in expected.items()
+            if binding.get(field) != expected_value
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "storyboard create incomplete: "
+                f"{request_id} request binding mismatch: "
+                + ", ".join(mismatches)
+            )
+
+
+def _scene_storyboard_source_bindings_are_current(run_dir: Path) -> bool:
+    """Bind currentness to every source cut and compiled reference byte."""
+
+    try:
+        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return False
+    scenes = data.get("scenes")
+    if not isinstance(scenes, list):
+        return False
+    found_unit = False
+    for scene in scenes:
+        if (
+            not isinstance(scene, dict)
+            or str(scene.get("kind") or "").strip().endswith("_reference")
+        ):
+            continue
+        render_units = scene.get("render_units")
+        if not isinstance(render_units, list) or not render_units:
+            return False
+        cuts_by_id: dict[str, dict[str, Any]] = {}
+        for cut in _list_value(scene.get("cuts")):
+            if (
+                not isinstance(cut, dict)
+                or str(cut.get("cut_status") or "active").strip().lower()
+                == "deleted"
+            ):
+                continue
+            cut_id = normalize_dotted_id(cut.get("cut_id"))
+            if cut_id is None or cut_id in cuts_by_id:
+                return False
+            cuts_by_id[cut_id] = cut
+        for unit in render_units:
+            if not isinstance(unit, dict):
+                return False
+            found_unit = True
+            source_ids = [
+                normalize_dotted_id(value)
+                for value in _list_value(unit.get("source_cut_ids"))
+            ]
+            if (
+                not source_ids
+                or any(source_id is None for source_id in source_ids)
+                or len(source_ids) != len(set(source_ids))
+            ):
+                return False
+            source_outputs: list[str] = []
+            for source_id in source_ids:
+                cut = cuts_by_id.get(source_id or "")
+                if cut is None:
+                    return False
+                generation = _dict_value(cut.get("image_generation"))
+                output = str(generation.get("output") or "").strip()
+                if not output:
+                    return False
+                source_outputs.append(output)
+            stored_source_hashes = unit.get("source_cut_image_sha256s")
+            if not isinstance(stored_source_hashes, dict):
+                return False
+            current_source_hashes = _video_reference_content_sha256(
+                run_dir,
+                source_outputs,
+            )
+            if (
+                len(current_source_hashes) != len(source_outputs)
+                or {
+                    str(key): str(value)
+                    for key, value in stored_source_hashes.items()
+                }
+                != current_source_hashes
+            ):
+                return False
+
+            video_generation = _dict_value(unit.get("video_generation"))
+            references = [
+                str(value).strip()
+                for value in _list_value(video_generation.get("references"))
+                if str(value).strip()
+            ]
+            payload = _dict_value(
+                video_generation.get("api_prompt_payload")
+            )
+            request_binding = _dict_value(
+                payload.get("provider_request_binding")
+            )
+            execution_options = _dict_value(
+                request_binding.get("execution_options")
+            )
+            stored_reference_hashes = execution_options.get(
+                "reference_content_sha256"
+            )
+            if not isinstance(stored_reference_hashes, dict):
+                return False
+            current_reference_hashes = _video_reference_content_sha256(
+                run_dir,
+                references,
+            )
+            if (
+                len(current_reference_hashes) != len(references)
+                or {
+                    str(key): str(value)
+                    for key, value in stored_reference_hashes.items()
+                }
+                != current_reference_hashes
+            ):
+                return False
+    return found_unit
+
+
+def _scene_storyboard_materialization_is_current(run_id: str) -> bool:
+    run_dir = safe_run_dir(run_id, ROOT)
+    try:
+        _validate_scene_storyboard_create_run(
+            run_id,
+            strict_visual_quality=False,
+            validate_base=False,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return (
+        _scene_storyboard_source_bindings_are_current(run_dir)
+        and _video_prompt_stage_materialization_complete(run_dir)
+    )
+
+
+def _finalize_scene_storyboard_p680(run_id: str) -> dict[str, Any]:
+    """Finalize one storyboard p680 handoff without changing reviewed inputs."""
+
+    run_dir = safe_run_dir(run_id, ROOT)
+    _validate_frontend_create_run(
+        run_id,
+        strict_visual_quality=True,
+    )
+    if _scene_storyboard_materialization_is_current(run_id):
+        _validate_frontend_create_run(
+            run_id,
+            strict_visual_quality=True,
+        )
+        return {"alreadyCurrent": True}
+
+    review_projection_before = (
+        video_manifest_review_projection_sha256(
+            run_dir / "video_manifest.md"
+        )
+    )
+    result = dict(
+        _materialize_scene_storyboard_video_requests(run_id)
+    )
+    review_projection_after = (
+        video_manifest_review_projection_sha256(
+            run_dir / "video_manifest.md"
+        )
+    )
+    if review_projection_after != review_projection_before:
+        raise RuntimeError(
+            "storyboard p680 finalizer changed the review projection"
+        )
+    _validate_scene_storyboard_create_run(
+        run_id,
+        strict_visual_quality=False,
+        validate_base=False,
+    )
+    _validate_frontend_create_run(
+        run_id,
+        strict_visual_quality=True,
+    )
+    result["alreadyCurrent"] = False
+    return result
 
 
 def _asset_create_target(asset_type: str) -> str:
@@ -10870,6 +13031,16 @@ def _has_completed_app_server_image_provenance(
             continue
         if logged_destination != destination_key:
             continue
+        if (
+            payload.get("provenanceInvalidation") is True
+            and str(payload.get("operation") or "") == "candidate_insertion"
+            and str(payload.get("status") or "").lower() == "invalidated"
+        ):
+            # The log directory is reverse chronological.  A later canonical
+            # generation receipt may re-establish provenance, but an insertion
+            # receipt always supersedes every older provider receipt—even when
+            # the candidate is byte-identical to the previous output.
+            return False
         if str(payload.get("status") or "").lower() not in {"completed", "succeeded"}:
             continue
         provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
@@ -11001,7 +13172,16 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
         return
     if not str(getattr(item, "prompt", "") or "").strip():
         raise RuntimeError(f"{kind} request has no prompt: {item.id}")
-    destination = resolve_run_relative(run_dir, str(item.output))
+    try:
+        _destination_relative, destination = _validate_generation_destination_nofollow(
+            run_dir,
+            str(item.output),
+            kind=kind,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"unsafe {kind} request output for {item.id}: {exc}"
+        ) from exc
     references: list[Path] = []
     for ref in getattr(item, "references", []) or []:
         reference = resolve_run_relative(run_dir, str(ref))
@@ -11105,6 +13285,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
     result = None
     debug_log = None
     retention_record: dict[str, Any] | None = None
+    copy_receipt: _GenerationDestinationCopyReceipt | None = None
     try:
         await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         async with _generated_images_fallback_claim_scope(allow_generated_images_fallback):
@@ -11189,7 +13370,31 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                     await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         if result.saved_path is None:
             raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
-        copy_saved_image(result.saved_path, destination)
+        try:
+            _destination_relative, destination = _validate_generation_destination_nofollow(
+                run_dir,
+                str(item.output),
+                kind=kind,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"unsafe {kind} request output before copy for {item.id}: {exc}"
+            ) from exc
+        try:
+            copy_receipt = (
+                _copy_saved_image_to_generation_destination_nofollow(
+                    run_dir=run_dir,
+                    saved_path=result.saved_path,
+                    output=str(item.output),
+                    kind=kind,
+                )
+            )
+            destination = copy_receipt.destination
+        except _UnsafeGenerationDestinationError as exc:
+            raise RuntimeError(
+                f"unsafe {kind} request output destination during copy "
+                f"for {item.id}: {exc}"
+            ) from exc
         debug_log = write_app_server_image_debug_log(
             run_dir=run_dir,
             item_id=item.id,
@@ -11205,6 +13410,9 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
             compiler_version=getattr(item, "compiler_version", None),
             source_digest=getattr(item, "source_digest", None),
             result=result,
+            inspect_destination=False,
+            trusted_output_sha256=copy_receipt.output_sha256,
+            trusted_destination_size_bytes=copy_receipt.size_bytes,
         )
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -11217,8 +13425,8 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                 "debugLog": debug_log.relative_to(run_dir).as_posix() if debug_log else "",
                 "savedPath": str(result.saved_path),
                 "source": getattr(result, "source", "app_server"),
-                "destinationExists": destination.exists(),
-                "outputSha256": _file_sha256(destination),
+                "destinationExists": True,
+                "outputSha256": copy_receipt.output_sha256,
                 "generationJobId": generation_job_id,
                 "turnId": getattr(result, "turn_id", None),
                 "imageGenerationItemId": getattr(result, "image_generation_item_id", None),
@@ -11245,6 +13453,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
             source_digest=getattr(item, "source_digest", None),
             result=result,
             error=str(exc),
+            inspect_destination=False,
         )
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -11278,17 +13487,42 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
         raise RuntimeError(f"{kind} request file has no {kind} items")
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
+    partial_projection: dict[str, Any] | None = None
     blocked_item_ids = _semantic_blocked_image_item_ids(run_dir, items) if kind == "scene" else set()
     skipped_items = [item for item in items if str(getattr(item, "id", "") or "") in blocked_item_ids]
     if skipped_items:
+        partial_projection = _load_current_partial_media_projection(
+            run_dir,
+            items=items,
+        )
+        _assert_partial_media_blocked_destinations_absent(
+            run_dir,
+            partial_projection,
+        )
         items = [item for item in items if str(getattr(item, "id", "") or "") not in blocked_item_ids]
         blocked_ids = [str(getattr(item, "id", "") or "") for item in skipped_items]
+        submitted_ids = [
+            str(getattr(item, "id", "") or "")
+            for item in items
+        ]
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                "review.semantic.scene_detail.partial_media_generated": "true",
+                "review.semantic.partial_media.generated": "true",
+                "review.semantic.partial_media.request_revision": (
+                    partial_projection["request_revision"]
+                ),
+                "review.semantic.partial_media.projection_sha256": (
+                    partial_projection["projection_sha256"]
+                ),
                 "review.semantic.partial_media.blocked_image_items": ", ".join(blocked_ids),
                 "review.semantic.partial_media.blocked_image_item_count": str(len(blocked_ids)),
+                "review.semantic.partial_media.synthetic_failed_candidates": (
+                    ", ".join(blocked_ids)
+                ),
+                "review.semantic.partial_media.provider_submitted_image_items": (
+                    ", ".join(submitted_ids)
+                ),
             },
         )
         write_app_server_debug_log(
@@ -11314,7 +13548,9 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
                 "skippedItemCount": len(skipped_items),
             },
         )
-        return
+        raise RuntimeError(
+            "localized partial media cannot block every scene image request"
+        )
     groups = _build_generation_groups(items, run_dir=run_dir, kind=kind)
     if not groups:
         raise RuntimeError(f"{kind} request file has no output items")
@@ -11433,12 +13669,64 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
             "provenancePolicy": provenance_policy,
         },
     )
+    if partial_projection is not None:
+        generated_ids = [
+            str(getattr(item, "id", "") or "")
+            for item in items
+            if item.output
+            and resolve_run_relative(run_dir, item.output).is_file()
+        ]
+        receipt = write_partial_media_generation_receipt(
+            run_dir,
+            projection=partial_projection,
+            provider_submitted_item_ids=[
+                str(getattr(item, "id", "") or "")
+                for item in items
+            ],
+            generated_item_ids=generated_ids,
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "review.semantic.partial_media.receipt": (
+                    PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
+                ),
+                "review.semantic.partial_media.receipt_sha256": (
+                    receipt["receipt_sha256"]
+                ),
+                "image_generation.status": "partial",
+                "image_generation.generated_count": str(len(generated_ids)),
+                "image_generation.blocked_item_count": str(
+                    len(partial_projection["blocked_image_item_ids"])
+                ),
+                "image_generation.blocked_item_ids": ", ".join(
+                    partial_projection["blocked_image_item_ids"]
+                ),
+            },
+        )
 
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
     issues: list[str] = []
+    snapshot_filename = {
+        "asset": "asset_generation_request_snapshot.json",
+        "scene": "image_generation_request_snapshot.json",
+    }.get(kind)
+    if snapshot_filename is None:
+        raise ValueError("kind must be asset or scene")
+    snapshot_path = run_dir / snapshot_filename
+    if not snapshot_path.is_file():
+        raise RuntimeError(
+            f"{kind} image generation incomplete: missing {snapshot_filename}"
+        )
+    try:
+        request_items = load_request_items(run_dir, kind)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"{kind} image generation incomplete: invalid {snapshot_filename}: {exc}"
+        ) from exc
     blocked_item_ids = _semantic_blocked_image_item_ids(run_dir) if kind == "scene" else set()
-    for item in load_request_items(run_dir, kind):
+    for item in request_items:
         if str(getattr(item, "id", "") or "") in blocked_item_ids:
             continue
         if not item.output:
@@ -11451,7 +13739,13 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
                 issues.append(item.output)
                 continue
             validate_image_bytes(output)
-            if str(getattr(item, "prompt_policy_version", "") or "") == "image_api_prompt_v2":
+            if (
+                kind == "asset"
+                or str(
+                    getattr(item, "prompt_policy_version", "") or ""
+                )
+                == "image_api_prompt_v2"
+            ):
                 references = [resolve_run_relative(run_dir, str(ref)) for ref in item.references]
                 reference_sha256s = [_file_sha256(reference) for reference in references]
                 if not _has_completed_app_server_image_provenance(
@@ -11472,7 +13766,128 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
         raise RuntimeError(f"{kind} image generation incomplete: {', '.join(issues)}")
 
 
-def _validate_p680_visual_quality(run_dir: Path) -> None:
+def _p680_image_stage_report_issues(
+    run_dir: Path,
+    *,
+    report_was_absent: bool,
+    previous_report_mtime_ns: int | None,
+    previous_report_sha256: str | None,
+    mode: Literal["pre_handoff", "terminal"],
+) -> list[str]:
+    """Require a fresh, run-bound p680 report with no failed checks."""
+
+    report_path = run_dir / "eval_report.json"
+    if not report_path.is_file():
+        return ["eval_report.json is missing"]
+    try:
+        current_report_sha256 = _file_sha256(report_path)
+        current_report_mtime_ns = report_path.stat().st_mtime_ns
+    except OSError:
+        return ["eval_report.json is unreadable"]
+    if (
+        not report_was_absent
+        and current_report_sha256 == previous_report_sha256
+        and current_report_mtime_ns == previous_report_mtime_ns
+    ):
+        return ["eval_report.json was not refreshed by the p680 verifier"]
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["eval_report.json is malformed"]
+    if not isinstance(report, dict) or report.get("stage_target") != "p680":
+        return ["eval_report.json does not describe the p680 target"]
+    report_run_dir = str(report.get("run_dir") or "").strip()
+    if not report_run_dir:
+        return ["eval_report.json does not bind the reviewed run"]
+    try:
+        if Path(report_run_dir).resolve() != run_dir.resolve():
+            return ["eval_report.json belongs to a different run"]
+    except OSError:
+        return ["eval_report.json run binding is unreadable"]
+    stages = report.get("stages")
+    if not isinstance(stages, dict):
+        return ["eval_report.json stages are missing"]
+
+    stage_names = (
+        tuple(stages)
+        if mode == "terminal"
+        else ("asset", "image")
+    )
+    if not stage_names:
+        return ["eval_report.json emitted no stages"]
+    for stage_name in stage_names:
+        normalized_stage_name = str(stage_name or "").strip()
+        if not normalized_stage_name:
+            return ["eval_report.json contains an unnamed stage"]
+        stage = stages.get(stage_name)
+        if not isinstance(stage, dict):
+            return [
+                f"eval_report.json is missing the {normalized_stage_name} stage"
+            ]
+        checks = stage.get("checks")
+        if not isinstance(checks, list):
+            return [
+                f"eval_report.json {normalized_stage_name} stage checks are missing"
+            ]
+        if normalized_stage_name in {"asset", "image"} and not checks:
+            return [
+                f"eval_report.json {normalized_stage_name} stage checks are empty"
+            ]
+        failed_check_ids: set[str] = set()
+        for check in checks:
+            if not isinstance(check, dict):
+                return [
+                    f"eval_report.json {normalized_stage_name} stage contains a malformed check"
+                ]
+            check_id = str(check.get("id") or "").strip()
+            if not check_id:
+                return [
+                    f"eval_report.json {normalized_stage_name} stage contains a check without an id"
+                ]
+            if check.get("passed") is not True:
+                failed_check_ids.add(check_id)
+        if failed_check_ids:
+            return [
+                f"{normalized_stage_name} stage check did not pass: "
+                + ", ".join(sorted(failed_check_ids))
+            ]
+        if stage.get("passed") is not True:
+            return [
+                f"eval_report.json {normalized_stage_name} stage did not pass"
+            ]
+
+    if mode == "terminal":
+        overall = report.get("overall")
+        if not isinstance(overall, dict):
+            return ["eval_report.json overall result is missing"]
+        if overall.get("passed") is not True:
+            return ["eval_report.json overall result did not pass"]
+        failed_stages = overall.get("failed_stages")
+        if failed_stages not in (None, []):
+            return [
+                "eval_report.json overall failed_stages must be empty"
+            ]
+    return []
+
+
+def _validate_p680_visual_quality(
+    run_dir: Path,
+    *,
+    mode: Literal["pre_handoff", "terminal"] = "pre_handoff",
+) -> None:
+    if mode not in {"pre_handoff", "terminal"}:
+        raise ValueError("p680 validation mode must be pre_handoff or terminal")
+    report_path = run_dir / "eval_report.json"
+    report_was_absent = not report_path.is_file()
+    previous_report_mtime_ns: int | None = None
+    previous_report_sha256: str | None = None
+    baseline_read_failed = False
+    if not report_was_absent:
+        try:
+            previous_report_mtime_ns = report_path.stat().st_mtime_ns
+            previous_report_sha256 = _file_sha256(report_path)
+        except OSError:
+            baseline_read_failed = True
     completed = subprocess.run(
         [
             sys.executable,
@@ -11492,34 +13907,260 @@ def _validate_p680_visual_quality(run_dir: Path) -> None:
         timeout=300,
         check=False,
     )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"p680 visual quality gate failed: {detail}")
+    issues = _p680_image_stage_report_issues(
+        run_dir,
+        report_was_absent=report_was_absent,
+        previous_report_mtime_ns=previous_report_mtime_ns,
+        previous_report_sha256=previous_report_sha256,
+        mode=mode,
+    )
+    if mode == "terminal" and completed.returncode != 0:
+        issues.insert(
+            0,
+            f"p680 verifier exited with status {completed.returncode}",
+        )
+    if baseline_read_failed:
+        issues.insert(
+            0,
+            "existing eval_report.json baseline could not be read before verification",
+        )
+    if issues:
+        process_detail = completed.stderr.strip() or completed.stdout.strip()
+        detail = "; ".join(issues)
+        if process_detail:
+            detail = f"{detail}; verifier: {process_detail}"
+        gate_name = (
+            "p680 terminal verification"
+            if mode == "terminal"
+            else "p680 visual quality gate"
+        )
+        raise RuntimeError(f"{gate_name} failed: {detail}")
+
+
+def _p560_failed_check_ids_from_eval_report(
+    run_dir: Path,
+    *,
+    report_was_absent: bool,
+    baseline_read_failed: bool,
+    previous_report_mtime_ns: int | None,
+    previous_report_sha256: str | None,
+) -> tuple[str, ...]:
+    if baseline_read_failed:
+        return ("eval_report.baseline_unreadable",)
+    report_path = run_dir / "eval_report.json"
+    if not report_path.is_file():
+        return ("eval_report.missing",)
+    try:
+        current_report_sha256 = _file_sha256(report_path)
+    except OSError:
+        return ("eval_report.unreadable",)
+    if not report_was_absent and current_report_sha256 == previous_report_sha256:
+        try:
+            current_report_mtime_ns = report_path.stat().st_mtime_ns
+        except OSError:
+            return ("eval_report.unreadable",)
+        if current_report_mtime_ns == previous_report_mtime_ns:
+            return ("eval_report.stale",)
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ("eval_report.malformed",)
+    if (
+        not isinstance(report, dict)
+        or report.get("flow") != "immersive"
+        or report.get("profile") != "standard"
+        or report.get("stage_target") != "p570"
+    ):
+        return ("eval_report.contract_mismatch",)
+    overall = report.get("overall")
+    if not isinstance(overall, dict) or overall.get("passed") is not False:
+        return ("eval_report.contract_mismatch",)
+    report_run_dir = str(report.get("run_dir") or "").strip()
+    if not report_run_dir:
+        return ("eval_report.contract_mismatch",)
+    try:
+        if Path(report_run_dir).resolve() != run_dir.resolve():
+            return ("eval_report.run_mismatch",)
+    except OSError:
+        return ("eval_report.run_mismatch",)
+    stages = report.get("stages")
+    if (
+        not isinstance(stages, dict)
+        or set(stages) != P560_EVAL_EXPECTED_STAGES
+    ):
+        return ("eval_report.contract_mismatch",)
+    failed_check_ids: list[str] = []
+    failed_stage_names: set[str] = set()
+    for stage_name, stage in stages.items():
+        if (
+            not isinstance(stage, dict)
+            or stage.get("stage") != stage_name
+            or not isinstance(stage.get("passed"), bool)
+        ):
+            return ("eval_report.contract_mismatch",)
+        checks = stage.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return ("eval_report.contract_mismatch",)
+        stage_failed_check_ids: list[str] = []
+        for check in checks:
+            if (
+                not isinstance(check, dict)
+                or not isinstance(check.get("passed"), bool)
+            ):
+                return ("eval_report.contract_mismatch",)
+            check_id = str(check.get("id") or "").strip()
+            if (
+                check_id in P560_PROMPT_REPAIRABLE_CHECK_IDS
+                and stage_name != "asset"
+            ):
+                return ("eval_report.contract_mismatch",)
+            if (
+                check.get("passed") is False
+                and str(check.get("kind") or "").strip().lower() != "warning"
+            ):
+                normalized_check_id = (
+                    check_id or f"{stage_name}.check_id_missing"
+                )
+                stage_failed_check_ids.append(normalized_check_id)
+                failed_check_ids.append(normalized_check_id)
+        stage_passed = not stage_failed_check_ids
+        if stage.get("passed") is not stage_passed:
+            return ("eval_report.contract_mismatch",)
+        if not stage_passed:
+            failed_stage_names.add(stage_name)
+    overall_failed_stages = overall.get("failed_stages")
+    if (
+        not isinstance(overall_failed_stages, list)
+        or {str(stage).strip() for stage in overall_failed_stages}
+        != failed_stage_names
+    ):
+        return ("eval_report.contract_mismatch",)
+    if not failed_check_ids:
+        return ("eval_report.failed_without_failed_checks",)
+    return tuple(dict.fromkeys(failed_check_ids))
+
+
+def _p560_visual_failure_is_prompt_repairable(
+    run_dir: Path,
+    failed_check_ids: tuple[str, ...],
+) -> bool:
+    if set(failed_check_ids) != P560_PROMPT_REPAIRABLE_CHECK_IDS:
+        return False
+    report_path = run_dir / "eval_report.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    stages = report.get("stages") if isinstance(report, dict) else None
+    asset_stage = stages.get("asset") if isinstance(stages, dict) else None
+    details = (
+        asset_stage.get("details")
+        if isinstance(asset_stage, dict)
+        else None
+    )
+    if not isinstance(details, dict):
+        return False
+    samples = details.get("asset_visual_quality_samples")
+    issue_lines = details.get("asset_visual_quality_issues")
+    if not isinstance(samples, list) or not isinstance(issue_lines, list):
+        return False
+    failing_samples = [
+        sample
+        for sample in samples
+        if isinstance(sample, dict) and str(sample.get("issue") or "").strip()
+    ]
+    if (
+        not failing_samples
+        or len(failing_samples) != len(issue_lines)
+        or len(issue_lines) >= 20
+    ):
+        return False
+    try:
+        bootstrap_asset_ids = {
+            str(getattr(item, "id", "") or "").strip()
+            for item in _bootstrap_asset_items(run_dir)
+            if str(getattr(item, "id", "") or "").strip()
+        }
+    except Exception:
+        return False
+    return bool(bootstrap_asset_ids) and all(
+        str(sample.get("asset_id") or "").strip() in bootstrap_asset_ids
+        and str(sample.get("issue") or "").strip()
+        in P560_PROMPT_REPAIRABLE_VISUAL_ISSUES
+        for sample in failing_samples
+    )
 
 
 def _validate_p560_asset_quality(run_dir: Path) -> None:
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(APP_ROOT / "scripts" / "verify-pipeline.py"),
-            "--run-dir",
-            str(run_dir),
-            "--flow",
-            "immersive",
-            "--profile",
-            "standard",
-            "--stage-target",
-            "p570",
-        ],
-        cwd=APP_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
+    report_path = run_dir / "eval_report.json"
+    report_was_absent = not report_path.is_file()
+    baseline_read_failed = False
+    previous_report_mtime_ns: int | None = None
+    previous_report_sha256: str | None = None
+    if not report_was_absent:
+        try:
+            previous_report_mtime_ns = report_path.stat().st_mtime_ns
+            previous_report_sha256 = _file_sha256(report_path)
+        except OSError:
+            baseline_read_failed = True
+            previous_report_mtime_ns = None
+            previous_report_sha256 = None
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(APP_ROOT / "scripts" / "verify-pipeline.py"),
+                "--run-dir",
+                str(run_dir),
+                "--flow",
+                "immersive",
+                "--profile",
+                "standard",
+                "--stage-target",
+                "p570",
+            ],
+            cwd=APP_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise P560AssetGateError(
+            f"p560 asset gate verifier timed out: {exc}",
+            failed_check_ids=("verifier.timeout",),
+            retryable_visual_quality=False,
+        ) from exc
+    except OSError as exc:
+        raise P560AssetGateError(
+            f"p560 asset gate verifier could not start: {exc}",
+            failed_check_ids=("verifier.spawn_failed",),
+            retryable_visual_quality=False,
+        ) from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"p560 bootstrap asset visual gate failed: {detail}")
+        failed_check_ids = _p560_failed_check_ids_from_eval_report(
+            run_dir,
+            report_was_absent=report_was_absent,
+            baseline_read_failed=baseline_read_failed,
+            previous_report_mtime_ns=previous_report_mtime_ns,
+            previous_report_sha256=previous_report_sha256,
+        )
+        retryable_visual_quality = (
+            _p560_visual_failure_is_prompt_repairable(
+                run_dir,
+                failed_check_ids,
+            )
+        )
+        failed_checks = ", ".join(failed_check_ids)
+        raise P560AssetGateError(
+            "p560 asset gate failed"
+            f" (failed checks: {failed_checks}; "
+            f"classification: {'visual_prompt_retry' if retryable_visual_quality else 'non_visual_fail_closed'}): "
+            f"{detail}",
+            failed_check_ids=failed_check_ids,
+            retryable_visual_quality=retryable_visual_quality,
+        )
 
 
 def _mark_asset_generation_handoff(
@@ -11547,6 +14188,74 @@ def _mark_asset_generation_handoff(
                 "done" if asset_quality_passed else "awaiting_approval"
             ),
         },
+    )
+    _finalize_p500_supervisor_result(
+        run_dir,
+        terminal_status=continuity_status,
+    )
+
+
+def _finalize_p500_supervisor_result(
+    run_dir: Path,
+    *,
+    terminal_status: str,
+) -> None:
+    """Publish the truthful p500 handoff only after asset generation returns."""
+
+    result_path = run_dir / "logs/orchestration/p500.supervisor_result.json"
+    if not result_path.is_file():
+        return
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    completed = _dedupe_preserve_order(
+        [
+            *[
+                str(value).strip()
+                for value in payload.get("completed_slots") or []
+                if str(value).strip()
+            ],
+            "p510",
+            "p520",
+            "p530",
+            "p540",
+            "p550",
+            "p560",
+            "p570",
+        ]
+    )
+    finished_at = now_iso()
+    result_relpath = "logs/orchestration/p500.supervisor_result.json"
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "orchestration.p500.supervisor.call_status": "returned",
+            "orchestration.p500.supervisor.status": "done",
+            "orchestration.p500.supervisor.finished_at": finished_at,
+            "orchestration.p500.supervisor.result": result_relpath,
+        },
+    )
+    payload.update(
+        {
+            "bucket": "p500",
+            "status": "done",
+            "completed_slots": completed,
+            "state_keys": {
+                "orchestration.p500.supervisor.call_status": "returned",
+                "orchestration.p500.supervisor.status": "done",
+                "orchestration.p500.supervisor.result": result_relpath,
+                "slot.p570.status": terminal_status,
+            },
+            "next_bucket": "p600",
+            "finished_at": finished_at,
+        }
+    )
+    _atomic_write_text(
+        result_path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     )
 
 
@@ -11620,13 +14329,41 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
 
 def _mark_image_generation_review_ready(run_id: str) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
+    scene_items = load_request_items(run_dir, "scene")
+    blocked_item_ids = _semantic_blocked_image_item_ids(
+        run_dir,
+        scene_items,
+    )
+    generated_count = sum(
+        1
+        for item in scene_items
+        if item.output
+        and str(getattr(item, "id", "") or "") not in blocked_item_ids
+        and resolve_run_relative(run_dir, item.output).is_file()
+    )
+    partial_media = bool(blocked_item_ids)
+    _finalize_p600_supervisor_result(
+        run_dir,
+        completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
+        terminal_slot="p680",
+        terminal_status="awaiting_approval",
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
             "status": "P680",
-            "runtime.stage": "scene_images_ready_for_review",
+            "runtime.stage": (
+                "scene_images_partial_ready_for_review"
+                if partial_media
+                else "scene_images_ready_for_review"
+            ),
             "slot.p660.status": "done",
-            "slot.p660.note": "scene images generated",
+            "slot.p660.note": (
+                "unblocked scene images generated; localized semantic "
+                "failures retained as blocked candidates"
+                if partial_media
+                else "scene images generated"
+            ),
             "slot.p670.status": "skipped",
             "slot.p670.note": "scene image semantic QA removed; frontend human review is next",
             "slot.p680.status": "awaiting_approval",
@@ -11634,13 +14371,23 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
             "stage.scene_implementation.status": "awaiting_approval",
             "review.image.status": "pending",
             "gate.image_review": "required",
+            "review.semantic.create_media_generated": "true",
+            "review.semantic.create_scene_media_generated": "true",
+            "image_generation.status": (
+                "partial" if partial_media else "completed"
+            ),
+            "image_generation.started": "true",
+            "image_generation.generated_count": str(generated_count),
+            "image_generation.blocked_item_count": str(
+                len(blocked_item_ids)
+            ),
+            "image_generation.blocked_item_ids": ", ".join(
+                sorted(blocked_item_ids)
+            ),
+            "image_generation.blocked_by": "",
+            "image_generation.block_reason": "",
+            "image_generation.finished_at": now_iso(),
         },
-    )
-    _finalize_p600_supervisor_result(
-        run_dir,
-        completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
-        terminal_slot="p680",
-        terminal_status="awaiting_approval",
     )
 
 
@@ -11648,7 +14395,7 @@ def _validate_image_review_ready(run_id: str) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
-    _validate_p680_visual_quality(run_dir)
+    _validate_p680_visual_quality(run_dir, mode="terminal")
     state = parse_state_file(run_dir / "state.txt")
     expected = {
         "slot.p660.status": "done",
@@ -11661,95 +14408,11 @@ def _validate_image_review_ready(run_id: str) -> None:
         raise RuntimeError(f"image review handoff incomplete: {', '.join(mismatches)}")
 
 
-def _scene_numbers_from_scene_selectors(selectors: Iterable[Any]) -> set[str]:
-    scene_numbers: set[str] = set()
-    pattern = re.compile(r"\bscene[_:]?(\d+)\b|\bscene(\d+)_cut\b|\bscene(\d+)cut\b")
-    for selector in selectors:
-        value = str(selector or "")
-        for match in pattern.finditer(value):
-            for group in match.groups():
-                if group:
-                    scene_numbers.add(str(int(group)))
-                    break
-    return scene_numbers
-
-
 def _state_list_value(state: dict[str, str], key: str) -> list[str]:
     raw = str(state.get(key, "") or "").strip()
     if not raw:
         return []
     return [item.strip().strip("`\"'") for item in raw.split(",") if item.strip()]
-
-
-def _normalized_scene_cut_token(value: Any) -> str:
-    raw = str(value or "").strip().strip("`\"'")
-    match = re.search(r"\bscene[_:]?(\d+)[_\-]?cut[_:]?0*(\d+)\b", raw)
-    if not match:
-        return raw
-    return f"scene{int(match.group(1))}_cut{int(match.group(2))}"
-
-
-def _image_item_selector_aliases(item: Any) -> set[str]:
-    aliases: set[str] = set()
-    item_id = str(getattr(item, "id", "") or "")
-    output = str(getattr(item, "output", "") or "")
-    for value in (item_id, Path(output).stem if output else ""):
-        if value:
-            aliases.add(value)
-            aliases.add(_normalized_scene_cut_token(value))
-    return {alias for alias in aliases if alias}
-
-
-def _semantic_failure_selectors(
-    run_dir: Path,
-    stage: str,
-    failure_context: dict[str, Any] | None = None,
-) -> list[Any]:
-    state = parse_state_file(run_dir / "state.txt")
-    selectors: list[Any] = []
-    if failure_context:
-        for key in ("failedSelectors", "blockedEntries"):
-            values = failure_context.get(key)
-            if isinstance(values, list):
-                selectors.extend(values)
-    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.failure.failed_selectors"))
-    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.failure.blocked_entries"))
-    selectors.extend(_state_list_value(state, f"review.semantic.{stage}.blocked_image_items"))
-    if stage == "asset_plan":
-        selectors.extend(_asset_plan_source_selectors_for_failed_entries(run_dir, selectors))
-    return selectors
-
-
-def _asset_plan_source_selectors_for_failed_entries(run_dir: Path, selectors: Iterable[Any]) -> list[str]:
-    selector_keys = {str(selector or "").strip().strip("`\"'") for selector in selectors if str(selector or "").strip()}
-    if not selector_keys:
-        return []
-    normalized_keys = {_normalized_scene_cut_token(key) for key in selector_keys}
-    asset_plan_path = run_dir / "asset_plan.md"
-    if not asset_plan_path.exists():
-        return []
-    try:
-        data = yaml.safe_load(_extract_manifest_yaml_text(asset_plan_path.read_text(encoding="utf-8"))) or {}
-    except Exception:
-        return []
-    assets = data.get("assets") if isinstance(data, dict) else None
-    if not isinstance(assets, list):
-        return []
-    source_selectors: list[str] = []
-    for asset in assets:
-        if not isinstance(asset, dict):
-            continue
-        asset_id = str(asset.get("asset_id") or "").strip()
-        output_stem = Path(str(asset.get("generation_plan", {}).get("output") or asset.get("output") or "")).stem
-        aliases = {asset_id, output_stem}
-        aliases = {alias for alias in aliases if alias}
-        if not (aliases & selector_keys or {_normalized_scene_cut_token(alias) for alias in aliases} & normalized_keys):
-            continue
-        for source_selector in asset.get("source_script_selectors") or []:
-            text = str(source_selector or "").strip()
-            if text:
-                source_selectors.append(text)
-    return source_selectors
 
 
 def _scene_detail_transport_blocked_scene_numbers(run_dir: Path) -> set[str]:
@@ -11763,48 +14426,41 @@ def _scene_detail_transport_blocked_scene_numbers(run_dir: Path) -> set[str]:
     return blocked
 
 
-def _scene_detail_semantic_blocked_scene_numbers(
+def _localized_semantic_partial_media_disposition(
     run_dir: Path,
-    failure_context: dict[str, Any] | None = None,
-) -> set[str]:
-    return _scene_numbers_from_scene_selectors(
-        _semantic_failure_selectors(run_dir, "scene_detail", failure_context=failure_context)
-    )
+    *,
+    stage: str,
+    items: list[Any] | None = None,
+) -> tuple[set[str], tuple[str, ...]]:
+    """Return blocked request ids only for a current, fully accounted failure."""
 
-
-def _scene_detail_blocked_scene_numbers(
-    run_dir: Path,
-    failure_context: dict[str, Any] | None = None,
-) -> set[str]:
-    return _scene_detail_transport_blocked_scene_numbers(run_dir) | _scene_detail_semantic_blocked_scene_numbers(
-        run_dir,
-        failure_context=failure_context,
-    )
-
-
-def _item_matches_scene_number(item: Any, scene_number: str) -> bool:
-    item_id = str(getattr(item, "id", "") or "")
-    output = str(getattr(item, "output", "") or "")
-    scene_token = f"scene{scene_number}"
-    return (
-        item_id == scene_token
-        or item_id.startswith(f"{scene_token}_")
-        or item_id.startswith(f"{scene_token}cut")
-        or f"/{scene_token}_" in output
-        or f"/{scene_token}cut" in output
-    )
-
-
-def _scene_detail_transport_blocked_image_item_ids(run_dir: Path, items: list[Any] | None = None) -> set[str]:
-    blocked_scene_numbers = _scene_detail_blocked_scene_numbers(run_dir)
-    if not blocked_scene_numbers:
-        return set()
-    scene_items = items if items is not None else load_request_items(run_dir, "scene")
-    return {
-        str(getattr(item, "id", "") or "")
-        for item in scene_items
-        if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers)
-    }
+    if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES:
+        return set(), (f"{stage} is not eligible for localized partial media",)
+    try:
+        projection = derive_partial_media_projection(
+            run_dir,
+            stages=[stage],
+            transport_scene_numbers_by_stage={
+                "scene_detail": (
+                    _scene_detail_transport_blocked_scene_numbers(run_dir)
+                )
+            },
+        )
+    except PartialMediaProjectionError as exc:
+        return set(), exc.issues
+    blocked_item_ids = set(projection["blocked_image_item_ids"])
+    if items is not None:
+        supplied_item_ids = {
+            str(getattr(item, "id", "") or "")
+            for item in items
+            if str(getattr(item, "id", "") or "")
+        }
+        if supplied_item_ids != set(projection["request_item_ids"]):
+            return set(), (
+                "supplied scene image items do not exactly match the current "
+                "request snapshot",
+            )
+    return blocked_item_ids, ()
 
 
 def _localized_semantic_blocked_image_item_ids(
@@ -11814,75 +14470,357 @@ def _localized_semantic_blocked_image_item_ids(
     items: list[Any] | None = None,
     failure_context: dict[str, Any] | None = None,
 ) -> set[str]:
-    scene_items = items if items is not None else load_request_items(run_dir, "scene")
-    if stage == "scene_detail":
-        blocked_scene_numbers = _scene_detail_blocked_scene_numbers(run_dir, failure_context=failure_context)
-        return {
-            str(getattr(item, "id", "") or "")
-            for item in scene_items
-            if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers)
-        }
-    selectors = _semantic_failure_selectors(run_dir, stage, failure_context=failure_context)
-    normalized_selectors = {_normalized_scene_cut_token(selector) for selector in selectors if str(selector or "").strip()}
-    blocked_scene_numbers = _scene_numbers_from_scene_selectors(selectors)
-    blocked_item_ids: set[str] = set()
-    for item in scene_items:
-        item_id = str(getattr(item, "id", "") or "")
-        if not item_id:
-            continue
-        if _image_item_selector_aliases(item) & normalized_selectors:
-            blocked_item_ids.add(item_id)
-            continue
-        if any(_item_matches_scene_number(item, scene_number) for scene_number in blocked_scene_numbers):
-            blocked_item_ids.add(item_id)
+    del failure_context
+    blocked_item_ids, issues = _localized_semantic_partial_media_disposition(
+        run_dir,
+        stage=stage,
+        items=items,
+    )
+    if issues:
+        return set()
+    state = parse_state_file(run_dir / "state.txt")
+    if (
+        state.get(f"review.semantic.{stage}.partial_media_allowed")
+        != "true"
+        or state.get(f"review.semantic.{stage}.localization.status")
+        != "localized_to_image_items"
+        or state.get(f"review.semantic.{stage}.localization.validation")
+        != "passed"
+        or state.get(f"review.semantic.{stage}.status") != "failed"
+    ):
+        return set()
+    recorded_id_values = _state_list_value(
+        state,
+        f"review.semantic.{stage}.blocked_image_items",
+    )
+    recorded_ids = set(recorded_id_values)
+    localized_id_values = _state_list_value(
+        state,
+        f"review.semantic.{stage}.localization.blocked_image_items",
+    )
+    recorded_count = str(
+        state.get(f"review.semantic.{stage}.blocked_image_item_count") or ""
+    ).strip()
+    if (
+        recorded_ids != blocked_item_ids
+        or len(recorded_ids) != len(recorded_id_values)
+        or set(localized_id_values) != blocked_item_ids
+        or len(set(localized_id_values)) != len(localized_id_values)
+        or recorded_count != str(len(blocked_item_ids))
+    ):
+        return set()
     return blocked_item_ids
 
 
 def _semantic_blocked_image_item_ids(run_dir: Path, items: list[Any] | None = None) -> set[str]:
+    claimed_stages = _claimed_partial_media_stages(run_dir)
+    if not claimed_stages:
+        return set()
+
     blocked: set[str] = set()
-    for stage in ("scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
-        blocked.update(_localized_semantic_blocked_image_item_ids(run_dir, stage=stage, items=items))
-    return blocked
+    for stage in claimed_stages:
+        stage_blocked = _localized_semantic_blocked_image_item_ids(
+            run_dir,
+            stage=stage,
+            items=items,
+        )
+        if not stage_blocked:
+            raise PartialMediaProjectionError(
+                (
+                    f"{stage} claims localized partial media but its current "
+                    "report/state cannot prove any blocked request items",
+                )
+            )
+        blocked.update(stage_blocked)
+    if not blocked:
+        raise PartialMediaProjectionError(
+            (
+                "localized partial-media claims produced zero blocked "
+                "request items",
+            )
+        )
+    projection = _load_current_partial_media_projection(
+        run_dir,
+        items=items,
+    )
+    projected_ids = set(projection["blocked_image_item_ids"])
+    if projected_ids != blocked:
+        raise PartialMediaProjectionError(
+            (
+                "current partial-media projection does not exactly match "
+                "the claimed stage state",
+            )
+        )
+    return projected_ids
+
+
+def _claimed_partial_media_stages(run_dir: Path) -> list[str]:
+    state = parse_state_file(run_dir / "state.txt")
+    return [
+        stage
+        for stage in PARTIAL_MEDIA_SEMANTIC_STAGES
+        if state.get(f"review.semantic.{stage}.partial_media_allowed")
+        == "true"
+    ]
+
+
+def _derive_current_partial_media_projection(
+    run_dir: Path,
+    *,
+    items: list[Any] | None = None,
+) -> dict[str, Any]:
+    stages = _claimed_partial_media_stages(run_dir)
+    if not stages:
+        raise PartialMediaProjectionError(
+            ("no current semantic stage claims localized partial media",)
+        )
+    projection = derive_partial_media_projection(
+        run_dir,
+        stages=stages,
+        transport_scene_numbers_by_stage={
+            "scene_detail": (
+                _scene_detail_transport_blocked_scene_numbers(run_dir)
+            )
+        },
+    )
+    if items is not None:
+        supplied_item_ids = {
+            str(getattr(item, "id", "") or "")
+            for item in items
+            if str(getattr(item, "id", "") or "")
+        }
+        if supplied_item_ids != set(projection["request_item_ids"]):
+            raise PartialMediaProjectionError(
+                (
+                    "supplied scene request items do not exactly match the "
+                    "partial-media projection",
+                )
+            )
+    return projection
+
+
+def _refresh_partial_media_projection_artifact(
+    run_dir: Path,
+) -> dict[str, Any]:
+    projection = _derive_current_partial_media_projection(run_dir)
+    write_partial_media_projection(run_dir, projection)
+    with suppress(FileNotFoundError):
+        (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+    return projection
+
+
+def _partial_media_generation_reset_updates(
+    projection: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    blocked_item_ids = (
+        [
+            str(value)
+            for value in projection.get("blocked_image_item_ids", [])
+        ]
+        if isinstance(projection, Mapping)
+        else []
+    )
+    return {
+        "review.semantic.partial_media.generated": "false",
+        "review.semantic.partial_media.request_revision": (
+            str(projection.get("request_revision") or "")
+            if isinstance(projection, Mapping)
+            else ""
+        ),
+        "review.semantic.partial_media.projection_sha256": (
+            str(projection.get("projection_sha256") or "")
+            if isinstance(projection, Mapping)
+            else ""
+        ),
+        "review.semantic.partial_media.blocked_image_items": ", ".join(
+            blocked_item_ids
+        ),
+        "review.semantic.partial_media.blocked_image_item_count": str(
+            len(blocked_item_ids)
+        ),
+        "review.semantic.partial_media.synthetic_failed_candidates": (
+            ", ".join(blocked_item_ids)
+        ),
+        "review.semantic.partial_media.provider_submitted_image_items": "",
+        "review.semantic.partial_media.receipt": "",
+        "review.semantic.partial_media.receipt_sha256": "",
+        "review.semantic.create_media_generated": "false",
+        "review.semantic.create_scene_media_generated": "false",
+        "image_generation.status": "not_started",
+        "image_generation.started": "false",
+        "image_generation.generated_count": "0",
+        "image_generation.blocked_item_count": str(len(blocked_item_ids)),
+        "image_generation.blocked_item_ids": ", ".join(blocked_item_ids),
+        "image_generation.blocked_by": "",
+        "image_generation.block_reason": "",
+        "image_generation.finished_at": "",
+    }
+
+
+def _load_current_partial_media_projection(
+    run_dir: Path,
+    *,
+    items: list[Any] | None = None,
+) -> dict[str, Any]:
+    derived = _derive_current_partial_media_projection(
+        run_dir,
+        items=items,
+    )
+    recorded = load_partial_media_projection(run_dir)
+    if recorded != derived:
+        raise PartialMediaProjectionError(
+            (
+                "recorded partial-media projection does not match current "
+                "request/report inputs",
+            )
+        )
+    return derived
+
+
+def _assert_partial_media_blocked_destinations_absent(
+    run_dir: Path,
+    projection: Mapping[str, Any],
+) -> None:
+    stale_destinations: list[str] = []
+    issues: list[str] = []
+    for raw_destination in projection.get(
+        "blocked_destinations",
+        [],
+    ):
+        destination = str(raw_destination or "").strip()
+        if not destination:
+            issues.append(
+                "partial-media projection contains an empty blocked "
+                "destination"
+            )
+            continue
+        try:
+            if run_relative_entry_exists_no_follow(
+                run_dir,
+                destination,
+            ):
+                stale_destinations.append(destination)
+        except PartialMediaProjectionError as exc:
+            issues.extend(exc.issues)
+    if stale_destinations:
+        issues.append(
+            "localized blocked destinations contain stale entries before "
+            "generation: "
+            + ", ".join(sorted(stale_destinations))
+        )
+    if issues:
+        raise PartialMediaProjectionError(issues)
+
+
+def _clear_partial_media_stage(
+    run_dir: Path,
+    *,
+    stage: str,
+) -> None:
+    if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES:
+        return
+    state = parse_state_file(run_dir / "state.txt")
+    stage_updates = {
+        f"review.semantic.{stage}.partial_media_allowed": "false",
+        f"review.semantic.{stage}.blocked_image_items": "",
+        f"review.semantic.{stage}.blocked_image_item_count": "0",
+        f"review.semantic.{stage}.localization.status": "not_needed",
+        f"review.semantic.{stage}.localization.blocked_image_items": "",
+        f"review.semantic.{stage}.localization.validation": "",
+    }
+    if state.get(
+        f"review.semantic.{stage}.partial_media_allowed"
+    ) != "true":
+        append_state_snapshot(run_dir / "state.txt", stage_updates)
+        return
+
+    remaining_stages = [
+        candidate
+        for candidate in PARTIAL_MEDIA_SEMANTIC_STAGES
+        if candidate != stage
+        and state.get(
+            f"review.semantic.{candidate}.partial_media_allowed"
+        )
+        == "true"
+    ]
+    projection: dict[str, Any] | None = None
+    if remaining_stages:
+        projection = derive_partial_media_projection(
+            run_dir,
+            stages=remaining_stages,
+            transport_scene_numbers_by_stage={
+                "scene_detail": (
+                    _scene_detail_transport_blocked_scene_numbers(run_dir)
+                )
+            },
+        )
+        write_partial_media_projection(run_dir, projection)
+    else:
+        with suppress(FileNotFoundError):
+            (run_dir / PARTIAL_MEDIA_PROJECTION_RELPATH).unlink()
+    with suppress(FileNotFoundError):
+        (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            **stage_updates,
+            **_partial_media_generation_reset_updates(projection),
+        },
+    )
+
+
+def _semantic_review_stage_is_media_ready(
+    run_dir: Path,
+    stage: str,
+) -> bool:
+    if _semantic_review_stage_is_current_passed(run_dir, stage):
+        return True
+    if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES:
+        return False
+    return bool(
+        _localized_semantic_blocked_image_item_ids(
+            run_dir,
+            stage=stage,
+        )
+    )
+
+
+def _localized_partial_semantic_slots(run_dir: Path) -> set[str]:
+    slots: set[str] = set()
+    for stage in PARTIAL_MEDIA_SEMANTIC_STAGES:
+        if check_semantic_review(run_dir, stage).passed:
+            continue
+        if not _localized_semantic_blocked_image_item_ids(
+            run_dir,
+            stage=stage,
+        ):
+            continue
+        slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+        if slot:
+            slots.add(slot)
+    return slots
 
 
 def _semantic_blocked_candidate(run_dir: Path, item: Any) -> dict[str, Any]:
-    state = parse_state_file(run_dir / "state.txt")
     item_id = str(getattr(item, "id", "") or "")
-    for stage in ("scene_detail", "cut_blueprint", "asset_plan", "image_prompt"):
-        if item_id in _localized_semantic_blocked_image_item_ids(run_dir, stage=stage, items=[item]):
-            if stage == "scene_detail":
-                return _scene_detail_blocked_candidate(run_dir, item)
-            reason_keys = state.get(f"review.semantic.{stage}.failure.reason_keys", "semantic_review_failed")
-            return {
-                "index": 1,
-                "status": "failed",
-                "path": None,
-                "error": f"semantic {stage} failed; image generation skipped for this item ({reason_keys})",
-            }
+    try:
+        projection = _load_current_partial_media_projection(run_dir)
+    except (OSError, ValueError):
+        projection = {}
+    candidates = (
+        projection.get("synthetic_candidates")
+        if isinstance(projection, dict)
+        and isinstance(projection.get("synthetic_candidates"), dict)
+        else {}
+    )
+    candidate = candidates.get(item_id)
+    if isinstance(candidate, dict):
+        return dict(candidate)
     return {
         "index": 1,
         "status": "failed",
         "path": None,
         "error": "semantic QA failed; image generation skipped for this item",
-    }
-
-
-def _scene_detail_blocked_candidate(run_dir: Path, item: Any) -> dict[str, Any]:
-    state = parse_state_file(run_dir / "state.txt")
-    transport_scene_numbers = _scene_detail_transport_blocked_scene_numbers(run_dir)
-    blocked_scene_numbers = sorted(scene_number for scene_number in _scene_detail_blocked_scene_numbers(run_dir) if _item_matches_scene_number(item, scene_number))
-    scene_number = blocked_scene_numbers[0] if blocked_scene_numbers else ""
-    if scene_number in transport_scene_numbers:
-        error_kind = state.get(f"review.semantic.scene_detail.shards.scene_{scene_number}.transport.error_kind", "timeout")
-        error = f"semantic scene_detail transport {error_kind}; image generation skipped for this scene"
-    else:
-        reason_keys = state.get("review.semantic.scene_detail.failure.reason_keys", "semantic_review_failed")
-        error = f"semantic scene_detail failed; image generation skipped for this scene ({reason_keys})"
-    return {
-        "index": 1,
-        "status": "failed",
-        "path": None,
-        "error": error,
     }
 
 
@@ -11906,32 +14844,497 @@ async def _refresh_image_prompt_repair_assets_if_required(run_dir: Path) -> None
     )
 
 
-async def _prepare_image_prompt_repair_revision_for_rereview(
+PRE_ASSET_SEMANTIC_STAGES = (
+    "research",
+    "story",
+    "scene_set",
+    "scene_detail",
+    "cut_blueprint",
+    "asset_plan",
+)
+SEMANTIC_REPAIR_DEPENDENCY_STAGES = frozenset(PRE_ASSET_SEMANTIC_STAGES)
+SEMANTIC_FIXED_POINT_MAX_REVIEWS = 24
+_frontend_review_runner_module: Any | None = None
+_frontend_review_runner_lock = threading.Lock()
+
+
+def _load_frontend_review_runner() -> Any:
+    """Load the frontend authoring helpers without executing their CLI entrypoint."""
+
+    global _frontend_review_runner_module
+    with _frontend_review_runner_lock:
+        if _frontend_review_runner_module is not None:
+            return _frontend_review_runner_module
+        path = APP_ROOT / "scripts" / "toc-immersive-frontend-run.py"
+        spec = importlib.util.spec_from_file_location(
+            "toc_immersive_frontend_review_reconciliation",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load frontend review runner: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
+        required_helpers = (
+            "_prepare_authoring_grounding",
+            "_refresh_p400_review_artifacts",
+            "_require_fresh_p400_readiness",
+            "prepare_grounding",
+            "_refresh_downstream_review_artifacts",
+        )
+        missing = [
+            name
+            for name in required_helpers
+            if not callable(getattr(module, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                "frontend review runner is missing reconciliation helpers: "
+                + ", ".join(missing)
+            )
+        _frontend_review_runner_module = module
+        return module
+
+
+def _semantic_review_stage_is_current_passed(run_dir: Path, stage: str) -> bool:
+    return check_semantic_review(run_dir, stage).passed
+
+
+async def _reconcile_after_semantic_repair(
     run_dir: Path,
     *,
-    provider_ready: bool = True,
+    stage: str,
+    changed_artifacts: Iterable[str],
+    image_prompt_provider_ready: bool = True,
+    job_id: str | None = None,
 ) -> None:
-    """Synchronize a repair, refresh changed assets, then bind scene refs again."""
+    """Refresh every derived contract invalidated by a producer-side repair."""
 
-    _synchronize_image_prompt_repair_outputs(run_dir)
-    state = parse_state_file(run_dir / "state.txt")
-    if provider_ready and state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
-        await _refresh_image_prompt_repair_assets_if_required(run_dir)
-        # Asset bytes are part of the immutable scene request revision. Rebuild
-        # the scene snapshot after refresh and before the fresh semantic review.
-        _synchronize_image_prompt_repair_outputs(run_dir)
-    elif state.get("review.semantic.image_prompt.repair.asset_refresh_required") == "true":
+    changed = sorted(
+        {
+            str(value).strip()
+            for value in changed_artifacts
+            if str(value).strip()
+        }
+    )
+    downstream_sources = (
+        run_dir / "research.md",
+        run_dir / "story.md",
+        run_dir / "visual_value.md",
+        run_dir / "script.md",
+        run_dir / "video_manifest.md",
+        run_dir / "asset_inventory.md",
+        run_dir / "asset_plan.md",
+    )
+    full_run_context = all(path.is_file() for path in downstream_sources)
+    dependency_stage = (
+        stage in SEMANTIC_REPAIR_DEPENDENCY_STAGES
+        or stage == "image_prompt"
+    )
+    if dependency_stage and not full_run_context:
+        if stage == "image_prompt":
+            # Isolated/legacy fixtures do not have enough authoring evidence to
+            # run the upstream fixed point.  They may still rebuild the
+            # repaired request revision, but must never submit refreshed media
+            # while that evidence is unavailable.
+            _synchronize_image_prompt_repair_outputs(run_dir)
+            state = parse_state_file(run_dir / "state.txt")
+            if (
+                state.get(
+                    "review.semantic.image_prompt.repair.asset_refresh_required"
+                )
+                == "true"
+            ):
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
+                        "review.semantic.image_prompt.repair.asset_refresh.note": (
+                            "full upstream review context is unavailable"
+                        ),
+                    },
+                )
+            _prepare_image_prompt_request_revision_for_review(
+                run_dir,
+                provider_ready=image_prompt_provider_ready,
+            )
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
-                "review.semantic.image_prompt.repair.asset_refresh.note": "media generation disabled; refreshed asset bytes will be required before provider-ready freeze",
+                f"review.semantic.{stage}.dependency_sync.status": (
+                    "deferred_until_full_run_materialization"
+                ),
+                f"review.semantic.{stage}.dependency_sync.changed_artifacts": (
+                    ", ".join(changed)
+                ),
+                f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
             },
         )
-    _prepare_image_prompt_request_revision_for_review(
+        return
+    if not changed:
+        raise RuntimeError(
+            f"{stage} semantic producer repair completed without changing a source artifact"
+        )
+    if not dependency_stage:
+        return
+
+    invalidation_updates = {
+        f"review.semantic.{stage}.dependency_sync.status": "in_progress",
+        f"review.semantic.{stage}.dependency_sync.changed_artifacts": ", ".join(
+            changed
+        ),
+        f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
+        "orchestration.p500.supervisor.status": "pending",
+        "orchestration.p600.supervisor.status": "invalidated",
+        "orchestration.p600.supervisor.invalidated_by": (
+            f"semantic.{stage}.producer_repair"
+        ),
+        "review.image_prompt.request_freeze.status": "draft",
+        "review.image_prompt.request_freeze.invalidated_by": (
+            f"semantic.{stage}.producer_repair"
+        ),
+        "slot.p510.status": "pending",
+        "slot.p540.status": "pending",
+        "slot.p550.status": "pending",
+        "slot.p560.status": "pending",
+        "slot.p570.status": "pending",
+        "slot.p610.status": "pending",
+        "slot.p630.status": "pending",
+        "slot.p640.status": "pending",
+        "slot.p650.status": "pending",
+        "slot.p660.status": "pending",
+        "slot.p670.status": "pending",
+        "slot.p680.status": "pending",
+        "review.image.status": "pending",
+        "image_generation.status": "not_started",
+        "image_generation.started": "false",
+        "image_generation.generated_count": "0",
+        "image_generation.blocked_by": "semantic_dependency_sync",
+    }
+    if stage == "image_prompt":
+        # A visual-plan repair often leaves every reusable asset byte
+        # unchanged.  Preserve the already completed p500 handoff until the
+        # synchronized asset request proves that regeneration is necessary.
+        # If it is necessary, the branch below invalidates and truthfully
+        # re-finalizes p550-p570 around the refreshed provider submission.
+        for key in (
+            "orchestration.p500.supervisor.status",
+            "slot.p510.status",
+            "slot.p540.status",
+            "slot.p550.status",
+            "slot.p560.status",
+            "slot.p570.status",
+        ):
+            invalidation_updates.pop(key, None)
+    append_state_snapshot(run_dir / "state.txt", invalidation_updates)
+    _invalidate_p600_supervisor_result(
         run_dir,
-        provider_ready=provider_ready,
+        invalidated_by=f"semantic.{stage}.producer_repair",
     )
+
+    def refresh_dependency_evidence() -> None:
+        frontend = _load_frontend_review_runner()
+        frontend._prepare_authoring_grounding(run_dir)
+        frontend._refresh_p400_review_artifacts(run_dir)
+        frontend._require_fresh_p400_readiness(run_dir)
+        _synchronize_image_prompt_repair_outputs(run_dir)
+        # Request compilation binds compiled prompt payloads into the manifest.
+        # Freeze P400 evidence again against that final pre-provider manifest.
+        frontend._prepare_authoring_grounding(run_dir)
+        frontend._refresh_p400_review_artifacts(run_dir)
+        frontend._require_fresh_p400_readiness(run_dir)
+        frontend.prepare_grounding(run_dir)
+        frontend._refresh_downstream_review_artifacts(run_dir)
+        # The downstream helper must not accidentally make the P400 evidence
+        # stale while refreshing asset/scene readsets.
+        frontend._require_fresh_p400_readiness(run_dir)
+
+    try:
+        refresh_dependency_evidence()
+        if stage == "image_prompt":
+            fixed_point_job_id = (
+                str(job_id).strip()
+                if str(job_id or "").strip()
+                else "image-prompt-repair"
+            )
+            await _run_pre_asset_semantic_fixed_point(
+                fixed_point_job_id,
+                run_dir=run_dir,
+            )
+            if image_prompt_provider_ready:
+                # A repaired manifest can change the asset bible and the
+                # provider request.  No refreshed asset may be submitted until
+                # P400 plus every upstream semantic report is current.
+                _validate_pre_asset_provider_gate(run_dir)
+                state = parse_state_file(run_dir / "state.txt")
+                asset_refresh_required = (
+                    state.get(
+                        "review.semantic.image_prompt.repair.asset_refresh_required"
+                    )
+                    == "true"
+                )
+                if asset_refresh_required:
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "orchestration.p500.supervisor.status": "pending",
+                            "slot.p550.status": "pending",
+                            "slot.p550.note": "waiting for synchronized repaired asset request submission",
+                            "slot.p560.status": "pending",
+                            "slot.p560.note": "waiting for repaired reusable asset outputs",
+                            "slot.p570.status": "pending",
+                            "slot.p570.note": "waiting for repaired asset quality validation",
+                        },
+                    )
+                    await _refresh_image_prompt_repair_assets_if_required(
+                        run_dir
+                    )
+                    _mark_asset_generation_handoff(
+                        run_dir,
+                        asset_quality_passed=True,
+                    )
+                    # Generated reference bytes are part of request evidence.
+                    # Re-materialize and re-enter the upstream fixed point
+                    # before the repaired image-prompt revision is reviewed.
+                    refresh_dependency_evidence()
+                    await _run_pre_asset_semantic_fixed_point(
+                        fixed_point_job_id,
+                        run_dir=run_dir,
+                    )
+                    _validate_pre_asset_provider_gate(run_dir)
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.semantic.image_prompt.repair.asset_refresh_required": "false",
+                            "review.semantic.image_prompt.repair.asset_refresh.converged_at": now_iso(),
+                        },
+                    )
+            else:
+                state = parse_state_file(run_dir / "state.txt")
+                if (
+                    state.get(
+                        "review.semantic.image_prompt.repair.asset_refresh_required"
+                    )
+                    == "true"
+                ):
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
+                            "review.semantic.image_prompt.repair.asset_refresh.note": (
+                                "media generation disabled; refreshed asset bytes "
+                                "will be required before provider-ready freeze"
+                            ),
+                        },
+                    )
+            _prepare_image_prompt_request_revision_for_review(
+                run_dir,
+                provider_ready=image_prompt_provider_ready,
+            )
+    except Exception as exc:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.{stage}.dependency_sync.status": "failed",
+                f"review.semantic.{stage}.dependency_sync.error": str(exc)[
+                    :2000
+                ],
+                f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
+                "image_generation.block_reason": (
+                    "semantic_dependency_sync_failed"
+                ),
+            },
+        )
+        raise RuntimeError(
+            f"{stage} semantic repair dependency synchronization failed: {exc}"
+        ) from exc
+
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            f"review.semantic.{stage}.dependency_sync.status": "done",
+            f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
+            "image_generation.blocked_by": "",
+            "image_generation.block_reason": "",
+        },
+    )
+
+
+async def _run_pre_asset_semantic_fixed_point(
+    job_id: str,
+    *,
+    run_dir: Path,
+) -> None:
+    """Review the earliest stale stage until the whole pre-asset DAG is current."""
+
+    review_count = 0
+    reviewed_once: set[str] = set()
+    while True:
+        stale_reviewed_stage = next(
+            (
+                candidate
+                for candidate in PRE_ASSET_SEMANTIC_STAGES
+                if candidate in reviewed_once
+                if not _semantic_review_stage_is_media_ready(
+                    run_dir,
+                    candidate,
+                )
+            ),
+            None,
+        )
+        unreviewed_stage = next(
+            (
+                candidate
+                for candidate in PRE_ASSET_SEMANTIC_STAGES
+                if candidate not in reviewed_once
+            ),
+            None,
+        )
+        stage = stale_reviewed_stage or unreviewed_stage
+        if stage is None:
+            stage = next(
+                (
+                    candidate
+                    for candidate in PRE_ASSET_SEMANTIC_STAGES
+                    if not _semantic_review_stage_is_media_ready(
+                        run_dir,
+                        candidate,
+                    )
+                ),
+                None,
+            )
+        if stage is None:
+            return
+        review_count += 1
+        if review_count > SEMANTIC_FIXED_POINT_MAX_REVIEWS:
+            raise RuntimeError(
+                "pre-asset semantic review did not converge after "
+                f"{SEMANTIC_FIXED_POINT_MAX_REVIEWS} stage reviews"
+            )
+        failure = await _run_semantic_review_for_media_generation(
+            job_id,
+            run_dir=run_dir,
+            stage=stage,
+        )
+        reviewed_once.add(stage)
+        if failure:
+            invalidated_by = f"semantic.{stage}.failed"
+            _invalidate_p600_supervisor_result(
+                run_dir,
+                invalidated_by=invalidated_by,
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.image_prompt.request_freeze.status": "draft",
+                    "review.image_prompt.request_freeze.invalidated_by": (
+                        invalidated_by
+                    ),
+                    "orchestration.p600.supervisor.status": "invalidated",
+                    "orchestration.p600.supervisor.invalidated_by": (
+                        invalidated_by
+                    ),
+                    "slot.p650.status": "pending",
+                    "slot.p660.status": "pending",
+                    "slot.p670.status": "pending",
+                    "slot.p680.status": "pending",
+                    "review.image.status": "pending",
+                    "review.semantic.create_media_generated": "false",
+                    "review.semantic.create_scene_media_generated": "false",
+                    "image_generation.status": "not_started",
+                    "image_generation.started": "false",
+                    "image_generation.generated_count": "0",
+                    "image_generation.blocked_by": f"semantic.{stage}",
+                },
+            )
+            raise RuntimeError(
+                "semantic review failed before media generation: " + failure
+            )
+
+
+def _validate_pre_asset_provider_gate(run_dir: Path) -> None:
+    """Fail closed before any asset prompt is submitted to the image provider."""
+
+    frontend = _load_frontend_review_runner()
+    frontend._require_fresh_p400_readiness(run_dir)
+    semantic_issues: list[str] = []
+    for stage in PRE_ASSET_SEMANTIC_STAGES:
+        if _semantic_review_stage_is_media_ready(run_dir, stage):
+            continue
+        result = check_semantic_review(run_dir, stage)
+        semantic_issues.append(
+            f"{stage}: {'; '.join(result.errors) or result.status or 'not passed'}"
+        )
+    if semantic_issues:
+        raise RuntimeError(
+            "pre-asset semantic gate is not current: "
+            + " | ".join(semantic_issues)
+        )
+    state = parse_state_file(run_dir / "state.txt")
+    dependency_issues = [
+        f"{stage}={status}"
+        for stage in SEMANTIC_REPAIR_DEPENDENCY_STAGES
+        if (
+            status := str(
+                state.get(
+                    f"review.semantic.{stage}.dependency_sync.status"
+                )
+                or ""
+            ).strip()
+        )
+        in {"in_progress", "failed"}
+    ]
+    if dependency_issues:
+        raise RuntimeError(
+            "semantic repair dependency synchronization is incomplete: "
+            + ", ".join(dependency_issues)
+        )
+    try:
+        snapshot = load_request_snapshot(
+            run_dir / "asset_generation_request_snapshot.json",
+            run_dir=run_dir,
+            verify_references=True,
+        )
+    except (ImageRequestSnapshotError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"asset request snapshot is not provider-ready: {exc}"
+        ) from exc
+    if not snapshot.items:
+        raise RuntimeError("asset request snapshot has no provider items")
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(APP_ROOT / "scripts" / "verify-pipeline.py"),
+                "--run-dir",
+                str(run_dir),
+                "--flow",
+                "immersive",
+                "--profile",
+                "standard",
+                "--stage-target",
+                "p450",
+            ],
+            cwd=APP_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "pre-asset p450 verifier timed out; provider submission is blocked"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            "pre-asset p450 verifier failed; provider submission is blocked"
+            + (f": {detail}" if detail else "")
+        )
 
 
 async def _generate_scene_outputs_after_p650_preflight(
@@ -11939,23 +15342,31 @@ async def _generate_scene_outputs_after_p650_preflight(
     *,
     run_id: str,
     run_dir: Path,
+    scene_revision_lock_held: bool = False,
 ) -> None:
     """Validate, submit, and hand off one immutable scene request revision."""
 
     # Prompt edits and request rematerialization use this same lock.  Keeping
     # the final p650 validation, provider submission, and p680 handoff in one
     # critical section closes the validate-then-edit race.
-    async with _serialized_run_write(run_dir, "scene_request_revision"):
+    async with AsyncExitStack() as lock_stack:
+        if not scene_revision_lock_held:
+            await lock_stack.enter_async_context(
+                _serialized_run_write(run_dir, "scene_request_revision")
+            )
         try:
             # This is the final p660 preflight: the reviewed provider prompt
             # bytes, reference hashes, semantic reports, and frozen revision
             # must still be the same revision that p650 approved.
             _validate_p650_run(run_id)
-        except RuntimeError as exc:
+        except Exception as exc:
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
                     "runtime.stage": "p650_gate_failed_before_scene_generation",
+                    "runtime.failure.stage": "p650",
+                    "runtime.failure.phase": "scene_generation_preflight",
+                    "runtime.failure.error_kind": "p650_validation_failed",
                     "slot.p660.status": "pending",
                     "slot.p660.note": "blocked before scene image generation by p650 revision validation",
                     "slot.p680.status": "pending",
@@ -11965,6 +15376,7 @@ async def _generate_scene_outputs_after_p650_preflight(
                     "image_generation.started": "false",
                     "image_generation.generated_count": "0",
                     "image_generation.blocked_by": "p650_revision_gate",
+                    "image_generation.block_reason": str(exc)[:2000],
                 },
             )
             raise RuntimeError(f"scene image generation blocked by p650 gate: {exc}") from exc
@@ -11975,11 +15387,82 @@ async def _generate_scene_outputs_after_p650_preflight(
                 "runtime.stage": "scene_images_generating",
                 "slot.p660.status": "in_progress",
                 "slot.p660.note": "scene image generation started after image-prompt semantic gate",
+                "slot.p680.status": "pending",
+                "slot.p680.note": "waiting for current revision output, provenance, and visual validation",
+                "review.image.status": "pending",
+                "review.semantic.create_scene_media_generated": "false",
+                "image_generation.status": "in_progress",
+                "image_generation.started": "true",
+                "image_generation.generated_count": "0",
+                "image_generation.blocked_by": "",
+                "image_generation.block_reason": "",
             },
         )
         # The outer revision lock is already held.  Calling the locked wrapper
         # here would deadlock because asyncio locks are not re-entrant.
-        await _generate_request_outputs_unlocked(run_dir=run_dir, kind="scene")
+        failure_phase = "media_generation"
+        try:
+            await _generate_request_outputs_unlocked(run_dir=run_dir, kind="scene")
+            # Generation can be long-running. Re-run the complete p650 gate so
+            # upstream review and the frozen request revision are still current
+            # immediately before the frontend handoff is published.
+            failure_phase = "validation"
+            _validate_p650_run(run_id)
+            _validate_generated_outputs(run_dir, "asset")
+            _validate_generated_outputs(run_dir, "scene")
+            _validate_p680_visual_quality(run_dir)
+        except Exception as exc:
+            generated_count = 0
+            with suppress(Exception):
+                generated_count = sum(
+                    1
+                    for item in load_request_items(run_dir, "scene")
+                    if item.output
+                    and resolve_run_relative(run_dir, item.output).is_file()
+                )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.stage": (
+                        "scene_image_generation_failed"
+                        if failure_phase == "media_generation"
+                        else "p680_pre_handoff_gate_failed"
+                    ),
+                    "runtime.failure.stage": (
+                        "p660" if failure_phase == "media_generation" else "p680"
+                    ),
+                    "runtime.failure.phase": failure_phase,
+                    "runtime.failure.error_kind": (
+                        "media_generation_failed"
+                        if failure_phase == "media_generation"
+                        else "validation_failed"
+                    ),
+                    "slot.p660.status": "failed",
+                    "slot.p660.note": "scene generation or pre-handoff validation failed",
+                    "slot.p670.status": "pending",
+                    "slot.p670.note": "waiting for successful scene output validation",
+                    "slot.p680.status": "pending",
+                    "slot.p680.note": "frontend image review is not ready because the pre-handoff gate failed",
+                    "stage.scene_implementation.status": "failed",
+                    "review.image.status": "pending",
+                    "review.semantic.create_scene_media_generated": "false",
+                    "image_generation.status": "failed",
+                    "image_generation.started": "true",
+                    "image_generation.generated_count": str(generated_count),
+                    "image_generation.blocked_by": (
+                        "scene_image_generation"
+                        if failure_phase == "media_generation"
+                        else "p680_pre_handoff_gate"
+                    ),
+                    "image_generation.block_reason": (
+                        "media_generation_failed"
+                        if failure_phase == "media_generation"
+                        else "pre_handoff_validation_failed"
+                    ),
+                    "image_generation.error": str(exc)[:2000],
+                },
+            )
+            raise
         _mark_image_generation_review_ready(run_id)
 
 
@@ -11988,16 +15471,11 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     semantic_failures: list[str] = []
     failed_semantic_stages: set[str] = set()
     await _set_create_job(job_id, {"message": "上流設計をsemantic QA中"})
-    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
-        failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage=stage)
-        if failure:
-            semantic_failures.append(failure)
-            failed_semantic_stages.add(stage)
-    if semantic_failures:
-        raise RuntimeError(
-            "semantic review failed before media generation: "
-            + " | ".join(semantic_failures)
-        )
+    await _run_pre_asset_semantic_fixed_point(
+        job_id,
+        run_dir=run_dir,
+    )
+    _validate_pre_asset_provider_gate(run_dir)
     asset_quality_passed = False
     last_asset_gate_error = ""
     for attempt in range(1, BOOTSTRAP_ASSET_MAX_ATTEMPTS + 1):
@@ -12007,6 +15485,54 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
             _validate_p560_asset_quality(run_dir)
         except RuntimeError as exc:
             last_asset_gate_error = str(exc)
+            if not (
+                isinstance(exc, P560AssetGateError)
+                and exc.retryable_visual_quality
+            ):
+                failed_check_ids = (
+                    exc.failed_check_ids
+                    if isinstance(exc, P560AssetGateError)
+                    else ("p570.unclassified_failure",)
+                )
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "runtime.stage": "p570_non_visual_gate_failed",
+                        "runtime.failure.stage": "p570",
+                        "runtime.failure.phase": "asset_validation",
+                        "runtime.failure.error_kind": "non_visual_validation",
+                        "runtime.failure.last_progress_at": now_iso(),
+                        "review.asset_visual_gate.status": "blocked_non_visual_validation",
+                        "review.asset_visual_gate.attempts": str(attempt),
+                        "review.asset_visual_gate.last_error": last_asset_gate_error[:2000],
+                        "review.asset_visual_gate.failed_check_ids": ", ".join(
+                            failed_check_ids
+                        ),
+                        "slot.p550.status": "done",
+                        "slot.p550.note": "frozen asset requests were submitted to the image provider",
+                        "slot.p560.status": "done",
+                        "slot.p560.note": "reusable asset image generation completed",
+                        "slot.p570.status": "failed",
+                        "slot.p570.note": "non-visual p570 validation failed; prompt repair and scene generation are blocked",
+                        "stage.asset.status": "failed",
+                        "slot.p660.status": "pending",
+                        "slot.p660.note": "blocked before scene image generation by non-visual p570 validation",
+                        "slot.p670.status": "pending",
+                        "slot.p670.note": "waiting for a valid p570 asset handoff",
+                        "slot.p680.status": "pending",
+                        "slot.p680.note": "frontend image review is not ready because p570 validation failed",
+                        "review.image.status": "pending",
+                        "review.semantic.create_scene_media_generated": "false",
+                        "image_generation.status": "not_started",
+                        "image_generation.started": "false",
+                        "image_generation.generated_count": "0",
+                        "image_generation.blocked_by": "p570_non_visual_gate",
+                        "image_generation.block_reason": ", ".join(
+                            failed_check_ids
+                        )[:2000],
+                    },
+                )
+                raise
             if attempt >= BOOTSTRAP_ASSET_MAX_ATTEMPTS:
                 append_state_snapshot(
                     run_dir / "state.txt",
@@ -12027,7 +15553,6 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                     ),
                     timeout=PROMPT_REPAIR_TIMEOUT_SECONDS,
                 )
-                _remove_bootstrap_asset_outputs(run_dir)
             except Exception as repair_exc:
                 write_app_server_debug_log(
                     run_dir=run_dir,
@@ -12048,6 +15573,47 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
                     },
                 )
                 break
+            # The bootstrap repair rewrites the exact provider request and its
+            # immutable snapshot.  asset_plan semantic QA includes both files,
+            # so the old pass is stale by construction.  Re-enter the complete
+            # upstream fixed point and fail closed before another provider
+            # submission.
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.asset_visual_gate.repair.semantic_revalidation.status": "in_progress",
+                    "review.asset_visual_gate.repair.semantic_revalidation.attempt": str(
+                        attempt
+                    ),
+                    "review.asset_visual_gate.repair.semantic_revalidation.updated_at": now_iso(),
+                },
+            )
+            try:
+                await _run_pre_asset_semantic_fixed_point(
+                    job_id,
+                    run_dir=run_dir,
+                )
+                _validate_pre_asset_provider_gate(run_dir)
+            except Exception as semantic_exc:
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "review.asset_visual_gate.repair.semantic_revalidation.status": "failed",
+                        "review.asset_visual_gate.repair.semantic_revalidation.error": str(
+                            semantic_exc
+                        )[:2000],
+                        "review.asset_visual_gate.repair.semantic_revalidation.updated_at": now_iso(),
+                    },
+                )
+                raise
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.asset_visual_gate.repair.semantic_revalidation.status": "done",
+                    "review.asset_visual_gate.repair.semantic_revalidation.updated_at": now_iso(),
+                },
+            )
+            _remove_bootstrap_asset_outputs(run_dir)
         else:
             asset_quality_passed = True
             append_state_snapshot(
@@ -12062,6 +15628,27 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
         run_dir,
         asset_quality_passed=asset_quality_passed,
     )
+    if not asset_quality_passed:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "status": "P570",
+                "runtime.stage": "asset_images_ready_for_review",
+                "slot.p660.status": "pending",
+                "slot.p660.note": "waiting for p570 asset continuity review",
+                "slot.p670.status": "pending",
+                "slot.p670.note": "waiting for p570 asset continuity review",
+                "slot.p680.status": "pending",
+                "slot.p680.note": "frontend scene-image review is not ready because p570 asset review is required",
+                "review.image.status": "pending",
+                "review.semantic.create_scene_media_generated": "false",
+                "image_generation.status": "not_started",
+                "image_generation.started": "false",
+                "image_generation.generated_count": "0",
+                "image_generation.blocked_by": "p570_asset_visual_review",
+            },
+        )
+        return False
     await _set_create_job(job_id, {"message": "画像プロンプトをsemantic QA中"})
     failure = await _run_semantic_review_for_media_generation(job_id, run_dir=run_dir, stage="image_prompt")
     if failure:
@@ -12137,11 +15724,199 @@ def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) ->
     _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
+def _mark_localized_image_prompt_request_freeze(
+    run_dir: Path,
+) -> None:
+    """Freeze the reviewed revision without misrepresenting a partial failure."""
+
+    snapshot = load_request_snapshot(
+        run_dir / "image_generation_request_snapshot.json",
+        run_dir=run_dir,
+        verify_references=True,
+    )
+    _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+    current_revision = _validate_image_prompt_request_revision(
+        run_dir,
+        manifest_data,
+        require_resolved_references=True,
+        require_compiled_v2=True,
+    )
+    if current_revision != snapshot.request_revision:
+        raise RuntimeError(
+            "localized image prompt failure is stale for the provider-ready "
+            "request revision"
+        )
+    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    if deterministic_errors:
+        raise RuntimeError(
+            "localized image prompt partial media is blocked by deterministic "
+            "prompt review: "
+            + "; ".join(deterministic_errors)
+        )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.image_prompt.request_freeze.status": "frozen",
+            "review.image_prompt.request_freeze.request_revision": current_revision,
+            "review.image_prompt.request_freeze.reviewed_request_revision": current_revision,
+            "review.image_prompt.request_freeze.semantic_status": "localized_failure",
+            "review.image_prompt.request_freeze.semantic_report": (
+                semantic_review_relpaths("image_prompt")["report"].as_posix()
+            ),
+            "review.image_prompt.request_freeze.frozen_at": now_iso(),
+            "slot.p650.status": "done",
+            "slot.p650.note": (
+                "provider-ready request revision frozen with fully localized "
+                "image-prompt semantic failures"
+            ),
+        },
+    )
+
+
 async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Path, stage: str) -> str | None:
     try:
         await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
         return None
     except Exception as exc:
+        semantic_failure_context = _semantic_review_failure_context(
+            run_dir,
+            stage,
+        )
+        try:
+            scene_items = load_request_items(run_dir, "scene")
+        except (OSError, ValueError):
+            scene_items = []
+        blocked_item_ids, localization_issues = (
+            _localized_semantic_partial_media_disposition(
+                run_dir,
+                stage=stage,
+                items=scene_items,
+            )
+        )
+        if not localization_issues:
+            blocked_ids = sorted(blocked_item_ids)
+            if stage == "image_prompt":
+                _mark_localized_image_prompt_request_freeze(run_dir)
+            transport_failure = is_codex_transport_error(exc)
+            transport_kind = (
+                classify_codex_transport_error(str(exc)) or "unknown"
+                if transport_failure
+                else ""
+            )
+            state_updates = semantic_state_updates(
+                stage,
+                status="failed",
+                entry_count=semantic_failure_context.get("entryCount"),
+                error_count=1,
+            )
+            state_updates.update(
+                _semantic_review_failure_state(run_dir, stage)
+            )
+            state_updates.update(
+                {
+                    f"review.semantic.{stage}.partial_media_allowed": "true",
+                    f"review.semantic.{stage}.blocked_image_items": ", ".join(
+                        blocked_ids
+                    ),
+                    f"review.semantic.{stage}.blocked_image_item_count": str(
+                        len(blocked_ids)
+                    ),
+                    f"review.semantic.{stage}.localization.status": (
+                        "localized_to_image_items"
+                    ),
+                    f"review.semantic.{stage}.localization.blocked_image_items": (
+                        ", ".join(blocked_ids)
+                    ),
+                    f"review.semantic.{stage}.localization.validation": "passed",
+                    "runtime.stage": "semantic_review_partial_media_allowed",
+                    "review.semantic.create_media_generated": "false",
+                    "slot.p660.status": "pending",
+                    "slot.p660.note": (
+                        "unblocked scene image requests may continue after "
+                        f"localized {stage} failure"
+                    ),
+                    "slot.p670.status": "pending",
+                    "slot.p670.note": (
+                        "waiting for partial scene image output validation"
+                    ),
+                    "slot.p680.status": "pending",
+                    "slot.p680.note": (
+                        "waiting for partial scene image review handoff"
+                    ),
+                    "review.image.status": "pending",
+                    "image_generation.status": "not_started",
+                    "image_generation.started": "false",
+                    "image_generation.generated_count": "0",
+                    "image_generation.blocked_by": "",
+                    "image_generation.block_reason": "",
+                }
+            )
+            if transport_failure:
+                state_updates.update(
+                    {
+                        f"review.semantic.{stage}.transport.status": "failed",
+                        f"review.semantic.{stage}.transport.error_kind": (
+                            transport_kind
+                        ),
+                        f"review.semantic.{stage}.transport.error": str(exc)[
+                            :2000
+                        ],
+                        f"review.semantic.{stage}.loop.status": (
+                            "blocked_transport"
+                        ),
+                    }
+                )
+            slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+            if slot:
+                state_updates[f"slot.{slot}.status"] = "done"
+                state_updates[f"slot.{slot}.note"] = (
+                    f"contextless semantic {stage} review completed with "
+                    "fully localized partial-media failures for image items: "
+                    f"{', '.join(blocked_ids)}"
+                )
+            append_state_snapshot(run_dir / "state.txt", state_updates)
+            projection = _refresh_partial_media_projection_artifact(
+                run_dir
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="localized_partial_media_allowed",
+                item_id=job_id,
+                request={"stage": stage},
+                response={
+                    "blockedImageItems": blocked_ids,
+                    "semanticFailureContext": semantic_failure_context,
+                    "transportErrorKind": transport_kind,
+                    "partialMediaAllowed": True,
+                    "partialMediaProjection": (
+                        PARTIAL_MEDIA_PROJECTION_RELPATH.as_posix()
+                    ),
+                    "partialMediaProjectionSha256": projection[
+                        "projection_sha256"
+                    ],
+                },
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
+
+        localization_status = (
+            "not_eligible"
+            if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES
+            else "not_localized"
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.{stage}.partial_media_allowed": "false",
+                f"review.semantic.{stage}.localization.status": (
+                    localization_status
+                ),
+                f"review.semantic.{stage}.localization.reason": "; ".join(
+                    localization_issues
+                )[:2000],
+            },
+        )
         if is_codex_transport_error(exc):
             transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
             current_state = parse_state_file(run_dir / "state.txt")
@@ -12156,7 +15931,7 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             )
             blocked_item_ids = (
                 _localized_semantic_blocked_image_item_ids(run_dir, stage=stage)
-                if stage in {"scene_detail", "cut_blueprint", "asset_plan", "image_prompt"}
+                if stage in PARTIAL_MEDIA_SEMANTIC_STAGES
                 else set()
             )
             _invalidate_p600_supervisor_result(run_dir, invalidated_by=invalidated_by)
@@ -12220,8 +15995,15 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
-                    f"review.semantic.{stage}.localization.status": "not_localized",
-                    f"review.semantic.{stage}.localization.reason": "transport failure did not map to scene image request items",
+                    f"review.semantic.{stage}.localization.status": (
+                        "not_eligible"
+                        if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES
+                        else "not_localized"
+                    ),
+                    f"review.semantic.{stage}.localization.reason": (
+                        "; ".join(localization_issues)[:2000]
+                        or "transport failure did not map to scene image request items"
+                    ),
                 },
             )
             write_app_server_debug_log(
@@ -12259,11 +16041,27 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
             entry_count=None,
             error_count=1,
         )
+        invalidated_by = f"semantic.{stage}.failed"
+        _invalidate_p600_supervisor_result(
+            run_dir,
+            invalidated_by=invalidated_by,
+        )
         state_updates.update(
             {
                 "runtime.stage": "semantic_review_failed_before_media_generation",
                 "review.semantic.create_media_generated": "false",
                 "review.semantic.create_blocking_stage": stage,
+                "review.image_prompt.request_freeze.status": "draft",
+                "review.image_prompt.request_freeze.invalidated_by": (
+                    invalidated_by
+                ),
+                "review.image_prompt.request_freeze.invalidated_at": now_iso(),
+                "orchestration.p600.supervisor.status": "invalidated",
+                "orchestration.p600.supervisor.invalidated_by": invalidated_by,
+                "slot.p650.status": "pending",
+                "slot.p650.note": (
+                    f"blocked by non-localized {stage} semantic failure"
+                ),
                 "slot.p660.status": "pending",
                 "slot.p660.note": f"blocked before image generation by {stage} semantic review failure",
                 "slot.p670.status": "pending",
@@ -12282,7 +16080,7 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                 items=load_request_items(run_dir, "scene"),
                 failure_context=semantic_failure_context,
             )
-            if stage in {"scene_detail", "cut_blueprint", "asset_plan", "image_prompt"}
+            if stage in PARTIAL_MEDIA_SEMANTIC_STAGES
             else set()
         )
         if blocked_item_ids:
@@ -12319,8 +16117,16 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                 error=message,
             )
             return f"{stage}: semantic QA failed; skipped image generation for {', '.join(blocked_ids)}"
-        state_updates[f"review.semantic.{stage}.localization.status"] = "not_localized"
-        state_updates[f"review.semantic.{stage}.localization.reason"] = "semantic failure did not map to scene image request items"
+        state_updates[f"review.semantic.{stage}.partial_media_allowed"] = "false"
+        state_updates[f"review.semantic.{stage}.localization.status"] = (
+            "not_eligible"
+            if stage not in PARTIAL_MEDIA_SEMANTIC_STAGES
+            else "not_localized"
+        )
+        state_updates[f"review.semantic.{stage}.localization.reason"] = (
+            "; ".join(localization_issues)[:2000]
+            or "semantic failure did not map to scene image request items"
+        )
         slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
         if slot:
             state_updates[f"slot.{slot}.status"] = "failed"
@@ -12376,6 +16182,7 @@ async def _run_semantic_review(
     reusable_result = _reusable_passed_semantic_review(run_dir, stage)
     if reusable_result is not None:
         _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
+        _clear_partial_media_stage(run_dir, stage=stage)
         if stage == "image_prompt" and image_prompt_provider_ready:
             _mark_image_prompt_request_freeze_done(
                 run_dir,
@@ -12401,33 +16208,138 @@ async def _run_semantic_review(
             run_dir / "state.txt",
             semantic_loop_state_updates(stage, status="reviewing", attempt=attempt, max_attempts=attempts),
         )
-        try:
-            result = await _await_semantic_operation_with_progress_watchdog(
-                _run_semantic_review_once(
-                    job_id,
+        output_contract_attempts = (
+            1
+            if stage in {"scene_detail", "image_prompt"}
+            else _semantic_review_output_contract_retry_attempts()
+        )
+        result: SemanticReviewStatus | None = None
+        for output_contract_attempt in range(
+            1,
+            output_contract_attempts + 1,
+        ):
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.output_contract.status": (
+                        "reviewing"
+                        if output_contract_attempt == 1
+                        else "retrying"
+                    ),
+                    f"review.semantic.{stage}.output_contract.attempt": str(
+                        output_contract_attempt
+                    ),
+                    f"review.semantic.{stage}.output_contract.max_attempts": str(
+                        output_contract_attempts
+                    ),
+                },
+            )
+            try:
+                result = await _await_semantic_operation_with_progress_watchdog(
+                    _run_semantic_review_once(
+                        job_id,
+                        run_dir=run_dir,
+                        stage=stage,
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        final_attempt=attempt >= attempts,
+                    ),
                     run_dir=run_dir,
                     stage=stage,
+                    operation="review",
+                    timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
+                    fingerprint=lambda: _semantic_review_progress_fingerprint(run_dir, stage),
+                )
+            except asyncio.TimeoutError as exc:
+                _record_semantic_review_hard_timeout(
+                    run_dir,
+                    stage,
                     attempt=attempt,
                     max_attempts=attempts,
-                    final_attempt=attempt >= attempts,
-                ),
-                run_dir=run_dir,
-                stage=stage,
-                operation="review",
-                timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
-                fingerprint=lambda: _semantic_review_progress_fingerprint(run_dir, stage),
-            )
-        except asyncio.TimeoutError as exc:
-            _record_semantic_review_hard_timeout(
-                run_dir,
-                stage,
-                attempt=attempt,
-                max_attempts=attempts,
-                timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
-            )
-            raise CodexAppServerTransportError(
-                f"{stage} semantic review timed out after no observable progress"
-            ) from exc
+                    timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
+                )
+                raise CodexAppServerTransportError(
+                    f"{stage} semantic review timed out after no observable progress"
+                ) from exc
+            except CodexAppServerTransportError as exc:
+                transport_kind = (
+                    classify_codex_transport_error(str(exc))
+                    or str(
+                        getattr(exc, "diagnostics", {}).get(
+                            "transportErrorKind"
+                        )
+                        or ""
+                    )
+                )
+                if (
+                    transport_kind == "output_contract_failed"
+                    and output_contract_attempt < output_contract_attempts
+                ):
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.semantic.{stage}.output_contract.status": "retrying",
+                            f"review.semantic.{stage}.output_contract.error": str(
+                                exc
+                            )[:2000],
+                            f"review.semantic.{stage}.output_contract.retry_count": str(
+                                output_contract_attempt
+                            ),
+                            f"review.semantic.{stage}.loop.status": "reviewing",
+                        },
+                    )
+                    write_app_server_debug_log(
+                        run_dir=run_dir,
+                        operation="semantic_review",
+                        status="output_contract_retrying",
+                        item_id=job_id,
+                        request={
+                            "stage": stage,
+                            "semanticAttempt": attempt,
+                            "outputContractAttempt": output_contract_attempt,
+                            "outputContractMaxAttempts": output_contract_attempts,
+                        },
+                        response={
+                            "transportErrorKind": transport_kind,
+                        },
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    continue
+                if transport_kind == "output_contract_failed":
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.semantic.{stage}.output_contract.status": "failed",
+                            f"review.semantic.{stage}.output_contract.error": str(
+                                exc
+                            )[:2000],
+                            f"review.semantic.{stage}.output_contract.retry_count": str(
+                                max(0, output_contract_attempt - 1)
+                            ),
+                        },
+                    )
+                raise
+            else:
+                if output_contract_attempt > 1:
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.semantic.{stage}.output_contract.status": "recovered",
+                            f"review.semantic.{stage}.output_contract.retry_count": str(
+                                output_contract_attempt - 1
+                            ),
+                        },
+                    )
+                else:
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            f"review.semantic.{stage}.output_contract.status": "passed",
+                            f"review.semantic.{stage}.output_contract.retry_count": "0",
+                        },
+                    )
+                break
+        assert result is not None
         if stage == "image_prompt":
             _assert_image_prompt_request_revision_unchanged(
                 run_dir,
@@ -12440,6 +16352,7 @@ async def _run_semantic_review(
                 run_dir / "state.txt",
                 semantic_loop_state_updates(stage, status="passed", attempt=attempt, max_attempts=attempts, error_count=0),
             )
+            _clear_partial_media_stage(run_dir, stage=stage)
             if stage == "image_prompt" and image_prompt_provider_ready:
                 _mark_image_prompt_request_freeze_done(
                     run_dir,
@@ -12552,11 +16465,14 @@ async def _run_semantic_review(
                     },
                     error=f"TimeoutError: semantic producer repair no-progress timeout after {_semantic_repair_no_progress_timeout_seconds():.0f}s",
                 )
+                await _reconcile_after_semantic_repair(
+                    run_dir,
+                    stage=stage,
+                    changed_artifacts=changed_artifacts,
+                    image_prompt_provider_ready=image_prompt_provider_ready,
+                    job_id=job_id,
+                )
                 if stage == "image_prompt":
-                    await _prepare_image_prompt_repair_revision_for_rereview(
-                        run_dir,
-                        provider_ready=image_prompt_provider_ready,
-                    )
                     image_prompt_request_revision = _prepare_image_prompt_request_revision_for_review(
                         run_dir,
                         provider_ready=image_prompt_provider_ready,
@@ -12598,11 +16514,21 @@ async def _run_semantic_review(
             raise CodexAppServerTransportError(
                 f"{stage} semantic producer repair timed out after no observable progress"
             ) from exc
+        repair_source_fingerprint_after = (
+            _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+        )
+        changed_artifacts = _changed_semantic_repair_artifacts(
+            repair_source_fingerprint_before,
+            repair_source_fingerprint_after,
+        )
+        await _reconcile_after_semantic_repair(
+            run_dir,
+            stage=stage,
+            changed_artifacts=changed_artifacts,
+            image_prompt_provider_ready=image_prompt_provider_ready,
+            job_id=job_id,
+        )
         if stage == "image_prompt":
-            await _prepare_image_prompt_repair_revision_for_rereview(
-                run_dir,
-                provider_ready=image_prompt_provider_ready,
-            )
             image_prompt_request_revision = _prepare_image_prompt_request_revision_for_review(
                 run_dir,
                 provider_ready=image_prompt_provider_ready,
@@ -12873,6 +16799,19 @@ def _record_reused_semantic_review(
 
 def _semantic_review_no_progress_timeout_seconds() -> float:
     return float(semantic_review_timeout_seconds())
+
+
+def _semantic_review_output_contract_retry_attempts() -> int:
+    raw = os.environ.get(
+        "TOC_SEMANTIC_REVIEW_OUTPUT_CONTRACT_RETRY_ATTEMPTS",
+        "",
+    ).strip()
+    if not raw:
+        return 2
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def _semantic_repair_no_progress_timeout_seconds() -> float:
@@ -13245,16 +17184,18 @@ async def _run_semantic_review_once(
             is_completed=_semantic_review_report_completed,
         )
         if not _semantic_review_report_completed(report_path):
-            report_from_agent = _semantic_report_text_from_transcript(transcript, stage)
-            if report_from_agent is not None:
-                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
-                append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        f"review.semantic.{stage}.report.source": "agent_message_transport_fallback",
-                        f"review.semantic.{stage}.report.materialized_at": now_iso(),
-                    },
-                )
+            _materialize_semantic_report_from_transcript(
+                run_dir=run_dir,
+                report_path=report_path,
+                transcript=transcript,
+                stage=stage,
+                source="agent_message_transport_fallback",
+            )
+        if not _semantic_review_report_completed(report_path):
+            raise _semantic_review_output_contract_error(
+                stage=stage,
+                transcript=transcript,
+            )
         if completed_from_report:
             write_app_server_debug_log(
                 run_dir=run_dir,
@@ -13275,6 +17216,19 @@ async def _run_semantic_review_once(
             )
     except Exception as exc:
         transport_kind = classify_codex_transport_error(str(exc))
+        if is_codex_transport_error(exc) and not _semantic_review_report_completed(
+            report_path
+        ):
+            recovered_transcript = getattr(exc, "transcript", transcript)
+            if isinstance(recovered_transcript, list):
+                transcript = recovered_transcript
+                _materialize_semantic_report_from_transcript(
+                    run_dir=run_dir,
+                    report_path=report_path,
+                    transcript=transcript,
+                    stage=stage,
+                    source="agent_message_transport_exception_fallback",
+                )
         if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
             transcript = getattr(exc, "transcript", transcript)
             write_app_server_debug_log(
@@ -13354,6 +17308,58 @@ async def _run_semantic_review_once(
             report_path.read_text(encoding="utf-8"),
         )
     result = check_semantic_review(run_dir, stage)
+    output_contract_errors = _semantic_review_result_output_contract_errors(
+        result
+    )
+    if output_contract_errors:
+        output_contract_error = _semantic_review_output_contract_error(
+            stage=stage,
+            transcript=transcript if isinstance(transcript, list) else [],
+            issues=output_contract_errors,
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.{stage}.transport.status": "failed",
+                f"review.semantic.{stage}.transport.error_kind": "output_contract_failed",
+                f"review.semantic.{stage}.transport.error": str(
+                    output_contract_error
+                )[:2000],
+                f"review.semantic.{stage}.loop.status": "blocked_transport",
+            },
+        )
+        slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+        if slot:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"slot.{slot}.status": "failed",
+                    f"slot.{slot}.note": (
+                        f"contextless semantic {stage} review blocked by "
+                        "reviewer output contract failure"
+                    ),
+                },
+            )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="output_contract_failed",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "prompt": str(prompt_path.relative_to(run_dir)),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            response={
+                "transportErrorKind": "output_contract_failed",
+                "contractErrors": list(output_contract_errors),
+            },
+            transcript=transcript if isinstance(transcript, list) else [],
+            error=f"{type(output_contract_error).__name__}: {output_contract_error}",
+        )
+        raise output_contract_error
     state_updates = review_status_to_state(stage, result)
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
@@ -13554,11 +17560,22 @@ def _refresh_semantic_review_input_digest(
         raise RuntimeError(f"semantic review scope lacks digest metadata: {scope_path}")
     entry_ids = [str(value).strip() for value in raw_entry_ids if str(value).strip()]
     if isinstance(raw_source_digests, list):
-        source_digests = [
-            {"path": str(record.get("path") or ""), "sha256": str(record.get("sha256") or "")}
-            for record in raw_source_digests
-            if isinstance(record, dict)
-        ]
+        source_digests = []
+        for record in raw_source_digests:
+            if not isinstance(record, dict):
+                continue
+            normalized_record = {
+                "path": str(record.get("path") or ""),
+                "sha256": str(record.get("sha256") or ""),
+            }
+            policy = record.get(
+                REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
+            )
+            if policy is not None:
+                normalized_record[
+                    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
+                ] = str(policy)
+            source_digests.append(normalized_record)
     else:
         raw_sources = scope.get("source_artifacts")
         if raw_sources is None:
@@ -13593,10 +17610,19 @@ def _refresh_semantic_review_input_digest(
                 raise RuntimeError(
                     f"semantic review source artifact must be a regular non-symlink file: {raw_source}"
                 )
+            fingerprint = review_source_fingerprint(
+                source_path,
+                artifact_relpath=raw_source,
+                review_kind="semantic",
+                stage=stage,
+            )
             source_digests.append(
                 {
                     "path": raw_source,
-                    "sha256": semantic_review_file_sha256(source_path),
+                    "sha256": fingerprint.sha256,
+                    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD: (
+                        fingerprint.policy
+                    ),
                 }
             )
     collection_sha256 = semantic_review_file_sha256(collection_path)
@@ -13775,6 +17801,90 @@ def _image_prompt_scope_shards(scope: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return shards
+
+
+def _write_terminal_transport_shard_report(
+    run_dir: Path,
+    *,
+    stage: str,
+    shard: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Replace a pending shard report with the terminal transport failure."""
+
+    artifacts = shard.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise RuntimeError(
+            f"{stage} transport shard is missing artifact paths"
+        )
+    scope_relpath = str(artifacts.get("scope") or "").strip()
+    report_relpath = str(artifacts.get("report") or "").strip()
+    if not scope_relpath or not report_relpath:
+        raise RuntimeError(
+            f"{stage} transport shard is missing scope/report paths"
+        )
+    entry_ids = [
+        str(value)
+        for value in (
+            result.get("entry_ids")
+            or shard.get("entry_ids")
+            or [result.get("entry_id")]
+        )
+        if str(value or "").strip()
+    ]
+    blocked_entries = [
+        str(value)
+        for value in (
+            result.get("blocked_entries") or entry_ids
+        )
+        if str(value or "").strip()
+    ]
+    findings = [
+        str(value)
+        for value in (
+            result.get("findings")
+            or result.get("errors")
+            or ["semantic shard transport failed"]
+        )
+        if str(value or "").strip()
+    ]
+    reason_keys = [
+        str(value)
+        for value in (
+            result.get("reason_keys")
+            or [f"{stage}_shard_transport_failed"]
+        )
+        if str(value or "").strip()
+    ]
+    digest = _semantic_scope_input_digest(
+        run_dir / scope_relpath
+    )
+    _write_semantic_artifact_text(
+        run_dir,
+        run_dir / report_relpath,
+        "\n".join(
+            [
+                f"# Semantic Review Report: {stage} transport shard",
+                "",
+                "status: failed",
+                f"semantic_review_input_digest: {digest}",
+                "reviewed_entries:",
+                *[f"  - {entry}" for entry in entry_ids],
+                "blocked_entries:",
+                *[f"  - {entry}" for entry in blocked_entries],
+                "findings:",
+                *[f"  - {finding}" for finding in findings],
+                "failed_selectors:",
+                *[f"  - {entry}" for entry in blocked_entries],
+                "reason_keys:",
+                *[f"  - {key}" for key in reason_keys],
+                "notes:",
+                "  - terminal report synthesized from request-bound "
+                "app-server transport failure",
+                "",
+            ]
+        ),
+    )
 
 
 def _write_image_prompt_shard_aggregate_report(
@@ -14089,6 +18199,28 @@ async def _run_image_prompt_sharded_semantic_review_once(
                     replacement.get("transport_error") or ""
                 )[:2000]
             append_state_snapshot(run_dir / "state.txt", updates)
+
+    shards_by_id = {
+        str(shard.get("shard_id") or ""): shard
+        for shard in shards
+    }
+    for result_item in shard_results:
+        if str(result_item.get("status") or "") != "transport_failed":
+            continue
+        shard = shards_by_id.get(
+            str(result_item.get("shard_id") or "")
+        )
+        if shard is None:
+            raise RuntimeError(
+                "image_prompt transport failure is not bound to a "
+                "current shard descriptor"
+            )
+        _write_terminal_transport_shard_report(
+            run_dir,
+            stage="image_prompt",
+            shard=shard,
+            result=result_item,
+        )
 
     blocked_entries = _dedupe_preserve_order(
         entry
@@ -14576,6 +18708,21 @@ async def _run_image_prompt_scene_shard_review(
                     transcript=transcript,
                 )
         except Exception as exc:
+            if is_codex_transport_error(exc) and not _semantic_review_report_completed(
+                report_path
+            ):
+                recovered_transcript = getattr(exc, "transcript", transcript)
+                if isinstance(recovered_transcript, list):
+                    transcript = recovered_transcript
+                    _materialize_semantic_report_from_transcript(
+                        run_dir=run_dir,
+                        report_path=report_path,
+                        transcript=transcript,
+                        stage="image_prompt",
+                        source=(
+                            "agent_message_transport_exception_fallback"
+                        ),
+                    )
             if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
                 transcript = getattr(exc, "transcript", transcript)
             elif is_codex_transport_error(exc):
@@ -14617,6 +18764,37 @@ async def _run_image_prompt_scene_shard_review(
             )
             if report_from_agent is not None:
                 _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
+        if not _semantic_review_report_completed(report_path):
+            output_contract_error = _semantic_review_output_contract_error(
+                stage="image_prompt",
+                transcript=transcript if isinstance(transcript, list) else [],
+            )
+            failure = _image_prompt_transport_failure_result(
+                shard=shard,
+                exc=output_contract_error,
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="output_contract_failed",
+                item_id=job_id,
+                request={
+                    "stage": "image_prompt",
+                    "mode": "per_scene_shard",
+                    "shardId": shard_id,
+                    "entryIds": entry_ids,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "transportAttempt": transport_attempt,
+                    "transportMaxAttempts": transport_max_attempts,
+                },
+                response={
+                    "transportErrorKind": "output_contract_failed",
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
+                error=f"{type(output_contract_error).__name__}: {output_contract_error}",
+            )
+            return failure
         report_text = report_path.read_text(encoding="utf-8", errors="replace") if report_path.exists() else ""
         reported_status = parse_judgment_report_status(report_text) if report_text else ""
         expected_input_digest = _semantic_scope_input_digest(scope_path)
@@ -14630,32 +18808,68 @@ async def _run_image_prompt_scene_shard_review(
         reported_failed_selectors = _semantic_report_list_values(report_text, "failed_selectors")
         findings = _semantic_report_list_values(report_text, "findings")
         reason_keys = _semantic_report_list_values(report_text, "reason_keys")
-        errors: list[str] = list(
+        contract_errors: list[str] = list(
             semantic_report_required_field_issues(
                 report_text,
                 require_digest=True,
             )
         )
         if reported_input_digests != [expected_input_digest] or not expected_input_digest:
-            errors.append("shard report semantic_review_input_digest must exactly match the current scope")
-        if reported_status != "passed":
-            errors.append(f"shard report status must be passed, got {reported_status or '(missing)'}")
-        if reported_blocked_entries:
-            errors.append(
+            contract_errors.append("shard report semantic_review_input_digest must exactly match the current scope")
+        if reported_status not in {"passed", "failed"}:
+            contract_errors.append(
+                "shard report status must be passed or failed, got "
+                f"{reported_status or '(missing)'}"
+            )
+        if reported_status == "passed" and reported_blocked_entries:
+            contract_errors.append(
                 "passed shard report must have empty blocked_entries: "
                 + ", ".join(reported_blocked_entries)
             )
-        if reported_failed_selectors:
-            errors.append(
+        if reported_status == "passed" and reported_failed_selectors:
+            contract_errors.append(
                 "passed shard report must have empty failed_selectors: "
                 + ", ".join(reported_failed_selectors)
             )
-        errors.extend(coverage_errors)
-        if coverage_errors:
-            reason_keys.append("semantic_review_selector_coverage_invalid")
-            findings.extend(coverage_errors)
-        if reported_blocked_entries or reported_failed_selectors:
-            reason_keys.append("image_prompt_shard_report_inconsistent")
+        contract_errors.extend(coverage_errors)
+        if contract_errors:
+            output_contract_error = _semantic_review_output_contract_error(
+                stage="image_prompt",
+                transcript=transcript if isinstance(transcript, list) else [],
+                issues=contract_errors,
+            )
+            failure = _image_prompt_transport_failure_result(
+                shard=shard,
+                exc=output_contract_error,
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="output_contract_failed",
+                item_id=job_id,
+                request={
+                    "stage": "image_prompt",
+                    "mode": "per_scene_shard",
+                    "shardId": shard_id,
+                    "entryIds": entry_ids,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "transportAttempt": transport_attempt,
+                    "transportMaxAttempts": transport_max_attempts,
+                },
+                response={
+                    "transportErrorKind": "output_contract_failed",
+                    "contractErrors": contract_errors,
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
+                error=f"{type(output_contract_error).__name__}: {output_contract_error}",
+            )
+            return failure
+        errors: list[str] = []
+        if reported_status != "passed":
+            errors.append(
+                f"shard report status must be passed, got {reported_status}"
+            )
         if errors and not reason_keys:
             reason_keys.append("image_prompt_shard_failed")
         status = "passed" if not errors else "failed"
@@ -14991,6 +19205,28 @@ async def _run_scene_detail_sharded_semantic_review_once(
                 )
         shard_results = next_shard_results
 
+    shards_by_entry_id = {
+        str(entry_id): shard
+        for shard in scene_detail_shards
+        for entry_id in shard.get("entry_ids") or []
+    }
+    for result_item in shard_results:
+        if str(result_item.get("status") or "") != "transport_failed":
+            continue
+        entry_id = str(result_item.get("entry_id") or "")
+        shard = shards_by_entry_id.get(entry_id)
+        if shard is None:
+            raise RuntimeError(
+                "scene_detail transport failure is not bound to a "
+                "current shard descriptor"
+            )
+        _write_terminal_transport_shard_report(
+            run_dir,
+            stage="scene_detail",
+            shard=shard,
+            result=result_item,
+        )
+
     reviewed_entries = [result["entry_id"] for result in shard_results]
     blocked_entries = _dedupe_preserve_order(
         blocked_entry
@@ -15244,6 +19480,21 @@ async def _run_scene_detail_shard_review(
                 )
         except Exception as exc:
             transport_kind = classify_codex_transport_error(str(exc))
+            if is_codex_transport_error(exc) and not _semantic_review_report_completed(
+                report_path
+            ):
+                recovered_transcript = getattr(exc, "transcript", transcript)
+                if isinstance(recovered_transcript, list):
+                    transcript = recovered_transcript
+                    _materialize_semantic_report_from_transcript(
+                        run_dir=run_dir,
+                        report_path=report_path,
+                        transcript=transcript,
+                        stage="scene_detail",
+                        source=(
+                            "agent_message_transport_exception_fallback"
+                        ),
+                    )
             if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
                 transcript = getattr(exc, "transcript", transcript)
                 write_app_server_debug_log(
@@ -15325,6 +19576,38 @@ async def _run_scene_detail_shard_review(
             )
             if report_from_agent is not None:
                 _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
+        if not _semantic_review_report_completed(report_path):
+            output_contract_error = _semantic_review_output_contract_error(
+                stage="scene_detail",
+                transcript=transcript if isinstance(transcript, list) else [],
+            )
+            failure = _scene_detail_transport_failure_result(
+                entry_id=entry_id,
+                exc=output_contract_error,
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="output_contract_failed",
+                item_id=job_id,
+                request={
+                    "stage": "scene_detail",
+                    "mode": "per_scene_shard",
+                    "entryId": entry_id,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "transportAttempt": transport_attempt,
+                    "transportMaxAttempts": transport_max_attempts,
+                    "prompt": str(prompt_path.relative_to(run_dir)),
+                    "report": str(report_path.relative_to(run_dir)),
+                },
+                response={
+                    "transportErrorKind": "output_contract_failed",
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
+                error=f"{type(output_contract_error).__name__}: {output_contract_error}",
+            )
+            return failure
         report_text = report_path.read_text(encoding="utf-8", errors="replace") if report_path.exists() else ""
         status = parse_judgment_report_status(report_text) if report_text else ""
         expected_input_digest = _semantic_scope_input_digest(scope_path)
@@ -15340,25 +19623,71 @@ async def _run_scene_detail_shard_review(
         blocked_entries = _semantic_report_list_values(report_text, "blocked_entries")
         findings = _semantic_report_list_values(report_text, "findings")
         reason_keys = _semantic_report_list_values(report_text, "reason_keys")
-        errors: list[str] = list(
+        contract_errors: list[str] = list(
             semantic_report_required_field_issues(
                 report_text,
                 require_digest=True,
             )
         )
         if reported_input_digests != [expected_input_digest] or not expected_input_digest:
-            errors.append("shard report semantic_review_input_digest must exactly match the current scope")
-        if status != "passed":
-            errors.append(f"shard report status must be passed, got {status or '(missing)'}")
+            contract_errors.append("shard report semantic_review_input_digest must exactly match the current scope")
+        if status not in {"passed", "failed"}:
+            contract_errors.append(
+                "shard report status must be passed or failed, got "
+                f"{status or '(missing)'}"
+            )
         if reviewed_entries != [entry_id]:
-            errors.append(
+            contract_errors.append(
                 "shard reviewed_entries must exactly match the scene-detail entry "
                 f"(expected={[entry_id]}, got={reviewed_entries})"
             )
-        if blocked_entries:
-            errors.append("passed shard report must not contain blocked_entries")
-        if failed_selectors:
-            errors.append("passed shard report must not contain failed_selectors")
+        if status == "passed" and blocked_entries:
+            contract_errors.append(
+                "passed shard report must not contain blocked_entries"
+            )
+        if status == "passed" and failed_selectors:
+            contract_errors.append(
+                "passed shard report must not contain failed_selectors"
+            )
+        if contract_errors:
+            output_contract_error = _semantic_review_output_contract_error(
+                stage="scene_detail",
+                transcript=transcript if isinstance(transcript, list) else [],
+                issues=contract_errors,
+            )
+            failure = _scene_detail_transport_failure_result(
+                entry_id=entry_id,
+                exc=output_contract_error,
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="output_contract_failed",
+                item_id=job_id,
+                request={
+                    "stage": "scene_detail",
+                    "mode": "per_scene_shard",
+                    "entryId": entry_id,
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "transportAttempt": transport_attempt,
+                    "transportMaxAttempts": transport_max_attempts,
+                    "prompt": str(prompt_path.relative_to(run_dir)),
+                    "report": str(report_path.relative_to(run_dir)),
+                },
+                response={
+                    "transportErrorKind": "output_contract_failed",
+                    "contractErrors": contract_errors,
+                },
+                transcript=transcript if isinstance(transcript, list) else [],
+                error=f"{type(output_contract_error).__name__}: {output_contract_error}",
+            )
+            return failure
+        errors: list[str] = []
+        if status != "passed":
+            errors.append(
+                f"shard report status must be passed, got {status}"
+            )
         effective_status = "passed" if not errors else "failed"
         if effective_status != "passed":
             if not blocked_entries and not failed_selectors:
@@ -15781,16 +20110,13 @@ def _semantic_report_text_from_transcript(
 ) -> str | None:
     """Recover a complete AI verdict when it was returned in chat instead of the report file."""
 
-    for notification in reversed(transcript):
-        if notification.get("method") != "item/completed":
-            continue
-        params = notification.get("params")
-        item = params.get("item") if isinstance(params, dict) else None
-        if not isinstance(item, dict) or item.get("type") != "agentMessage":
-            continue
-        text = str(item.get("text") or "").strip()
+    def normalized_report(text: str) -> str | None:
+        text = str(text or "").strip()
         if not text:
-            continue
+            return None
+        json_report = _semantic_json_verdict_to_report(text, stage=stage)
+        if json_report is not None:
+            return json_report
         status = parse_judgment_report_status(text)
         if status not in {"passed", "failed"}:
             match = re.search(
@@ -15804,12 +20130,211 @@ def _semantic_report_text_from_transcript(
             "blocked_entries:",
             "failed_selectors:",
         )
-        if status not in {"passed", "failed"} or any(field not in text for field in required_fields):
-            continue
+        if status not in {"passed", "failed"} or any(
+            field not in text for field in required_fields
+        ):
+            return None
         if stage in {"research", "story"} and "criteria_results_json:" not in text:
-            continue
+            return None
         return text.rstrip() + "\n"
+
+    explicit_final_messages: list[str] = []
+    legacy_messages: list[str] = []
+    for notification in transcript:
+        if notification.get("method") != "item/completed":
+            continue
+        params = notification.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            continue
+        text = str(item.get("text") or "")
+        if "phase" in item:
+            if str(item.get("phase") or "").strip() == "final_answer":
+                explicit_final_messages.append(text)
+            # Explicit commentary/analysis is never a canonical verdict.
+            continue
+        legacy_messages.append(text)
+
+    if explicit_final_messages:
+        # One explicit final_answer makes phase-aware output authoritative.
+        # Parse only the newest final; if it is malformed, fail the output
+        # contract instead of promoting an older commentary/legacy message.
+        return normalized_report(explicit_final_messages[-1])
+    for text in reversed(legacy_messages):
+        if (report := normalized_report(text)) is not None:
+            return report
     return None
+
+
+def _semantic_json_verdict_to_report(text: str, *, stage: str) -> str | None:
+    """Normalize one strict JSON semantic verdict into the canonical report format."""
+
+    normalized = str(text or "").strip()
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*\n(?P<body>\{.*\})\s*\n```",
+        normalized,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if fenced:
+        normalized = fenced.group("body").strip()
+    if not normalized.startswith("{") or not normalized.endswith("}"):
+        return None
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    required_scalar_fields = ("status", "semantic_review_input_digest")
+    required_list_fields = (
+        "reviewed_entries",
+        "blocked_entries",
+        "findings",
+        "failed_selectors",
+        "reason_keys",
+        "notes",
+    )
+    if any(not isinstance(payload.get(field), str) for field in required_scalar_fields):
+        return None
+    if any(not isinstance(payload.get(field), list) for field in required_list_fields):
+        return None
+
+    status = str(payload["status"]).strip().lower()
+    input_digest = str(payload["semantic_review_input_digest"]).strip()
+    if status not in {"passed", "failed"}:
+        return None
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", input_digest) is None:
+        return None
+    for field in ("reviewed_entries", "blocked_entries", "failed_selectors", "reason_keys"):
+        values = payload[field]
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            return None
+    if any(not isinstance(value, str) for value in payload["notes"]):
+        return None
+
+    criteria_results: list[Any] | None = None
+    if stage in {"research", "story"}:
+        raw_criteria_results = payload.get("criteria_results_json")
+        if not isinstance(raw_criteria_results, list):
+            return None
+        criteria_results = raw_criteria_results
+
+    lines = [
+        f"status: {status}",
+        f"semantic_review_input_digest: {input_digest}",
+        "reviewed_entries: "
+        + json.dumps(payload["reviewed_entries"], ensure_ascii=False),
+        "blocked_entries: "
+        + json.dumps(payload["blocked_entries"], ensure_ascii=False),
+    ]
+    if payload["findings"]:
+        lines.extend(
+            [
+                "findings:",
+                *[
+                    "  - " + json.dumps(finding, ensure_ascii=False)
+                    for finding in payload["findings"]
+                ],
+            ]
+        )
+    else:
+        lines.append("findings: []")
+    lines.append(
+        "failed_selectors: "
+        + json.dumps(payload["failed_selectors"], ensure_ascii=False)
+    )
+    if criteria_results is not None:
+        lines.append(
+            "criteria_results_json: "
+            + json.dumps(criteria_results, ensure_ascii=False)
+        )
+    lines.extend(
+        [
+            "reason_keys: "
+            + json.dumps(payload["reason_keys"], ensure_ascii=False),
+            "notes: " + json.dumps(payload["notes"], ensure_ascii=False),
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _materialize_semantic_report_from_transcript(
+    *,
+    run_dir: Path,
+    report_path: Path,
+    transcript: list[dict[str, Any]],
+    stage: str,
+    source: str,
+) -> bool:
+    if _semantic_review_report_completed(report_path):
+        return True
+    report_from_agent = _semantic_report_text_from_transcript(
+        transcript,
+        stage,
+    )
+    if report_from_agent is None:
+        return False
+    _write_semantic_artifact_text(
+        run_dir,
+        report_path,
+        report_from_agent,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            f"review.semantic.{stage}.report.source": source,
+            f"review.semantic.{stage}.report.materialized_at": now_iso(),
+        },
+    )
+    return _semantic_review_report_completed(report_path)
+
+
+def _semantic_review_result_output_contract_errors(
+    result: SemanticReviewStatus,
+) -> tuple[str, ...]:
+    """Separate a valid negative verdict from malformed/stale report output."""
+
+    errors = list(result.errors)
+    if result.status == "failed":
+        expected_status_error = (
+            "semantic review status must be passed, got failed"
+        )
+        errors = [
+            error
+            for error in errors
+            if error != expected_status_error
+        ]
+    return tuple(errors)
+
+
+def _semantic_review_output_contract_error(
+    *,
+    stage: str,
+    transcript: list[dict[str, Any]],
+    issues: Iterable[str] = (),
+) -> CodexAppServerTransportError:
+    normalized_issues = [
+        str(issue).strip()
+        for issue in issues
+        if str(issue).strip()
+    ]
+    detail = (
+        ": " + "; ".join(normalized_issues)
+        if normalized_issues
+        else ""
+    )
+    return CodexAppServerTransportError(
+        f"{stage} semantic review output contract failed: "
+        "completed turn did not produce a terminal canonical report or a "
+        f"complete machine-readable final verdict{detail}",
+        transcript=transcript,
+        diagnostics={
+            "transportErrorKind": "output_contract_failed",
+            "stage": stage,
+        },
+    )
 
 
 async def _run_turn_until_semantic_artifact_completed(
@@ -16178,7 +20703,9 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
         raw = type(exc).__name__
     normalized = " ".join(raw.split())
     normalized_lower = normalized.lower()
-    if "401 unauthorized" in normalized_lower or "missing bearer or basic authentication" in normalized_lower:
+    if isinstance(exc, CanonicalP500ResumeRequiredError):
+        prefix = "Canonical p500 resume is required"
+    elif "401 unauthorized" in normalized_lower or "missing bearer or basic authentication" in normalized_lower:
         prefix = "Codex app-server の画像生成認証が不足しています"
     elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timeouterror" in normalized_lower:
         prefix = "Codex app-server の画像生成がタイムアウトしました"
@@ -16196,6 +20723,11 @@ def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
         prefix = "Codex app-server が画像ファイルを返しませんでした"
     elif "p680 visual quality gate failed" in normalized:
         prefix = "p680 の画像品質検証に失敗しました"
+    elif (
+        "legacy p500 resume requires" in normalized_lower
+        or "legacy world_walk p500 resume requires" in normalized_lower
+    ):
+        prefix = "p500再開に必要な入力契約が不足しています"
     elif "storyboard create" in normalized_lower:
         prefix = "ストーリーボード式ToC作成に失敗しました"
     else:
@@ -16238,6 +20770,13 @@ async def _run_create_job(
 ) -> None:
     if stop_target not in CREATE_STOP_TARGETS:
         raise ValueError("stop_target must be p650 or p680")
+    if (
+        create_mode == CREATE_MODE_SCENE_STORYBOARD
+        and stop_target != "p680"
+    ):
+        raise ValueError(
+            "scene_storyboard create requires stop_target p680"
+        )
     if not 300 <= target_duration_seconds <= 1200:
         raise ValueError("target_duration_seconds must be between 300 and 1200")
     run_dir_for_log = safe_run_dir(run_id, ROOT)
@@ -16285,7 +20824,7 @@ async def _run_create_job(
         if generate_images and create_mode == CREATE_MODE_SCENE_STORYBOARD:
             storyboard_started = time.monotonic()
             await _set_create_job(job_id, {"message": "cutストーリーボードを作成中"})
-            storyboard_result = _materialize_scene_storyboard_video_requests(run_id)
+            storyboard_result = _finalize_scene_storyboard_p680(run_id)
             write_app_server_debug_log(
                 run_dir=run_dir_for_log,
                 operation="create_job_step",
@@ -16361,6 +20900,7 @@ async def _run_create_job(
                     "semantic_review_failed_before_media_generation",
                     "semantic_review_failed_after_media_generation",
                     "app_server_transport_failed",
+                    "p570_non_visual_gate_failed",
                 }
                 failure_updates = {
                     "status": "FAILED",
@@ -16390,6 +20930,104 @@ async def _run_create_job(
         await _release_run_execution_lease(job_id)
 
 
+async def _run_world_walk_create_job(
+    job_id: str,
+    *,
+    title: str,
+    source_run_id: str,
+    run_id: str,
+    target_duration_seconds: int = 300,
+) -> None:
+    run_dir = safe_run_dir(run_id, ROOT)
+    started = time.monotonic()
+    try:
+        _require_world_walk_source_run(source_run_id)
+        async with _run_execution_leases_guard:
+            lease_already_reserved = job_id in _run_execution_leases
+        if not lease_already_reserved:
+            await _acquire_run_execution_lease(job_id, run_dir)
+        await _set_create_job(
+            job_id,
+            {
+                "message": "世界観散歩モードをp680まで実行中",
+                "currentProcess": "p000",
+            },
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="world_walk_create_job",
+            status="started",
+            item_id=job_id,
+            request={
+                "title": title,
+                "runId": run_id,
+                "sourceRunId": source_run_id,
+                "targetDurationSeconds": target_duration_seconds,
+            },
+        )
+        await _run_toc_immersive_frontend_cli_helper(
+            topic=title,
+            run_id=run_id,
+            experience=CREATE_MODE_WORLD_WALK,
+            source_run_id=source_run_id,
+            target_duration_seconds=target_duration_seconds,
+        )
+        await _sync_process_current_process(job_id, run_id)
+        _validate_created_run(run_id)
+        _validate_frontend_create_run(run_id, strict_visual_quality=True)
+        await _set_create_job(
+            job_id,
+            {
+                "status": "completed",
+                "message": "作成完了",
+                "currentProcess": "p680",
+            },
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="world_walk_create_job",
+            status="completed",
+            item_id=job_id,
+            request={
+                "runId": run_id,
+                "sourceRunId": source_run_id,
+            },
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+            },
+        )
+    except Exception as exc:
+        with suppress(Exception):
+            await _sync_process_current_process(job_id, run_id)
+        _cleanup_unscaffolded_run(run_id)
+        detail = _create_run_error_message(exc)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="world_walk_create_job",
+            status="failed",
+            item_id=job_id,
+            request={
+                "runId": run_id,
+                "sourceRunId": source_run_id,
+            },
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+            },
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+
+
 @router.get("/image_gen", response_class=HTMLResponse)
 async def image_gen_page() -> Response:
     index = DIST_DIR / "index.html"
@@ -16404,6 +21042,11 @@ async def image_gen_page() -> Response:
 @router.get("/api/image-gen/runs")
 async def api_runs() -> dict[str, Any]:
     return {"runs": list_runs(ROOT)}
+
+
+@router.get("/api/image-gen/runs/world-walk-sources")
+async def api_world_walk_sources() -> dict[str, Any]:
+    return {"sources": await asyncio.to_thread(_list_world_walk_source_runs)}
 
 
 @router.post("/api/image-gen/runs/create")
@@ -16586,6 +21229,115 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
     return job
 
 
+@router.post("/api/image-gen/runs/create-world-walk")
+async def api_create_world_walk_run(
+    req: CreateWorldWalkRunRequest,
+) -> dict[str, Any]:
+    source_run_id = req.source_run_id.strip()
+    _require_world_walk_source_run(source_run_id)
+    title = (
+        (req.title or "").strip()
+        or _world_walk_title_from_source_run_id(source_run_id)
+    )
+    if not title:
+        raise HTTPException(status_code=400, detail="title must not be blank")
+    target_duration_seconds = req.target_duration_seconds
+    job_id = uuid.uuid4().hex
+    async with _create_jobs_lock:
+        running_count = sum(
+            1
+            for existing in _create_jobs.values()
+            if existing.get("status") == "running"
+        )
+        if running_count >= MAX_RUNNING_CREATE_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail="too many create jobs are running",
+            )
+        if len(_create_jobs) >= MAX_CREATE_JOBS:
+            terminal_job_id = next(
+                (
+                    existing_id
+                    for existing_id, existing in _create_jobs.items()
+                    if existing.get("status") in {"completed", "failed"}
+                ),
+                None,
+            )
+            if terminal_job_id:
+                _create_jobs.pop(terminal_job_id)
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="too many create jobs are running",
+                )
+        run_id, run_dir = reserve_run_dir(title, root=ROOT)
+        job = {
+            "jobId": job_id,
+            "runId": run_id,
+            "path": f"output/{run_id}",
+            "status": "running",
+            "title": title,
+            "createMode": CREATE_MODE_WORLD_WALK,
+            "sourceRunId": source_run_id,
+            "sourceRunPath": f"output/{source_run_id}",
+            "targetDurationSeconds": target_duration_seconds,
+            "stopTarget": "p680",
+            "stopTargetNumber": _process_number("p680"),
+            "currentProcess": "p000",
+            "currentProcessNumber": 0,
+            "pid": os.getpid(),
+            "error": None,
+            "errorCode": None,
+            "message": "フォルダを作成中",
+        }
+        _create_jobs[job_id] = job
+    try:
+        await _acquire_run_execution_lease(job_id, run_dir)
+    except FileLockUnavailable as exc:
+        async with _create_jobs_lock:
+            _create_jobs.pop(job_id, None)
+        raise HTTPException(
+            status_code=409,
+            detail="run create/resume is already active",
+        ) from exc
+    process_store_result = await asyncio.to_thread(
+        _create_process_record_best_effort,
+        job=job,
+        title=title,
+        source=f"output/{source_run_id}",
+        stop_target="p680",
+        generate_images=True,
+    )
+    if process_store_result:
+        job["processStore"] = process_store_result
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="create_job_start",
+        status="running",
+        item_id=job_id,
+        request={
+            "title": title,
+            "runId": run_id,
+            "sourceRunId": source_run_id,
+            "createMode": CREATE_MODE_WORLD_WALK,
+            "stopTarget": "p680",
+            "targetDurationSeconds": target_duration_seconds,
+            "processStore": process_store_result,
+        },
+        response={"path": f"output/{run_id}"},
+    )
+    asyncio.create_task(
+        _run_world_walk_create_job(
+            job_id,
+            title=title,
+            source_run_id=source_run_id,
+            run_id=run_id,
+            target_duration_seconds=target_duration_seconds,
+        )
+    )
+    return job
+
+
 @router.get("/api/image-gen/runs/create/{job_id}")
 async def api_create_run_status(job_id: str) -> dict[str, Any]:
     async with _create_jobs_lock:
@@ -16641,108 +21393,759 @@ def _target_duration_seconds_for_run(run_dir: Path) -> int:
     return normalize_target_duration(None)
 
 
-@router.post("/api/image-gen/runs/{run_id}/resume")
-async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
-    run_dir = safe_run_dir(run_id, ROOT)
-    current_process_number = _current_process_number_for_run(run_id)
-    async with _create_jobs_lock:
-        running_count = sum(1 for existing in _create_jobs.values() if existing.get("status") == "running")
-        if running_count >= MAX_RUNNING_CREATE_JOBS:
-            raise HTTPException(status_code=429, detail="too many create jobs are running")
+def _resume_create_mode_for_run(run_dir: Path, record: Any | None) -> str:
+    state = parse_state_file(run_dir / "state.txt")
+    state_mode = str(state.get("runtime.create_mode") or "").strip()
+    manifest_mode = ""
+    if (run_dir / "video_manifest.md").is_file():
+        try:
+            _path, _original_text, manifest = _read_manifest_data(run_dir)
+            metadata = _dict_value(manifest.get("video_metadata"))
+            manifest_mode = str(
+                metadata.get("create_mode")
+                or metadata.get("experience")
+                or ""
+            ).strip()
+        except (OSError, TypeError, ValueError):
+            manifest_mode = ""
+    if manifest_mode == "cinematic_story":
+        manifest_mode = CREATE_MODE_NORMAL
+    record_mode = str(getattr(record, "create_mode", "") or "").strip()
+    for candidate in (state_mode, manifest_mode, record_mode):
+        if candidate in {
+            CREATE_MODE_NORMAL,
+            CREATE_MODE_SCENE_STORYBOARD,
+            CREATE_MODE_WORLD_WALK,
+        }:
+            return candidate
+    return CREATE_MODE_NORMAL
+
+
+def _validate_current_p680_run(run_id: str, *, create_mode: str) -> None:
+    if create_mode == CREATE_MODE_SCENE_STORYBOARD:
+        _validate_scene_storyboard_create_run(
+            run_id,
+            strict_visual_quality=True,
+        )
+        return
+    _validate_frontend_create_run(run_id, strict_visual_quality=True)
+
+
+def _signal_resume_process_group(
+    proc: asyncio.subprocess.Process,
+    signal_number: int,
+) -> None:
     try:
-        record = await asyncio.to_thread(process_store.get_process_run, run_id=run_id)
-    except Exception:
-        record = None
-    if current_process_number == 0 and record is not None:
-        current_process_number = int(record.current_process_number)
-    current_process = _process_label(current_process_number)
-    if current_process_number >= 680:
-        raise HTTPException(status_code=409, detail="run already reached p680")
-    title = record.title if record else run_id
-    source = record.source if record and record.source else title
-    create_mode = record.create_mode if record else CREATE_MODE_NORMAL
+        os.killpg(proc.pid, signal_number)
+    except ProcessLookupError:
+        return
+    except OSError:
+        if proc.returncode is not None:
+            return
+        try:
+            if signal_number == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            return
+
+
+def _resume_process_group_exists(proc: asyncio.subprocess.Process) -> bool:
     try:
-        target_duration_seconds = _target_duration_seconds_for_run(run_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=f"run target duration is invalid: {exc}") from exc
-    job_id = uuid.uuid4().hex
+        os.killpg(proc.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _terminate_resume_process_group(
+    proc: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+) -> tuple[bytes, bytes]:
+    _signal_resume_process_group(proc, signal.SIGTERM)
+    result: tuple[bytes, bytes] | None = None
     try:
-        await _acquire_run_execution_lease(job_id, run_dir)
-    except FileLockUnavailable as exc:
-        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
-    job = {
-        "jobId": job_id,
-        "runId": run_id,
-        "path": f"output/{run_id}",
-        "status": "running",
-        "title": title,
-        "createMode": create_mode,
-        "targetDurationSeconds": target_duration_seconds,
-        "stopTarget": req.stop_target,
-        "stopTargetNumber": _process_number(req.stop_target),
-        "currentProcess": current_process,
-        "currentProcessNumber": current_process_number,
-        "pid": os.getpid(),
-        "error": None,
-        "errorCode": None,
-        "message": f"{current_process}から{req.stop_target}へ再開中",
-    }
-    async with _create_jobs_lock:
-        _create_jobs[job_id] = job
-    process_store_result = await asyncio.to_thread(
-        _create_process_record_best_effort,
-        job=job,
-        title=title,
-        source=source,
-        stop_target=req.stop_target,
-        generate_images=True,
+        result = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=RESUME_SUBPROCESS_TERMINATION_GRACE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        pass
+    if _resume_process_group_exists(proc):
+        _signal_resume_process_group(proc, signal.SIGKILL)
+    if result is not None:
+        return result
+    # communicate() reaps the direct child after the helper session and all
+    # descendants have been terminated.
+    return await asyncio.shield(communicate_task)
+
+
+async def _await_resume_process_cleanup(
+    proc: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+) -> tuple[bytes, bytes]:
+    cleanup_task = asyncio.create_task(
+        _terminate_resume_process_group(proc, communicate_task)
     )
-    if process_store_result:
-        job["processStore"] = process_store_result
-    resume_images: dict[str, Any] | None = None
-    if req.stop_target == "p680" and current_process_number >= 650:
-        resume_images = await asyncio.to_thread(_delete_existing_images_for_image_resume, run_dir)
+    pending_cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as cancellation:
+            pending_cancellation = cancellation
+    result = cleanup_task.result()
+    if pending_cancellation is not None:
+        raise pending_cancellation
+    return result
+
+
+async def _run_resume_subprocess_command(command: list[str]) -> tuple[bytes, bytes]:
+    proc = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=str(ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    communicate_task = asyncio.create_task(proc.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError as cancellation:
+        with suppress(asyncio.CancelledError):
+            await _await_resume_process_cleanup(proc, communicate_task)
+        raise cancellation
+    except asyncio.TimeoutError as exc:
+        stdout, stderr = await _await_resume_process_cleanup(
+            proc,
+            communicate_task,
+        )
+        detail = (
+            stderr.decode("utf-8", errors="replace").strip()
+            or stdout.decode("utf-8", errors="replace").strip()
+        )
+        raise TimeoutError(
+            "resume-from-p500 subprocess timed out"
+            + (f": {detail}" if detail else "")
+        ) from exc
+    if proc.returncode != 0:
+        detail = (
+            stderr.decode("utf-8", errors="replace").strip()
+            or stdout.decode("utf-8", errors="replace").strip()
+        )
+        raise RuntimeError(
+            detail
+            or f"resume-from-p500 exited with status {proc.returncode}"
+        )
+    return stdout, stderr
+
+
+def _p500_resume_plan_token(stdout: bytes, *, checkpoint_id: str) -> str:
+    try:
+        payload = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "resume-from-p500 dry-run did not return exact JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("resume-from-p500 dry-run JSON must be an object")
+    returned_checkpoint_id = payload.get("checkpoint_id")
+    if (
+        not isinstance(returned_checkpoint_id, str)
+        or returned_checkpoint_id != checkpoint_id
+    ):
+        raise RuntimeError(
+            "resume-from-p500 dry-run checkpoint_id is missing or mismatched"
+        )
+    plan_token = payload.get("plan_token")
+    if (
+        not isinstance(plan_token, str)
+        or re.fullmatch(r"[0-9a-f]{64}", plan_token) is None
+    ):
+        raise RuntimeError(
+            "resume-from-p500 dry-run plan_token is missing or malformed"
+        )
+    return plan_token
+
+
+async def _run_p500_resume_subprocess(
+    *,
+    job_id: str,
+    run_dir: Path,
+    source: str | None = None,
+) -> dict[str, str]:
+    checkpoint_id = f"api-{job_id}"
+    base_command = [
+        sys.executable,
+        str(ROOT / "scripts" / "resume-from-p500.py"),
+        "--run-dir",
+        str(run_dir),
+        "--checkpoint-id",
+        checkpoint_id,
+    ]
+    if source is not None:
+        base_command.extend(["--source", source])
+    dry_stdout, _dry_stderr = await _run_resume_subprocess_command(base_command)
+    plan_token = _p500_resume_plan_token(
+        dry_stdout,
+        checkpoint_id=checkpoint_id,
+    )
+
+    # This boundary intentionally contains no run/state/debug write. Apply must
+    # consume the exact plan that the dry-run inspected.
+    apply_command = [
+        *base_command,
+        "--plan-token",
+        plan_token,
+        "--apply",
+        "--continue-to",
+        "p680",
+    ]
+    apply_stdout, _apply_stderr = await _run_resume_subprocess_command(
+        apply_command
+    )
+    return {
+        "checkpointId": checkpoint_id,
+        "planToken": plan_token,
+        "stdout": apply_stdout.decode("utf-8", errors="replace").strip(),
+    }
+
+
+async def _run_blocking_with_cancel_barrier(
+    function: Callable[..., Any],
+    *args: Any,
+) -> Any:
+    """Keep a blocking mutation inside its caller's lease even if cancelled."""
+
+    worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancellation:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except BaseException:
+            # Cancellation remains the externally visible outcome, but the
+            # mutation has reached a terminal state before its lease is freed.
+            pass
+        raise cancellation
+
+
+async def _run_image_only_resume_job(
+    job_id: str,
+    *,
+    run_id: str,
+    create_mode: str,
+) -> None:
+    run_dir = safe_run_dir(run_id, ROOT)
+    started = time.monotonic()
+    try:
+        async with _run_execution_leases_guard:
+            lease_already_reserved = job_id in _run_execution_leases
+        if not lease_already_reserved:
+            await _acquire_run_execution_lease(job_id, run_dir)
+        try:
+            current_record = await asyncio.to_thread(
+                process_store.get_process_run,
+                run_id=run_id,
+            )
+        except Exception:
+            current_record = None
+        create_mode = _resume_create_mode_for_run(run_dir, current_record)
         await _set_create_job(
             job_id,
             {
-                "message": f"{current_process}から{req.stop_target}へ再開中: 既存画像を照合して差分だけ再生成します",
+                "message": "p650成果物を維持してシーン画像だけ再開中",
+                "currentProcess": "p650",
+                "currentProcessNumber": 650,
+            },
+        )
+        async with AsyncExitStack() as revision_locks:
+            for resource in (
+                "run_artifacts",
+                "asset_request_revision",
+                "scene_request_revision",
+            ):
+                await revision_locks.enter_async_context(
+                    _serialized_run_write(run_dir, resource)
+                )
+
+            _validate_p650_run(run_id)
+            regeneration_plan = _classify_p680_regeneration_plan(run_dir)
+            if regeneration_plan.errors:
+                raise RuntimeError(
+                    "image-only resume preflight rejected unsafe regeneration targets: "
+                    + "; ".join(regeneration_plan.errors[:20])
+                )
+            if regeneration_plan.requires_canonical_p500:
+                raise CanonicalP500ResumeRequiredError(
+                    "canonical p500 resume is required because the current p680 "
+                    "regeneration plan contains asset/reference repair targets"
+                )
+            resume_images = await _run_blocking_with_cancel_barrier(
+                _delete_existing_images_for_image_resume,
+                run_dir,
+            )
+            resume_errors = resume_images.get("errors")
+            if resume_errors is None:
+                resume_errors = []
+            if not isinstance(resume_errors, list):
+                raise RuntimeError(
+                    "image-only resume preflight returned an invalid errors contract"
+                )
+            normalized_resume_errors = [
+                str(error).strip()
+                for error in resume_errors
+                if str(error).strip()
+            ]
+            if normalized_resume_errors:
+                raise RuntimeError(
+                    "image-only resume preflight rejected unsafe regeneration targets: "
+                    + "; ".join(normalized_resume_errors[:20])
+                )
+            await _set_create_job(
+                job_id,
+                {
+                    "message": "既存画像を照合して差分だけ再生成中",
+                    "metadata": {
+                        "resumeMode": "image_only",
+                        "resumePolicy": "hash_aware_partial",
+                        "deletedImagesCount": resume_images.get("deletedCount", 0),
+                        "preservedImagesCount": resume_images.get("preservedCount", 0),
+                    },
+                },
+            )
+            await _generate_scene_outputs_after_p650_preflight(
+                job_id,
+                run_id=run_id,
+                run_dir=run_dir,
+                scene_revision_lock_held=True,
+            )
+            if create_mode == CREATE_MODE_SCENE_STORYBOARD:
+                await _run_blocking_with_cancel_barrier(
+                    _finalize_scene_storyboard_p680,
+                    run_id,
+                )
+            _validate_current_p680_run(
+                run_id,
+                create_mode=create_mode,
+            )
+        await _sync_process_current_process(job_id, run_id)
+        await _set_create_job(
+            job_id,
+            {
+                "status": "completed",
+                "message": "再開完了",
+                "currentProcess": "p680",
+                "currentProcessNumber": 680,
+            },
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="create_job_resume_image_only",
+            status="completed",
+            item_id=job_id,
+            request={
+                "runId": run_id,
+                "createMode": create_mode,
+                "resumePolicy": "hash_aware_partial",
+            },
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                "resumeImages": resume_images,
+            },
+        )
+    except Exception as exc:
+        with suppress(Exception):
+            await _sync_process_current_process(job_id, run_id)
+        detail = _create_run_error_message(exc)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="create_job_resume_image_only",
+            status="failed",
+            item_id=job_id,
+            request={"runId": run_id, "createMode": create_mode},
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                **_create_job_failure_diagnostics(run_dir),
+            },
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": (
+                    "canonical_p500_required"
+                    if isinstance(exc, CanonicalP500ResumeRequiredError)
+                    else type(exc).__name__
+                ),
+                "message": "再開失敗",
+            },
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+
+
+async def _run_p500_resume_job(
+    job_id: str,
+    *,
+    run_id: str,
+    create_mode: str,
+) -> None:
+    run_dir = safe_run_dir(run_id, ROOT)
+    started = time.monotonic()
+    try:
+        await _set_create_job(
+            job_id,
+            {
+                "message": "p500再開計画を検証中",
+                "metadata": {"resumeMode": "p500_subprocess"},
+            },
+        )
+        try:
+            current_record = await asyncio.to_thread(
+                process_store.get_process_run,
+                run_id=run_id,
+            )
+        except Exception:
+            current_record = None
+        create_mode = _resume_create_mode_for_run(run_dir, current_record)
+        create_input_path = (
+            run_dir / "logs" / "orchestration" / "create_input.json"
+        )
+        has_canonical_create_input = (
+            create_input_path.exists() or create_input_path.is_symlink()
+        )
+        source: str | None = None
+        if not has_canonical_create_input:
+            record_mode = str(
+                getattr(current_record, "create_mode", "") or ""
+            ).strip()
+            if (
+                create_mode == CREATE_MODE_WORLD_WALK
+                or record_mode == CREATE_MODE_WORLD_WALK
+            ):
+                raise RuntimeError(
+                    "legacy world_walk p500 resume requires canonical exact "
+                    "create input; the process source is only a run path"
+                )
+            record_source = getattr(current_record, "source", None)
+            if (
+                not isinstance(record_source, str)
+                or not record_source.strip()
+            ):
+                raise RuntimeError(
+                    "legacy p500 resume requires the exact source from its "
+                    "current process record"
+                )
+            source = record_source
+        subprocess_result = await _run_p500_resume_subprocess(
+            job_id=job_id,
+            run_dir=run_dir,
+            source=source,
+        )
+        await _set_create_job(
+            job_id,
+            {
+                "message": "p680成果物を検証中",
                 "metadata": {
-                    "resumeFromProcessNumber": current_process_number,
-                    "preservedImagesCount": resume_images.get("preservedCount", 0),
-                    "resumePolicy": "hash_aware_partial",
+                    "resumeMode": "p500_subprocess",
+                    "checkpointId": subprocess_result["checkpointId"],
                 },
             },
         )
-    write_app_server_debug_log(
-        run_dir=run_dir,
-        operation="create_job_resume",
-        status="running",
-        item_id=job_id,
-        request={
-            "runId": run_id,
-            "fromProcess": current_process,
-            "fromProcessNumber": current_process_number,
-            "stopTarget": req.stop_target,
-            "targetDurationSeconds": target_duration_seconds,
-            "resumeImages": resume_images,
-            "resumePolicy": "hash_aware_partial",
-            "processStore": process_store_result,
-        },
-        response={"path": f"output/{run_id}"},
-    )
-    asyncio.create_task(
-        _run_create_job(
+        try:
+            current_record = await asyncio.to_thread(
+                process_store.get_process_run,
+                run_id=run_id,
+            )
+        except Exception:
+            current_record = None
+        create_mode = _resume_create_mode_for_run(run_dir, current_record)
+        _validate_current_p680_run(
+            run_id,
+            create_mode=create_mode,
+        )
+        await _sync_process_current_process(job_id, run_id)
+        await _set_create_job(
             job_id,
+            {
+                "status": "completed",
+                "message": "再開完了",
+                "currentProcess": "p680",
+                "currentProcessNumber": 680,
+            },
+        )
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="create_job_resume_p500_subprocess",
+            status="completed",
+            item_id=job_id,
+            request={"runId": run_id, "createMode": create_mode},
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                "checkpointId": subprocess_result["checkpointId"],
+            },
+        )
+    except Exception as exc:
+        # The subprocess owns both the create/resume lease and canonical resume
+        # state. Preserve its semantic failure and applied checkpoint verbatim.
+        with suppress(Exception):
+            await _sync_process_current_process(job_id, run_id)
+        detail = _create_run_error_message(exc)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="create_job_resume_p500_subprocess",
+            status="failed",
+            item_id=job_id,
+            request={"runId": run_id, "createMode": create_mode},
+            response={
+                "elapsedMs": int((time.monotonic() - started) * 1000),
+                **_create_job_failure_diagnostics(run_dir),
+            },
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": type(exc).__name__,
+                "message": "再開失敗",
+            },
+        )
+
+
+@router.post("/api/image-gen/runs/{run_id}/resume")
+async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
+    run_dir = safe_run_dir(run_id, ROOT)
+    job_id = uuid.uuid4().hex
+    async with _create_jobs_lock:
+        same_run_active = any(
+            str(existing.get("runId") or "") == run_id
+            and str(existing.get("status") or "")
+            not in {"completed", "failed", "paused"}
+            for existing in _create_jobs.values()
+        )
+        if same_run_active:
+            raise HTTPException(
+                status_code=409,
+                detail="run create/resume is already active",
+            )
+        # Reserve this run in memory while the strict validators inspect it.
+        # The subprocess branch intentionally does not own the file lease.
+        _create_jobs[job_id] = {
+            "jobId": job_id,
+            "runId": run_id,
+            "path": f"output/{run_id}",
+            "status": "inspecting",
+        }
+
+    lease_reserved = False
+    task_scheduled = False
+    try:
+        try:
+            record = await asyncio.to_thread(
+                process_store.get_process_run,
+                run_id=run_id,
+            )
+        except Exception:
+            record = None
+        create_mode = _resume_create_mode_for_run(run_dir, record)
+
+        try:
+            _validate_current_p680_run(
+                run_id,
+                create_mode=create_mode,
+            )
+        except Exception:
+            p680_complete = False
+        else:
+            p680_complete = True
+        if p680_complete:
+            raise HTTPException(
+                status_code=409,
+                detail="run already reached strict p680 completion",
+            )
+
+        try:
+            _validate_p650_run(run_id)
+        except Exception:
+            p650_complete = False
+        else:
+            p650_complete = True
+        if p650_complete:
+            regeneration_plan = _classify_p680_regeneration_plan(run_dir)
+            if regeneration_plan.errors:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "image-only resume preflight rejected unsafe "
+                        "regeneration targets: "
+                        + "; ".join(regeneration_plan.errors[:20])
+                    ),
+                )
+            resume_mode = (
+                "p500_subprocess"
+                if regeneration_plan.requires_canonical_p500
+                else "image_only"
+            )
+        else:
+            resume_mode = "p500_subprocess"
+
+        current_process_number = _current_process_number_for_run(run_id)
+        if current_process_number == 0 and record is not None:
+            current_process_number = int(record.current_process_number)
+        if p650_complete:
+            current_process_number = max(650, current_process_number)
+        current_process = _process_label(current_process_number)
+        title = record.title if record else run_id
+        source = record.source if record and record.source else title
+        try:
+            target_duration_seconds = _target_duration_seconds_for_run(run_dir)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run target duration is invalid: {exc}",
+            ) from exc
+
+        job = {
+            "jobId": job_id,
+            "runId": run_id,
+            "path": f"output/{run_id}",
+            "status": "running",
+            "title": title,
+            "createMode": create_mode,
+            "resumeMode": resume_mode,
+            "targetDurationSeconds": target_duration_seconds,
+            "stopTarget": req.stop_target,
+            "stopTargetNumber": _process_number(req.stop_target),
+            "currentProcess": current_process,
+            "currentProcessNumber": current_process_number,
+            "pid": os.getpid(),
+            "error": None,
+            "errorCode": None,
+            "message": f"{current_process}から{req.stop_target}へ再開中",
+        }
+        async with _create_jobs_lock:
+            running_count = sum(
+                1
+                for existing_id, existing in _create_jobs.items()
+                if existing_id != job_id
+                and existing.get("status") == "running"
+            )
+            if running_count >= MAX_RUNNING_CREATE_JOBS:
+                raise HTTPException(
+                    status_code=429,
+                    detail="too many create jobs are running",
+                )
+            if len(_create_jobs) > MAX_CREATE_JOBS:
+                terminal_job_id = next(
+                    (
+                        existing_id
+                        for existing_id, existing in _create_jobs.items()
+                        if existing_id != job_id
+                        and existing.get("status")
+                        in {"completed", "failed", "paused"}
+                    ),
+                    None,
+                )
+                if terminal_job_id:
+                    _create_jobs.pop(terminal_job_id)
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="too many create jobs are running",
+                    )
+            _create_jobs[job_id] = job
+
+        if resume_mode == "image_only":
+            try:
+                await _acquire_run_execution_lease(job_id, run_dir)
+            except FileLockUnavailable as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="run create/resume is already active",
+                ) from exc
+            lease_reserved = True
+
+        process_store_result = await asyncio.to_thread(
+            _create_process_record_best_effort,
+            job=job,
             title=title,
             source=source,
-            run_id=run_id,
-            generate_images=True,
-            create_mode=create_mode,
             stop_target=req.stop_target,
-            target_duration_seconds=target_duration_seconds,
+            generate_images=True,
         )
-    )
-    return job
+        if process_store_result:
+            job["processStore"] = process_store_result
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="create_job_resume",
+            status="running",
+            item_id=job_id,
+            request={
+                "runId": run_id,
+                "fromProcess": current_process,
+                "fromProcessNumber": current_process_number,
+                "stopTarget": req.stop_target,
+                "targetDurationSeconds": target_duration_seconds,
+                "resumeMode": resume_mode,
+                "resumePolicy": (
+                    "hash_aware_partial"
+                    if resume_mode == "image_only"
+                    else "p500_checkpoint_plan_apply"
+                ),
+                "processStore": process_store_result,
+            },
+            response={"path": f"output/{run_id}"},
+        )
+
+        if resume_mode == "image_only":
+            resume_coro = _run_image_only_resume_job(
+                job_id,
+                run_id=run_id,
+                create_mode=create_mode,
+            )
+        else:
+            resume_coro = _run_p500_resume_job(
+                job_id,
+                run_id=run_id,
+                create_mode=create_mode,
+            )
+        try:
+            resume_task = asyncio.create_task(resume_coro)
+        except BaseException:
+            resume_coro.close()
+            raise
+        _resume_tasks[job_id] = resume_task
+        resume_task.add_done_callback(
+            lambda completed, current_job_id=job_id: (
+                _resume_tasks.pop(current_job_id, None)
+                if _resume_tasks.get(current_job_id) is completed
+                else None
+            )
+        )
+        task_scheduled = True
+        return job
+    except BaseException:
+        if not task_scheduled:
+            if lease_reserved:
+                await _release_run_execution_lease(job_id)
+            async with _create_jobs_lock:
+                _create_jobs.pop(job_id, None)
+        raise
 
 
 @router.get("/api/image-gen/requests")
@@ -16770,7 +22173,11 @@ async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")
         persisted_candidates = list_candidate_items(run_dir, item.id)
         if str(item.id) in blocked_scene_item_ids:
             payload["generationStatus"] = "blocked"
-            payload["candidates"] = persisted_candidates or [_semantic_blocked_candidate(run_dir, item)]
+            payload["candidates"] = [
+                _semantic_blocked_candidate(run_dir, item)
+            ]
+            if persisted_candidates:
+                payload["previousCandidates"] = persisted_candidates
         else:
             payload["candidates"] = persisted_candidates
         items.append(payload)
@@ -19140,17 +24547,182 @@ async def api_download_zip(req: ZipRequest) -> StreamingResponse:
 
 @router.post("/api/image-gen/insert-bulk")
 async def api_insert_bulk(req: BulkInsertRequest) -> dict[str, Any]:
-    inserted = []
-    for item in req.items:
-        run_dir = safe_run_dir(item.run_id, ROOT)
-        candidate = resolve_run_relative(run_dir, item.candidate_path)
-        if not candidate.exists():
-            raise HTTPException(status_code=404, detail=f"candidate not found: {item.candidate_path}")
-        try:
-            _validate_candidate_matches_output(run_dir, candidate, item.output)
-            inserted.append(insert_candidate(run_dir, candidate, item.output))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lease_ids: list[str] = []
+    try:
+        run_dirs = {
+            item.run_id: safe_run_dir(item.run_id, ROOT)
+            for item in req.items
+        }
+        ordered_runs = sorted(run_dirs.items(), key=lambda entry: str(entry[1]))
+        # Reserve every involved run before the first canonical write.  This
+        # prevents a multi-run bulk request from partially committing merely
+        # because a later run is already being created or resumed.
+        for run_id, run_dir in ordered_runs:
+            lease_id = f"candidate-insert-{uuid.uuid4().hex}-{run_id}"
+            await _acquire_run_execution_lease(lease_id, run_dir)
+            lease_ids.append(lease_id)
+
+        async with AsyncExitStack() as lock_stack:
+            # Match the writer order used by prompt materialization:
+            # run_artifacts -> asset request revision -> scene request revision.
+            for _run_id, run_dir in ordered_runs:
+                await lock_stack.enter_async_context(
+                    _serialized_run_write(run_dir, "run_artifacts")
+                )
+                await lock_stack.enter_async_context(
+                    _serialized_run_write(run_dir, "asset_request_revision")
+                )
+                await lock_stack.enter_async_context(
+                    _serialized_run_write(run_dir, "scene_request_revision")
+                )
+
+            planned: list[dict[str, Any]] = []
+            for position, item in enumerate(req.items):
+                run_dir = run_dirs[item.run_id]
+                candidate = resolve_run_relative(run_dir, item.candidate_path)
+                if not candidate.is_file():
+                    raise FileNotFoundError(
+                        f"candidate not found: {item.candidate_path}"
+                    )
+                target = validate_candidate_insertion(
+                    run_dir,
+                    candidate,
+                    item.output,
+                )
+                owner = _validate_candidate_matches_output(
+                    run_dir,
+                    candidate,
+                    item.output,
+                )
+                planned.append(
+                    {
+                        "position": position,
+                        "run_dir": run_dir,
+                        "candidate": candidate,
+                        "output": item.output,
+                        "target": target,
+                        "owner": owner,
+                    }
+                )
+            target_keys = [
+                (str(plan["run_dir"]), str(plan["target"]))
+                for plan in planned
+            ]
+            if len(set(target_keys)) != len(target_keys):
+                raise ValueError(
+                    "bulk candidate insertion contains duplicate canonical outputs"
+                )
+
+            # Every request item has now passed preflight while all relevant
+            # revisions are frozen.  Preserve canonical bytes so an unexpected
+            # copy failure cannot leave a half-inserted bulk request.
+            before_outputs = _capture_file_transaction(
+                plan["target"] for plan in planned
+            )
+            try:
+                owners_by_run: dict[Path, list[tuple[str, str, Path, Path]]] = {}
+                for plan in planned:
+                    owner = plan["owner"]
+                    if owner is None:
+                        continue
+                    kind, item_id = owner
+                    owners_by_run.setdefault(plan["run_dir"], []).append(
+                        (
+                            kind,
+                            item_id,
+                            plan["target"],
+                            plan["candidate"],
+                        )
+                    )
+
+                for run_dir, owners in owners_by_run.items():
+                    invalidated_at = now_iso()
+                    state_updates = {
+                        "status": "P650",
+                        "runtime.stage": "candidate_insertion_requires_revalidation",
+                        "review.image_prompt.request_freeze.status": "draft",
+                        "review.image_prompt.request_freeze.invalidated_by": "candidate_insertion",
+                        "review.image_prompt.request_freeze.invalidated_at": invalidated_at,
+                        "orchestration.p600.supervisor.status": "invalidated",
+                        "orchestration.p600.supervisor.invalidated_by": "candidate_insertion",
+                        "slot.p650.status": "pending",
+                        "slot.p650.note": "candidate insertion changed canonical image bytes; request freeze must be revalidated",
+                        "slot.p660.status": "pending",
+                        "slot.p660.note": "canonical image provenance must be regenerated or rebound",
+                        "slot.p670.status": "pending",
+                        "slot.p670.note": "waiting for current canonical image validation",
+                        "slot.p680.status": "pending",
+                        "slot.p680.note": "candidate insertion invalidated the previous image-review handoff",
+                        "review.image.status": "pending",
+                        "gate.image_review": "required",
+                        "stage.scene_implementation.status": "pending",
+                        "review.semantic.create_scene_media_generated": "false",
+                        "image_generation.status": "not_started",
+                        "image_generation.started": "false",
+                        "image_generation.generated_count": "0",
+                        "image_generation.blocked_by": "candidate_insertion_revalidation",
+                    }
+                    for kind, item_id, target, candidate in owners:
+                        safe_item_id = (
+                            re.sub(r"[^A-Za-z0-9_.-]+", "_", item_id)
+                            .strip("._")
+                            or "item"
+                        )
+                        state_updates[
+                            f"image_generation.provenance.{kind}.{safe_item_id}.status"
+                        ] = "invalidated"
+                        state_updates[
+                            f"image_generation.provenance.{kind}.{safe_item_id}.invalidated_at"
+                        ] = invalidated_at
+                        write_app_server_image_provenance_invalidation_log(
+                            run_dir=run_dir,
+                            kind=kind,
+                            item_id=item_id,
+                            destination=target,
+                            candidate=candidate,
+                        )
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        state_updates,
+                    )
+                    _invalidate_p600_supervisor_result(
+                        run_dir,
+                        invalidated_by="candidate_insertion",
+                    )
+
+                inserted: list[dict[str, Any]] = []
+                for plan in planned:
+                    result = dict(
+                        insert_candidate(
+                            plan["run_dir"],
+                            plan["candidate"],
+                            plan["output"],
+                        )
+                    )
+                    if plan["owner"] is not None:
+                        result["kind"], result["itemId"] = plan["owner"]
+                        result["provenanceInvalidated"] = True
+                    inserted.append(result)
+            except Exception:
+                _restore_file_transaction(before_outputs)
+                raise
+    except FileLockUnavailable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"candidate insertion conflict: {exc}",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"candidate insertion failed: {exc}",
+        ) from exc
+    finally:
+        for lease_id in reversed(lease_ids):
+            await _release_run_execution_lease(lease_id)
     return {"inserted": inserted}
 
 

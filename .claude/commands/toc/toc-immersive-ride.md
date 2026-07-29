@@ -52,6 +52,13 @@ p番号で止めたい場合（`p` なしの数字も可）:
   - 道/階段/橋など「前進の導線」が常に画面にある（scene間の連続性を作る）
   - POV の連続性は構図で固定する（地平線の安定、path/leading lines をセンター、一定のカメラ高さ）
 
+`world_walk`:
+
+- 既存 run の `story.md` / `assets/` を参照し、「世界観を散歩してみた」形式にする
+- 視点は観察者POV。主人公本人の主観視点にせず、少し遠目の中景〜遠景で見る
+- 序盤は物語が進まない asset 内散歩、中盤以降は参照キャラが遠景に現れて物語が別導線で始まる構成
+- 派手な演出、急接近、観察者が物語へ介入する構図は禁止
+
 ## 期待される出力（概要）
 
 `output/<topic>_<timestamp>/` に以下が生成される:
@@ -107,10 +114,12 @@ $ARGUMENTS:
   - `p700` / `700` / `narration`: 全編narration authoring / audio QA・human handoff まで
   - `p800` / `800` / `video_generation`: video request / clip generation stage まで
   - `p900` / `900` / `render` / `video`: final render / QA まで
-- `--experience cinematic_story|cloud_island_walk|ride_action_boat` (optional, default: `cloud_island_walk`)
+- `--experience cinematic_story|cloud_island_walk|world_walk|ride_action_boat` (optional, default: `cloud_island_walk`)
   - `cinematic_story`: 物語を映画的に見せる（ボート/真鍮バーの固定仕様は使わない）
   - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
+  - `world_walk`: 既存 asset 内を観察者POVで散歩し、物語を遠目に見かけるパターン
   - `ride_action_boat`: legacy 名（互換用。内部的には `cinematic_story` 扱い）
+- `--source-run output/<topic>_<timestamp>` (`world_walk` の場合 required)
 - `--video-tool kling|kling-omni|seedance|veo` (optional, default: `kling-omni`)
   - `kling`: `video_manifest.md` の `scenes[].video_generation.tool` を `kling_3_0` にする
   - `kling-omni`: `video_manifest.md` の `scenes[].video_generation.tool` を `kling_3_0_omni` にする
@@ -182,6 +191,7 @@ scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>
 - 参照画像を全生成に含める（キャラクター・重要小道具。手元/乗り物アンカーは前提にしない）
 - scene間の連続性（照明・雰囲気・位置関係の自然な遷移）
 - `cloud_island_walk`: 道/橋/階段など「前進の導線」を常に画面内に置く（歩み＝理解の進行）
+- `world_walk`: 観察者POV、少し遠目、物語が進まない asset 内散歩、参照キャラの遠景登場
 
 キャラクター参照（turnaround）:
 - `assets/characters/<id>.png`（または `<id>_front.png`）を1枚用意し、
@@ -194,6 +204,7 @@ scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>
 - `Studio Ghibli style`
 - 視点のブレ（同一カット内でカメラ位置/高さが不自然に変わる）
 - `cloud_island_walk` での禁止: `third-person / over-the-shoulder / selfie`（外側カメラへの切替）
+- `world_walk` での禁止: 主人公本人の主観視点、急接近、派手な演出、観察者が物語へ介入する構図
 
 ## 参照
 

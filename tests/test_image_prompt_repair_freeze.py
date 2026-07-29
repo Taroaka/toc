@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,12 @@ from toc.image_request_snapshot import (
     load_request_snapshot,
     materialize_request_snapshot,
     write_request_snapshot_atomic,
+)
+from toc.review_projection import (
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
+    review_source_fingerprint,
+    video_manifest_review_projection_sha256,
 )
 from toc.semantic_review import (
     SEMANTIC_REVIEW_INPUT_SCHEMA,
@@ -162,6 +169,15 @@ def _current_request_revision(run_dir: Path) -> str:
     ).request_revision
 
 
+def _write_review_source_placeholders(run_dir: Path) -> None:
+    (run_dir / "story.md").write_text("# story\n", encoding="utf-8")
+    (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+    (run_dir / "video_manifest.md").write_text(
+        "```yaml\nscenes:\n  - scene_id: 1\n    cuts: []\n```\n",
+        encoding="utf-8",
+    )
+
+
 def _write_deterministic_review(
     run_dir: Path,
     *,
@@ -236,9 +252,11 @@ def _write_deterministic_review(
             [
                 "# Image Prompt Story Review",
                 "",
-                "- review_format_version: `deterministic_image_prompt_review_v2`",
+                "- review_format_version: `deterministic_image_prompt_review_v3`",
                 f"- manifest: `{run_dir / 'video_manifest.md'}`",
-                f"- manifest_sha256: `{image_gen_app._file_sha256(run_dir / 'video_manifest.md') if (run_dir / 'video_manifest.md').is_file() else ''}`",
+                "- manifest_fingerprint_policy: "
+                f"`{VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA}`",
+                f"- manifest_sha256: `{video_manifest_review_projection_sha256(run_dir / 'video_manifest.md') if (run_dir / 'video_manifest.md').is_file() else ''}`",
                 f"- story_sha256: `{image_gen_app._file_sha256(run_dir / 'story.md') if (run_dir / 'story.md').is_file() else ''}`",
                 f"- script_sha256: `{image_gen_app._file_sha256(run_dir / 'script.md') if (run_dir / 'script.md').is_file() else ''}`",
                 f"- status: `{status}`",
@@ -276,13 +294,23 @@ def _write_passing_review_artifacts(run_dir: Path) -> None:
     scope_path = run_dir / paths["scope"]
     report_path = run_dir / paths["report"]
     prompt_path.write_text("# prompt\n", encoding="utf-8")
-    source_artifact_digests = [
-        {
-            "path": source,
-            "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
-        }
-        for source in source_artifacts
-    ]
+    source_artifact_digests: list[dict[str, str]] = []
+    for source in source_artifacts:
+        fingerprint = review_source_fingerprint(
+            run_dir / source,
+            artifact_relpath=source,
+            review_kind="semantic",
+            stage="image_prompt",
+        )
+        source_artifact_digests.append(
+            {
+                "path": source,
+                "sha256": fingerprint.sha256,
+                REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD: (
+                    fingerprint.policy
+                ),
+            }
+        )
     scope = {
         "stage": "image_prompt",
         "entry_count": 1,
@@ -529,8 +557,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_human_override_does_not_fail_server_hard_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(
                 run_dir,
                 blocking_hard_findings=0,
@@ -553,8 +580,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_human_override_without_reason_remains_blocking(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(
                 run_dir,
                 blocking_hard_findings=0,
@@ -573,16 +599,17 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_gate_rejects_synthetic_pass_summary_without_sections(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             (run_dir / "image_prompt_story_review.md").write_text(
                 "\n".join(
                     [
                         "# Image Prompt Story Review",
                         "",
-                        "- review_format_version: `deterministic_image_prompt_review_v2`",
+                        "- review_format_version: `deterministic_image_prompt_review_v3`",
                         f"- manifest: `{run_dir / 'video_manifest.md'}`",
-                        f"- manifest_sha256: `{image_gen_app._file_sha256(run_dir / 'video_manifest.md')}`",
+                        "- manifest_fingerprint_policy: "
+                        f"`{VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA}`",
+                        f"- manifest_sha256: `{video_manifest_review_projection_sha256(run_dir / 'video_manifest.md')}`",
                         f"- story_sha256: `{image_gen_app._file_sha256(run_dir / 'story.md')}`",
                         f"- script_sha256: `{image_gen_app._file_sha256(run_dir / 'script.md')}`",
                         "- status: `PASS`",
@@ -607,8 +634,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_gate_rejects_empty_selector_section(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(run_dir)
             report_path = run_dir / "image_prompt_story_review.md"
             report_text = report_path.read_text(encoding="utf-8")
@@ -626,8 +652,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_gate_rejects_summary_that_hides_blocking_section_detail(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(
                 run_dir,
                 hard_finding_details=[
@@ -656,8 +681,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_gate_rejects_report_bound_to_a_different_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(run_dir)
             other_manifest = run_dir / "other_manifest.md"
             other_manifest.write_text("# unrelated manifest\n", encoding="utf-8")
@@ -674,11 +698,122 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
 
         self.assertTrue(any("different manifest" in error for error in errors))
 
+    def test_deterministic_review_binding_ignores_only_render_unit_overlay(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td)
+            _write_review_source_placeholders(run_dir)
+            _write_deterministic_review(run_dir)
+            report_text = (
+                run_dir / "image_prompt_story_review.md"
+            ).read_text(encoding="utf-8")
+            manifest_path, original_text, manifest = (
+                image_gen_app._read_manifest_data(run_dir)
+            )
+            manifest["scenes"][0]["render_units"] = [
+                {
+                    "unit_id": "1",
+                    "source_cut_ids": ["1"],
+                }
+            ]
+            image_gen_app._write_manifest_data(
+                manifest_path,
+                original_text,
+                manifest,
+            )
+
+            self.assertEqual(
+                image_gen_app._deterministic_image_prompt_review_binding_errors(
+                    run_dir,
+                    report_text,
+                ),
+                [],
+            )
+            self.assertTrue(
+                image_gen_app._deterministic_image_prompt_review_sources_are_current(
+                    run_dir
+                )
+            )
+
+            manifest["scenes"][0]["scene_title"] = "reviewed field changed"
+            image_gen_app._write_manifest_data(
+                manifest_path,
+                original_text,
+                manifest,
+            )
+            errors = (
+                image_gen_app._deterministic_image_prompt_review_binding_errors(
+                    run_dir,
+                    report_text,
+                )
+            )
+            self.assertFalse(
+                image_gen_app._deterministic_image_prompt_review_sources_are_current(
+                    run_dir
+                )
+            )
+
+        self.assertTrue(
+            any(
+                "video_manifest.md digest is stale" in error
+                for error in errors
+            )
+        )
+
+    def test_legacy_deterministic_review_uses_exact_manifest_bytes_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td)
+            _write_review_source_placeholders(run_dir)
+            _write_deterministic_review(run_dir)
+            report_path = run_dir / "image_prompt_story_review.md"
+            manifest_path = run_dir / "video_manifest.md"
+            report_text = report_path.read_text(encoding="utf-8")
+            report_text = report_text.replace(
+                "deterministic_image_prompt_review_v3",
+                "deterministic_image_prompt_review_v2",
+            )
+            report_text = re.sub(
+                r"(?m)^- manifest_fingerprint_policy:.*\n",
+                "",
+                report_text,
+            )
+            report_text = report_text.replace(
+                video_manifest_review_projection_sha256(manifest_path),
+                image_gen_app._file_sha256(manifest_path),
+            )
+            report_path.write_text(report_text, encoding="utf-8")
+
+            self.assertTrue(
+                image_gen_app._deterministic_image_prompt_review_sources_are_current(
+                    run_dir
+                )
+            )
+
+            manifest_path, original_text, manifest = (
+                image_gen_app._read_manifest_data(run_dir)
+            )
+            manifest["scenes"][0]["render_units"] = [
+                {"unit_id": "1", "source_cut_ids": ["1"]}
+            ]
+            image_gen_app._write_manifest_data(
+                manifest_path,
+                original_text,
+                manifest,
+            )
+
+            self.assertFalse(
+                image_gen_app._deterministic_image_prompt_review_sources_are_current(
+                    run_dir
+                )
+            )
+
     def test_partial_or_stale_deterministic_detail_cannot_localize_the_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             _write_deterministic_review(
                 run_dir,
                 hard_findings=2,
@@ -755,8 +890,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
     def test_deterministic_hard_finding_is_composed_into_semantic_repair_result(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
-            for name in ("story.md", "script.md", "video_manifest.md"):
-                (run_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+            _write_review_source_placeholders(run_dir)
             (run_dir / "state.txt").write_text("", encoding="utf-8")
             finding_code = "missing_object_id"
             finding_message = "source requires glass_slipper but object_ids does not include it."
@@ -1050,45 +1184,52 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
         self.assertEqual(state["review.semantic.image_prompt.repair.asset_refresh.status"], "done")
         self.assertEqual(state["review.semantic.image_prompt.repair.asset_refresh_required"], "false")
 
-    def test_changed_assets_refresh_before_scene_snapshot_is_rebound_for_rereview(self) -> None:
+    def test_incomplete_image_prompt_repair_defers_asset_refresh_without_provider_submission(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)
             (run_dir / "state.txt").write_text("", encoding="utf-8")
-            order: list[str] = []
 
             def synchronize(_run_dir: Path) -> None:
-                order.append("sync")
                 image_gen_app.append_state_snapshot(
                     run_dir / "state.txt",
                     {
-                        "review.semantic.image_prompt.repair.asset_refresh_required": (
-                            "true" if order.count("sync") == 1 else "false"
-                        )
+                        "review.semantic.image_prompt.repair.asset_refresh_required": "true"
                     },
                 )
-
-            async def refresh(_run_dir: Path) -> None:
-                order.append("asset_refresh")
 
             with (
                 patch(
                     "server.image_gen_app._synchronize_image_prompt_repair_outputs",
                     Mock(side_effect=synchronize),
-                ),
+                ) as sync,
                 patch(
                     "server.image_gen_app._refresh_image_prompt_repair_assets_if_required",
-                    AsyncMock(side_effect=refresh),
-                ),
+                    AsyncMock(),
+                ) as refresh,
                 patch(
                     "server.image_gen_app._prepare_image_prompt_request_revision_for_review",
                     Mock(),
                 ),
             ):
                 asyncio.run(
-                    image_gen_app._prepare_image_prompt_repair_revision_for_rereview(run_dir)
+                    image_gen_app._reconcile_after_semantic_repair(
+                        run_dir,
+                        stage="image_prompt",
+                        changed_artifacts=["video_manifest.md"],
+                        job_id="job-1",
+                    )
                 )
 
-        self.assertEqual(order, ["sync", "asset_refresh", "sync"])
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        sync.assert_called_once_with(run_dir)
+        refresh.assert_not_awaited()
+        self.assertEqual(
+            state["review.semantic.image_prompt.repair.asset_refresh.status"],
+            "deferred",
+        )
 
     def test_sync_materializes_manifest_asset_addition_and_marks_logical_refresh(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:

@@ -55,6 +55,7 @@ developer_instructions = """
 テンプレ:
 - `cinematic_story`: `workflow/immersive-ride-video-manifest-template.md`
 - `cloud_island_walk`: `workflow/immersive-cloud-island-walk-video-manifest-template.md`
+- `world_walk`: `workflow/immersive-world-walk-video-manifest-template.md`
 - `ride_action_boat`: legacy 名（互換用。内部的には `cinematic_story` 扱い）
 
 ## 固定プロンプト要件（experience別）
@@ -83,6 +84,26 @@ developer_instructions = """
 - `ジブリ風`
 - `三人称 / 肩越し / 自撮り`
 
+### `world_walk`
+
+必ず全sceneのpromptに含める（推奨セット）:
+
+- `観察者POV`
+- `少し遠目、中景〜遠景中心`
+- `自然な歩行速度、水平線安定、カメラ高さ一定`
+- `物語が進まない asset 内散歩`（序盤）
+- `参照キャラが遠景に現れる`（中盤以降）
+- `物語が別導線で始まっているのを見かける`
+- `画面内テキストなし`
+
+禁止:
+
+- `主人公本人の主観視点`
+- `自撮り / 肩越し密着 / 顔の大写し`
+- `急接近 / 劇的な手持ちブレ`
+- `派手なエフェクト / 爆発や戦闘の強調`
+- `観察者が物語へ介入する構図`
+
 ## prompt の書き方（重要）
 
 `video_manifest.md` の `scenes[].image_generation.prompt` は、自由文ではなく **構造化テンプレ**で書く。
@@ -103,6 +124,7 @@ developer_instructions = """
 - 連続性:
   - sceneの終わりが次sceneの始まりへ自然につながる（照明/視線/進行方向）
   - `cloud_island_walk`: 道/橋/階段など「前進の導線」が常に画面内にある（歩みが理解の深化になる）
+  - `world_walk`: source run の asset 内を歩く導線を保ち、序盤は物語を進めず、中盤以降の参照キャラ登場も遠目に留める
 - 各sceneに「意味のある対象」を必ず置く（キャラクターでも、概念の比喩オブジェクトでもよい）
 - ガイドは **音声（ナレーション）として必須**（視覚的に登場させない）
 - ただし `visual_value.md` に基づく価値パートは例外で、**4-6カット / 各4秒 / ナレーションなし** の silent sequence を許可する
@@ -160,6 +182,9 @@ developer_instructions = """
     - ただし `visual_value.md` に基づく silent cut は `audio.narration.tool: "silent"` と `text: ""` を使い、無音でよい
   - `cloud_island_walk`:
     - この体験は既存仕様を維持し、run root の単一音声（`assets/audio/narration.mp3`）でもよい
+  - `world_walk`:
+    - 散歩の観察距離を壊さない短いナレーションを scene/clip ごとに置いてよい
+    - 序盤の asset 内散歩は無音または環境音寄りでもよいが、意図する場合は `audio.narration.tool: "silent"` と `text: ""` を明示する
   - style instructions は `notes` に明記し、textには読み上げ原稿のみを書く
 
 ## 出力フォーマット

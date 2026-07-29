@@ -20,7 +20,7 @@
 - topic: `<topic>`
 - run: `output/<topic>_<timestamp>/`
 - created_at: `<ISO8601>`
-- experience: `cinematic_story|cloud_island_walk|...`
+- experience: `cinematic_story|cloud_island_walk|world_walk|...`（`ride_action_boat` は legacy alias）
 - source_script: `output/<topic>_<timestamp>/script.md`
 - source_visual_value: `output/<topic>_<timestamp>/visual_value.md`
 - story_time: `<story.time の open string。古典は時代名、ユーザー創作は空文字可>`

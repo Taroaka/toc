@@ -526,6 +526,7 @@ stage target resolution:
 - create API の request field は `target_duration_seconds`。省略時は `300`、整数 `300..1200` のみを受け付ける。以下、この値を `T` とする。
 - `story.md.story_metadata.time` は物語世界の歴史的時代を表す string とする。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作は `""` を許容する。`story.md.story_metadata.time -> script.md.script_metadata.time -> video_manifest.md.video_metadata.time` の一方向だけで projection し、非空値は asset / scene image provider prompt の時代整合制約と video provider prompt の continuity に含める。空文字では時代用 fragment を生成しない。
 - p600 の candidate request を materialize した時点では `slot.p650.status=pending`、`review.image_prompt.request_freeze.status=draft` とする。image-prompt semantic repair は `video_manifest.md.scenes[].cuts[].image_generation.first_frame_visual_plan` と cut-local dependency/reference を修正し、orchestrator が payload / request Markdown / snapshot を同期再生成する。asset 生成後かつ semantic pack 構築前に全 scene reference を実在 bytes の sha256 へ束縛し、provider-ready request revision を確定する。deterministic hard gate と semantic report が同一 revision で pass した後の freeze は snapshot を変更せず、strict validation と state 遷移だけを行う。その場合だけ `request_freeze.status=frozen`、`slot.p650.status=done`、p600 supervisor result `status=done` にできる。
+- terminal p680 は slot/state の文字列だけでは成立しない。asset/image の immutable request snapshot と request-bound provenance が current であり、`verify-pipeline.py --stage-target p680` が exit 0、fresh `eval_report.json.stage_target=p680`、`overall.passed=true`、かつ report に出力された全 stage が pass のときだけ `p680=awaiting_approval` とする。provider 実行前の pre-handoff 検証ではこの terminal 条件を要求しない。
 - repair が `video_manifest.md.assets` を変えた場合は `asset_plan.md` と asset request/snapshot を共通 compiler から再 projection し、変更 asset の生成後に scene snapshot の参照 hash を再束縛する。修正後の deterministic story-consistency report も再生成し、修正前 report や旧 asset prompt/source digest を current revision として扱わない。
 - request、`runtime.target_video_seconds`、`research.md.metadata.target_duration_seconds`、`story.md.story_metadata.target_duration_seconds`、`script.md.script_metadata.target_duration_seconds`、`video_manifest.md.video_metadata.target_duration_seconds` は同じ `T` を保持し、後段が独自の固定 300 秒へ戻してはならない。
 - research/story の semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。review transport failure、criterion 欠落、根拠欠落、failed criterion は pass とみなさない。
@@ -785,8 +786,12 @@ output/<topic>_<timestamp>/
 
 ## 4. Immersive `video_manifest.md`（assets bible）
 
-`/toc-immersive-ride` は `output/<topic>_<timestamp>/video_manifest.md` を正本として、
+`/toc-immersive-ride` と `/toc-world-walk` は `output/<topic>_<timestamp>/video_manifest.md` を正本として、
 画像/動画/TTS を一括生成する。
+
+`/toc-world-walk` は `video_metadata.experience: "world_walk"` と
+`video_metadata.source_run` / `video_metadata.source_assets` を持ち、既存 run の asset を参照して
+観察者 POV の散歩動画を作る。
 
 この manifest の契約は、最終的に `scripts/generate-assets-from-manifest.py` が読み取り、各 provider に投げる前提。
 
@@ -938,6 +943,7 @@ cut-local override は exact `scene.location_sequence[]` 内で departure `locat
   - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
   - optional `render_units[]` を持てる
     - `render_units[]` は最終 render 用の動画クリップ単位
+    - `scene_storyboard` では `render_units[]` を p800 用の derived execution overlay として p680 で materialize してよい。pre-p800 の review / semantic currentness は canonical YAML projection から direct `scenes[].render_units` だけを除外し、それ以外の manifest field は unknown field を含めて hash に拘束する。materializer は authored cut ID / duration を変更せず、書き込み前後で projection 不変を検証し、失敗時は manifest を rollback する
     - `unit_id`, `source_cut_ids[]`, optional unit-level `cut_contract`, `video_generation` を持つ
     - scene に `render_units[]` がある場合、最終 render の動画正本は cut ではなく render unit 側を使う
     - `source_cut_ids[]` は canonical cut 順の非空 list。active cut は scene 内で exactly once 被覆し、重複・欠落・deleted cut 参照を許さない
@@ -1112,9 +1118,12 @@ p500 resume contract:
 - resume は `state.txt` の履歴を書き換える rollback ではない。p500 以降の旧成果物を `logs/resume/p500/<checkpoint>/artifacts/` へ退避し、後続 state を新しい append-only snapshot で `pending` / `stale` にする pseudo rollback である。
 - `research.md`、`story.md`、`visual_value.md`、`script.md`、`video_manifest.md` と p400 以前の review/grounding artifact は保持する。
 - frontend create の `video_manifest.md` は p450 時点で production execution 枠を含むため、`manifest_phase: production` だけを理由に p600 artifact として退避しない。旧 request snapshot、semantic report、実在 media、生成/review state を無効化して再 materialize する。
+- 新規 frontend create は、受け取った exact source bytes とその sha256、topic、experience、source run、target duration を `logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存する。この artifact がある run の resume はそれを正本とし、CLI/API から競合する source を与えた場合は停止する。artifact 自体の存在、filesystem type、bytes は dry-run/apply token に含める。artifact がない legacy run は、topic や research から source を推測せず、非空の明示 `--source` を必須とする。
 - reset 前に current `script.md` / `video_manifest.md` から review artifact を除く deterministic `eval.p400_readiness.status=approved` を再計算する。Codex fix で旧 review digest が stale になることは許容するが、reset 後に p400 review artifact を再 materialize し、request/provider 実行前に review integrity を含む完全な p400 readiness を通す。
 - reset は `.locks/create_resume.lock` を frontend create/resume および single/bulk image generation と共有し、同一 run の並行 mutation を禁止する。disk 上の bulk job が `queued|running` の場合も reset しない。
 - apply 前の dry-run、退避 checkpoint、upstream digest、移動対象一覧を必須とする。apply は dry-run の `checkpoint_id` と plan digest token に一致しなければ fail closed とする。unknown artifact は自動退避しない。
+- p650 完了後の image-only resume は、current request に束縛された scene output だけを再生成する厳密な scene-only plan に限る。asset/reference repair、unknown action、空/unsafe/unbound target、malformed plan は image-only で削除せず、asset/reference repair は canonical p500 dry-run/exact-token/apply へ戻す。route は API 選択時と run lease 取得後の双方で再判定する。
+- `world_walk` の resume は source manifest に列挙された source asset を復元・照合し、fresh create と同じ reference contract を asset plan/request へ投影する。参照は最大4件、`execution_lane: standard`、`bootstrap_allowed: false` とし、観察者 POV の固定 prompt contract を維持する。
 - reset 後は p510 から semantic QA と request freeze を再実行する。過去の `passed` report や frozen snapshot を再利用してはならない。
 - slot は実処理より先に完了扱いにしない。asset request の provider submission が返った後にだけ `p550=done` / `p560=done` とし、asset continuity gate が通れば `p570=done`、frontend 確認が必要なら `p570=awaiting_approval` とする。`--materialize-only` は provider を呼ばないため `p560` / `p570` を `pending` のまま保持し、materialized p650 validator もこの2 slot の未実行を明示的に許容する。
 
@@ -1346,6 +1355,7 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 - semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
 - semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
 - `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` 回まで再実行する。既定は 3 回。pass 済み shard は再実行しない。retry で復帰した shard は `review.semantic.scene_detail.shards.<scene>.transport.status=recovered` にする。使い切った shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
+- 局所継続の正本は state の allow flag 単体ではなく、`logs/review/semantic/partial_media_projection.json`（`toc.partial_media_projection.v1`）と `partial_media_generation_receipt.json`（`toc.partial_media_generation_receipt.v1`）の組である。projection は current scene request revision / snapshot hash、current semantic scope / report hash、stage ごとの selector 対応、blocked / survivor item、synthetic failed candidate を digest に束縛する。receipt は同じ projection digest / request revision、provider へ送った survivor、生成済み survivor、送らなかった blocked item を束縛する。verifier は両 artifact を current source から再導出して完全一致を確認し、blocked destination に regular file、symlink、broken symlink、FIFO、socket、directory のいずれかが残る場合、survivor output / provenance が欠ける場合、全 item が blocked の場合は fail-close にする。p680 terminal gate 自体には semantic / output failure の例外リストを設けず、valid projection / receipt を評価した全 emitted check / stage と overall が pass の場合だけ合格とする
 - `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
 
 Canonical semantic review stages:

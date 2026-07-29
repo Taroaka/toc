@@ -3,7 +3,7 @@
 本書は `todo.txt` の 15) Documentation に対応する。
 
 ## 前提
-- 起点は assistant command（Codex 主軸。Claude Code slash command 互換: `/toc-run`, `/toc-scene-series`, `/toc-immersive-ride`）
+- 起点は assistant command（Codex 主軸。Claude Code slash command 互換: `/toc-run`, `/toc-scene-series`, `/toc-immersive-ride`, `/toc-world-walk`）
 - 成果物は `output/<topic>_<timestamp>/` に生成される
 - 成果物（`research.md` / `story.md` / `script.md` / `video_manifest.md` 等）の本文は **日本語**で記述する（ユーザーがそのまま修正できるように）
   - 例外: ツール名 / ファイルパス / コード / 固有名詞はそのまま（必要なら英語併記はOK）
@@ -111,6 +111,13 @@ p番号ターゲットは、`p300` と `300` のどちらも使える。`p100` /
 ```text
 /toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
 /toc-immersive-ride --topic "かぐや姫" --stage 300 --experience cinematic_story
+```
+
+既存 run の asset を参照して「世界観を散歩してみた」動画を作る場合:
+
+```text
+/toc-world-walk --source-run output/桃太郎_<timestamp>
+/toc-world-walk --source-run output/桃太郎_<timestamp> --stage script --review-policy drafts
 ```
 
 ## 期待される出力（/toc-run）
@@ -371,6 +378,7 @@ python scripts/sync-narration-from-script.py \
   - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
   - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
   - p600 の画像gateは生成済み scene still と参照画像を実画像として検査する。scene still がベクター風/イラスト風/低情報量 raster で参照画像が正常なら p600 を再生成し、参照画像も同様に失敗するなら p500/p560 の参照asset再生成へ戻す。生成証跡が app-server 由来でない場合も再生成対象にする
+  - frontend resume で scene still だけが再生成対象なら image-only 経路を使える。参照 asset の再生成が一つでも必要なら、画像を先に削除せず canonical p500 dry-run/exact-token/apply へ戻す。unknown / malformed / request-unbound な再生成 plan は fail closed とする
   - 画像生成は依存のない cut から並列化され、`--image-max-concurrency` で同時実行数を制御できる（上限 10）
   - `recreate` を実際に回すときは `--force` を使う
   - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする

@@ -25,6 +25,7 @@
 - Entrypoint (/toc-run): `docs/implementation/entrypoint.md`
 - Entrypoint (/toc-scene-series): `docs/implementation/scene-series-entrypoint.md`
 - Entrypoint (/toc-immersive-ride): `docs/implementation/immersive-ride-entrypoint.md`
+- Entrypoint (/toc-world-walk): `docs/implementation/immersive-ride-entrypoint.md`
 - Scene loop: `docs/implementation/scene-loop.md`
 - Video integration: `docs/implementation/video-integration.md`
 - Orchestration logging: `docs/implementation/orchestration-logging.md`

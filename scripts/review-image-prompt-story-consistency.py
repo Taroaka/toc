@@ -34,6 +34,10 @@ from toc.reveal_constraints import (  # noqa: E402
     load_reveal_constraints,
     parse_selector,
 )
+from toc.review_projection import (  # noqa: E402
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
+    video_manifest_review_projection_sha256,
+)
 
 
 PROMPT_ENTRY_RE = re.compile(
@@ -2299,8 +2303,10 @@ def render_report(
     lines = [
         "# Image Prompt Story Review",
         "",
-        "- review_format_version: `deterministic_image_prompt_review_v2`",
+        "- review_format_version: `deterministic_image_prompt_review_v3`",
         f"- manifest: `{manifest_path}`",
+        "- manifest_fingerprint_policy: "
+        f"`{VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA}`",
         *(
             [
                 f"- manifest_sha256: `{source_sha256s.get('manifest', '')}`",
@@ -2617,7 +2623,7 @@ def main() -> int:
         hydrated_results,
         manifest_path=manifest_path,
         source_sha256s={
-            "manifest": hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            "manifest": video_manifest_review_projection_sha256(manifest_path)
             if manifest_path.is_file()
             else "",
             "story": hashlib.sha256(story_path.read_bytes()).hexdigest()

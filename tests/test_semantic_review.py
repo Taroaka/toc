@@ -607,6 +607,34 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("time_of_day_status", prompt)
             self.assertIn("undeclared legacy artifact", prompt)
 
+    def test_asset_plan_repair_edits_manifest_bible_not_compiled_requests(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "asset_plan", status="failed")
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "asset_plan",
+                round_number=1,
+                max_attempts=2,
+                errors=("asset coverage and prompt contract are inconsistent",),
+            )
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+            editable_line = next(
+                line
+                for line in prompt.splitlines()
+                if line.startswith("- Primary editable artifacts:")
+            )
+
+            self.assertIn("Asset Plan Repair Boundary", prompt)
+            self.assertIn("video_manifest.md.assets", prompt)
+            self.assertIn("orchestrator", prompt)
+            self.assertNotIn("asset_generation_requests.md", editable_line)
+            self.assertIn(
+                "Do not hand-edit `asset_generation_requests.md`",
+                prompt,
+            )
+
     def test_video_motion_repair_edits_canonical_motion_and_reference_roles_then_recompiles(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)

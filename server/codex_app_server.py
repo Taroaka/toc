@@ -1248,6 +1248,8 @@ def classify_codex_transport_error(message: str) -> str:
     normalized = " ".join(str(message or "").lower().split())
     if not normalized:
         return ""
+    if "semantic review output contract" in normalized:
+        return "output_contract_failed"
     if any(
         marker in normalized
         for marker in (

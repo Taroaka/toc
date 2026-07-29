@@ -53,6 +53,19 @@ python scripts/toc-create-run-headless.py \
   --source "シンデレラ"
 ```
 
+scene storyboard 専用 create route を検証する場合:
+
+```bash
+python scripts/toc-create-run-headless.py \
+  --title "シンデレラ" \
+  --source "シンデレラ" \
+  --create-mode scene_storyboard \
+  --assert-profile storyboard_v1
+```
+
+storyboard は生成済み cut 画像から storyboard PNG と video request を作るため、
+`--create-mode scene_storyboard` と `--no-images` は併用できません。
+
 既にbackend serverを起動している場合は、実サーバーのendpointへ投げます。
 
 ```bash
@@ -125,4 +138,3 @@ frontless_review 実行結果:
 - status: passed
 - 確認: cut_contractあり、画像requestにmotion_brief漏れなし、動画requestにmotionあり
 ```
-

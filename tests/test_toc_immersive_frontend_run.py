@@ -7,6 +7,7 @@ import json
 import hashlib
 import importlib.util
 import os
+import shutil
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -20,6 +21,7 @@ from toc.semantic_review import (
     semantic_review_input_digest,
     semantic_review_scope_binding_sha256,
 )
+from toc.review_loop import review_input_snapshot_issues
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -98,14 +100,25 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
     def test_pre_media_semantic_pipeline_reviews_every_design_stage_without_media(self) -> None:
         module = load_frontend_run_module()
         calls: list[tuple[str, bool]] = []
+        fixed_point = AsyncMock()
+        snapshot_refresh = Mock()
 
         async def review(_job_id, *, run_dir, stage, image_prompt_provider_ready=True):
             self.assertEqual(run_dir, Path("/tmp/example-run"))
             calls.append((stage, image_prompt_provider_ready))
 
         with (
+            patch(
+                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                fixed_point,
+            ),
             patch("server.image_gen_app._run_semantic_review", side_effect=review),
             patch.object(module, "check_semantic_review", return_value=Mock(passed=True, errors=())),
+            patch.object(
+                module,
+                "_refresh_downstream_review_input_snapshots",
+                snapshot_refresh,
+            ),
         ):
             import asyncio
 
@@ -116,19 +129,825 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 )
             )
 
+        fixed_point.assert_awaited_once_with(
+            "toc-immersive-frontend-run",
+            run_dir=Path("/tmp/example-run"),
+        )
+        snapshot_refresh.assert_called_once_with(Path("/tmp/example-run"))
         self.assertEqual(
             calls,
             [
-                ("scene_set", True),
-                ("scene_detail", True),
-                ("cut_blueprint", True),
-                ("asset_plan", True),
                 ("image_prompt", False),
             ],
         )
 
+    def test_world_walk_binds_canonical_source_metadata(self) -> None:
+        module = load_frontend_run_module()
+        source_run = REPO_ROOT / "output" / "桃太郎_20260727_1200"
+        manifest = {"video_metadata": {"experience": "cinematic_story"}}
+
+        module._bind_experience_metadata(
+            manifest,
+            experience="world_walk",
+            source_run=source_run,
+        )
+
+        metadata = manifest["video_metadata"]
+        source_relative = "output/桃太郎_20260727_1200"
+        self.assertEqual(metadata["experience"], "world_walk")
+        self.assertEqual(metadata["source_run"], source_relative)
+        self.assertEqual(metadata["source_story"], f"{source_relative}/story.md")
+        self.assertEqual(metadata["source_assets"], f"{source_relative}/assets")
+
+    def test_create_input_contract_preserves_exact_multiline_source(self) -> None:
+        module = load_frontend_run_module()
+        exact_source = "冒頭の空白を保持。  \n\n第二段落。\n"
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_create_input_",
+            dir=REPO_ROOT / "output",
+        ) as tmp:
+            run_dir = Path(tmp)
+
+            path = module._write_create_input_contract(
+                run_dir=run_dir,
+                topic="創作",
+                source=exact_source,
+                experience="cinematic_story",
+                source_run=None,
+                target_duration_seconds=600,
+            )
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], "toc.create_input.v1")
+            self.assertEqual(payload["source"], exact_source)
+            self.assertEqual(
+                payload["source_sha256"],
+                hashlib.sha256(exact_source.encode("utf-8")).hexdigest(),
+            )
+            self.assertIsNone(payload["source_run"])
+            self.assertEqual(payload["target_duration_seconds"], 600)
+
+    def test_world_walk_create_input_uses_actual_source_story_bytes(self) -> None:
+        module = load_frontend_run_module()
+        exact_story = "# Source Story\n\n行末と空行をそのまま使う。  \n"
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_world_walk_input_",
+            dir=output_root,
+        ) as tmp:
+            root = Path(tmp)
+            source_run = root / "source"
+            run_dir = root / "target"
+            source_run.mkdir()
+            (source_run / "story.md").write_text(
+                exact_story,
+                encoding="utf-8",
+            )
+
+            resolved_source = module._exact_materialization_source(
+                source="output/source",
+                experience="world_walk",
+                source_run=source_run,
+            )
+            path = module._write_create_input_contract(
+                run_dir=run_dir,
+                topic="世界観散歩",
+                source=resolved_source,
+                experience="world_walk",
+                source_run=source_run,
+                target_duration_seconds=300,
+            )
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["source"], exact_story)
+            self.assertNotEqual(payload["source"], "output/source")
+            self.assertEqual(
+                payload["source_run"],
+                source_run.relative_to(REPO_ROOT).as_posix(),
+            )
+
+    def test_world_walk_generation_contract_uses_source_assets_and_observer_pov(self) -> None:
+        module = load_frontend_run_module()
+        script = {"scenes": [{"cuts": [{"cut_contract": {}, "scene_contract": {}}]}]}
+        manifest = {
+            "video_metadata": {},
+            "assets": {"style_guide": {"reference_images": []}},
+            "scenes": [
+                {
+                    "time_of_day": "day",
+                    "cuts": [
+                        {
+                            "cut_contract": {"cinematic_contract": {}},
+                            "scene_contract": {"must_avoid": []},
+                            "image_generation": {
+                                "character_ids": [],
+                                "object_ids": [],
+                                "location_ids": [],
+                                "first_frame_visual_plan": {
+                                    "temporal_boundary": {
+                                        "event_fact_visible_in_still": "村の門前を歩いている"
+                                    },
+                                    "subject_binding": {
+                                        "primary_subject": {"name": "村の門前の生活空間"}
+                                    },
+                                    "spatial_composition": {
+                                        "foreground": "土の道",
+                                        "midground": "村の門",
+                                        "background": "遠い家並み",
+                                    },
+                                    "scene_material_pack": {
+                                        "dominant_materials": ["木、土、麻布"]
+                                    },
+                                },
+                                "api_prompt_payload": {},
+                            },
+                            "video_generation": {"motion_prompt": "ゆっくり前へ進む"},
+                        }
+                    ],
+                }
+            ],
+        }
+        references = [
+            "assets/source_references/characters/momotaro.png",
+            "assets/source_references/locations/village.png",
+        ]
+
+        module._apply_world_walk_generation_contract(
+            script=script,
+            manifest=manifest,
+            source_references=references,
+        )
+
+        cut = manifest["scenes"][0]["cuts"][0]
+        self.assertEqual(manifest["world_walk_contract"]["viewpoint"], "observer_pov")
+        self.assertEqual(manifest["assets"]["style_guide"]["reference_images"], references)
+        self.assertEqual(cut["image_generation"]["references"], references)
+        self.assertEqual(
+            cut["image_generation"]["api_prompt_payload"]["reference_images"],
+            references,
+        )
+        self.assertIn(
+            "観察者POV",
+            cut["image_generation"]["api_prompt_payload"]["prompt"],
+        )
+        self.assertIn(
+            "物語を進めず",
+            cut["image_generation"]["api_prompt_payload"]["prompt"],
+        )
+        self.assertIn("観察者POV", cut["cut_contract"]["world_walk_contract"]["prompt_requirement"])
+        self.assertIn("顔の大写し", cut["scene_contract"]["must_avoid"])
+        self.assertIn("観察者POV", cut["video_generation"]["motion_prompt"])
+
+    def test_world_walk_materializes_source_images_inside_target_run(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_run = root / "source"
+            run_dir = root / "target"
+            source_image = source_run / "assets" / "characters" / "hero.png"
+            source_image.parent.mkdir(parents=True)
+            source_image.write_bytes(b"source-image")
+            run_dir.mkdir()
+
+            references = module._materialize_world_walk_source_references(
+                source_run,
+                run_dir,
+            )
+
+            self.assertEqual(references, ["assets/source_references/characters/hero.png"])
+            self.assertEqual((run_dir / references[0]).read_bytes(), b"source-image")
+
+    def test_fresh_run_validator_accepts_safe_server_preamble(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_server_preamble_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td)
+            lock = run_dir / ".locks/create_resume.lock"
+            lock.parent.mkdir()
+            lock.write_text("pid=123\n", encoding="utf-8")
+            event = (
+                run_dir
+                / "logs/app_server/create_job_step/started.json"
+            )
+            event.parent.mkdir(parents=True)
+            event.write_text("{}\n", encoding="utf-8")
+
+            self.assertEqual(
+                module._validated_fresh_cli_run_dir(str(run_dir)),
+                run_dir,
+            )
+
+    def test_fresh_run_lock_rejects_validated_root_symlink_swap(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_root_swap_",
+            dir=output_root,
+        ) as td:
+            parent = Path(td)
+            run_dir = parent / "run"
+            run_dir.mkdir()
+            accepted = module._validated_fresh_cli_run_dir(str(run_dir))
+            original_run = parent / "run-original"
+            outside = parent / "outside"
+            outside.mkdir()
+            run_dir.rename(original_run)
+            run_dir.symlink_to(outside, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "real directory",
+                ):
+                    with module._run_materialization_lock(accepted):
+                        self.fail("swapped root must never acquire the lock")
+                self.assertFalse(
+                    (outside / ".toc_frontend_create.lock").exists()
+                )
+            finally:
+                run_dir.unlink()
+                original_run.rename(run_dir)
+
+            with module._run_materialization_lock(run_dir):
+                locked_original = parent / "run-locked-original"
+                run_dir.rename(locked_original)
+                run_dir.symlink_to(outside, target_is_directory=True)
+                try:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "real directory",
+                    ):
+                        module._write_create_input_contract(
+                            run_dir=run_dir,
+                            topic="創作",
+                            source="source",
+                            experience="cinematic_story",
+                            source_run=None,
+                            target_duration_seconds=300,
+                        )
+                    self.assertFalse(
+                        (
+                            outside
+                            / "logs/orchestration/create_input.json"
+                        ).exists()
+                    )
+                finally:
+                    run_dir.unlink()
+                    locked_original.rename(run_dir)
+
+            if hasattr(os, "chflags"):
+                protected_target = parent / "run-protected-rename"
+                with module._run_materialization_lock(
+                    run_dir,
+                    expected_identity=(
+                        module.directory_identity_nofollow(run_dir)
+                    ),
+                    protect_pathname=True,
+                ):
+                    (run_dir / "state.txt").write_text(
+                        "status=AUTHORING\n---\n",
+                        encoding="utf-8",
+                    )
+                    (run_dir / "logs").mkdir()
+                    outside_research = outside / "research.md"
+                    outside_research.write_text(
+                        "outside-original",
+                        encoding="utf-8",
+                    )
+                    injected_research = run_dir / "research.md"
+                    injected_research.symlink_to(outside_research)
+                    with self.assertRaises(OSError):
+                        module._write_run_text_nofollow(
+                            run_dir,
+                            injected_research,
+                            "must-not-escape",
+                        )
+                    self.assertEqual(
+                        outside_research.read_text(encoding="utf-8"),
+                        "outside-original",
+                    )
+                    with self.assertRaises(PermissionError):
+                        run_dir.rename(protected_target)
+                self.assertTrue(run_dir.is_dir())
+                self.assertTrue((run_dir / "state.txt").is_file())
+                (run_dir / "research.md").unlink()
+
+    def test_fresh_run_lock_fails_closed_without_chflags(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_no_chflags_",
+            dir=output_root,
+        ) as td:
+            parent = Path(td)
+            run_dir = parent / "run"
+            run_dir.mkdir()
+            run_identity = module.directory_identity_nofollow(run_dir)
+
+            with patch.object(module.os, "chflags", None):
+                with module._run_materialization_lock(
+                    run_dir,
+                    expected_identity=run_identity,
+                    protect_pathname=True,
+                ):
+                    module._write_run_text_nofollow(
+                        run_dir,
+                        run_dir / "research.md",
+                        "trusted",
+                    )
+            self.assertEqual(
+                (run_dir / "research.md").read_text(encoding="utf-8"),
+                "trusted",
+            )
+
+            original_run = parent / "run-original"
+            with (
+                patch.object(module.os, "chflags", None),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "directory identity changed",
+                ),
+            ):
+                with module._run_materialization_lock(
+                    run_dir,
+                    expected_identity=run_identity,
+                    protect_pathname=True,
+                ):
+                    run_dir.rename(original_run)
+                    run_dir.mkdir()
+                    module._write_run_text_nofollow(
+                        run_dir,
+                        run_dir / "story.md",
+                        "must-not-write-to-replacement",
+                    )
+
+            self.assertFalse((run_dir / "story.md").exists())
+            shutil.rmtree(run_dir)
+            original_run.rename(run_dir)
+
+    def test_prepare_grounding_preserves_frozen_authoring_readsets(self) -> None:
+        module = load_frontend_run_module()
+        run_dir = Path("/tmp/frontend-grounding-order")
+
+        with (
+            patch.object(module, "_prepare_authoring_grounding") as authoring_grounding,
+            patch.object(module.subprocess, "run") as subprocess_run,
+        ):
+            module.prepare_grounding(run_dir)
+
+        authoring_grounding.assert_not_called()
+        commands = [call.args[0] for call in subprocess_run.call_args_list]
+        self.assertIn("verify-pipeline.py", str(commands[0][1]))
+        self.assertIn("--stage-target", commands[0])
+        self.assertEqual(
+            [
+                command[command.index("--stage") + 1]
+                for command in commands[1:]
+            ],
+            ["asset", "scene_implementation"],
+        )
+
+    def test_prepare_grounding_completes_only_successful_grounding_slots(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory(prefix="frontend_grounding_slots_") as tmp:
+            run_dir = Path(tmp)
+            with (
+                patch.object(module, "_prepare_authoring_grounding"),
+                patch.object(module.subprocess, "run"),
+            ):
+                module.prepare_grounding(run_dir)
+
+            state = parse_state(run_dir / "state.txt")
+
+        self.assertEqual(state["slot.p510.status"], "done")
+        self.assertEqual(state["slot.p610.status"], "done")
+
+    def test_prepare_grounding_preserves_completed_asset_slot_when_scene_grounding_fails(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory(prefix="frontend_grounding_failure_") as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text(
+                "slot.p510.status=pending\nslot.p610.status=pending\n",
+                encoding="utf-8",
+            )
+
+            def fail_scene_grounding(command, **_kwargs):
+                if "--stage" in command and command[command.index("--stage") + 1] == "scene_implementation":
+                    raise subprocess.CalledProcessError(1, command)
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(module, "_prepare_authoring_grounding"),
+                patch.object(module.subprocess, "run", side_effect=fail_scene_grounding),
+                self.assertRaises(subprocess.CalledProcessError),
+            ):
+                module.prepare_grounding(run_dir)
+
+            state = parse_state(run_dir / "state.txt")
+
+        self.assertEqual(state["slot.p510.status"], "done")
+        self.assertEqual(state["slot.p610.status"], "pending")
+
+    def test_materialize_declares_final_frontend_review_policy_before_grounding(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        captured: dict[str, str] = {}
+        captured_create_input: dict[str, object] = {}
+
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_grounding_policy_",
+            dir=output_root,
+        ) as tmp:
+            # materialize_run() derives its story variant from run_dir.name.
+            # Keep the leaf stable so this contract test cannot select a
+            # different asset/prompt variant from a random tempfile suffix.
+            run_dir = Path(tmp) / "fixed_grounding_policy_seed"
+
+            def capture_policy(target_run_dir: Path) -> None:
+                captured_create_input.update(
+                    json.loads(
+                        (
+                            target_run_dir
+                            / "logs/orchestration/create_input.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                )
+                state = parse_state(target_run_dir / "state.txt")
+                for key in (
+                    "runtime.review_policy",
+                    "review.policy.story",
+                    "review.policy.image",
+                    "review.policy.narration",
+                    "gate.research_review",
+                    "gate.story_review",
+                    "gate.image_review",
+                    "gate.narration_review",
+                ):
+                    captured[key] = state.get(key, "")
+                raise RuntimeError("stop after grounding policy capture")
+
+            with (
+                patch.object(
+                    module,
+                    "_prepare_authoring_grounding",
+                    side_effect=capture_policy,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "stop after grounding policy capture",
+                ),
+            ):
+                module.materialize_run(
+                    "創作",
+                    "架空の主人公が閉ざされた門を越える物語。",
+                    run_dir,
+                    "p650",
+                )
+
+        self.assertEqual(
+            captured,
+            {
+                "runtime.review_policy": "frontend",
+                "review.policy.story": "required",
+                "review.policy.image": "required",
+                "review.policy.narration": "optional",
+                "gate.research_review": "required",
+                "gate.story_review": "required",
+                "gate.image_review": "required",
+                "gate.narration_review": "optional",
+            },
+        )
+        self.assertEqual(
+            captured_create_input["source"],
+            "架空の主人公が閉ざされた門を越える物語。",
+        )
+        self.assertEqual(
+            captured_create_input["schema_version"],
+            "toc.create_input.v1",
+        )
+
+    def test_prepare_grounding_keeps_real_p400_snapshot_bindings_current(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_grounding_snapshot_",
+            dir=output_root,
+        ) as tmp:
+            # Exercise the real materialization path with a deterministic
+            # variant; the random parent still isolates every test run.
+            # This fixed leaf selects a known-valid generic-story variant while
+            # the random parent keeps filesystem state isolated.
+            run_dir = Path(tmp) / "frontend_grounding_snapshot_aoosiyjk"
+            module.materialize_run(
+                "創作",
+                "架空の主人公が閉ざされた門を越え、失われた証を取り戻す物語。",
+                run_dir,
+                "p650",
+                foundation_review_runner=self._write_passing_foundation_review,
+            )
+            readset_path = run_dir / "logs" / "grounding" / "script.readset.json"
+            readset_sha_before = hashlib.sha256(readset_path.read_bytes()).hexdigest()
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+            module.prepare_grounding(run_dir)
+
+            readset_sha_after = hashlib.sha256(readset_path.read_bytes()).hexdigest()
+            readset = json.loads(readset_path.read_text(encoding="utf-8"))
+            state = parse_state(run_dir / "state.txt")
+
+            self.assertEqual(readset_sha_after, readset_sha_before)
+            self.assertEqual(
+                readset["review_policy"],
+                {
+                    "story": "required",
+                    "image": "required",
+                    "narration": "optional",
+                },
+            )
+            for stage in (
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "script",
+                "production_readiness",
+            ):
+                snapshot_path = (
+                    run_dir
+                    / "logs"
+                    / "eval"
+                    / stage
+                    / "round_01"
+                    / "review_input_snapshot.json"
+                )
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    snapshot["readset"],
+                    {
+                        "path": "logs/grounding/script.readset.json",
+                        "sha256": readset_sha_before,
+                        "size_bytes": readset_path.stat().st_size,
+                    },
+                    stage,
+                )
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage=stage,
+                        round_number=1,
+                    ),
+                    [],
+                    stage,
+                )
+                if stage != "visual_value":
+                    manifest_source = next(
+                        item
+                        for item in snapshot["source_artifacts"]
+                        if item["path"] == "video_manifest.md"
+                    )
+                    self.assertEqual(
+                        manifest_source["sha256"],
+                        manifest_sha,
+                        stage,
+                    )
+            self.assertEqual(state["eval.p400_readiness.status"], "approved")
+
+    def test_review_materialization_phases_have_exact_stage_ownership(self) -> None:
+        module = load_frontend_run_module()
+
+        self.assertEqual(
+            module.P400_REVIEW_STAGES,
+            (
+                "visual_value",
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "script",
+                "production_readiness",
+            ),
+        )
+        self.assertEqual(
+            module.DOWNSTREAM_REVIEW_STAGES,
+            (
+                "asset",
+                "scene_implementation_hard",
+                "scene_implementation_judgment",
+            ),
+        )
+
+    def test_materialize_run_orders_p400_reviews_before_requests_and_orchestration(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        events: list[str] = []
+
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_review_phase_order_",
+            dir=output_root,
+        ) as tmp:
+            run_dir = Path(tmp) / "fixed_grounding_policy_seed"
+            with (
+                patch.object(
+                    module,
+                    "_prepare_authoring_grounding",
+                    side_effect=lambda _run_dir: events.append("authoring_grounding"),
+                ),
+                patch.object(
+                    module,
+                    "_refresh_p400_review_artifacts",
+                    side_effect=lambda _run_dir: events.append("p400_reviews"),
+                ),
+                patch.object(
+                    module,
+                    "_require_fresh_p400_readiness",
+                    side_effect=lambda _run_dir: events.append("p400_readiness"),
+                ),
+                patch.object(
+                    module,
+                    "_write_asset_request_files",
+                    side_effect=lambda *_args: events.append("asset_requests"),
+                ),
+                patch.object(
+                    module,
+                    "_materialize_standard_request_files",
+                    side_effect=lambda _run_dir: events.append("scene_requests"),
+                ),
+                patch.object(
+                    module,
+                    "_write_orchestration",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("orchestration") or {}
+                    ),
+                ),
+            ):
+                module.materialize_run(
+                    "創作",
+                    "架空の主人公が閉ざされた門を越える物語。",
+                    run_dir,
+                    "p650",
+                )
+
+        self.assertEqual(
+            events,
+            [
+                "authoring_grounding",
+                "p400_reviews",
+                "p400_readiness",
+                "asset_requests",
+                "scene_requests",
+                "authoring_grounding",
+                "p400_reviews",
+                "p400_readiness",
+                "orchestration",
+            ],
+        )
+
+    def test_downstream_review_snapshots_bind_current_non_null_readsets(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory(prefix="frontend_downstream_reviews_") as tmp:
+            run_dir = Path(tmp)
+            grounding_dir = run_dir / "logs" / "grounding"
+            grounding_dir.mkdir(parents=True)
+            for relpath in (
+                "story.md",
+                "script.md",
+                "video_manifest.md",
+                "asset_inventory.md",
+                "asset_plan.md",
+                "image_prompt_story_review.md",
+                "asset_generation_requests.md",
+                "asset_generation_request_snapshot.json",
+                "image_generation_requests.md",
+                "image_generation_request_snapshot.json",
+            ):
+                path = run_dir / relpath
+                path.write_text(
+                    (
+                        "```yaml\nscenes: []\n```\n"
+                        if relpath == "video_manifest.md"
+                        else f"{relpath}\n"
+                    ),
+                    encoding="utf-8",
+                )
+            readset_paths = {
+                "asset": grounding_dir / "asset.readset.json",
+                "scene_implementation": grounding_dir
+                / "scene_implementation.readset.json",
+            }
+            for stage, path in readset_paths.items():
+                path.write_text(
+                    json.dumps({"stage": stage}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+            with (
+                patch.object(module.subprocess, "run") as subprocess_run,
+                patch.object(
+                    module,
+                    "_authoring_review_blocking_findings",
+                    return_value=(),
+                ),
+            ):
+                module._refresh_downstream_review_artifacts(run_dir)
+
+            semantic_pack_stages = [
+                command[command.index("--stage") + 1]
+                for command in (
+                    call.args[0] for call in subprocess_run.call_args_list
+                )
+                if "build-semantic-review-pack.py" in str(command[1])
+            ]
+            self.assertEqual(
+                semantic_pack_stages,
+                ["asset_plan", "image_prompt"],
+            )
+            snapshot_readsets = {
+                "asset": "asset",
+                "scene_implementation_hard": "scene_implementation",
+                "scene_implementation_judgment": "scene_implementation",
+            }
+            for review_stage, grounding_stage in snapshot_readsets.items():
+                snapshot_path = (
+                    run_dir
+                    / "logs"
+                    / "eval"
+                    / review_stage
+                    / "round_01"
+                    / "review_input_snapshot.json"
+                )
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                readset_path = readset_paths[grounding_stage]
+                self.assertEqual(
+                    snapshot["readset"],
+                    {
+                        "path": (
+                            f"logs/grounding/{grounding_stage}.readset.json"
+                        ),
+                        "sha256": hashlib.sha256(
+                            readset_path.read_bytes()
+                        ).hexdigest(),
+                        "size_bytes": readset_path.stat().st_size,
+                    },
+                    review_stage,
+                )
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage=review_stage,
+                        round_number=1,
+                    ),
+                    [],
+                    review_stage,
+                )
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\n"
+                "video_metadata:\n"
+                "  topic: final repaired manifest\n"
+                "scenes: []\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "image_prompt_story_review.md").write_text(
+                "final repaired deterministic review\n",
+                encoding="utf-8",
+            )
+
+            module._refresh_downstream_review_input_snapshots(run_dir)
+
+            for review_stage in (
+                "scene_implementation_hard",
+                "scene_implementation_judgment",
+            ):
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage=review_stage,
+                        round_number=1,
+                    ),
+                    [],
+                    review_stage,
+                )
+            self.assertTrue(
+                review_input_snapshot_issues(
+                    run_dir=run_dir,
+                    stage="asset",
+                    round_number=1,
+                ),
+                "approved asset review must not be rebound without rerunning its critics",
+            )
+
     def test_materialize_only_main_runs_semantic_pipeline_but_not_media_generation(self) -> None:
         module = load_frontend_run_module()
+        events: list[str] = []
         semantic_pipeline = AsyncMock()
         media_generation = AsyncMock()
 
@@ -138,10 +957,32 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "_validated_fresh_cli_run_dir",
                 return_value=Path("/tmp/materialized-run"),
             ),
+            patch.object(
+                module,
+                "directory_identity_nofollow",
+                return_value=(1, 2),
+            ),
             patch.object(module, "_run_materialization_lock", return_value=nullcontext()),
-            patch.object(module, "materialize_run"),
-            patch.object(module, "prepare_grounding"),
-            patch.object(module, "run_pre_media_semantic_pipeline", semantic_pipeline),
+            patch.object(
+                module,
+                "materialize_run",
+                side_effect=lambda *_args, **_kwargs: events.append("materialize"),
+            ),
+            patch.object(
+                module,
+                "prepare_grounding",
+                side_effect=lambda _run_dir: events.append("grounding"),
+            ),
+            patch.object(
+                module,
+                "_refresh_downstream_review_artifacts",
+                side_effect=lambda _run_dir: events.append("downstream_reviews"),
+            ),
+            patch.object(
+                module,
+                "run_pre_media_semantic_pipeline",
+                semantic_pipeline,
+            ),
             patch.object(module, "generate_images", media_generation),
             patch.object(module, "write_run_index"),
             patch.object(
@@ -160,11 +1001,253 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         ):
             module.main()
 
+        self.assertEqual(
+            events,
+            ["materialize", "grounding", "downstream_reviews"],
+        )
         semantic_pipeline.assert_awaited_once_with(
             Path("/tmp/materialized-run"),
             image_prompt_provider_ready=False,
         )
         media_generation.assert_not_awaited()
+
+    def test_main_stops_before_p680_validation_when_asset_review_is_required(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        validation = Mock()
+
+        with tempfile.TemporaryDirectory(prefix="frontend_asset_review_", dir=output_root) as tmp:
+            run_dir = Path(tmp)
+
+            def seed_pending_handoff(*_args, **_kwargs) -> None:
+                (run_dir / "state.txt").write_text(
+                    "slot.p680.status=pending\n",
+                    encoding="utf-8",
+                )
+
+            with (
+                patch.object(module, "_validated_fresh_cli_run_dir", return_value=run_dir),
+                patch.object(
+                    module,
+                    "directory_identity_nofollow",
+                    return_value=(1, 2),
+                ),
+                patch.object(module, "_run_materialization_lock", return_value=nullcontext()),
+                patch.object(module, "materialize_run", side_effect=seed_pending_handoff),
+                patch.object(module, "prepare_grounding"),
+                patch.object(module, "_refresh_downstream_review_artifacts"),
+                patch.object(module, "write_run_index"),
+                patch.object(module, "validate", validation),
+                patch(
+                    "server.image_gen_app._generate_create_images",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ) as create_images,
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "toc-immersive-frontend-run.py",
+                        "--topic",
+                        "創作",
+                        "--run-dir",
+                        str(run_dir),
+                        "--stop-target",
+                        "p680",
+                    ],
+                ),
+                self.assertRaisesRegex(RuntimeError, "p570"),
+            ):
+                module.main()
+
+            state = parse_state(run_dir / "state.txt")
+
+        create_images.assert_awaited_once_with(
+            "toc-immersive-frontend-run",
+            run_id=run_dir.relative_to(output_root).as_posix(),
+        )
+        validation.assert_not_called()
+        self.assertEqual(state["slot.p680.status"], "pending")
+
+    def test_p650_generation_completes_asset_quality_handoff_before_validation(self) -> None:
+        module = load_frontend_run_module()
+        run_dir = REPO_ROOT / "output" / "frontend_p650_asset_handoff"
+        events: list[str] = []
+
+        async def fixed_point(_job_id: str, *, run_dir: Path) -> None:
+            events.append("fixed_point")
+
+        def provider_gate(_run_dir: Path) -> None:
+            events.append("provider_gate")
+
+        async def generate_assets(*, run_dir: Path, kind: str) -> None:
+            events.append(f"provider:{kind}")
+
+        def asset_quality(_run_dir: Path) -> None:
+            events.append("asset_quality")
+
+        def asset_handoff(_run_dir: Path, *, asset_quality_passed: bool) -> None:
+            self.assertTrue(asset_quality_passed)
+            events.append("asset_handoff")
+
+        async def semantic_review(
+            _job_id: str,
+            *,
+            run_dir: Path,
+            stage: str,
+        ) -> None:
+            self.assertEqual(stage, "image_prompt")
+            events.append("image_prompt")
+
+        def snapshot_refresh(_run_dir: Path) -> None:
+            events.append("snapshot_refresh")
+
+        with (
+            patch(
+                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                side_effect=fixed_point,
+            ),
+            patch(
+                "server.image_gen_app._validate_pre_asset_provider_gate",
+                side_effect=provider_gate,
+            ),
+            patch(
+                "server.image_gen_app._run_semantic_review",
+                side_effect=semantic_review,
+            ),
+            patch(
+                "server.image_gen_app._generate_request_outputs",
+                side_effect=generate_assets,
+            ),
+            patch(
+                "server.image_gen_app._validate_p560_asset_quality",
+                side_effect=asset_quality,
+            ),
+            patch(
+                "server.image_gen_app._mark_asset_generation_handoff",
+                side_effect=asset_handoff,
+            ),
+            patch.object(
+                module,
+                "_refresh_downstream_review_input_snapshots",
+                side_effect=snapshot_refresh,
+            ),
+            patch.object(module, "check_semantic_review", return_value=Mock(passed=True, errors=())),
+        ):
+            import asyncio
+
+            asyncio.run(module.generate_images(run_dir, "p650"))
+
+        self.assertEqual(
+            events,
+            [
+                "fixed_point",
+                "provider_gate",
+                "provider:asset",
+                "asset_quality",
+                "asset_handoff",
+                "image_prompt",
+                "snapshot_refresh",
+            ],
+        )
+
+    def test_p650_provider_gate_failure_blocks_asset_submission(self) -> None:
+        module = load_frontend_run_module()
+        run_dir = REPO_ROOT / "output" / "frontend_p650_provider_gate"
+        fixed_point = AsyncMock()
+        generate_assets = AsyncMock()
+
+        with (
+            patch(
+                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                fixed_point,
+            ),
+            patch(
+                "server.image_gen_app._validate_pre_asset_provider_gate",
+                side_effect=RuntimeError("pre-asset gate failed"),
+            ),
+            patch(
+                "server.image_gen_app._generate_request_outputs",
+                generate_assets,
+            ),
+            self.assertRaisesRegex(RuntimeError, "pre-asset gate failed"),
+        ):
+            import asyncio
+
+            asyncio.run(module.generate_images(run_dir, "p650"))
+
+        fixed_point.assert_awaited_once_with(
+            "toc-immersive-frontend-run",
+            run_dir=run_dir,
+        )
+        generate_assets.assert_not_awaited()
+
+    def test_p650_asset_gate_failure_preserves_completed_provider_work(self) -> None:
+        module = load_frontend_run_module()
+        from server import image_gen_app
+
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        cases = (
+            (
+                image_gen_app.P560AssetGateError(
+                    "visual quality failed",
+                    failed_check_ids=("asset.visual_not_vector_like",),
+                    retryable_visual_quality=True,
+                ),
+                "awaiting_approval",
+            ),
+            (
+                image_gen_app.P560AssetGateError(
+                    "orchestration failed",
+                    failed_check_ids=("orchestration.supervisor_results",),
+                    retryable_visual_quality=False,
+                ),
+                "failed",
+            ),
+        )
+
+        for gate_error, expected_p570_status in cases:
+            with self.subTest(expected_p570_status=expected_p570_status):
+                with tempfile.TemporaryDirectory(prefix="frontend_p650_gate_", dir=output_root) as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / "state.txt").write_text(
+                        "slot.p550.status=pending\n"
+                        "slot.p560.status=pending\n"
+                        "slot.p570.status=pending\n",
+                        encoding="utf-8",
+                    )
+                    with (
+                        patch(
+                            "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                            new_callable=AsyncMock,
+                        ),
+                        patch(
+                            "server.image_gen_app._validate_pre_asset_provider_gate",
+                        ),
+                        patch("server.image_gen_app._run_semantic_review", new_callable=AsyncMock),
+                        patch("server.image_gen_app._generate_request_outputs", new_callable=AsyncMock),
+                        patch(
+                            "server.image_gen_app._validate_p560_asset_quality",
+                            side_effect=gate_error,
+                        ),
+                        patch.object(
+                            module,
+                            "check_semantic_review",
+                            return_value=Mock(passed=True, errors=()),
+                        ),
+                        self.assertRaises(image_gen_app.P560AssetGateError),
+                    ):
+                        import asyncio
+
+                        asyncio.run(module.generate_images(run_dir, "p650"))
+
+                    state = parse_state(run_dir / "state.txt")
+
+                self.assertEqual(state["slot.p550.status"], "done")
+                self.assertEqual(state["slot.p560.status"], "done")
+                self.assertEqual(state["slot.p570.status"], expected_p570_status)
 
     @staticmethod
     def _write_passing_foundation_review(run_dir: Path, stage: str) -> None:
@@ -324,6 +1407,11 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             patch.object(module, "prepare_grounding", Mock()),
             patch.object(
                 module,
+                "_refresh_downstream_review_artifacts",
+                Mock(),
+            ),
+            patch.object(
+                module,
                 "run_pre_media_semantic_pipeline",
                 semantic_pipeline,
             ),
@@ -367,15 +1455,55 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             p200 = json.loads(
                 (run_dir / "logs" / "orchestration" / "p200.supervisor_result.json").read_text(encoding="utf-8")
             )
+            p500 = json.loads(
+                (run_dir / "logs" / "orchestration" / "p500.supervisor_result.json").read_text(encoding="utf-8")
+            )
             p600 = json.loads(
                 (run_dir / "logs" / "orchestration" / "p600.supervisor_result.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(p100["state_keys"]["slot.p130.status"], "done")
         self.assertEqual(p200["state_keys"]["slot.p230.status"], "done")
+        self.assertEqual(p500["status"], "pending")
+        self.assertEqual(p500["completed_slots"], ["p520", "p530"])
+        self.assertEqual(p500["state_keys"]["slot.p570.status"], "pending")
         self.assertEqual(p600["status"], "pending")
-        self.assertEqual(p600["completed_slots"], ["p610", "p620"])
+        self.assertEqual(p600["completed_slots"], ["p620"])
         self.assertEqual(p600["state_keys"]["slot.p680.status"], "pending")
+
+    def test_fresh_materialized_media_slots_only_complete_executed_work(self) -> None:
+        module = load_frontend_run_module()
+        expected_common_statuses = {
+            "p510": "pending",
+            "p520": "done",
+            "p530": "done",
+            "p540": "pending",
+            "p550": "pending",
+            "p560": "pending",
+            "p570": "pending",
+            "p610": "pending",
+            "p620": "done",
+            "p630": "pending",
+            "p640": "pending",
+            "p650": "pending",
+        }
+
+        for stop_target in ("p650", "p680"):
+            with self.subTest(stop_target=stop_target):
+                updates = module._fresh_materialized_media_slot_updates(stop_target)
+                self.assertEqual(
+                    {
+                        slot: updates[f"slot.{slot}.status"]
+                        for slot in expected_common_statuses
+                    },
+                    expected_common_statuses,
+                )
+                for slot in ("p660", "p670", "p680"):
+                    key = f"slot.{slot}.status"
+                    if stop_target == "p680":
+                        self.assertEqual(updates[key], "pending")
+                    else:
+                        self.assertNotIn(key, updates)
 
     def test_reviewed_foundations_feed_story_and_cut_builders(self) -> None:
         module = load_frontend_run_module()
@@ -2759,6 +3887,13 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 patch.object(module, "_authoring_review_blocking_findings", return_value=()),
             ):
                 module.materialize_run("シンデレラ", "シンデレラ", run_dir, "p650")
+                grounding_dir = run_dir / "logs" / "grounding"
+                for stage in ("asset", "scene_implementation"):
+                    (grounding_dir / f"{stage}.readset.json").write_text(
+                        json.dumps({"stage": stage}) + "\n",
+                        encoding="utf-8",
+                    )
+                module._refresh_downstream_review_artifacts(run_dir)
                 module.write_run_index(run_dir)
             for name in (
                 "research.md",
@@ -2796,6 +3931,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
             self.assertNotIn("slot.p660.status", state)
             self.assertNotIn("slot.p680.status", state)
+            self.assertEqual(state["slot.p510.status"], "pending")
+            self.assertEqual(state["slot.p520.status"], "done")
+            self.assertEqual(state["slot.p530.status"], "done")
+            self.assertEqual(state["slot.p540.status"], "pending")
+            self.assertEqual(state["slot.p550.status"], "pending")
+            self.assertEqual(state["slot.p560.status"], "pending")
+            self.assertEqual(state["slot.p570.status"], "pending")
+            self.assertEqual(state["slot.p610.status"], "pending")
+            self.assertEqual(state["slot.p620.status"], "done")
+            self.assertEqual(state["slot.p630.status"], "pending")
+            self.assertEqual(state["slot.p640.status"], "pending")
             self.assertEqual(state["review.image.status"], "pending")
             self.assertEqual(state["gate.image_review"], "required")
             self.assertEqual(state["review.image_prompt.judgment.status"], "pending")

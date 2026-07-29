@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -38,9 +39,23 @@ from toc.image_request_snapshot import (  # noqa: E402
     ImageRequestSnapshotError,
     current_reference_sha256s,
     load_request_snapshot,
-    sha256_file,
 )
-from toc.semantic_review import check_image_prompt_judgment, check_semantic_review  # noqa: E402
+from toc.partial_media import (  # noqa: E402
+    PARTIAL_MEDIA_SEMANTIC_STAGES,
+    PARTIAL_MEDIA_PROJECTION_RELPATH,
+    PARTIAL_MEDIA_RECEIPT_RELPATH,
+    PartialMediaProjectionError,
+    derive_partial_media_projection,
+    load_partial_media_generation_receipt,
+    load_partial_media_projection,
+    read_run_relative_regular_file_bytes,
+    run_relative_entry_exists_no_follow,
+)
+from toc.semantic_review import (  # noqa: E402
+    check_image_prompt_judgment,
+    check_semantic_review,
+    semantic_review_relpaths,
+)
 from toc.stage_evaluator import check_manifest_single as shared_check_manifest_single  # noqa: E402
 from toc.stage_evaluator import check_visual_value, scene_time_of_day_contract_missing  # noqa: E402
 from toc.story_duration import (  # noqa: E402
@@ -211,6 +226,303 @@ def append_grounding_checks(checks: list[dict[str, Any]], *, run_dir: Path, stag
     )
 
 
+def _state_list_values(state: dict[str, str], key: str) -> list[str]:
+    raw = str(state.get(key) or "").strip()
+    if not raw:
+        return []
+    return [
+        value
+        for item in raw.split(",")
+        if (value := item.strip().strip("`\"'"))
+    ]
+
+
+def _scene_detail_transport_failed_scene_numbers(
+    state: dict[str, str],
+) -> set[str]:
+    pattern = re.compile(
+        r"^review\.semantic\.scene_detail\.shards\.scene_(\d+)"
+        r"\.transport\.status$"
+    )
+    return {
+        match.group(1)
+        for key, value in state.items()
+        if (match := pattern.fullmatch(key))
+        and str(value).strip().lower() == "failed"
+    }
+
+
+def _localized_partial_media_contract(
+    run_dir: Path,
+    *,
+    require_generation_receipt: bool,
+) -> dict[str, Any]:
+    """Validate the shared projection and its optional generation receipt."""
+
+    state = parse_state_file(run_dir / "state.txt")
+    claimed_stages = [
+        stage
+        for stage in PARTIAL_MEDIA_SEMANTIC_STAGES
+        if state.get(f"review.semantic.{stage}.partial_media_allowed")
+        == "true"
+    ]
+
+    def partial_media_entry_present(relpath: Path) -> bool:
+        try:
+            return run_relative_entry_exists_no_follow(
+                run_dir,
+                relpath.as_posix(),
+            )
+        except PartialMediaProjectionError:
+            # Unsafe or unreadable ancestry is itself stale partial-media
+            # state.  Never let Path.exists() hide a broken symlink leaf.
+            return True
+
+    stale_artifact_or_state = (
+        state.get("review.semantic.partial_media.generated") == "true"
+        or bool(
+            _state_list_values(
+                state,
+                "review.semantic.partial_media.blocked_image_items",
+            )
+        )
+        or partial_media_entry_present(PARTIAL_MEDIA_PROJECTION_RELPATH)
+        or partial_media_entry_present(PARTIAL_MEDIA_RECEIPT_RELPATH)
+    )
+    if not claimed_stages:
+        return {
+            "valid": not stale_artifact_or_state,
+            "claimed_stages": [],
+            "blocked_item_ids": set(),
+            "blocked_destinations": set(),
+            "stage_blocked_item_ids": {},
+            "errors": (
+                [
+                    "partial-media state/artifacts exist without a current "
+                    "localized semantic failure"
+                ]
+                if stale_artifact_or_state
+                else []
+            ),
+        }
+
+    issues: list[str] = []
+    transport_scenes = _scene_detail_transport_failed_scene_numbers(state)
+    try:
+        derived = derive_partial_media_projection(
+            run_dir,
+            stages=claimed_stages,
+            transport_scene_numbers_by_stage={
+                "scene_detail": transport_scenes
+            },
+        )
+        recorded = load_partial_media_projection(run_dir)
+    except PartialMediaProjectionError as exc:
+        issues.extend(exc.issues)
+        derived = {}
+        recorded = {}
+    if derived and recorded != derived:
+        issues.append(
+            "recorded partial-media projection does not exactly match "
+            "current request/report inputs"
+        )
+
+    stage_records = {
+        str(record.get("stage") or ""): record
+        for record in derived.get("stages", [])
+        if isinstance(record, dict)
+        and str(record.get("stage") or "")
+    }
+    for stage in claimed_stages:
+        record = stage_records.get(stage)
+        if not isinstance(record, dict):
+            issues.append(
+                f"{stage} is missing from the current partial-media projection"
+            )
+            continue
+        blocked_ids = set(record.get("blocked_image_item_ids") or [])
+        recorded_values = _state_list_values(
+            state,
+            f"review.semantic.{stage}.blocked_image_items",
+        )
+        localized_values = _state_list_values(
+            state,
+            f"review.semantic.{stage}.localization.blocked_image_items",
+        )
+        if (
+            state.get(f"review.semantic.{stage}.status") != "failed"
+            or state.get(
+                f"review.semantic.{stage}.localization.status"
+            )
+            != "localized_to_image_items"
+            or state.get(
+                f"review.semantic.{stage}.localization.validation"
+            )
+            != "passed"
+            or set(recorded_values) != blocked_ids
+            or len(set(recorded_values)) != len(recorded_values)
+            or set(localized_values) != blocked_ids
+            or len(set(localized_values)) != len(localized_values)
+            or state.get(
+                f"review.semantic.{stage}.blocked_image_item_count"
+            )
+            != str(len(blocked_ids))
+        ):
+            issues.append(
+                f"{stage} state does not exactly match the shared "
+                "partial-media projection"
+            )
+        if stage == "image_prompt" and (
+            state.get("review.image_prompt.request_freeze.status")
+            != "frozen"
+            or state.get(
+                "review.image_prompt.request_freeze.semantic_status"
+            )
+            != "localized_failure"
+            or state.get(
+                "review.image_prompt.request_freeze.request_revision"
+            )
+            != derived.get("request_revision")
+            or state.get(
+                "review.image_prompt.request_freeze.reviewed_request_revision"
+            )
+            != derived.get("request_revision")
+        ):
+            issues.append(
+                "image_prompt localized failure is not bound to the current "
+                "frozen request revision"
+            )
+
+    blocked_item_ids = set(
+        derived.get("blocked_image_item_ids") or []
+    )
+    blocked_destinations = set(
+        derived.get("blocked_destinations") or []
+    )
+    stale_blocked_outputs: list[str] = []
+    for destination in sorted(blocked_destinations):
+        if not destination:
+            continue
+        try:
+            if run_relative_entry_exists_no_follow(run_dir, destination):
+                stale_blocked_outputs.append(destination)
+        except PartialMediaProjectionError as exc:
+            issues.extend(exc.issues)
+    if stale_blocked_outputs:
+        issues.append(
+            "localized blocked destinations contain stale image outputs: "
+            + ", ".join(stale_blocked_outputs)
+        )
+
+    if require_generation_receipt and derived:
+        try:
+            receipt = load_partial_media_generation_receipt(run_dir)
+        except PartialMediaProjectionError as exc:
+            issues.extend(exc.issues)
+            receipt = {}
+        surviving_item_ids = set(
+            derived.get("surviving_image_item_ids") or []
+        )
+        expected_candidates = derived.get("synthetic_candidates")
+        submitted_values = receipt.get("provider_submitted_item_ids")
+        generated_values = receipt.get("generated_item_ids")
+        skipped_values = receipt.get("skipped_item_ids")
+        if (
+            receipt.get("request_revision")
+            != derived.get("request_revision")
+            or receipt.get("projection_sha256")
+            != derived.get("projection_sha256")
+            or not isinstance(submitted_values, list)
+            or set(submitted_values) != surviving_item_ids
+            or len(set(submitted_values)) != len(submitted_values)
+            or receipt.get("provider_call_count")
+            != len(surviving_item_ids)
+            or not isinstance(generated_values, list)
+            or set(generated_values) != surviving_item_ids
+            or len(set(generated_values)) != len(generated_values)
+            or not isinstance(skipped_values, list)
+            or set(skipped_values) != blocked_item_ids
+            or len(set(skipped_values)) != len(skipped_values)
+            or receipt.get("synthetic_candidates")
+            != expected_candidates
+        ):
+            issues.append(
+                "partial-media generation receipt does not exactly match "
+                "the current projection"
+            )
+
+        blocked_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.blocked_image_items",
+        )
+        synthetic_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.synthetic_failed_candidates",
+        )
+        submitted_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.provider_submitted_image_items",
+        )
+        if (
+            state.get("review.semantic.partial_media.generated") != "true"
+            or state.get("review.semantic.partial_media.request_revision")
+            != derived.get("request_revision")
+            or state.get("review.semantic.partial_media.projection_sha256")
+            != derived.get("projection_sha256")
+            or state.get("review.semantic.partial_media.receipt")
+            != PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
+            or state.get("review.semantic.partial_media.receipt_sha256")
+            != receipt.get("receipt_sha256")
+            or set(blocked_state_values) != blocked_item_ids
+            or len(set(blocked_state_values))
+            != len(blocked_state_values)
+            or state.get(
+                "review.semantic.partial_media.blocked_image_item_count"
+            )
+            != str(len(blocked_item_ids))
+            or set(synthetic_state_values) != blocked_item_ids
+            or len(set(synthetic_state_values))
+            != len(synthetic_state_values)
+            or set(submitted_state_values) != surviving_item_ids
+            or len(set(submitted_state_values))
+            != len(submitted_state_values)
+            or state.get("image_generation.status") != "partial"
+            or state.get("image_generation.blocked_item_count")
+            != str(len(blocked_item_ids))
+            or set(
+                _state_list_values(
+                    state,
+                    "image_generation.blocked_item_ids",
+                )
+            )
+            != blocked_item_ids
+        ):
+            issues.append(
+                "partial-media state receipt does not exactly mirror the "
+                "atomic generation receipt"
+            )
+
+    return {
+        "valid": not issues,
+        "claimed_stages": claimed_stages,
+        "blocked_item_ids": blocked_item_ids if not issues else set(),
+        "blocked_destinations": (
+            blocked_destinations if not issues else set()
+        ),
+        "stage_blocked_item_ids": (
+            {
+                stage: set(record["blocked_image_item_ids"])
+                for stage, record in stage_records.items()
+            }
+            if not issues
+            else {}
+        ),
+        "projection_sha256": derived.get("projection_sha256"),
+        "request_revision": derived.get("request_revision"),
+        "errors": list(dict.fromkeys(issues)),
+    }
+
+
 def append_semantic_review_check(
     checks: list[dict[str, Any]],
     details: dict[str, Any],
@@ -219,6 +531,8 @@ def append_semantic_review_check(
     stage: str,
     required: bool,
     check_id: str | None = None,
+    allow_localized_partial: bool = False,
+    require_generation_receipt: bool = False,
 ) -> None:
     result = check_image_prompt_judgment(run_dir) if stage == "image_prompt" else check_semantic_review(run_dir, stage)
     prefix = stage.replace("-", "_")
@@ -226,11 +540,33 @@ def append_semantic_review_check(
         details[f"{prefix}_semantic_review_errors"] = list(result.errors)
     details[f"{prefix}_semantic_review_status"] = result.status or ""
     details[f"{prefix}_semantic_review_entry_count"] = result.entry_count
+    localized_partial = False
+    if required and allow_localized_partial and not result.passed:
+        contract = _localized_partial_media_contract(
+            run_dir,
+            require_generation_receipt=require_generation_receipt,
+        )
+        localized_partial = (
+            contract["valid"]
+            and stage in contract["stage_blocked_item_ids"]
+        )
+        details[f"{prefix}_localized_partial_media"] = localized_partial
+        if contract["errors"]:
+            details[f"{prefix}_localized_partial_media_errors"] = list(
+                contract["errors"]
+            )
+        if localized_partial:
+            details[f"{prefix}_localized_blocked_image_item_ids"] = sorted(
+                contract["stage_blocked_item_ids"][stage]
+            )
     add_check(
         checks,
         check_id or f"{prefix}.semantic_review_subagent_passed",
-        (not required) or result.passed,
-        f"contextless {stage} semantic review subagent report exists and passed",
+        (not required) or result.passed or localized_partial,
+        (
+            f"contextless {stage} semantic review report passed or its "
+            "terminal failures are current and fully localized/accounted"
+        ),
         kind="rubric",
     )
 
@@ -463,8 +799,24 @@ def check_script_single(run_dir: Path, profile: str, *, target_slot: str = "p450
     details: dict[str, Any] = {}
     require_scene_semantic = target_number in {410, 420} or target_number >= 500
     append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_detail", required=require_scene_semantic)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="cut_blueprint", required=target_number == 420 or target_number >= 500)
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="scene_detail",
+        required=require_scene_semantic,
+        allow_localized_partial=True,
+        require_generation_receipt=target_number >= 680,
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="cut_blueprint",
+        required=target_number == 420 or target_number >= 500,
+        allow_localized_partial=True,
+        require_generation_receipt=target_number >= 680,
+    )
     updates["eval.script.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("script", path.name, checks, details=details), updates
 
@@ -493,8 +845,24 @@ def check_script_scene_series(run_dir: Path, profile: str, *, target_slot: str =
     details: dict[str, Any] = {"scene_count": len(scene_dirs)}
     require_scene_semantic = target_number in {410, 420} or target_number >= 500
     append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="scene_detail", required=require_scene_semantic)
-    append_semantic_review_check(checks, details, run_dir=run_dir, stage="cut_blueprint", required=target_number == 420 or target_number >= 500)
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="scene_detail",
+        required=require_scene_semantic,
+        allow_localized_partial=True,
+        require_generation_receipt=target_number >= 680,
+    )
+    append_semantic_review_check(
+        checks,
+        details,
+        run_dir=run_dir,
+        stage="cut_blueprint",
+        required=target_number == 420 or target_number >= 500,
+        allow_localized_partial=True,
+        require_generation_receipt=target_number >= 680,
+    )
     updates = {"eval.script.score": f"{score_from_checks(checks):.4f}"}
     return make_stage("script", "scenes/*/script.md", checks, details=details), updates
 
@@ -807,6 +1175,20 @@ def _normalized_run_relative_path(run_dir: Path, value: Any) -> str | None:
         return None
 
 
+def _is_regular_run_relative_file_no_follow(
+    run_dir: Path,
+    value: Any,
+) -> bool:
+    relative_path = _normalized_run_relative_path(run_dir, value)
+    if relative_path is None:
+        return False
+    try:
+        read_run_relative_regular_file_bytes(run_dir, relative_path)
+    except PartialMediaProjectionError:
+        return False
+    return True
+
+
 def _strict_snapshot_provenance_record_matches(
     run_dir: Path,
     *,
@@ -860,10 +1242,14 @@ def _strict_snapshot_provenance_record_matches(
     }
     if any(str(provenance.get(field) or "") != expected for field, expected in expected_snapshot_fields.items()):
         return False
-    output_path = run_dir / item.destination
-    if not output_path.is_file():
+    try:
+        output_bytes = read_run_relative_regular_file_bytes(
+            run_dir,
+            item.destination,
+        )
+    except PartialMediaProjectionError:
         return False
-    output_sha256 = sha256_file(output_path)
+    output_sha256 = hashlib.sha256(output_bytes).hexdigest()
     if str(provenance.get("outputSha256") or "") != output_sha256:
         return False
     if str(payload.get("outputSha256") or "") != output_sha256:
@@ -876,6 +1262,7 @@ def _strict_snapshot_provenance_failures(
     *,
     kind: str,
     expected_outputs: list[str] | None = None,
+    excluded_item_ids: set[str] | None = None,
 ) -> list[str]:
     snapshot_filename = REQUEST_SNAPSHOT_FILE_BY_KIND[kind]
     snapshot_path = run_dir / snapshot_filename
@@ -905,7 +1292,20 @@ def _strict_snapshot_provenance_failures(
                 continue
             if isinstance(payload, dict):
                 log_payloads.append(payload)
+    excluded = excluded_item_ids or set()
+    unknown_excluded = excluded - {
+        item.item_id
+        for item in snapshot.items
+    }
+    if unknown_excluded:
+        failures.append(
+            "excluded provenance item ids are absent from the current "
+            "snapshot: "
+            + ", ".join(sorted(unknown_excluded))
+        )
     for item in snapshot.items:
+        if item.item_id in excluded:
+            continue
         if not any(
             _strict_snapshot_provenance_record_matches(
                 run_dir,
@@ -1643,7 +2043,66 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
     target_number = _slot_number(target_slot, default=680)
     requests = run_dir / "image_generation_requests.md"
     expected_outputs = _node_output_paths(run_dir, field_path=["image_generation", "output"])
-    missing_outputs = [path for path in expected_outputs if not path.exists()]
+    partial_contract = _localized_partial_media_contract(
+        run_dir,
+        require_generation_receipt=target_number >= 680,
+    )
+    partial_contract_issues = list(partial_contract["errors"])
+    blocked_item_ids = (
+        set(partial_contract["blocked_item_ids"])
+        if partial_contract["valid"]
+        else set()
+    )
+    blocked_destinations = (
+        set(partial_contract["blocked_destinations"])
+        if partial_contract["valid"]
+        else set()
+    )
+    if blocked_item_ids:
+        try:
+            current_snapshot = load_request_snapshot(
+                run_dir / REQUEST_SNAPSHOT_FILE_BY_KIND["scene"],
+                run_dir=run_dir,
+                verify_references=True,
+            )
+        except ImageRequestSnapshotError as exc:
+            partial_contract_issues.append(
+                f"current scene request snapshot is invalid: {exc}"
+            )
+        else:
+            manifest_destinations = {
+                normalized
+                for path in expected_outputs
+                if (
+                    normalized := _normalized_run_relative_path(
+                        run_dir,
+                        path,
+                    )
+                )
+            }
+            snapshot_destinations = {
+                item.destination
+                for item in current_snapshot.items
+            }
+            if manifest_destinations != snapshot_destinations:
+                partial_contract_issues.append(
+                    "localized partial media requires exact manifest-to-"
+                    "snapshot destination coverage"
+                )
+    if partial_contract_issues:
+        blocked_item_ids = set()
+        blocked_destinations = set()
+    required_outputs = [
+        path
+        for path in expected_outputs
+        if _normalized_run_relative_path(run_dir, path)
+        not in blocked_destinations
+    ]
+    missing_outputs = [
+        path
+        for path in required_outputs
+        if not _is_regular_run_relative_file_no_follow(run_dir, path)
+    ]
 
     add_check(checks, "image.generation_requests", requests.exists(), f"{requests.name} exists")
     request_text = requests.read_text(encoding="utf-8") if requests.exists() else ""
@@ -1700,26 +2159,53 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
     )
     append_grounding_checks(checks, run_dir=run_dir, stage="scene_implementation")
     add_check(checks, "image.expected_outputs", bool(expected_outputs), "manifest declares image_generation.output paths", kind="rubric")
+    if partial_contract_issues:
+        details["image_localized_partial_media_errors"] = (
+            partial_contract_issues[:20]
+        )
+    if blocked_item_ids:
+        details["image_intentionally_blocked_item_ids"] = sorted(
+            blocked_item_ids
+        )
+        details["image_intentionally_blocked_destinations"] = sorted(
+            blocked_destinations
+        )
+    add_check(
+        checks,
+        "image.localized_partial_media_contract",
+        not partial_contract_issues,
+        (
+            "localized semantic omissions, when present, are current, "
+            "request-bound, fully accounted, and receipt-bound"
+        ),
+        kind="rubric",
+    )
     add_check(
         checks,
         "image.output_files",
-        bool(expected_outputs) and not missing_outputs,
-        f"all declared image outputs exist (missing {len(missing_outputs)} of {len(expected_outputs)})",
+        bool(required_outputs) and not missing_outputs,
+        (
+            "all non-blocked declared image outputs exist "
+            f"(missing {len(missing_outputs)} of {len(required_outputs)} "
+            "required)"
+        ),
         kind="rubric",
     )
     details["declared_image_outputs"] = len(expected_outputs)
+    details["required_image_outputs"] = len(required_outputs)
     if missing_outputs:
         details["missing_image_outputs"] = [str(path.relative_to(run_dir)) if path.is_relative_to(run_dir) else str(path) for path in missing_outputs[:20]]
 
     visual_quality_stats, reference_quality_stats, regeneration_plan, uninspected_outputs = _scene_image_visual_quality_stats(
         run_dir,
         request_items,
-        expected_outputs,
+        required_outputs,
     )
     scene_output_relpaths = [
         str(path.relative_to(run_dir))
-        for path in expected_outputs
-        if path.exists() and path.is_file() and path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES
+        for path in required_outputs
+        if _is_regular_run_relative_file_no_follow(run_dir, path)
+        and path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES
     ]
     scene_snapshot_path = run_dir / REQUEST_SNAPSHOT_FILE_BY_KIND["scene"]
     requires_strict_snapshot = scene_snapshot_path.is_file() or any(
@@ -1732,6 +2218,7 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
             run_dir,
             kind="scene",
             expected_outputs=[str(path) for path in expected_outputs],
+            excluded_item_ids=blocked_item_ids,
         )
     else:
         provenance = _image_generation_provenance_by_destination(run_dir)
@@ -1767,21 +2254,21 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
     add_check(
         checks,
         "image.visual_outputs_inspected",
-        not uninspected_outputs and len(visual_quality_stats) == len([path for path in expected_outputs if path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES and path.exists()]),
+        not uninspected_outputs and len(visual_quality_stats) == len([path for path in required_outputs if path.suffix.lower() in VECTOR_GATE_IMAGE_SUFFIXES and path.exists()]),
         "every manifest-declared scene image output is inspected by the visual quality gate",
         kind="rubric",
     )
     add_check(
         checks,
         "image.generation_provenance_app_server",
-        bool(expected_outputs) and not scene_provenance_failures,
+        bool(required_outputs) and not scene_provenance_failures,
         "generated p600 scene images match the current immutable request snapshot and strict request-bound app-server provenance",
         kind="rubric",
     )
     add_check(
         checks,
         "image.visual_not_vector_like",
-        bool(expected_outputs) and not uninspected_outputs and not visual_quality_issues,
+        bool(required_outputs) and not uninspected_outputs and not visual_quality_issues,
         "generated p600 scene images are photorealistic/live-action candidates and not vector-like/low-detail",
         kind="rubric",
     )
@@ -1799,6 +2286,8 @@ def check_image(run_dir: Path, *, target_slot: str = "p600") -> tuple[dict[str, 
         stage="image_prompt",
         required=target_number >= 640,
         check_id="image.semantic_review_subagent_passed",
+        allow_localized_partial=True,
+        require_generation_receipt=target_number >= 680,
     )
     updates["eval.image.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("image", "image_generation_requests.md / assets/scenes/**", checks, details=details), updates
@@ -2036,7 +2525,35 @@ def _relative_required_artifact_path(run_dir: Path, value: Any) -> tuple[Path | 
     return run_dir / relative, str(relative)
 
 
-def _supervisor_result_issues(path: Path, *, run_dir: Path, bucket: str, state: dict[str, str]) -> list[str]:
+def _pending_supervisor_allowed(
+    *,
+    bucket: str,
+    state: dict[str, str],
+    stage_target: str,
+) -> bool:
+    target_number = _slot_number_from_code(stage_target)
+    if (
+        bucket == "p500"
+        and target_number is not None
+        and 500 <= target_number <= 570
+        and state.get("slot.p570.status") in {"pending", "in_progress"}
+    ):
+        return True
+    return (
+        bucket == "p600"
+        and state.get("slot.p650.status") == "pending"
+        and state.get("review.image_prompt.request_freeze.status") == "draft"
+    )
+
+
+def _supervisor_result_issues(
+    path: Path,
+    *,
+    run_dir: Path,
+    bucket: str,
+    state: dict[str, str],
+    stage_target: str,
+) -> list[str]:
     if not path.exists():
         return [f"{bucket}:result_missing"]
     try:
@@ -2044,14 +2561,16 @@ def _supervisor_result_issues(path: Path, *, run_dir: Path, bucket: str, state: 
     except json.JSONDecodeError:
         return [f"{bucket}:result_invalid_json"]
     issues: list[str] = []
-    pending_image_prompt_freeze = (
-        bucket == "p600"
-        and state.get("slot.p650.status") == "pending"
-        and state.get("review.image_prompt.request_freeze.status") == "draft"
+    pending_supervisor_allowed = _pending_supervisor_allowed(
+        bucket=bucket,
+        state=state,
+        stage_target=stage_target,
     )
     if payload.get("bucket") != bucket:
         issues.append(f"{bucket}:result_bucket_mismatch")
-    if payload.get("status") != ("pending" if pending_image_prompt_freeze else "done"):
+    if payload.get("status") != (
+        "pending" if pending_supervisor_allowed else "done"
+    ):
         issues.append(f"{bucket}:result_status_not_done")
     completed_slots = payload.get("completed_slots")
     if not isinstance(completed_slots, list) or not completed_slots:
@@ -2126,12 +2645,14 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
         call_status = state.get(f"{prefix}.call_status")
         supervisor_status = state.get(f"{prefix}.status")
         finished_at = state.get(f"{prefix}.finished_at")
-        pending_image_prompt_freeze = (
-            bucket == "p600"
-            and state.get("slot.p650.status") == "pending"
-            and state.get("review.image_prompt.request_freeze.status") == "draft"
+        pending_supervisor_allowed = _pending_supervisor_allowed(
+            bucket=bucket,
+            state=state,
+            stage_target=stage_target,
         )
-        expected_supervisor_status = "pending" if pending_image_prompt_freeze else "done"
+        expected_supervisor_status = (
+            "pending" if pending_supervisor_allowed else "done"
+        )
         if call_status != "returned" or supervisor_status != expected_supervisor_status or not finished_at:
             missing_returned_state.append(
                 f"{bucket}:call_status={call_status or '(unset)'},status={supervisor_status or '(unset)'},finished_at={finished_at or '(unset)'}"
@@ -2153,6 +2674,7 @@ def check_orchestration(run_dir: Path, *, stage_target: str) -> tuple[dict[str, 
                 run_dir=run_dir,
                 bucket=bucket,
                 state=state,
+                stage_target=stage_target,
             )
         )
     add_check(

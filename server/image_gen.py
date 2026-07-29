@@ -34,6 +34,27 @@ REQUEST_SNAPSHOT_FILE_BY_KIND = {
     "asset": "asset_generation_request_snapshot.json",
     "scene": "image_generation_request_snapshot.json",
 }
+RUN_STAGE_STATE_KEYS = {
+    "p100": ("stage.research.status",),
+    "p200": ("stage.story.status",),
+    "p300": ("stage.visual_value.status",),
+    "p400": ("stage.script.status",),
+    "p500": (
+        "stage.asset.status",
+        "stage.asset_plan_review.status",
+        "stage.asset_generation.status",
+    ),
+    "p600": (
+        "stage.scene_implementation.status",
+        "stage.image_prompt_review.status",
+        "stage.image_generation.status",
+    ),
+    "p700": ("stage.narration.status",),
+    "p800": ("stage.video.status", "stage.video_generation.status"),
+    "p900": ("stage.render.status", "stage.qa.status"),
+}
+RUN_PROGRESS_BLOCKING_STATES = {"failed", "blocked", "changes_requested", "rejected"}
+RUN_PROGRESS_TERMINAL_STATES = {"done", "passed", "ready", "reviewed", "approved", "skipped"}
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 IMAGE_API_PROMPT_POLICY_PREFIX = "image_api_prompt_v"
 COMPILED_IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
@@ -267,8 +288,109 @@ def _has_missing_request_outputs(run_dir: Path, kind: str) -> bool:
     try:
         items = load_request_items(run_dir, kind)
     except Exception:
-        return False
-    return any(item.output and not (run_dir / item.output).exists() for item in items)
+        return True
+    return any(not item.output or not (run_dir / item.output).is_file() for item in items)
+
+
+def _state_slot_statuses(state: dict[str, str]) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for key, value in state.items():
+        match = re.fullmatch(r"slot\.(p\d{3})\.status", key)
+        if not match:
+            continue
+        normalized = value.strip().lower()
+        if normalized:
+            statuses[match.group(1)] = normalized
+    return statuses
+
+
+def _slot_bucket(code: str) -> str:
+    return f"p{code[1]}00" if re.fullmatch(r"p\d{3}", code) else ""
+
+
+def _summarize_progress_states(statuses: list[str]) -> str:
+    for wanted in ("failed", "blocked", "changes_requested", "rejected"):
+        if wanted in statuses:
+            return wanted
+    if "in_progress" in statuses:
+        return "in_progress"
+    if "pending" in statuses or "not_started" in statuses:
+        return "pending"
+    if "awaiting_approval" in statuses:
+        return "awaiting_approval"
+    if statuses and all(status in RUN_PROGRESS_TERMINAL_STATES for status in statuses):
+        return "done"
+    return statuses[-1] if statuses else ""
+
+
+def _overlay_progress_state(
+    *,
+    stages: list[dict[str, str]],
+    slots: list[dict[str, Any]],
+    state: dict[str, str],
+) -> dict[str, str]:
+    slot_statuses = _state_slot_statuses(state)
+    slots_by_code = {str(slot.get("code") or ""): slot for slot in slots}
+    for code, status in slot_statuses.items():
+        slot = slots_by_code.get(code)
+        if slot is not None:
+            slot["state"] = status
+            requirement = state.get(f"slot.{code}.requirement", "").strip().lower()
+            if requirement:
+                slot["requirement"] = requirement
+
+    slot_statuses_by_bucket: dict[str, list[str]] = {}
+    for code, status in slot_statuses.items():
+        bucket = _slot_bucket(code)
+        if bucket and bucket != "p000":
+            slot_statuses_by_bucket.setdefault(bucket, []).append(status)
+
+    for stage in stages:
+        code = stage.get("code", "")
+        slot_summary = _summarize_progress_states(slot_statuses_by_bucket.get(code, []))
+        if slot_summary:
+            stage["state"] = slot_summary
+            continue
+        stage_statuses = [
+            state[key].strip().lower()
+            for key in RUN_STAGE_STATE_KEYS.get(code, ())
+            if state.get(key, "").strip()
+        ]
+        stage_summary = _summarize_progress_states(stage_statuses)
+        if stage_summary:
+            stage["state"] = stage_summary
+    return slot_statuses
+
+
+def _current_slot_from_state(
+    *,
+    slots: list[dict[str, Any]],
+    slot_statuses: dict[str, str],
+) -> dict[str, str] | None:
+    slots_by_code = {str(slot.get("code") or ""): slot for slot in slots}
+    active_states = (
+        RUN_PROGRESS_BLOCKING_STATES
+        | {"in_progress", "pending", "not_started", "awaiting_approval"}
+    )
+    matching_codes = sorted(
+        (
+            code
+            for code, status in slot_statuses.items()
+            if code != "p000"
+            and _slot_bucket(code) != "p000"
+            and status in active_states
+        ),
+        key=lambda code: int(code[1:]),
+    )
+    if not matching_codes:
+        return None
+    # Progress is an ordered frontier, not a global severity ranking.  Once an
+    # earlier slot is non-terminal, later failed/in-progress template state is
+    # stale until that frontier advances.
+    code = matching_codes[0]
+    slot = slots_by_code.get(code, {})
+    label = str(slot.get("purpose") or slot.get("stage") or code)
+    return {"code": code, "label": label, "state": slot_statuses[code]}
 
 
 def read_run_progress(run_dir: Path) -> dict[str, Any]:
@@ -277,8 +399,9 @@ def read_run_progress(run_dir: Path) -> dict[str, Any]:
     index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
     stages = _parse_stage_table(index_text) if index_text else []
     slots = _parse_slot_contract(index_text) if index_text else []
+    slot_statuses = _overlay_progress_state(stages=stages, slots=slots, state=state)
     active_states = {"not_started", "pending", "in_progress", "blocked", "awaiting_approval", "failed"}
-    current_stage = next((stage for stage in stages if stage["code"] != "p000" and stage["state"] in active_states), None)
+    current_stage = _current_slot_from_state(slots=slots, slot_statuses=slot_statuses)
     request_stage = None
     if not (run_dir / REQUEST_FILE_BY_KIND["asset"]).exists():
         request_stage = {"code": "p550", "label": "Asset Requests", "state": "pending"}
@@ -293,6 +416,8 @@ def read_run_progress(run_dir: Path) -> dict[str, Any]:
         or _stage_code_number(current_stage) > _stage_code_number(request_stage)
     ):
         current_stage = request_stage
+    if current_stage is None:
+        current_stage = next((stage for stage in stages if stage["code"] != "p000" and stage["state"] in active_states), None)
     if current_stage is None:
         current_stage = next((stage for stage in reversed(stages) if stage["code"] != "p000" and stage["state"] == "done"), None)
     done_count = sum(1 for stage in stages if stage["code"] != "p000" and stage["state"] == "done")
@@ -885,6 +1010,9 @@ def write_app_server_image_debug_log(
     source_digest: str | None = None,
     result: Any | None = None,
     error: str | None = None,
+    inspect_destination: bool = True,
+    trusted_output_sha256: str | None = None,
+    trusted_destination_size_bytes: int | None = None,
 ) -> Path:
     log_dir = run_dir / "logs" / "app_server" / "image_gen"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -894,7 +1022,30 @@ def write_app_server_image_debug_log(
     transcript = getattr(result, "transcript", []) if result is not None else []
     result_reference_sha256s = getattr(result, "reference_sha256s", None) if result is not None else None
     reference_sha256s = result_reference_sha256s if isinstance(result_reference_sha256s, list) else []
-    output_sha256 = _sha256_file(destination) if destination.exists() and destination.is_file() else None
+    if inspect_destination:
+        output_sha256 = (
+            _sha256_file(destination)
+            if destination.exists() and destination.is_file()
+            else None
+        )
+        destination_details = _path_debug_details(
+            run_dir,
+            destination,
+        )
+    else:
+        output_sha256 = trusted_output_sha256
+        destination_details = {
+            "path": _run_relative_or_string(run_dir, destination),
+            "inspectionSkipped": (
+                "descriptor_verified_copy"
+                if trusted_output_sha256
+                else "unsafe_destination"
+            ),
+        }
+        if trusted_destination_size_bytes is not None:
+            destination_details["sizeBytes"] = (
+                trusted_destination_size_bytes
+            )
     provenance = {
         "policy": getattr(result, "provenance_policy", None) if result is not None else None,
         "generationJobId": getattr(result, "generation_job_id", None) if result is not None else None,
@@ -920,7 +1071,7 @@ def write_app_server_image_debug_log(
         "candidateIndex": index,
         "kind": kind,
         "destination": _run_relative_or_string(run_dir, destination),
-        "destinationDetails": _path_debug_details(run_dir, destination),
+        "destinationDetails": destination_details,
         "references": [_run_relative_or_string(run_dir, reference) for reference in references],
         "referenceDetails": [_path_debug_details(run_dir, reference) for reference in references],
         "referenceCount": len(references),
@@ -957,6 +1108,55 @@ def write_app_server_image_debug_log(
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with index_path.open("a", encoding="utf-8") as index_file:
         index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")
+    return log_path
+
+
+def write_app_server_image_provenance_invalidation_log(
+    *,
+    run_dir: Path,
+    kind: str,
+    item_id: str,
+    destination: Path,
+    candidate: Path,
+) -> Path:
+    """Record a canonical-image mutation that supersedes older provider provenance."""
+
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
+    log_path = (
+        log_dir
+        / f"{stamp}_{time.time_ns()}_{safe_id}_candidate_insertion_invalidated.json"
+    )
+    payload = {
+        "loggedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "operation": "candidate_insertion",
+        "status": "invalidated",
+        "provenanceInvalidation": True,
+        "reason": "canonical output replaced from a candidate image",
+        "itemId": item_id,
+        "kind": kind,
+        "destination": _run_relative_or_string(run_dir, destination),
+        "candidatePath": _run_relative_or_string(run_dir, candidate),
+    }
+    log_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("a", encoding="utf-8") as index_file:
+        index_file.write(
+            json.dumps(
+                {
+                    **payload,
+                    "debugLog": _run_relative_or_string(run_dir, log_path),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
     return log_path
 
 
@@ -1506,6 +1706,27 @@ def require_candidate_path(run_dir: Path, candidate: Path) -> None:
     require_image_file(resolved)
 
 
+def validate_candidate_insertion(
+    run_dir: Path,
+    candidate: Path,
+    output: str,
+) -> Path:
+    """Validate a candidate-to-canonical copy without mutating run artifacts."""
+
+    run_dir = run_dir.resolve()
+    require_candidate_path(run_dir, candidate)
+    validate_image_bytes(candidate)
+    require_assets_output(run_dir, output)
+    normalized = Path(output)
+    target = run_dir.joinpath(*normalized.parts)
+    # `resolve_run_relative` intentionally follows links for read paths.  A
+    # canonical write must instead reject every redirected parent/leaf so an
+    # assets/scenes path cannot overwrite a user upload through a symlink.
+    if target.is_symlink() or target.resolve(strict=False) != target:
+        raise ValueError("canonical output path must not contain symlinks")
+    return target
+
+
 def backup_existing(target: Path, run_dir: Path) -> Path | None:
     if not target.exists():
         return None
@@ -1519,13 +1740,12 @@ def backup_existing(target: Path, run_dir: Path) -> Path | None:
 
 def insert_candidate(run_dir: Path, candidate: Path, output: str) -> dict[str, str | None]:
     run_dir = run_dir.resolve()
-    require_candidate_path(run_dir, candidate)
-    validate_image_bytes(candidate)
-    require_assets_output(run_dir, output)
-    target = resolve_run_relative(run_dir, output)
+    target = validate_candidate_insertion(run_dir, candidate, output)
     backup = backup_existing(target, run_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(candidate, target)
+    if target.resolve(strict=False) != target:
+        raise ValueError("canonical output path must not contain symlinks")
+    copy_saved_image(candidate, target)
     return {
         "output": target.relative_to(run_dir).as_posix(),
         "backup": backup.relative_to(run_dir).as_posix() if backup else None,

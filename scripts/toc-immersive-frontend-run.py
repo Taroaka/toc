@@ -18,9 +18,12 @@ import json
 import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -31,7 +34,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import append_state_snapshot, load_structured_document
+from toc.harness import (
+    _order_keys,
+    append_state_snapshot as _append_state_snapshot,
+    artifact_inventory,
+    load_structured_document,
+    nested_state,
+    new_job_id,
+    now_iso as harness_now_iso,
+    pending_gates,
+)
 from toc.asset_prompt_compiler import compile_asset_prompt
 from toc.cut_context_packet import materialize_cut_context_packet
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
@@ -45,17 +57,44 @@ from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
     REVIEW_LOOP_SPECS,
     aggregated_review_relpath,
+    aggregator_prompt_relpath,
+    build_review_input_snapshot,
     critic_prompt_relpath,
     critic_relpath,
+    final_review_relpath,
+    loop_state_updates,
+    render_aggregator_prompt,
     render_aggregated_review,
+    render_critic_prompt,
     review_input_digest,
+    review_input_snapshot_relpath,
     review_input_snapshot_issues,
+    write_review_input_snapshot as _write_review_input_snapshot,
 )
-from toc.review_loop_runner import materialize_review_loop_round
-from toc.run_index import write_run_index
+from toc.review_loop_runner import (
+    materialize_review_loop_round as _materialize_review_loop_round,
+)
+from toc.run_index import (
+    build_run_index_markdown,
+    write_run_index as _write_run_index,
+)
 from toc.semantic_review import check_semantic_review
 from toc.stage_evaluator import check_manifest_single, check_script_single, check_visual_value
 from toc.story_duration import build_duration_plan, normalize_target_duration
+from scripts.world_walk_source import (
+    PathIdentity,
+    copy_regular_file_atomic_nofollow,
+    directory_identity_nofollow,
+    ensure_directory_relative_nofollow,
+    open_directory_nofollow,
+    read_regular_file_nofollow,
+    sha256_regular_file_nofollow,
+    unlink_regular_file_verified_nofollow,
+    validate_world_walk_source_contract_path,
+    validate_world_walk_source_path,
+    write_regular_file_exclusive_nofollow,
+    write_regular_file_nofollow,
+)
 
 
 P650_SLOTS = (
@@ -88,17 +127,168 @@ P650_SLOTS = (
 )
 P680_SLOTS = (*P650_SLOTS, "p660", "p670", "p680")
 AWAITING_ALLOWED = {"p130", "p230", "p320", "p330", "p430", "p540", "p570", "p630", "p640", "p680"}
-AUTHORING_REVIEW_STAGES = (
+P400_REVIEW_STAGES = (
     "visual_value",
     "scene_set",
     "scene_detail",
     "cut_blueprint",
     "script",
     "production_readiness",
+)
+DOWNSTREAM_REVIEW_STAGES = (
     "asset",
     "scene_implementation_hard",
     "scene_implementation_judgment",
 )
+CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
+CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
+_ACTIVE_MATERIALIZATION_ROOT: ContextVar[
+    tuple[str, PathIdentity] | None
+] = ContextVar(
+    "toc_frontend_active_materialization_root",
+    default=None,
+)
+
+
+def _exact_materialization_source(
+    *,
+    source: str,
+    experience: str,
+    source_run: Path | None,
+    source_root_identity: PathIdentity | None = None,
+) -> str:
+    """Return the exact bytes used to reconstruct the story profile."""
+
+    if experience != "world_walk":
+        return source
+    if source_run is None:
+        raise ValueError("world_walk materialization requires source_run")
+    expected_identity = (
+        source_root_identity
+        if source_root_identity is not None
+        else directory_identity_nofollow(source_run)
+    )
+    return read_regular_file_nofollow(
+        source_run,
+        "story.md",
+        expected_root_identity=expected_identity,
+    ).decode("utf-8")
+
+
+def _write_create_input_contract(
+    *,
+    run_dir: Path,
+    topic: str,
+    source: str,
+    experience: str,
+    source_run: Path | None,
+    target_duration_seconds: int,
+    expected_run_identity: PathIdentity | None = None,
+) -> Path:
+    """Persist the exact, non-derived input needed for deterministic resume."""
+
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("create input topic must be nonempty")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("create input source must be nonempty")
+    if experience not in {"cinematic_story", "world_walk"}:
+        raise ValueError(f"unsupported create input experience: {experience}")
+    if experience == "world_walk" and source_run is None:
+        raise ValueError("world_walk create input requires source_run")
+    if experience != "world_walk" and source_run is not None:
+        raise ValueError(
+            "source_run is only valid for world_walk create input"
+        )
+    normalized_duration = normalize_target_duration(target_duration_seconds)
+    source_run_rel = (
+        source_run.relative_to(REPO_ROOT).as_posix()
+        if source_run is not None
+        else None
+    )
+    path = run_dir / CREATE_INPUT_REL_PATH
+    if not run_dir.exists():
+        if expected_run_identity is not None:
+            raise ValueError(
+                f"create input run directory disappeared: {run_dir}"
+            )
+        run_dir.mkdir(parents=True, exist_ok=False)
+    payload = (
+        json.dumps(
+            {
+                "schema_version": CREATE_INPUT_SCHEMA_VERSION,
+                "topic": topic,
+                "source": source,
+                "source_sha256": hashlib.sha256(
+                    source.encode("utf-8")
+                ).hexdigest(),
+                "experience": experience,
+                "source_run": source_run_rel,
+                "target_duration_seconds": normalized_duration,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    root_identity = (
+        expected_run_identity
+        if expected_run_identity is not None
+        else directory_identity_nofollow(run_dir)
+    )
+    write_regular_file_exclusive_nofollow(
+        destination_root=run_dir,
+        destination_relative=CREATE_INPUT_REL_PATH,
+        data=payload,
+        expected_destination_root_identity=root_identity,
+    )
+    return path
+
+
+def _fresh_materialized_media_slot_updates(stop_target: str) -> dict[str, str]:
+    """Describe only p500/p600 work that materialize_run has actually done."""
+
+    if stop_target not in {"p650", "p680"}:
+        raise ValueError(f"unsupported stop target: {stop_target}")
+    updates = {
+        "slot.p510.status": "pending",
+        "slot.p510.note": "asset grounding has not completed",
+        "slot.p520.status": "done",
+        "slot.p520.note": "asset inventory materialized from the production manifest",
+        "slot.p530.status": "done",
+        "slot.p530.note": "asset plan materialized; semantic review pending",
+        "slot.p540.status": "pending",
+        "slot.p540.note": "asset semantic review has not completed",
+        "slot.p550.status": "pending",
+        "slot.p550.note": "candidate asset requests exist but provider submission has not completed",
+        "slot.p560.status": "pending",
+        "slot.p560.note": "asset generation has not completed",
+        "slot.p570.status": "pending",
+        "slot.p570.note": "asset continuity review has not completed",
+        "slot.p610.status": "pending",
+        "slot.p610.note": "scene implementation grounding has not completed",
+        "slot.p620.status": "done",
+        "slot.p620.note": "production manifest materialized into candidate scene requests",
+        "slot.p630.status": "pending",
+        "slot.p630.note": "scene implementation hard review has not completed",
+        "slot.p640.status": "pending",
+        "slot.p640.note": "scene implementation judgment has not completed",
+        "slot.p650.status": "pending",
+        "slot.p650.note": "candidate requests materialized; waiting for semantic review, repair, and final freeze",
+    }
+    if stop_target == "p680":
+        updates.update(
+            {
+                "slot.p660.status": "pending",
+                "slot.p660.note": "waiting for image-prompt semantic review and final request freeze",
+                "slot.p670.status": "pending",
+                "slot.p670.note": "waiting for scene image generation to finish",
+                "slot.p680.status": "pending",
+                "slot.p680.note": "frontend image review is not ready until every scene image exists",
+            }
+        )
+    return updates
+
+
 DEFAULT_SCENE_TITLES = [
     "日常が軋む場所",
     "願いが拒まれる部屋",
@@ -880,6 +1070,32 @@ def _md_yaml(title: str, data: dict[str, Any]) -> str:
     return f"# {title}\n\n```yaml\n{yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)}```\n"
 
 
+def _write_run_text_nofollow(
+    run_dir: Path,
+    path: Path,
+    text: str,
+) -> None:
+    try:
+        relative = path.relative_to(run_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"run artifact path escapes run directory: {path}"
+        ) from exc
+    active_root = _ACTIVE_MATERIALIZATION_ROOT.get()
+    lexical_root = os.path.abspath(os.fspath(run_dir))
+    identity = (
+        active_root[1]
+        if active_root is not None and active_root[0] == lexical_root
+        else directory_identity_nofollow(run_dir)
+    )
+    write_regular_file_nofollow(
+        destination_root=run_dir,
+        destination_relative=relative,
+        data=text.encode("utf-8"),
+        expected_destination_root_identity=identity,
+    )
+
+
 def _run_id_from_dir(run_dir: Path) -> str:
     resolved = run_dir.resolve()
     try:
@@ -893,36 +1109,131 @@ def _validated_fresh_cli_run_dir(raw_run_dir: str) -> Path:
     _run_id_from_dir(run_dir)
     if run_dir.is_symlink():
         raise SystemExit(f"--run-dir must not be a symlink: {run_dir}")
-    stale_artifacts = [
-        name
-        for name in ("research.md", "story.md", "script.md", "video_manifest.md")
-        if (run_dir / name).exists()
-    ]
-    if stale_artifacts:
+    if run_dir.exists() and not run_dir.is_dir():
+        raise SystemExit(f"--run-dir must be a directory: {run_dir}")
+    stale_entries: list[str] = []
+    if run_dir.is_dir():
+        for entry in run_dir.iterdir():
+            if entry.name == ".locks" and entry.is_dir():
+                descendants = tuple(entry.rglob("*"))
+                safe = all(
+                    not path.is_symlink()
+                    and (
+                        path.is_dir()
+                        or (
+                            path.is_file()
+                            and path.suffix == ".lock"
+                        )
+                    )
+                    for path in descendants
+                )
+            elif entry.name == "logs" and entry.is_dir():
+                descendants = tuple(entry.rglob("*"))
+                safe = all(
+                    not path.is_symlink()
+                    and (
+                        path.is_dir()
+                        or path.is_file()
+                    )
+                    and (
+                        path == entry / "app_server"
+                        or (entry / "app_server") in path.parents
+                    )
+                    for path in descendants
+                )
+            else:
+                safe = False
+            if entry.is_symlink() or not safe:
+                stale_entries.append(entry.name)
+        stale_entries.sort()
+    if stale_entries:
         raise SystemExit(
-            "--run-dir already contains a materialized run; use a fresh run id: "
-            + ", ".join(stale_artifacts)
+            "--run-dir must be empty for a fresh run: "
+            + ", ".join(stale_entries)
         )
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if not run_dir.exists():
+        run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
 
 @contextmanager
-def _run_materialization_lock(run_dir: Path):
-    lock_path = run_dir / ".toc_frontend_create.lock"
+def _run_materialization_lock(
+    run_dir: Path,
+    *,
+    expected_identity: PathIdentity | None = None,
+    protect_pathname: bool = False,
+):
+    root_descriptor = open_directory_nofollow(
+        run_dir,
+        expected_identity=expected_identity,
+    )
+    opened_root = os.fstat(root_descriptor)
+    root_identity = opened_root.st_dev, opened_root.st_ino
+    lock_name = ".toc_frontend_create.lock"
+    original_flags: int | None = None
+    pathname_protected = False
+    chflags = getattr(os, "chflags", None)
+    active_root_token = None
     try:
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(
+            lock_name,
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=root_descriptor,
+        )
     except FileExistsError as exc:
+        os.close(root_descriptor)
         raise RuntimeError(f"another frontend-create process owns this run: {run_dir}") from exc
+    except Exception:
+        os.close(root_descriptor)
+        raise
     try:
         os.write(descriptor, f"pid={os.getpid()}\n".encode("utf-8"))
+        if protect_pathname and callable(chflags):
+            original_flags = int(getattr(opened_root, "st_flags", 0))
+            chflags(
+                run_dir,
+                original_flags | stat.UF_APPEND,
+                follow_symlinks=False,
+            )
+            pathname_protected = True
+            verified = open_directory_nofollow(
+                run_dir,
+                expected_identity=root_identity,
+            )
+            os.close(verified)
+        active_root_token = _ACTIVE_MATERIALIZATION_ROOT.set(
+            (os.path.abspath(os.fspath(run_dir)), root_identity)
+        )
         yield
+        verified = open_directory_nofollow(
+            run_dir,
+            expected_identity=root_identity,
+        )
+        os.close(verified)
     finally:
+        if active_root_token is not None:
+            _ACTIVE_MATERIALIZATION_ROOT.reset(active_root_token)
+        if (
+            pathname_protected
+            and original_flags is not None
+            and callable(chflags)
+        ):
+            chflags(
+                run_dir,
+                original_flags,
+                follow_symlinks=False,
+            )
         os.close(descriptor)
         try:
-            lock_path.unlink()
+            os.unlink(lock_name, dir_fd=root_descriptor)
         except FileNotFoundError:
             pass
+        os.close(root_descriptor)
 
 
 def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
@@ -8930,7 +9241,220 @@ def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -
     }
 
 
-def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+def _bind_experience_metadata(
+    manifest: dict[str, Any],
+    *,
+    experience: str,
+    source_run: Path | None,
+) -> None:
+    metadata = manifest["video_metadata"]
+    metadata["experience"] = experience
+    if source_run is None:
+        return
+    source_run_rel = source_run.relative_to(REPO_ROOT).as_posix()
+    metadata["source_run"] = source_run_rel
+    metadata["source_story"] = f"{source_run_rel}/story.md"
+    metadata["source_assets"] = f"{source_run_rel}/assets"
+
+
+WORLD_WALK_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+WORLD_WALK_PROMPT_CONTRACT = (
+    "観察者POV。カメラは物語へ介入せず、自然な歩行速度と安定した水平線を保つ。"
+    "人物は中景から遠景に置き、顔の大写し、自撮り、肩越し密着、急接近を避ける。"
+    "序盤は物語を進めず参照世界の場所と生活痕跡を観察し、中盤以降に物語の出来事を遠目に見かける。"
+)
+
+
+def _materialize_world_walk_source_references(
+    source_run: Path,
+    run_dir: Path,
+    *,
+    source_root_identity: PathIdentity | None = None,
+    destination_root_identity: PathIdentity | None = None,
+) -> list[str]:
+    expected_source_identity = (
+        source_root_identity
+        if source_root_identity is not None
+        else directory_identity_nofollow(source_run)
+    )
+    expected_destination_identity = (
+        destination_root_identity
+        if destination_root_identity is not None
+        else directory_identity_nofollow(run_dir)
+    )
+    source_assets = source_run / "assets"
+    candidates = sorted(
+        path
+        for path in source_assets.rglob("*")
+        if path.is_file() and path.suffix.lower() in WORLD_WALK_IMAGE_SUFFIXES
+    )
+    if not candidates:
+        raise RuntimeError("world_walk source run has no reusable asset images")
+    references: list[str] = []
+    for source_path in candidates[:12]:
+        relative = source_path.relative_to(source_assets)
+        output_relative = Path("assets") / "source_references" / relative
+        copy_regular_file_atomic_nofollow(
+            source_root=source_run,
+            source_relative=Path("assets") / relative,
+            destination_root=run_dir,
+            destination_relative=output_relative,
+            expected_source_root_identity=expected_source_identity,
+            expected_destination_root_identity=expected_destination_identity,
+        )
+        references.append(output_relative.as_posix())
+    return references
+
+
+def _apply_world_walk_asset_generation_contract(
+    *,
+    asset_plan: dict[str, Any],
+    source_references: list[str],
+) -> None:
+    if not source_references:
+        raise RuntimeError("world_walk requires concrete source asset references")
+    selected_references = list(source_references[:4])
+    for entry in asset_plan.get("assets") or []:
+        if not isinstance(entry, dict):
+            continue
+        generation_plan = entry.get("generation_plan")
+        if not isinstance(generation_plan, dict):
+            continue
+        generation_plan["reference_inputs"] = list(selected_references)
+        generation_plan["execution_lane"] = "standard"
+        generation_plan["bootstrap_allowed"] = False
+        fixed_prompts = entry.setdefault("fixed_prompts", [])
+        if (
+            isinstance(fixed_prompts, list)
+            and WORLD_WALK_PROMPT_CONTRACT not in fixed_prompts
+        ):
+            fixed_prompts.append(WORLD_WALK_PROMPT_CONTRACT)
+
+
+def _apply_world_walk_generation_contract(
+    *,
+    script: dict[str, Any],
+    manifest: dict[str, Any],
+    source_references: list[str],
+) -> None:
+    if not source_references:
+        raise RuntimeError("world_walk requires concrete source asset references")
+    world_walk_contract = {
+        "viewpoint": "observer_pov",
+        "camera_distance": "medium_to_long",
+        "intervention": "forbidden",
+        "opening": "asset_walk_without_story_progression",
+        "story_encounter": "characters_and_events_are_seen_from_a_distance",
+        "prompt_requirement": WORLD_WALK_PROMPT_CONTRACT,
+        "source_references": source_references,
+    }
+    script["world_walk_contract"] = deepcopy(world_walk_contract)
+    manifest["world_walk_contract"] = deepcopy(world_walk_contract)
+    assets = manifest.get("assets")
+    if isinstance(assets, dict):
+        style_guide = assets.get("style_guide")
+        if isinstance(style_guide, dict):
+            style_guide["reference_images"] = list(source_references)
+            style_guide["world_walk_prompt_contract"] = WORLD_WALK_PROMPT_CONTRACT
+
+    for document in (script, manifest):
+        for scene_index, scene in enumerate(document.get("scenes") or [], start=1):
+            if not isinstance(scene, dict):
+                continue
+            phase = (
+                "asset_walk_without_story_progression"
+                if scene_index <= max(1, len(document.get("scenes") or []) // 3)
+                else "distant_story_encounter"
+            )
+            scene["world_walk_contract"] = {
+                **deepcopy(world_walk_contract),
+                "phase": phase,
+            }
+            for cut in scene.get("cuts") or []:
+                if not isinstance(cut, dict):
+                    continue
+                cut_contract = cut.get("cut_contract")
+                if isinstance(cut_contract, dict):
+                    cut_contract["world_walk_contract"] = deepcopy(scene["world_walk_contract"])
+                    cinematic = cut_contract.get("cinematic_contract")
+                    if isinstance(cinematic, dict):
+                        cinematic["world_walk_camera_rule"] = WORLD_WALK_PROMPT_CONTRACT
+                scene_contract = cut.get("scene_contract")
+                if isinstance(scene_contract, dict):
+                    must_avoid = scene_contract.setdefault("must_avoid", [])
+                    for value in ("顔の大写し", "自撮り", "肩越し密着", "観察者の物語介入"):
+                        if value not in must_avoid:
+                            must_avoid.append(value)
+
+                image_generation = cut.get("image_generation")
+                if not isinstance(image_generation, dict):
+                    continue
+                selected_references = source_references[:4]
+                visual_plan = image_generation.get("first_frame_visual_plan")
+                if isinstance(visual_plan, dict):
+                    composition = visual_plan.setdefault("spatial_composition", {})
+                    if isinstance(composition, dict):
+                        composition["shot_size"] = "wide"
+                        composition["camera_angle"] = WORLD_WALK_PROMPT_CONTRACT
+                        composition["foreground"] = (
+                            "観察者が歩ける自然な導線。観察者本人は画面に映さない"
+                        )
+                        if phase == "asset_walk_without_story_progression":
+                            composition["midground"] = "参照世界の日常の生活痕跡と静かな空間"
+                            composition["background"] = "物語の事件がまだ始まっていない遠景"
+                    if phase == "asset_walk_without_story_progression":
+                        temporal = visual_plan.setdefault("temporal_boundary", {})
+                        if isinstance(temporal, dict):
+                            temporal["event_fact_visible_in_still"] = (
+                                "物語を進めず、参照世界の場所と生活痕跡だけを観察している瞬間"
+                            )
+                    visual_plan["world_walk_prompt_contract"] = WORLD_WALK_PROMPT_CONTRACT
+                    review_metadata = {
+                        key: value
+                        for key, value in (image_generation.get("api_prompt_payload") or {}).items()
+                        if key
+                        not in {
+                            "policy_version",
+                            "compiler_version",
+                            "source_digest",
+                            "prompt",
+                            "negative_prompt",
+                            "reference_instructions",
+                            "reference_images",
+                            "sha256",
+                            "drawable_prompt_ir",
+                        }
+                    }
+                    image_generation["api_prompt_payload"] = _image_api_prompt_payload_for_scaffold(
+                        first_frame_visual_plan=visual_plan,
+                        character_ids=image_generation.get("character_ids") or [],
+                        object_ids=image_generation.get("object_ids") or [],
+                        location_ids=image_generation.get("location_ids") or [],
+                        references=selected_references,
+                        story_time=str(manifest.get("video_metadata", {}).get("time") or ""),
+                        scene_time_of_day=str(scene.get("time_of_day") or ""),
+                        review_metadata=review_metadata,
+                    )
+                image_generation["references"] = selected_references
+                image_generation["reference_count"] = len(selected_references)
+                video_generation = cut.get("video_generation")
+                if isinstance(video_generation, dict):
+                    original_motion = str(video_generation.get("motion_prompt") or "").strip()
+                    video_generation["motion_prompt"] = (
+                        f"{WORLD_WALK_PROMPT_CONTRACT} {original_motion}".strip()
+                    )
+
+
+def _build_script_and_manifest(
+    topic: str,
+    run_dir: Path,
+    now: str,
+    profile: dict[str, Any],
+    *,
+    experience: str = "cinematic_story",
+    source_run: Path | None = None,
+    source_references: list[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     script_scenes: list[dict[str, Any]] = []
     manifest_scenes: list[dict[str, Any]] = []
     selectors: list[str] = []
@@ -10617,6 +11141,17 @@ def _build_script_and_manifest(topic: str, run_dir: Path, now: str, profile: dic
     )
     manifest = {"schema_version": "scene_event_v1", "manifest_phase": "production", "video_metadata": {"topic": topic, "source_story": str(run_dir / "story.md"), "created_at": now, "run_variant": run_variant, "experience": "cinematic_story", "aspect_ratio": "16:9", "resolution": "1280x720", "frame_rate": 24, "target_duration_seconds": int(duration_plan["target_seconds"]), "minimum_duration_seconds": int(duration_plan["minimum_effective_seconds"]), "minimum_scene_count": int(duration_plan["minimum_scene_count"]), "minimum_cut_count": derived_semantic_minimum_cut_count, "minimum_narration_seconds": int(duration_plan["minimum_narration_seconds"]), "duration_plan": duration_plan, "duration_seconds": total_duration_seconds}, "scene_generation": scene_generation_policy, "canonical_event_coverage_matrix": canonical_event_coverage_matrix, "assets": {"character_bible": character_bible, "object_bible": object_bible, "location_bible": [{"location_id": spec["asset_id"], "reference_images": [spec["output"]], "review_aliases": [spec["name"]], "fixed_prompts": [str((spec.get("visual_spec") or {}).get("subject") or f"{spec['name']}、実写映画の場所参照、空間構造と固定素材を維持")], "cinematic": {"role": spec["story_purpose"], "visual_subject": str((spec.get("visual_spec") or {}).get("subject") or "")}, "reuse_contract": deepcopy(spec.get("reuse_contract") or {"mode": "neutral_anchor"})} for spec in _location_asset_specs(profile)], "style_guide": {"visual_style": "実写、シネマティック、プラクティカルエフェクト。画面内テキストなし。", "forbidden": ["アニメ調", "漫画調", "イラスト調", "画面内テキスト", "字幕", "ウォーターマーク", "ロゴ"], "reference_images": []}}, "human_change_requests": [], "scenes": manifest_scenes}
     manifest["video_metadata"]["time"] = str(profile.get("story_time") or "").strip()
+    _bind_experience_metadata(
+        manifest,
+        experience=experience,
+        source_run=source_run,
+    )
+    if experience == "world_walk":
+        _apply_world_walk_generation_contract(
+            script=script,
+            manifest=manifest,
+            source_references=list(source_references or []),
+        )
     manifest["video_metadata"]["scene_time_of_day_contract"] = SCENE_TIME_OF_DAY_CONTRACT
     manifest["video_metadata"]["scene_time_of_day_visual_basis_contract"] = SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT
     _write_scene_design_json(
@@ -10678,6 +11213,17 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
         asset_id = entry["asset_id"]
         output = entry["generation_plan"]["output"]
         generation_plan = entry.get("generation_plan") if isinstance(entry.get("generation_plan"), dict) else {}
+        reference_inputs = list(generation_plan.get("reference_inputs") or [])
+        execution_lane = str(
+            generation_plan.get("execution_lane")
+            or ("standard" if reference_inputs else "bootstrap_builtin")
+        ).strip()
+        bootstrap_allowed_raw = generation_plan.get("bootstrap_allowed")
+        bootstrap_allowed = (
+            bootstrap_allowed_raw
+            if isinstance(bootstrap_allowed_raw, bool)
+            else not reference_inputs
+        )
         asset_stage_scenes.append(
             {
                 "scene_id": index,
@@ -10690,17 +11236,21 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
                         "creation_status": "planned",
                         "generation_plan": {
                             "required_views": generation_plan.get("required_views") or [],
-                            "reference_inputs": generation_plan.get("reference_inputs") or [],
+                            "reference_inputs": reference_inputs,
                         },
                         "review": {"status": "approved"},
                         "image_generation": {
                             "tool": "codex_builtin_image",
-                            "execution_lane": "bootstrap_builtin",
-                            "bootstrap_allowed": True,
-                            "bootstrap_reason": "frontend_review_asset_stage",
+                            "execution_lane": execution_lane,
+                            "bootstrap_allowed": bootstrap_allowed,
+                            "bootstrap_reason": (
+                                "frontend_review_asset_stage"
+                                if bootstrap_allowed
+                                else ""
+                            ),
                             "prompt": _prompt_for_asset(entry, profile),
                             "output": output,
-                            "references": generation_plan.get("reference_inputs") or [],
+                            "references": reference_inputs,
                         },
                     }
                 ],
@@ -10715,8 +11265,19 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
         },
         "scenes": asset_stage_scenes,
     }
-    (run_dir / "asset_stage_manifest.md").write_text(_md_yaml("Asset Stage Manifest", asset_stage_manifest), encoding="utf-8")
-    (run_dir / "asset_generation_manifest.md").write_text(_md_yaml("Asset Generation Manifest", {"asset_generation_manifest": {"items": manifest_items}}), encoding="utf-8")
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "asset_stage_manifest.md",
+        _md_yaml("Asset Stage Manifest", asset_stage_manifest),
+    )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "asset_generation_manifest.md",
+        _md_yaml(
+            "Asset Generation Manifest",
+            {"asset_generation_manifest": {"items": manifest_items}},
+        ),
+    )
     subprocess.run(
         [
             sys.executable,
@@ -10752,21 +11313,7 @@ def _materialize_standard_request_files(run_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
-    for semantic_stage in ("image_prompt", "video_motion"):
-        subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
-                "--run-dir",
-                str(run_dir),
-                "--stage",
-                semantic_stage,
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    _build_semantic_review_packs(run_dir, ("video_motion",))
 
 
 def _require_fresh_p400_readiness(run_dir: Path) -> None:
@@ -10919,7 +11466,57 @@ def _final_review_text(stage: str, aggregate_text: str) -> str:
     )
 
 
-def _write_review_artifacts(run_dir: Path) -> None:
+def _build_semantic_review_packs(
+    run_dir: Path,
+    stages: tuple[str, ...],
+) -> None:
+    for semantic_stage in stages:
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
+                "--run-dir",
+                str(run_dir),
+                "--stage",
+                semantic_stage,
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _refresh_p400_review_artifacts(run_dir: Path) -> None:
+    """Freeze only reviews whose sources and readsets belong to P400."""
+
+    _build_semantic_review_packs(
+        run_dir,
+        ("scene_set", "scene_detail", "cut_blueprint"),
+    )
+    _refresh_review_loop_artifacts(run_dir, P400_REVIEW_STAGES)
+
+
+def _require_downstream_review_inputs(run_dir: Path) -> None:
+    required = (
+        "asset_generation_requests.md",
+        "asset_generation_request_snapshot.json",
+        "image_generation_requests.md",
+        "image_generation_request_snapshot.json",
+        "logs/grounding/asset.readset.json",
+        "logs/grounding/scene_implementation.readset.json",
+    )
+    missing = [relpath for relpath in required if not (run_dir / relpath).is_file()]
+    if missing:
+        raise RuntimeError(
+            "downstream review inputs are not materialized: " + ", ".join(missing)
+        )
+
+
+def _refresh_downstream_review_artifacts(run_dir: Path) -> None:
+    """Freeze asset/scene reviews only after requests and grounding exist."""
+
+    _require_downstream_review_inputs(run_dir)
     subprocess.run(
         [
             sys.executable,
@@ -10950,26 +11547,85 @@ def _write_review_artifacts(run_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
-    # image_prompt is materialized after the request files exist in
-    # _materialize_standard_request_files(). Building it here would review the
-    # pre-request manifest and then immediately overwrite the same pack.
-    for semantic_stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
-        subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
-                "--run-dir",
-                str(run_dir),
-                "--stage",
-                semantic_stage,
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    _build_semantic_review_packs(run_dir, ("asset_plan", "image_prompt"))
+    _refresh_review_loop_artifacts(run_dir, DOWNSTREAM_REVIEW_STAGES)
+
+
+def _refresh_downstream_review_input_snapshots(run_dir: Path) -> None:
+    """Rebind downstream review evidence without resetting projected statuses."""
+
+    _require_downstream_review_inputs(run_dir)
+    resolved_run_dir = run_dir.resolve()
     state_updates: dict[str, str] = {}
-    for stage in AUTHORING_REVIEW_STAGES:
+    # Asset approval remains bound to the revision its critics actually
+    # reviewed. Only p630/p640 are projections of the final image-prompt gate,
+    # so only those snapshots may be rebound without rerunning critics.
+    for stage in DOWNSTREAM_REVIEW_STAGES[1:]:
+        snapshot = build_review_input_snapshot(
+            run_dir=resolved_run_dir,
+            stage=stage,
+            round_number=1,
+        )
+        input_digest = str(snapshot["input_digest"])
+        prompt_relpaths: list[Path] = []
+        for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
+            prompt_relpath = critic_prompt_relpath(
+                stage,
+                1,
+                critic_number,
+            )
+            prompt_path = resolved_run_dir / prompt_relpath
+            _write_run_text_nofollow(
+                resolved_run_dir,
+                prompt_path,
+                render_critic_prompt(
+                    run_dir=resolved_run_dir,
+                    stage=stage,
+                    round_number=1,
+                    critic_number=critic_number,
+                    input_digest=input_digest,
+                )
+                + "\n",
+            )
+            prompt_relpaths.append(prompt_relpath)
+        aggregate_prompt_relpath = aggregator_prompt_relpath(stage, 1)
+        aggregate_prompt_path = resolved_run_dir / aggregate_prompt_relpath
+        _write_run_text_nofollow(
+            resolved_run_dir,
+            aggregate_prompt_path,
+            render_aggregator_prompt(
+                run_dir=resolved_run_dir,
+                stage=stage,
+                round_number=1,
+                input_digest=input_digest,
+            )
+            + "\n",
+        )
+        prompt_relpaths.append(aggregate_prompt_relpath)
+        snapshot_path = write_review_input_snapshot(
+            run_dir=resolved_run_dir,
+            stage=stage,
+            round_number=1,
+            snapshot=snapshot,
+            prompt_relpaths=tuple(prompt_relpaths),
+        )
+        state_updates.update(
+            {
+                f"eval.{stage}.loop.round_01.input_snapshot": str(
+                    snapshot_path.relative_to(resolved_run_dir)
+                ),
+                f"eval.{stage}.loop.round_01.input_digest": input_digest,
+            }
+        )
+    append_state_snapshot(resolved_run_dir / "state.txt", state_updates)
+
+
+def _refresh_review_loop_artifacts(
+    run_dir: Path,
+    stages: tuple[str, ...],
+) -> None:
+    state_updates: dict[str, str] = {}
+    for stage in stages:
         materialize_review_loop_round(run_dir=run_dir, stage=stage, round_number=1)
         if stage in {"scene_implementation_hard", "scene_implementation_judgment"}:
             aggregate_text = "\n".join(
@@ -10983,9 +11639,15 @@ def _write_review_artifacts(run_dir: Path) -> None:
                     "",
                 ]
             )
-            (run_dir / aggregated_review_relpath(stage, 1)).write_text(aggregate_text, encoding="utf-8")
+            _write_run_text_nofollow(
+                run_dir,
+                run_dir / aggregated_review_relpath(stage, 1),
+                aggregate_text,
+            )
             final_report = REVIEW_LOOP_SPECS[stage].final_report
-            (run_dir / final_report).write_text(
+            _write_run_text_nofollow(
+                run_dir,
+                run_dir / final_report,
                 "\n".join(
                     [
                         f"# {REVIEW_LOOP_SPECS[stage].title}",
@@ -10996,7 +11658,6 @@ def _write_review_artifacts(run_dir: Path) -> None:
                         "",
                     ]
                 ),
-                encoding="utf-8",
             )
             state_updates.update(
                 {
@@ -11024,7 +11685,11 @@ def _write_review_artifacts(run_dir: Path) -> None:
                 prompt_text,
                 blocking_findings=blocking_findings,
             )
-            (run_dir / critic_relpath(stage, 1, critic_number)).write_text(critic_text, encoding="utf-8")
+            _write_run_text_nofollow(
+                run_dir,
+                run_dir / critic_relpath(stage, 1, critic_number),
+                critic_text,
+            )
             critic_reports.append(critic_text)
 
         aggregate_text = render_aggregated_review(
@@ -11057,12 +11722,17 @@ def _write_review_artifacts(run_dir: Path) -> None:
                 aggregate_text = aggregate_text.replace(f"{marker}: TODO", f"{marker}: passed")
 
         aggregate_path = run_dir / aggregated_review_relpath(stage, 1)
-        aggregate_path.write_text(aggregate_text, encoding="utf-8")
+        _write_run_text_nofollow(
+            run_dir,
+            aggregate_path,
+            aggregate_text,
+        )
         final_report = REVIEW_LOOP_SPECS[stage].final_report
         aggregate_passed = bool(re.search(r"(?m)^- status:\s*passed\s*$", aggregate_text))
-        (run_dir / final_report).write_text(
+        _write_run_text_nofollow(
+            run_dir,
+            run_dir / final_report,
             _final_review_text(stage, aggregate_text) if aggregate_passed else aggregate_text,
-            encoding="utf-8",
         )
         state_updates.update(
             {
@@ -11100,16 +11770,15 @@ def _write_orchestration(
         "p600": ["image_generation_requests.md"],
     }
     orch = run_dir / "logs" / "orchestration"
-    orch.mkdir(parents=True, exist_ok=True)
     progress = ["| timestamp | bucket | supervisor | event | stop_slot | result | note |", "|---|---|---|---|---|---|---|"]
     state_updates: dict[str, str] = {}
     for bucket in buckets:
-        bucket_pending = bucket == "p600"
+        bucket_pending = bucket in {"p500", "p600"}
         result_rel = f"logs/orchestration/{bucket}.supervisor_result.json"
         progress.append(f"| {now} | {bucket} | {bucket} P-Bucket Supervisor | invoked | {stop_target} | - | frontend handoff path |")
         progress.append(
             f"| {now} | {bucket} | {bucket} P-Bucket Supervisor | returned | {stop_target} | {result_rel} | "
-            + ("image prompt semantic review pending |" if bucket_pending else "bucket complete |")
+            + ("media workflow pending |" if bucket_pending else "bucket complete |")
         )
         key = f"orchestration.{bucket}.supervisor"
         state_updates[f"{key}.call_status"] = "returned"
@@ -11120,26 +11789,34 @@ def _write_orchestration(
             expected_status = "done"
         elif bucket_pending:
             expected_status = "pending"
-        elif bucket == "p500" and stop_target == "p680":
-            expected_status = "done"
         else:
             expected_status = "awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done"
+        if bucket == "p500":
+            completed_slots = ["p520", "p530"]
+        elif bucket == "p600":
+            completed_slots = ["p620"]
+        else:
+            completed_slots = list(bucket_slots[bucket])
         result = {
             "bucket": bucket,
             "status": "pending" if bucket_pending else "done",
             "stop_slot": stop_target,
-            "completed_slots": (
-                [slot for slot in bucket_slots[bucket] if slot in {"p610", "p620"}]
-                if bucket_pending
-                else list(bucket_slots[bucket])
-            ),
+            "completed_slots": completed_slots,
             "required_artifacts": [{"path": path, "exists": True} for path in bucket_artifacts[bucket]],
             "state_keys": {status_key: expected_status},
             "review_outputs": [],
             "next_bucket": None if bucket == "p600" else "next",
         }
-        (orch / f"{bucket}.supervisor_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (orch / "l2_supervisor_progress.md").write_text("\n".join(progress) + "\n", encoding="utf-8")
+        _write_run_text_nofollow(
+            run_dir,
+            orch / f"{bucket}.supervisor_result.json",
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        )
+    _write_run_text_nofollow(
+        run_dir,
+        orch / "l2_supervisor_progress.md",
+        "\n".join(progress) + "\n",
+    )
     return state_updates
 
 
@@ -11299,15 +11976,69 @@ def materialize_run(
     stop_target: str,
     target_duration_seconds: int = 300,
     foundation_review_runner: Callable[[Path, str], None] | None = None,
+    experience: str = "cinematic_story",
+    source_run: Path | None = None,
+    world_walk_source_identity: PathIdentity | None = None,
+    world_walk_destination_identity: PathIdentity | None = None,
 ) -> None:
+    target_duration_seconds = normalize_target_duration(
+        target_duration_seconds
+    )
+    source = _exact_materialization_source(
+        source=source,
+        experience=experience,
+        source_run=source_run,
+        source_root_identity=world_walk_source_identity,
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    materialization_root_identity = (
+        world_walk_destination_identity
+        if world_walk_destination_identity is not None
+        else directory_identity_nofollow(run_dir)
+    )
+    for reserved_path, initial_bytes in (
+        ("state.txt", b""),
+        ("run_status.json", b"{}\n"),
+        ("p000_index.md", b""),
+    ):
+        write_regular_file_exclusive_nofollow(
+            destination_root=run_dir,
+            destination_relative=reserved_path,
+            data=initial_bytes,
+            expected_destination_root_identity=(
+                materialization_root_identity
+            ),
+        )
+    source_references = (
+        _materialize_world_walk_source_references(
+            source_run,
+            run_dir,
+            source_root_identity=world_walk_source_identity,
+            destination_root_identity=materialization_root_identity,
+        )
+        if experience == "world_walk" and source_run is not None
+        else []
+    )
+    _write_create_input_contract(
+        run_dir=run_dir,
+        topic=topic,
+        source=source,
+        experience=experience,
+        source_run=source_run,
+        target_duration_seconds=target_duration_seconds,
+        expected_run_identity=materialization_root_identity,
+    )
     profile = _duration_aware_profile(
         _story_profile(topic, source, variant_seed=run_dir.name),
         target_duration_seconds=target_duration_seconds,
     )
     duration_plan = dict(profile["duration_plan"])
-    run_dir.mkdir(parents=True, exist_ok=True)
     for rel in ("assets/characters", "assets/objects", "assets/locations", "assets/scenes", "assets/audio", "logs/grounding"):
-        (run_dir / rel).mkdir(parents=True, exist_ok=True)
+        ensure_directory_relative_nofollow(
+            run_dir,
+            rel,
+            expected_root_identity=materialization_root_identity,
+        )
     now = _now_iso()
     append_state_snapshot(
         run_dir / "state.txt",
@@ -11321,23 +12052,47 @@ def materialize_run(
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
             "runtime.foundation_semantic_review": "required" if foundation_review_runner else "not_run_direct_materialization",
+            "immersive.experience": experience,
+            **(
+                {"immersive.source_run": source_run.relative_to(REPO_ROOT).as_posix()}
+                if source_run is not None
+                else {}
+            ),
+            "runtime.review_policy": "frontend",
             "review.policy.story": "required",
+            "review.policy.image": "required",
+            "review.policy.narration": "optional",
             "gate.research_review": "required",
             "gate.story_review": "required",
+            "gate.image_review": "required",
+            "gate.narration_review": "optional",
             "review.research.status": "pending",
             "review.story.status": "pending",
             "slot.p130.status": "pending",
             "slot.p230.status": "pending",
             "slot.p420.status": "pending",
             "slot.p650.status": "pending",
-            "slot.p660.status": "pending",
-            "slot.p670.status": "pending",
-            "slot.p680.status": "pending",
+            **(
+                {
+                    "slot.p660.status": "pending",
+                    "slot.p670.status": "pending",
+                    "slot.p680.status": "pending",
+                }
+                if stop_target == "p680"
+                else {}
+            ),
             "review.image_prompt.request_freeze.status": "draft",
             "review.image_prompt.request_freeze.invalidated_by": "new_materialization",
         },
     )
-    (run_dir / "research.md").write_text(_md_yaml(f"リサーチ（{profile['topic_label']}）", _build_research(topic, source, now, profile)), encoding="utf-8")
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "research.md",
+        _md_yaml(
+            f"リサーチ（{profile['topic_label']}）",
+            _build_research(topic, source, now, profile),
+        ),
+    )
     _review_foundation_stage(
         run_dir=run_dir,
         stage="research",
@@ -11373,7 +12128,14 @@ def materialize_run(
         },
     )
     profile = _profile_from_reviewed_research(profile, reviewed_research)
-    (run_dir / "story.md").write_text(_md_yaml(f"物語設計（{profile['topic_label']}）", _build_story(topic, run_dir, now, profile)), encoding="utf-8")
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "story.md",
+        _md_yaml(
+            f"物語設計（{profile['topic_label']}）",
+            _build_story(topic, run_dir, now, profile),
+        ),
+    )
     _review_foundation_stage(
         run_dir=run_dir,
         stage="story",
@@ -11445,9 +12207,24 @@ def materialize_run(
         "regeneration_risks": [{"risk": "衣装や顔がcutごとに変わる", "mitigation": "character referenceを全cutに指定する"}],
         "handoff_to_p400_p500_p600_p700": {"p400_script": "scene設計から必要なcut数を逆算して構成する", "p500_asset": f"{protagonist_asset} と {artifact_asset} を必須参照にする", "p600_scene_implementation": "各cutにscene_contractと画像promptを持たせる", "p700_narration": "画像確定後に語りを同期する"},
     }
-    (run_dir / "visual_value.md").write_text(_md_yaml(f"視覚化価値設計（{profile['topic_label']}）", visual), encoding="utf-8")
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "visual_value.md",
+        _md_yaml(
+            f"視覚化価値設計（{profile['topic_label']}）",
+            visual,
+        ),
+    )
     try:
-        script, manifest, selectors = _build_script_and_manifest(topic, run_dir, now, profile)
+        script, manifest, selectors = _build_script_and_manifest(
+            topic,
+            run_dir,
+            now,
+            profile,
+            experience=experience,
+            source_run=source_run,
+            source_references=source_references,
+        )
     except Exception as exc:
         _write_cut_design_failure_log(
             run_dir,
@@ -11458,35 +12235,70 @@ def materialize_run(
             exc=exc,
         )
         raise
-    (run_dir / "script.md").write_text(_md_yaml(f"台本（{profile['topic_label']} / cinematic_story）", script), encoding="utf-8")
-    (run_dir / "video_manifest.md").write_text(_md_yaml(f"Video Manifest（{profile['topic_label']} / p450 production）", manifest), encoding="utf-8")
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "script.md",
+        _md_yaml(
+            f"台本（{profile['topic_label']} / cinematic_story）",
+            script,
+        ),
+    )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "video_manifest.md",
+        _md_yaml(
+            f"Video Manifest（{profile['topic_label']} / p450 production）",
+            manifest,
+        ),
+    )
     asset_inventory, asset_plan = _build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
-    (run_dir / "asset_inventory.md").write_text(_md_yaml("Asset Inventory", asset_inventory), encoding="utf-8")
-    (run_dir / "asset_plan.md").write_text(_md_yaml("Asset Plan", asset_plan), encoding="utf-8")
+    if experience == "world_walk":
+        _apply_world_walk_asset_generation_contract(
+            asset_plan=asset_plan,
+            source_references=source_references,
+        )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "asset_inventory.md",
+        _md_yaml("Asset Inventory", asset_inventory),
+    )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "asset_plan.md",
+        _md_yaml("Asset Plan", asset_plan),
+    )
     _prepare_authoring_grounding(run_dir)
-    _write_review_artifacts(run_dir)
+    _refresh_p400_review_artifacts(run_dir)
     _require_fresh_p400_readiness(run_dir)
     _write_asset_request_files(run_dir, asset_plan, profile)
     _materialize_standard_request_files(run_dir)
+    # Request projection persists compiled video payloads back into the
+    # production manifest. Re-ground and re-freeze P400 against that final
+    # pre-provider revision so p450 never consumes stale review snapshots.
+    _prepare_authoring_grounding(run_dir)
+    _refresh_p400_review_artifacts(run_dir)
+    _require_fresh_p400_readiness(run_dir)
     state_updates = _write_orchestration(
         run_dir,
         stop_target,
         now,
         foundation_reviews_passed=foundation_review_runner is not None,
     )
-    slots = P650_SLOTS if stop_target == "p680" else P650_SLOTS
+    media_slot_updates = _fresh_materialized_media_slot_updates(stop_target)
+    slots = P680_SLOTS if stop_target == "p680" else P650_SLOTS
     for slot in slots:
+        if f"slot.{slot}.status" in media_slot_updates:
+            continue
         state_updates[f"slot.{slot}.status"] = "awaiting_approval" if slot in AWAITING_ALLOWED else "done"
         state_updates[f"slot.{slot}.note"] = "frontend handoff" if slot in AWAITING_ALLOWED else "completed by frontend-review workflow"
     state_updates.update(
         {
-            "slot.p650.status": "pending",
-            "slot.p650.note": "candidate requests materialized; waiting for semantic review, repair, and final freeze",
             "review.image_prompt.request_freeze.status": "draft",
             "review.image_prompt.request_freeze.request": "image_generation_requests.md",
             "review.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
         }
     )
+    state_updates.update(media_slot_updates)
     if foundation_review_runner is not None:
         state_updates.update(
             {
@@ -11496,13 +12308,6 @@ def materialize_run(
                 "slot.p230.note": "story semantic review/repair passed",
             }
         )
-    if stop_target == "p680":
-        state_updates["slot.p660.status"] = "pending"
-        state_updates["slot.p660.note"] = "waiting for image-prompt semantic review and final request freeze"
-        state_updates["slot.p670.status"] = "pending"
-        state_updates["slot.p670.note"] = "waiting for scene image generation to finish"
-        state_updates["slot.p680.status"] = "pending"
-        state_updates["slot.p680.note"] = "frontend image review is not ready until every scene image exists"
     state_updates.update(
         {
             "timestamp": now,
@@ -11525,7 +12330,7 @@ def materialize_run(
             "gate.research_review": "required",
             "gate.story_review": "required",
             "gate.narration_review": "optional",
-            "immersive.experience": "cinematic_story",
+            "immersive.experience": experience,
             "review.research.status": "approved" if foundation_review_runner is not None else "pending",
             "review.story.status": "approved" if foundation_review_runner is not None else "pending",
             "review.script.status": "approved",
@@ -11554,7 +12359,10 @@ def _prepare_authoring_grounding(run_dir: Path) -> None:
 
 
 def prepare_grounding(run_dir: Path) -> None:
-    _prepare_authoring_grounding(run_dir)
+    # materialize_run() has already prepared the authoring readsets before it
+    # freezes the p400 review-loop snapshots. Re-running those stages here
+    # changes readset hashes after the freeze and makes the otherwise-current
+    # p400 review artifacts stale.
     subprocess.run(
         [
             sys.executable,
@@ -11573,13 +12381,25 @@ def prepare_grounding(run_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
-    for stage in ("asset", "scene_implementation"):
+    grounding_slots = {
+        "asset": ("p510", "asset grounding completed"),
+        "scene_implementation": ("p610", "scene implementation grounding completed"),
+    }
+    for stage, (slot, note) in grounding_slots.items():
         subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "prepare-stage-context.py"), "--stage", stage, "--run-dir", str(run_dir), "--flow", "immersive"],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
             text=True,
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "timestamp": _now_iso(),
+                f"slot.{slot}.status": "done",
+                f"slot.{slot}.note": note,
+            },
         )
 
 
@@ -11588,18 +12408,72 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
 
     run_id = _run_id_from_dir(run_dir)
     if stop_target == "p650":
-        for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
-            await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage=stage)
-            result = check_semantic_review(run_dir, stage)
-            if not result.passed:
-                raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
+        await image_gen_app._run_pre_asset_semantic_fixed_point(
+            "toc-immersive-frontend-run",
+            run_dir=run_dir,
+        )
+        image_gen_app._validate_pre_asset_provider_gate(run_dir)
         await image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset")
+        try:
+            image_gen_app._validate_p560_asset_quality(run_dir)
+        except Exception as exc:
+            retryable_visual_quality = (
+                isinstance(exc, image_gen_app.P560AssetGateError)
+                and exc.retryable_visual_quality
+            )
+            if retryable_visual_quality:
+                image_gen_app._mark_asset_generation_handoff(
+                    run_dir,
+                    asset_quality_passed=False,
+                )
+            else:
+                failed_check_ids = getattr(
+                    exc,
+                    "failed_check_ids",
+                    ("p570.unclassified_failure",),
+                )
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {
+                        "timestamp": _now_iso(),
+                        "runtime.stage": "p570_non_visual_gate_failed",
+                        "review.asset_visual_gate.status": "blocked_non_visual_validation",
+                        "review.asset_visual_gate.last_error": str(exc)[:2000],
+                        "review.asset_visual_gate.failed_check_ids": ", ".join(
+                            str(check_id)
+                            for check_id in failed_check_ids
+                            if str(check_id).strip()
+                        ),
+                        "slot.p550.status": "done",
+                        "slot.p550.note": "asset requests were submitted to the image provider",
+                        "slot.p560.status": "done",
+                        "slot.p560.note": "reusable asset image generation completed before p570 validation failed",
+                        "slot.p570.status": "failed",
+                        "slot.p570.note": "non-visual p570 validation failed",
+                        "stage.asset.status": "failed",
+                    },
+                )
+            raise
+        image_gen_app._mark_asset_generation_handoff(
+            run_dir,
+            asset_quality_passed=True,
+        )
         await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage="image_prompt")
         result = check_semantic_review(run_dir, "image_prompt")
         if not result.passed:
             raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
+        _refresh_downstream_review_input_snapshots(run_dir)
     else:
-        await image_gen_app._generate_create_images("toc-immersive-frontend-run", run_id=run_id)
+        generation_completed = await image_gen_app._generate_create_images(
+            "toc-immersive-frontend-run",
+            run_id=run_id,
+        )
+        if generation_completed is False:
+            raise RuntimeError(
+                "p570 asset continuity review is required; "
+                "p680 scene generation and validation are blocked"
+            )
+        _refresh_downstream_review_input_snapshots(run_dir)
 
 
 async def run_pre_media_semantic_pipeline(
@@ -11611,15 +12485,10 @@ async def run_pre_media_semantic_pipeline(
 
     from server import image_gen_app
 
-    for stage in ("scene_set", "scene_detail", "cut_blueprint", "asset_plan"):
-        await image_gen_app._run_semantic_review(
-            "toc-immersive-frontend-run",
-            run_dir=run_dir,
-            stage=stage,
-        )
-        result = check_semantic_review(run_dir, stage)
-        if not result.passed:
-            raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
+    await image_gen_app._run_pre_asset_semantic_fixed_point(
+        "toc-immersive-frontend-run",
+        run_dir=run_dir,
+    )
     await image_gen_app._run_semantic_review(
         "toc-immersive-frontend-run",
         run_dir=run_dir,
@@ -11629,6 +12498,7 @@ async def run_pre_media_semantic_pipeline(
     result = check_semantic_review(run_dir, "image_prompt")
     if not result.passed:
         raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
+    _refresh_downstream_review_input_snapshots(run_dir)
 
 
 def validate(run_dir: Path, stop_target: str) -> None:
@@ -11648,6 +12518,12 @@ def main() -> None:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--stop-target", choices=["p650", "p680"], default="p680")
     parser.add_argument(
+        "--experience",
+        choices=["cinematic_story", "world_walk"],
+        default="cinematic_story",
+    )
+    parser.add_argument("--source-run", default=None)
+    parser.add_argument(
         "--target-duration-seconds",
         type=int,
         default=300,
@@ -11662,10 +12538,56 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
+    source_run: Path | None = None
+    world_walk_source_identity: PathIdentity | None = None
+    if args.experience == "world_walk":
+        if not args.source_run:
+            parser.error("--source-run is required for --experience world_walk")
+        try:
+            source_candidate, _source_run_rel = (
+                validate_world_walk_source_contract_path(
+                    REPO_ROOT,
+                    args.source_run,
+                    allow_missing=False,
+                )
+            )
+            world_walk_source_identity = (
+                directory_identity_nofollow(source_candidate)
+            )
+            source_run, _source_run_rel = validate_world_walk_source_path(
+                REPO_ROOT,
+                source_candidate,
+            )
+            if (
+                directory_identity_nofollow(source_run)
+                != world_walk_source_identity
+            ):
+                raise ValueError("world-walk source identity changed")
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        try:
+            source = read_regular_file_nofollow(
+                source_run,
+                "story.md",
+                expected_root_identity=world_walk_source_identity,
+            ).decode("utf-8")
+        except (OSError, UnicodeError, ValueError) as exc:
+            parser.error(f"world-walk source story could not be read safely: {exc}")
+    else:
+        if args.source_run:
+            parser.error("--source-run is only valid for --experience world_walk")
+        source = args.source.strip() or args.topic
     run_dir = _validated_fresh_cli_run_dir(args.run_dir)
-    source = args.source.strip() or args.topic
+    try:
+        run_dir_identity = directory_identity_nofollow(run_dir)
+    except (OSError, ValueError) as exc:
+        parser.error(f"destination run could not be opened safely: {exc}")
     materialize_stop_target = "p650" if args.materialize_only and args.stop_target == "p680" else args.stop_target
-    with _run_materialization_lock(run_dir):
+    with _run_materialization_lock(
+        run_dir,
+        expected_identity=run_dir_identity,
+        protect_pathname=True,
+    ):
         materialize_run(
             args.topic,
             source,
@@ -11673,8 +12595,13 @@ def main() -> None:
             materialize_stop_target,
             target_duration_seconds=target_duration_seconds,
             foundation_review_runner=_run_foundation_semantic_review,
+            experience=args.experience,
+            source_run=source_run,
+            world_walk_source_identity=world_walk_source_identity,
+            world_walk_destination_identity=run_dir_identity,
         )
         prepare_grounding(run_dir)
+        _refresh_downstream_review_artifacts(run_dir)
         if args.materialize_only:
             asyncio.run(
                 run_pre_media_semantic_pipeline(

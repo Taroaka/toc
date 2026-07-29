@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from toc.review_projection import (
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    ReviewProjectionError,
+    review_source_fingerprint,
+)
+
 
 IMAGE_PROMPT_JUDGMENT_COLLECTION = Path("logs/review/image_prompt.review_collection.md")
 IMAGE_PROMPT_JUDGMENT_SCOPE = Path("logs/review/image_prompt.review_scope.json")
@@ -80,19 +86,26 @@ def semantic_review_input_digest(
 ) -> str:
     """Return the canonical identity of every input visible to a reviewer."""
 
+    source_records: list[dict[str, str]] = []
+    for record in source_artifact_digests:
+        normalized_record = {
+            "path": str(record.get("path") or ""),
+            "sha256": str(record.get("sha256") or ""),
+        }
+        policy = record.get(REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD)
+        if policy is not None:
+            normalized_record[
+                REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
+            ] = str(policy)
+        source_records.append(normalized_record)
+
     payload = {
         "schema_version": SEMANTIC_REVIEW_INPUT_SCHEMA,
         "stage": str(stage),
         "entry_ids": [str(entry_id) for entry_id in entry_ids],
         "collection_sha256": str(collection_sha256),
         "prompt_sha256": str(prompt_sha256),
-        "source_artifacts": [
-            {
-                "path": str(record.get("path") or ""),
-                "sha256": str(record.get("sha256") or ""),
-            }
-            for record in source_artifact_digests
-        ],
+        "source_artifacts": source_records,
         "request_revision": str(request_revision or ""),
         "scope_binding_sha256": str(scope_binding_sha256),
     }
@@ -457,6 +470,9 @@ def _semantic_review_artifact_currentness_issues(
             continue
         raw_path = raw_record.get("path")
         raw_sha256 = raw_record.get("sha256")
+        raw_policy = raw_record.get(
+            REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
+        )
         source_path, path_error = _safe_run_relative_file(
             run_dir,
             raw_path,
@@ -467,11 +483,51 @@ def _semantic_review_artifact_currentness_issues(
         if not isinstance(raw_sha256, str) or _SHA256_RE.fullmatch(raw_sha256) is None:
             errors.append(f"source_artifact_digests[{index}].sha256 must be a lowercase SHA-256")
         if source_path is not None and isinstance(raw_sha256, str):
-            current_sha256 = semantic_review_file_sha256(source_path)
-            if current_sha256 != raw_sha256:
-                errors.append(f"semantic review source SHA-256 mismatch: {raw_path}")
+            try:
+                fingerprint = review_source_fingerprint(
+                    source_path,
+                    artifact_relpath=(
+                        raw_path if isinstance(raw_path, str) else ""
+                    ),
+                    review_kind="semantic",
+                    stage=stage,
+                )
+            except ReviewProjectionError as exc:
+                errors.append(
+                    "semantic review source projection is invalid: "
+                    f"{raw_path}: {exc}"
+                )
+            else:
+                if raw_policy is None:
+                    # semantic_review_input_v1 originally stored raw file
+                    # hashes without an explicit policy. Keep that evidence
+                    # valid only while the exact legacy bytes still match.
+                    current_sha256 = semantic_review_file_sha256(
+                        source_path
+                    )
+                elif (
+                    not isinstance(raw_policy, str)
+                    or not raw_policy
+                    or raw_policy != fingerprint.policy
+                ):
+                    errors.append(
+                        "semantic review source fingerprint policy mismatch: "
+                        f"{raw_path}"
+                    )
+                    current_sha256 = ""
+                else:
+                    current_sha256 = fingerprint.sha256
+                if current_sha256 != raw_sha256:
+                    errors.append(
+                        f"semantic review source SHA-256 mismatch: {raw_path}"
+                    )
         if isinstance(raw_path, str) and isinstance(raw_sha256, str):
-            records.append({"path": raw_path, "sha256": raw_sha256})
+            record = {"path": raw_path, "sha256": raw_sha256}
+            if raw_policy is not None:
+                record[REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD] = str(
+                    raw_policy
+                )
+            records.append(record)
 
     normalized_sources = [
         raw_path.strip()

@@ -2,14 +2,15 @@
 """Create a ToC run through the same backend create route used by the frontend.
 
 This is a regression helper for design changes. It calls
-`POST /api/image-gen/runs/create` in-process, polls the matching job endpoint,
-and writes a compact report under the created run directory.
+the selected frontend create endpoint in-process, polls the matching job
+endpoint, and writes a compact report under the created run directory.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
 import re
 import sys
@@ -24,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import load_structured_document  # noqa: E402
+from toc.image_request_snapshot import sha256_canonical_json  # noqa: E402
 
 
 OUTPUT_ROOT = (REPO_ROOT / "output").resolve()
@@ -159,6 +161,238 @@ def _check_cut_contract_v2(
     return failures
 
 
+def _split_markdown_sections(
+    text: str,
+) -> list[tuple[str, str]]:
+    sections: list[tuple[str, list[str]]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_title is not None:
+                sections.append((current_title, current_lines))
+            current_title = line[3:].strip()
+            current_lines = [line]
+        elif current_title is not None:
+            current_lines.append(line)
+    if current_title is not None:
+        sections.append((current_title, current_lines))
+    return [
+        (title, "\n".join(lines).strip())
+        for title, lines in sections
+    ]
+
+
+def _storyboard_request_binding(body: str) -> dict[str, Any]:
+    def scalar(name: str) -> str:
+        match = re.search(
+            rf"(?m)^- {re.escape(name)}: `([^`]*)`\s*$",
+            body,
+        )
+        return match.group(1).strip() if match else ""
+
+    def fenced(name: str) -> str:
+        match = re.search(
+            rf"(?ms)```{re.escape(name)}\s*\n(.*?)\n```",
+            body,
+        )
+        return match.group(1).strip() if match else ""
+
+    def list_values(name: str) -> list[str]:
+        match = re.search(
+            rf"(?ms)^- {re.escape(name)}:\s*\n"
+            r"((?:  - `[^`]*`\s*(?:\n|$))*)",
+            body,
+        )
+        if not match:
+            return []
+        return [
+            value.strip()
+            for value in re.findall(
+                r"(?m)^  - `([^`]*)`\s*$",
+                match.group(1),
+            )
+            if value.strip()
+        ]
+
+    return {
+        "storyboard_image": scalar("storyboard_image"),
+        "prompt_sha256": scalar("prompt_sha256"),
+        "negative_prompt_sha256": scalar("negative_prompt_sha256"),
+        "references_digest": scalar("references_digest"),
+        "source_cuts": list_values("source_cuts"),
+        "references": list_values("references"),
+        "prompt": fenced("video_prompt"),
+        "negative_prompt": fenced("negative_prompt"),
+    }
+
+
+def _check_storyboard_v1(run_dir: Path) -> list[str]:
+    failures: list[str] = []
+    state = _parse_state(run_dir / "state.txt")
+    if state.get("runtime.create_mode") != "scene_storyboard":
+        failures.append("state runtime.create_mode is not scene_storyboard")
+    manifest_path = run_dir / "video_manifest.md"
+    request_path = run_dir / "video_generation_requests.md"
+    for path in (manifest_path, request_path):
+        if not path.is_file() or path.is_symlink():
+            failures.append(f"missing or unsafe {path.name}")
+    if not manifest_path.is_file() or not request_path.is_file():
+        return failures
+    _manifest_text, manifest = load_structured_document(manifest_path)
+    scenes = (
+        manifest.get("scenes")
+        if isinstance(manifest.get("scenes"), list)
+        else []
+    )
+    expected_ids: list[str] = []
+    expected: dict[str, dict[str, Any]] = {}
+    for scene_index, scene in enumerate(scenes, start=1):
+        if (
+            not isinstance(scene, dict)
+            or str(scene.get("kind") or "").strip().endswith("_reference")
+        ):
+            continue
+        scene_id = str(scene.get("scene_id") or scene_index).strip()
+        scene_selector = (
+            scene_id
+            if scene_id.lower().startswith("scene")
+            else f"scene{scene_id}"
+        )
+        cuts = [
+            cut
+            for cut in scene.get("cuts", [])
+            if isinstance(cut, dict)
+        ]
+        cut_outputs = {
+            str(cut.get("cut_id") or cut_index): str(
+                (
+                    cut.get("image_generation")
+                    if isinstance(cut.get("image_generation"), dict)
+                    else {}
+                ).get("output")
+                or ""
+            ).strip()
+            for cut_index, cut in enumerate(cuts, start=1)
+        }
+        render_units = (
+            scene.get("render_units")
+            if isinstance(scene.get("render_units"), list)
+            else []
+        )
+        if not render_units:
+            failures.append(f"{scene_selector}: missing render_units")
+            continue
+        for unit in render_units:
+            if not isinstance(unit, dict):
+                failures.append(f"{scene_selector}: invalid render_unit")
+                continue
+            unit_id = str(unit.get("unit_id") or "").strip()
+            request_id = f"{scene_selector}_unit{unit_id}"
+            source_cuts = [
+                str(value).strip()
+                for value in unit.get("source_cut_ids", [])
+                if str(value).strip()
+            ]
+            storyboard = str(unit.get("storyboard_image") or "").strip()
+            generation = (
+                unit.get("video_generation")
+                if isinstance(unit.get("video_generation"), dict)
+                else {}
+            )
+            references = [
+                str(value).strip()
+                for value in generation.get("references", [])
+                if str(value).strip()
+            ]
+            expected_references = [
+                cut_outputs.get(source_cuts[0], "")
+                if source_cuts
+                else "",
+                storyboard,
+            ]
+            if references != expected_references:
+                failures.append(
+                    f"{request_id}: ordered references do not bind first cut and storyboard"
+                )
+            contract = (
+                unit.get("video_input_contract")
+                if isinstance(unit.get("video_input_contract"), dict)
+                else {}
+            )
+            if (
+                contract.get("input_mode") != "reference_images"
+                or contract.get("required_references") != references
+            ):
+                failures.append(
+                    f"{request_id}: invalid reference-image input contract"
+                )
+            storyboard_path = run_dir / storyboard
+            if not storyboard_path.is_file() or storyboard_path.is_symlink():
+                failures.append(
+                    f"{request_id}: missing or unsafe storyboard image"
+                )
+            else:
+                try:
+                    from PIL import Image  # type: ignore[import-not-found]
+
+                    with Image.open(storyboard_path) as image:
+                        if image.size != (1920, 1080):
+                            failures.append(
+                                f"{request_id}: storyboard image must be 1920x1080"
+                            )
+                        image.verify()
+                except Exception as exc:
+                    failures.append(
+                        f"{request_id}: invalid storyboard image: {exc}"
+                    )
+            payload = (
+                generation.get("api_prompt_payload")
+                if isinstance(generation.get("api_prompt_payload"), dict)
+                else {}
+            )
+            prompt = str(payload.get("prompt") or "")
+            negative_prompt = str(payload.get("negative_prompt") or "")
+            expected_ids.append(request_id)
+            expected[request_id] = {
+                "storyboard_image": storyboard,
+                "prompt_sha256": hashlib.sha256(
+                    prompt.encode("utf-8")
+                ).hexdigest(),
+                "negative_prompt_sha256": hashlib.sha256(
+                    negative_prompt.encode("utf-8")
+                ).hexdigest(),
+                "references_digest": sha256_canonical_json(references),
+                "source_cuts": source_cuts,
+                "references": references,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+            }
+    sections = _split_markdown_sections(
+        request_path.read_text(encoding="utf-8", errors="replace")
+    )
+    actual_ids = [title for title, _body in sections]
+    if actual_ids != expected_ids:
+        failures.append(
+            "video request section identity/order mismatch: "
+            f"expected={expected_ids}, got={actual_ids}"
+        )
+        return failures
+    for request_id, body in sections:
+        binding = _storyboard_request_binding(body)
+        mismatches = [
+            field
+            for field, expected_value in expected[request_id].items()
+            if binding.get(field) != expected_value
+        ]
+        if mismatches:
+            failures.append(
+                f"{request_id}: request binding mismatch: "
+                + ", ".join(mismatches)
+            )
+    return failures
+
+
 def _safe_report_path(run_dir: Path) -> Path:
     resolved_run_dir = run_dir.resolve(strict=True)
     relative = Path("logs/regression/headless_regression_report.md")
@@ -224,9 +458,18 @@ async def create_run_via_frontend_route(
     generate_images: bool,
     timeout_seconds: float,
     poll_interval: float,
+    create_mode: str = "normal",
     target_duration_seconds: int = 300,
     base_url: str | None = None,
 ) -> dict[str, Any]:
+    if create_mode not in {"normal", "scene_storyboard"}:
+        raise ValueError(
+            "create_mode must be normal or scene_storyboard"
+        )
+    if create_mode == "scene_storyboard" and not generate_images:
+        raise ValueError(
+            "storyboard create requires image generation"
+        )
     existing_run_ids = {
         path.name
         for path in OUTPUT_ROOT.iterdir()
@@ -249,14 +492,21 @@ async def create_run_via_frontend_route(
             base_url="http://toc-headless.local",
         )
     async with client_cm as client:
+        endpoint = (
+            "/api/image-gen/runs/create/storyboard"
+            if create_mode == "scene_storyboard"
+            else "/api/image-gen/runs/create"
+        )
+        payload: dict[str, Any] = {
+            "title": title,
+            "source": source,
+            "target_duration_seconds": target_duration_seconds,
+        }
+        if create_mode == "normal":
+            payload["generate_images"] = generate_images
         created = await client.post(
-            "/api/image-gen/runs/create",
-            json={
-                "title": title,
-                "source": source,
-                "generate_images": generate_images,
-                "target_duration_seconds": target_duration_seconds,
-            },
+            endpoint,
+            json=payload,
         )
         created.raise_for_status()
         job = created.json()
@@ -271,6 +521,12 @@ async def create_run_via_frontend_route(
             raise RuntimeError("create response must bind jobId to an initial runId and path")
         if expected_run_id in existing_run_ids:
             raise RuntimeError(f"create response replayed a pre-existing runId: {expected_run_id}")
+        returned_mode = str(job.get("createMode") or "").strip()
+        if returned_mode and returned_mode != create_mode:
+            raise RuntimeError(
+                "create response mode changed: "
+                f"expected {create_mode!r}, got {returned_mode!r}"
+            )
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             latest = await client.get(f"/api/image-gen/runs/create/{job_id}")
@@ -295,7 +551,7 @@ async def create_run_via_frontend_route(
                 )
             expected_run_id = expected_run_id or latest_run_id
             expected_path = expected_path or latest_path
-            if job.get("status") in {"completed", "failed"}:
+            if job.get("status") in {"completed", "failed", "paused"}:
                 return job
             await asyncio.sleep(poll_interval)
         raise TimeoutError(f"create job did not finish within {timeout_seconds:.0f}s: {job_id}")
@@ -335,21 +591,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Headless ToC create regression through the frontend backend route.")
     parser.add_argument("--title", required=True)
     parser.add_argument("--source", default="")
+    parser.add_argument(
+        "--create-mode",
+        choices=["normal", "scene_storyboard"],
+        default="normal",
+    )
     parser.add_argument("--no-images", action="store_true", help="Disable image generation. Images are generated by default.")
     parser.add_argument("--target-duration-seconds", type=int, default=300, help="Target video duration in seconds (300-1200).")
     parser.add_argument("--base-url", default="", help="Optional running backend URL, e.g. http://127.0.0.1:8000. Omit for in-process ASGI.")
-    parser.add_argument("--assert-profile", choices=["none", "cut_contract_v2"], default="cut_contract_v2")
+    parser.add_argument(
+        "--assert-profile",
+        choices=["auto", "none", "cut_contract_v2", "storyboard_v1"],
+        default="auto",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=7200)
     parser.add_argument("--poll-interval", type=float, default=2.0)
     args = parser.parse_args()
 
     source = args.source.strip() or args.title
     generate_images = not args.no_images
+    if args.create_mode == "scene_storyboard" and not generate_images:
+        parser.error(
+            "--create-mode scene_storyboard cannot be combined with --no-images"
+        )
     job = asyncio.run(
         create_run_via_frontend_route(
             title=args.title,
             source=source,
             generate_images=generate_images,
+            create_mode=args.create_mode,
             target_duration_seconds=args.target_duration_seconds,
             timeout_seconds=args.timeout_seconds,
             poll_interval=args.poll_interval,
@@ -364,7 +634,14 @@ def main() -> int:
     except ValueError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    if args.assert_profile == "cut_contract_v2":
+    assertion_profile = args.assert_profile
+    if assertion_profile == "auto":
+        assertion_profile = (
+            "storyboard_v1"
+            if args.create_mode == "scene_storyboard"
+            else "cut_contract_v2"
+        )
+    if assertion_profile == "cut_contract_v2":
         assertion_failures.extend(
             _check_cut_contract_v2(
                 run_dir,
@@ -373,6 +650,8 @@ def main() -> int:
                 expected_title=args.title,
             )
         )
+    elif assertion_profile == "storyboard_v1":
+        assertion_failures.extend(_check_storyboard_v1(run_dir))
     try:
         report = _write_report(
             run_dir=run_dir,

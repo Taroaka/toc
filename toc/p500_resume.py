@@ -7,8 +7,10 @@ from datetime import datetime
 import fnmatch
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -30,6 +32,12 @@ PRESERVED_CANONICAL_FILES = (
     "video_manifest.md",
     "state.txt",
     "p000_index.md",
+)
+OPTIONAL_PRESERVED_UPSTREAM_FILES = (
+    "logs/orchestration/create_input.json",
+)
+RESUME_INPUT_IDENTITY_SCHEMA_VERSION = (
+    "toc.p500_resume.input_identity.v1"
 )
 
 DOWNSTREAM_SLOTS = (
@@ -165,7 +173,13 @@ class ResumePlan:
     checkpoint_dir: str
     preserved_files: tuple[str, ...]
     upstream_sha256: dict[str, str]
+    state_fingerprint: dict[str, Any]
+    state_before_sha256: str
+    index_fingerprint: dict[str, Any]
+    optional_upstream_fingerprints: dict[str, dict[str, Any]]
+    resume_input_identity: dict[str, str]
     downstream_files: tuple[str, ...]
+    downstream_fingerprints: dict[str, dict[str, Any]]
     p400_reason_keys: tuple[str, ...]
     plan_token: str
 
@@ -179,6 +193,108 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _lexical_path_fingerprint(path: Path) -> dict[str, Any]:
+    """Fingerprint a path without following a final-component symlink."""
+
+    try:
+        lexical_stat = path.lstat()
+    except FileNotFoundError:
+        return {
+            "exists": False,
+            "lexical_type": "missing",
+            "is_symlink": False,
+            "bytes_sha256": None,
+        }
+
+    mode = lexical_stat.st_mode
+    if stat.S_ISLNK(mode):
+        try:
+            target_bytes = os.fsencode(os.readlink(path))
+            final_stat = path.lstat()
+        except FileNotFoundError as exc:
+            raise P500ResumeError(
+                f"resume plan path changed while fingerprinting: {path}"
+            ) from exc
+        if _stat_identity(final_stat) != _stat_identity(lexical_stat):
+            raise P500ResumeError(
+                f"resume plan path changed while fingerprinting: {path}"
+            )
+        return {
+            "exists": True,
+            "lexical_type": "symlink",
+            "is_symlink": True,
+            "bytes_sha256": hashlib.sha256(target_bytes).hexdigest(),
+        }
+
+    if stat.S_ISREG(mode):
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise P500ResumeError(
+                f"resume plan path changed while fingerprinting: {path}"
+            ) from exc
+        try:
+            opened_stat = os.fstat(descriptor)
+            if _stat_identity(opened_stat) != _stat_identity(lexical_stat):
+                raise P500ResumeError(
+                    f"resume plan path changed while fingerprinting: {path}"
+                )
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            final_stat = os.fstat(descriptor)
+            if _stat_identity(final_stat) != _stat_identity(opened_stat):
+                raise P500ResumeError(
+                    f"resume plan path changed while fingerprinting: {path}"
+                )
+        finally:
+            os.close(descriptor)
+        return {
+            "exists": True,
+            "lexical_type": "regular_file",
+            "is_symlink": False,
+            "bytes_sha256": digest.hexdigest(),
+        }
+
+    if stat.S_ISDIR(mode):
+        lexical_type = "directory"
+    elif stat.S_ISFIFO(mode):
+        lexical_type = "fifo"
+    elif stat.S_ISSOCK(mode):
+        lexical_type = "socket"
+    elif stat.S_ISCHR(mode):
+        lexical_type = "character_device"
+    elif stat.S_ISBLK(mode):
+        lexical_type = "block_device"
+    else:
+        lexical_type = "other"
+    return {
+        "exists": True,
+        "lexical_type": lexical_type,
+        "is_symlink": False,
+        "bytes_sha256": None,
+    }
 
 
 def _slot_number(slot: str) -> int:
@@ -230,6 +346,17 @@ def _validate_upstream(run_dir: Path) -> None:
         raise P500ResumeError(
             "canonical run artifacts must not be symlinks: " + ", ".join(unsafe)
         )
+    unsafe_optional: list[str] = []
+    for rel in OPTIONAL_PRESERVED_UPSTREAM_FILES:
+        path = run_dir / rel
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            unsafe_optional.append(rel)
+    if unsafe_optional:
+        raise P500ResumeError(
+            "optional canonical run artifacts must be regular files and not "
+            "symlinks: "
+            + ", ".join(unsafe_optional)
+        )
 
 
 def _p400_readiness(run_dir: Path) -> tuple[str, tuple[str, ...]]:
@@ -276,7 +403,7 @@ def _is_extra_downstream_root_file(rel: str) -> bool:
 
 
 def _is_downstream_file(run_dir: Path, rel: str) -> bool:
-    if rel in PRESERVED_CANONICAL_FILES:
+    if rel in PRESERVED_CANONICAL_FILES or rel in OPTIONAL_PRESERVED_UPSTREAM_FILES:
         return False
     if rel == ".toc_frontend_create.lock" or rel.startswith(_PRESERVED_PREFIXES):
         return False
@@ -346,19 +473,102 @@ def _validate_no_active_bulk_jobs(run_dir: Path) -> None:
         )
 
 
+def _normalize_resume_input_identity(
+    identity: dict[str, str] | None,
+) -> dict[str, str]:
+    if identity is None:
+        return {}
+    if not isinstance(identity, dict):
+        raise P500ResumeError("resume input identity must be an object")
+    if not identity:
+        return {}
+    expected_keys = {
+        "schema_version",
+        "topic_sha256",
+        "source_sha256",
+    }
+    if set(identity) != expected_keys:
+        raise P500ResumeError(
+            "resume input identity has an invalid field contract"
+        )
+    if (
+        identity.get("schema_version")
+        != RESUME_INPUT_IDENTITY_SCHEMA_VERSION
+    ):
+        raise P500ResumeError(
+            "resume input identity has an unsupported schema_version"
+        )
+    for field in ("topic_sha256", "source_sha256"):
+        value = identity.get(field)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        ):
+            raise P500ResumeError(
+                f"resume input identity {field} is malformed"
+            )
+    return {
+        "schema_version": RESUME_INPUT_IDENTITY_SCHEMA_VERSION,
+        "source_sha256": identity["source_sha256"],
+        "topic_sha256": identity["topic_sha256"],
+    }
+
+
+def canonical_state_before_sha256(state: dict[str, str]) -> str:
+    """Hash the exact parsed-state mapping stored in checkpoint metadata."""
+
+    if not isinstance(state, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in state.items()
+    ):
+        raise P500ResumeError(
+            "checkpoint state_before must map strings to strings"
+        )
+    canonical_bytes = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_bytes).hexdigest()
+
+
 def _plan_token(
     *,
     run_dir: Path,
     checkpoint_id: str,
     upstream_sha256: dict[str, str],
+    state_fingerprint: dict[str, Any],
+    index_fingerprint: dict[str, Any],
+    optional_upstream_fingerprints: dict[str, dict[str, Any]],
     downstream_files: tuple[str, ...],
+    downstream_fingerprints: dict[str, dict[str, Any]],
+    resume_input_identity: dict[str, str] | None = None,
+    state_before_sha256: str | None = None,
 ) -> str:
+    include_input_identity = resume_input_identity is not None
+    normalized_input_identity = _normalize_resume_input_identity(
+        resume_input_identity
+    )
+    if (
+        state_before_sha256 is not None
+        and re.fullmatch(r"[0-9a-f]{64}", state_before_sha256) is None
+    ):
+        raise P500ResumeError("state_before_sha256 is malformed")
     payload = {
         "run_dir": str(run_dir),
         "checkpoint_id": checkpoint_id,
         "upstream_sha256": upstream_sha256,
+        "state_fingerprint": state_fingerprint,
+        "index_fingerprint": index_fingerprint,
+        "optional_upstream_fingerprints": optional_upstream_fingerprints,
         "downstream_files": downstream_files,
+        "downstream_fingerprints": downstream_fingerprints,
     }
+    if include_input_identity:
+        payload["resume_input_identity"] = normalized_input_identity
+    if state_before_sha256 is not None:
+        payload["state_before_sha256"] = state_before_sha256
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -369,7 +579,11 @@ def build_resume_plan(
     repo_root: Path,
     run_dir: str | Path,
     checkpoint_id: str | None = None,
+    resume_input_identity: dict[str, str] | None = None,
 ) -> ResumePlan:
+    normalized_input_identity = _normalize_resume_input_identity(
+        resume_input_identity
+    )
     resolved = resolve_run_dir(repo_root, run_dir)
     _validate_upstream(resolved)
     _validate_no_active_bulk_jobs(resolved)
@@ -380,7 +594,19 @@ def build_resume_plan(
         for rel in PRESERVED_CANONICAL_FILES
         if rel not in {"state.txt", "p000_index.md"}
     }
+    state_before = parse_state_file(resolved / "state.txt")
+    state_before_sha256 = canonical_state_before_sha256(state_before)
     downstream = tuple(sorted(set(_iter_downstream_files(resolved))))
+    state_fingerprint = _lexical_path_fingerprint(resolved / "state.txt")
+    index_fingerprint = _lexical_path_fingerprint(resolved / "p000_index.md")
+    optional_upstream_fingerprints = {
+        rel: _lexical_path_fingerprint(resolved / rel)
+        for rel in OPTIONAL_PRESERVED_UPSTREAM_FILES
+    }
+    downstream_fingerprints = {
+        rel: _lexical_path_fingerprint(resolved / rel)
+        for rel in downstream
+    }
     checkpoint_root = resolved / "logs" / "resume" / "p500"
     checkpoint_dir = checkpoint_root / checkpoint
     try:
@@ -395,13 +621,25 @@ def build_resume_plan(
         checkpoint_dir=str(checkpoint_dir),
         preserved_files=PRESERVED_CANONICAL_FILES,
         upstream_sha256=upstream_sha256,
+        state_fingerprint=state_fingerprint,
+        state_before_sha256=state_before_sha256,
+        index_fingerprint=index_fingerprint,
+        optional_upstream_fingerprints=optional_upstream_fingerprints,
+        resume_input_identity=normalized_input_identity,
         downstream_files=downstream,
+        downstream_fingerprints=downstream_fingerprints,
         p400_reason_keys=reason_keys,
         plan_token=_plan_token(
             run_dir=resolved,
             checkpoint_id=checkpoint,
             upstream_sha256=upstream_sha256,
+            state_fingerprint=state_fingerprint,
+            state_before_sha256=state_before_sha256,
+            index_fingerprint=index_fingerprint,
+            optional_upstream_fingerprints=optional_upstream_fingerprints,
             downstream_files=downstream,
+            downstream_fingerprints=downstream_fingerprints,
+            resume_input_identity=normalized_input_identity,
         ),
     )
 
@@ -508,14 +746,52 @@ def _apply_resume_plan_locked(plan: ResumePlan) -> Path:
             repo_root=run_dir.parents[1],
             run_dir=run_dir,
             checkpoint_id=plan.checkpoint_id,
+            resume_input_identity=plan.resume_input_identity,
         )
         if current.upstream_sha256 != plan.upstream_sha256:
             raise P500ResumeError(
                 "upstream artifacts changed after the resume plan was built; run dry-run again"
             )
+        if current.state_fingerprint != plan.state_fingerprint:
+            raise P500ResumeError(
+                "state.txt changed after the resume plan was built; run dry-run again"
+            )
+        if current.state_before_sha256 != plan.state_before_sha256:
+            raise P500ResumeError(
+                "parsed state changed after the resume plan was built; "
+                "run dry-run again"
+            )
+        if current.index_fingerprint != plan.index_fingerprint:
+            raise P500ResumeError(
+                "p000_index.md changed after the resume plan was built; "
+                "run dry-run again"
+            )
+        if (
+            current.optional_upstream_fingerprints
+            != plan.optional_upstream_fingerprints
+        ):
+            raise P500ResumeError(
+                "create_input.json changed after the resume plan was built; "
+                "run dry-run again"
+            )
+        if current.resume_input_identity != plan.resume_input_identity:
+            raise P500ResumeError(
+                "resume input identity changed after the resume plan was "
+                "built; run dry-run again"
+            )
         if current.downstream_files != plan.downstream_files:
             raise P500ResumeError(
                 "downstream artifacts changed after the resume plan was built; run dry-run again"
+            )
+        if current.downstream_fingerprints != plan.downstream_fingerprints:
+            raise P500ResumeError(
+                "downstream artifact bytes or lexical type changed after the "
+                "resume plan was built; run dry-run again"
+            )
+        if current.plan_token != plan.plan_token:
+            raise P500ResumeError(
+                "resume plan token changed after the resume plan was built; "
+                "run dry-run again"
             )
 
         checkpoint_dir.mkdir(parents=True, exist_ok=False)
@@ -529,6 +805,11 @@ def _apply_resume_plan_locked(plan: ResumePlan) -> Path:
             moved.append(rel)
 
         state = parse_state_file(run_dir / "state.txt")
+        if canonical_state_before_sha256(state) != plan.state_before_sha256:
+            raise P500ResumeError(
+                "state_before changed before checkpoint metadata was written; "
+                "run dry-run again"
+            )
         metadata = {
             **plan.to_dict(),
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -588,11 +869,13 @@ def prepare_p500_resume(
     run_dir: str | Path,
     apply: bool,
     checkpoint_id: str | None = None,
+    resume_input_identity: dict[str, str] | None = None,
 ) -> tuple[ResumePlan, Path | None]:
     plan = build_resume_plan(
         repo_root=repo_root,
         run_dir=run_dir,
         checkpoint_id=checkpoint_id,
+        resume_input_identity=resume_input_identity,
     )
     checkpoint = apply_resume_plan(plan) if apply else None
     return plan, checkpoint

@@ -23,6 +23,7 @@
 - `/toc-run`
 - `/toc-scene-series`
 - `/toc-immersive-ride`
+- `/toc-world-walk`
 - 実行方法の正本: `docs/how-to-run.md`
 
 ## Server Roles

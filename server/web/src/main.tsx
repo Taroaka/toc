@@ -51,6 +51,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import SettingsIcon from '@mui/icons-material/Settings';
 import StopIcon from '@mui/icons-material/Stop';
 import { GlassDock, GlassPanel, GlassStatusRim, GlassSurface } from './components';
+import { pollCreateRun } from './createRunPolling';
 import './styles.css';
 
 const MAX_CUT_VIDEO_DURATION_SECONDS = 60;
@@ -377,7 +378,7 @@ type RunProgress = {
   percent: number;
 };
 
-type CreateRunMode = 'normal' | 'scene_storyboard';
+type CreateRunMode = 'normal' | 'scene_storyboard' | 'world_walk';
 
 type CreateRunJob = {
   jobId: string;
@@ -386,6 +387,8 @@ type CreateRunJob = {
   status: 'running' | 'completed' | 'failed' | 'paused';
   title: string;
   createMode?: CreateRunMode;
+  sourceRunId?: string;
+  sourceRunPath?: string;
   targetDurationSeconds?: number;
   stopTargetNumber?: number;
   currentProcess?: string;
@@ -394,6 +397,15 @@ type CreateRunJob = {
   message?: string | null;
   error?: string | null;
   errorCode?: string | null;
+};
+
+type WorldWalkSourceRun = {
+  id: string;
+  title: string;
+  worldWalkTitle: string;
+  path: string;
+  hasAssetRequests: boolean;
+  hasSceneRequests: boolean;
 };
 
 type CandidatesResponse = {
@@ -2325,6 +2337,9 @@ function App() {
   const [createRunTitle, setCreateRunTitle] = useState('');
   const [createRunSource, setCreateRunSource] = useState('');
   const [createRunMode, setCreateRunMode] = useState<CreateRunMode>('normal');
+  const [createRunSourceRunId, setCreateRunSourceRunId] = useState('');
+  const [worldWalkSources, setWorldWalkSources] = useState<WorldWalkSourceRun[]>([]);
+  const [worldWalkSourcesBusy, setWorldWalkSourcesBusy] = useState(false);
   const [createRunTargetDurationSeconds, setCreateRunTargetDurationSeconds] = useState('300');
   const [createRunBusy, setCreateRunBusy] = useState(false);
   const [createRunStatus, setCreateRunStatus] = useState<string | null>(null);
@@ -2371,6 +2386,10 @@ function App() {
   const fullNarrationPlaybackTokenRef = useRef(0);
   const cancelCurrentFullNarrationAudioRef = useRef<(() => void) | null>(null);
   const selectedRun = useMemo(() => runs.find((run) => run.id === runId), [runId, runs]);
+  const selectedWorldWalkSource = useMemo(
+    () => worldWalkSources.find((source) => source.id === createRunSourceRunId) ?? null,
+    [createRunSourceRunId, worldWalkSources],
+  );
   const requestKind = workspaceMode === 'image' ? viewKind : 'scene';
   runIdRef.current = runId;
   requestKindRef.current = requestKind;
@@ -2572,6 +2591,27 @@ function App() {
     return data.runs;
   }, []);
 
+  const loadWorldWalkSources = useCallback(async () => {
+    setWorldWalkSourcesBusy(true);
+    try {
+      const data = await jsonFetch<{ sources: WorldWalkSourceRun[] }>('/api/image-gen/runs/world-walk-sources');
+      setWorldWalkSources(data.sources);
+      setCreateRunError(null);
+      setCreateRunSourceRunId((current) => (
+        data.sources.some((source) => source.id === current)
+          ? current
+          : data.sources[0]?.id || ''
+      ));
+    } catch (error) {
+      console.error(error);
+      setWorldWalkSources([]);
+      setCreateRunSourceRunId('');
+      setCreateRunError('散歩モードの参照元取得に失敗しました');
+    } finally {
+      setWorldWalkSourcesBusy(false);
+    }
+  }, []);
+
   const loadRunRequests = useCallback(async (targetRunId: string, targetKind: ViewKind) => {
     const targetScopeKey = imageRequestScopeKey(targetRunId, targetKind);
     const requestEpoch = loadRunRequestsEpochRef.current + 1;
@@ -2642,6 +2682,11 @@ function App() {
     loadRuns()
       .catch((error) => console.error(error));
   }, [loadRuns]);
+
+  useEffect(() => {
+    if (!createRunOpen || createRunMode !== 'world_walk') return;
+    void loadWorldWalkSources();
+  }, [createRunMode, createRunOpen, loadWorldWalkSources]);
 
   useEffect(() => {
     const nextScopeKey = imageRequestScopeKey(runId, requestKind);
@@ -4249,23 +4294,36 @@ function App() {
 
   const createRun = async () => {
     const title = createRunTitle.trim();
-    if (!title) return;
+    if (createRunMode !== 'world_walk' && !title) return;
+    if (createRunMode === 'world_walk' && !createRunSourceRunId) return;
     const targetDurationSeconds = Number(createRunTargetDurationSeconds);
     if (!Number.isInteger(targetDurationSeconds) || targetDurationSeconds < 300 || targetDurationSeconds > 1200) return;
     const mode = createRunMode;
-    const endpoint = mode === 'scene_storyboard' ? '/api/image-gen/runs/create/storyboard' : '/api/image-gen/runs/create';
+    const endpoint = mode === 'world_walk'
+      ? '/api/image-gen/runs/create-world-walk'
+      : mode === 'scene_storyboard'
+        ? '/api/image-gen/runs/create/storyboard'
+        : '/api/image-gen/runs/create';
+    const body = mode === 'world_walk'
+      ? {
+          source_run_id: createRunSourceRunId,
+          title: title || null,
+          target_duration_seconds: targetDurationSeconds,
+        }
+      : {
+          title,
+          source: createRunSource.trim() || null,
+          target_duration_seconds: targetDurationSeconds,
+        };
+    setCreateRunOpen(false);
     setCreateRunBusy(true);
     setCreateRunError(null);
-    setCreateRunStatus('フォルダを作成中');
+    setCreateRunStatus(mode === 'world_walk' ? '散歩モードを作成中' : 'フォルダを作成中');
     try {
       const created = await jsonFetch<CreateRunJob>(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title,
-          source: createRunSource.trim() || null,
-          target_duration_seconds: targetDurationSeconds,
-        }),
+        body: JSON.stringify(body),
       });
       const newRun: RunFolder = {
         id: created.runId,
@@ -4279,20 +4337,26 @@ function App() {
       setItems([]);
       setReferences([]);
       setRunProgress(null);
-      setCreateRunOpen(false);
       setCreateRunTitle('');
       setCreateRunSource('');
+      setCreateRunSourceRunId('');
       setCreateRunMode('normal');
       setCreateRunTargetDurationSeconds('300');
-      setCreateRunStatus(mode === 'scene_storyboard' ? 'ストーリーボード式ToCを作成中' : 'ToCを作成中');
+      setCreateRunStatus(
+        mode === 'world_walk'
+          ? '世界観散歩を作成中'
+          : mode === 'scene_storyboard'
+            ? 'ストーリーボード式ToCを作成中'
+            : 'ToCを作成中',
+      );
 
-      let latest = created;
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        await sleep(60000);
-        latest = await jsonFetch<CreateRunJob>(`/api/image-gen/runs/create/${encodeURIComponent(created.jobId)}`);
-        if (latest.message) setCreateRunStatus(latest.message);
-        if (latest.status === 'completed' || latest.status === 'failed' || latest.status === 'paused') break;
-      }
+      const latest = await pollCreateRun(created, {
+        sleep: () => sleep(60000),
+        fetchStatus: () => jsonFetch<CreateRunJob>(
+          `/api/image-gen/runs/create/${encodeURIComponent(created.jobId)}`,
+        ),
+        onMessage: setCreateRunStatus,
+      });
       if (latest.status !== 'completed' && latest.status !== 'paused') {
         throw new Error(latest.error || '作成が完了しませんでした');
       }
@@ -5005,26 +5069,58 @@ function App() {
           <DialogTitle id="create-run-title">新しいToCを作成</DialogTitle>
           <DialogContent dividers>
             <Stack spacing={2}>
-              <TextField
-                label="タイトル"
-                value={createRunTitle}
-                disabled={createRunBusy}
-                onChange={(event) => setCreateRunTitle(event.target.value)}
-                autoFocus
-                fullWidth
-              />
               <FormControl fullWidth size="small">
                 <InputLabel>作成モード</InputLabel>
                 <Select
                   label="作成モード"
                   value={createRunMode}
                   disabled={createRunBusy}
-                  onChange={(event) => setCreateRunMode(event.target.value as CreateRunMode)}
+                  onChange={(event) => {
+                    setCreateRunMode(event.target.value as CreateRunMode);
+                    setCreateRunError(null);
+                    setCreateRunStatus(null);
+                  }}
                 >
                   <MenuItem value="normal">通常</MenuItem>
-                  <MenuItem value="scene_storyboard">1scene=1ストーリーボード式</MenuItem>
+                  <MenuItem value="scene_storyboard">scene単位ストーリーボード式（尺に応じて分割）</MenuItem>
+                  <MenuItem value="world_walk">世界観散歩</MenuItem>
                 </Select>
               </FormControl>
+              {createRunMode === 'world_walk' && (
+                <FormControl
+                  fullWidth
+                  size="small"
+                  disabled={createRunBusy || worldWalkSourcesBusy || worldWalkSources.length === 0}
+                >
+                  <InputLabel>参照する物語</InputLabel>
+                  <Select
+                    label="参照する物語"
+                    value={createRunSourceRunId}
+                    onChange={(event) => setCreateRunSourceRunId(String(event.target.value))}
+                  >
+                    {worldWalkSources.length === 0 ? (
+                      <MenuItem value="" disabled>
+                        {worldWalkSourcesBusy ? '読み込み中' : '参照元なし'}
+                      </MenuItem>
+                    ) : (
+                      worldWalkSources.map((source) => (
+                        <MenuItem key={source.id} value={source.id}>
+                          {source.title}
+                        </MenuItem>
+                      ))
+                    )}
+                  </Select>
+                </FormControl>
+              )}
+              <TextField
+                label={createRunMode === 'world_walk' ? 'タイトル（任意）' : 'タイトル'}
+                value={createRunTitle}
+                disabled={createRunBusy}
+                onChange={(event) => setCreateRunTitle(event.target.value)}
+                placeholder={createRunMode === 'world_walk' ? selectedWorldWalkSource?.worldWalkTitle || '' : undefined}
+                autoFocus
+                fullWidth
+              />
               <FormControl fullWidth size="small">
                 <InputLabel>動画尺プリセット</InputLabel>
                 <Select
@@ -5055,16 +5151,25 @@ function App() {
                 helperText="300〜1200秒。実効尺は目標の80%以上で合格します。"
                 fullWidth
               />
-              <TextField
-                label="中身"
-                value={createRunSource}
-                disabled={createRunBusy}
-                onChange={(event) => setCreateRunSource(event.target.value)}
-                placeholder="空欄の場合はタイトルと同じ内容で作成"
-                multiline
-                minRows={5}
-                fullWidth
-              />
+              {createRunMode === 'world_walk' ? (
+                <TextField
+                  label="参照元"
+                  value={selectedWorldWalkSource?.path || ''}
+                  disabled
+                  fullWidth
+                />
+              ) : (
+                <TextField
+                  label="中身"
+                  value={createRunSource}
+                  disabled={createRunBusy}
+                  onChange={(event) => setCreateRunSource(event.target.value)}
+                  placeholder="空欄の場合はタイトルと同じ内容で作成"
+                  multiline
+                  minRows={5}
+                  fullWidth
+                />
+              )}
               {createRunBusy && <LinearProgress />}
               <Box className="createRunStatusRow">
                 {createRunStatus && <Chip size="small" color={createRunBusy ? 'primary' : 'default'} label={createRunStatus} />}
@@ -5085,7 +5190,7 @@ function App() {
               onClick={createRun}
               disabled={
                 createRunBusy
-                || !createRunTitle.trim()
+                || (createRunMode === 'world_walk' ? !createRunSourceRunId : !createRunTitle.trim())
                 || !Number.isInteger(Number(createRunTargetDurationSeconds))
                 || Number(createRunTargetDurationSeconds) < 300
                 || Number(createRunTargetDurationSeconds) > 1200

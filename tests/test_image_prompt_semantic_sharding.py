@@ -18,6 +18,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from server import image_gen_app  # noqa: E402
 from server.codex_app_server import CodexAppServerTransportError  # noqa: E402
+from toc.review_projection import (  # noqa: E402
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
+    video_manifest_review_projection_sha256,
+)
 
 
 def _load_pack_builder():
@@ -168,8 +172,16 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
         # The semantic shard reviewer is downstream of the deterministic
         # story/prompt gate.  Keep this fixture provider-ready instead of
         # accidentally testing the missing-gate failure path.
-        for source_name in ("story.md", "script.md", "video_manifest.md"):
+        for source_name in ("story.md", "script.md"):
             (run_dir / source_name).write_text(f"# {source_name}\n", encoding="utf-8")
+        (run_dir / "video_manifest.md").write_text(
+            "```yaml\n"
+            "video_metadata:\n"
+            "  topic: shard-test\n"
+            "scenes: []\n"
+            "```\n",
+            encoding="utf-8",
+        )
         deterministic_selectors = [
             str(entry["selector"])
             for entry in entries
@@ -194,9 +206,11 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                 [
                     "# Image Prompt Story Review",
                     "",
-                    "- review_format_version: `deterministic_image_prompt_review_v2`",
+                    "- review_format_version: `deterministic_image_prompt_review_v3`",
                     f"- manifest: `{run_dir / 'video_manifest.md'}`",
-                    f"- manifest_sha256: `{image_gen_app._file_sha256(run_dir / 'video_manifest.md')}`",
+                    "- manifest_fingerprint_policy: "
+                    f"`{VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA}`",
+                    f"- manifest_sha256: `{video_manifest_review_projection_sha256(run_dir / 'video_manifest.md')}`",
                     f"- story_sha256: `{image_gen_app._file_sha256(run_dir / 'story.md')}`",
                     f"- script_sha256: `{image_gen_app._file_sha256(run_dir / 'script.md')}`",
                     "- status: `PASS`",
@@ -301,13 +315,16 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
         self.assertEqual(state["review.semantic.image_prompt.shards.status"], "passed")
         self.assertIn("reviewed_entries:\n  - scene10_cut01\n  - scene10\n  - scene20_cut01\n  - scene20", report)
 
-    def test_selector_coverage_error_blocks_only_its_scene_and_preserves_passing_scene(self) -> None:
+    def test_selector_coverage_error_retries_only_its_scene_as_output_contract_failure(
+        self,
+    ) -> None:
         entries = [
             {"selector": "scene10_cut01", "scene_id": 10, "review_scope": "all_entries"},
             {"selector": "scene10", "scene_id": 10, "review_scope": "scene_composite"},
             {"selector": "scene20_cut01", "scene_id": 20, "review_scope": "all_entries"},
             {"selector": "scene20", "scene_id": 20, "review_scope": "scene_composite"},
         ]
+        turn_counts: dict[str, int] = {}
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -323,6 +340,11 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                     return "thread-1"
 
                 async def run_turn(self, *, text: str, **_kwargs):
+                    shard_id = text.split(
+                        "Review only image_prompt scene shard `",
+                        1,
+                    )[1].split("`", 1)[0]
+                    turn_counts[shard_id] = turn_counts.get(shard_id, 0) + 1
                     report_path = _pending_report_path_from_prompt(text)
                     expected = json.loads(text.split("Expected reviewed_entries exactly once: ", 1)[1].splitlines()[0])
                     reviewed = expected if expected[0].startswith("scene10") else [expected[0], expected[0]]
@@ -348,30 +370,49 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app.subprocess.run", fake_build_pack),
                 patch("server.image_gen_app.create_codex_app_server_client", lambda **_kwargs: FakeClient()),
+                patch.dict(
+                    os.environ,
+                    {"TOC_IMAGE_PROMPT_TRANSPORT_RETRY_ATTEMPTS": "2"},
+                ),
             ):
-                result = asyncio.run(
-                    image_gen_app._run_semantic_review_once(
-                        "job-1",
-                        run_dir=run_dir,
-                        stage="image_prompt",
-                        attempt=1,
-                        max_attempts=2,
-                        final_attempt=False,
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "image_prompt scene shard transport failed",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="image_prompt",
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
                     )
-                )
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
             report = (run_dir / image_gen_app.semantic_review_relpaths("image_prompt")["report"]).read_text(encoding="utf-8")
 
-        self.assertFalse(result.passed)
+        self.assertEqual(turn_counts, {"scene_10": 1, "scene_20": 2})
         self.assertEqual(state["review.semantic.image_prompt.shards.failed_count"], "1")
         self.assertEqual(state["review.semantic.image_prompt.shards.scene_10.status"], "passed")
-        self.assertEqual(state["review.semantic.image_prompt.shards.scene_20.status"], "failed")
         self.assertEqual(
-            state["review.semantic.image_prompt.shards.scene_20.blocked_entries"],
-            "scene20_cut01, scene20",
+            state["review.semantic.image_prompt.shards.scene_20.status"],
+            "transport_failed",
         )
-        self.assertIn("semantic_review_selector_coverage_invalid", report)
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_20.transport.error_kind"
+            ],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_20.transport.retry_count"
+            ],
+            "1",
+        )
+        self.assertIn("image_prompt_shard_transport_failed", report)
         self.assertIn("blocked_entries:\n  - scene20_cut01\n  - scene20", report)
         self.assertNotIn("blocked_entries:\n  - scene10_cut01", report)
         self.assertIn("reviewed_entries:\n  - scene10_cut01\n  - scene10\n  - scene20_cut01\n  - scene20", report)
@@ -440,6 +481,211 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
         self.assertEqual(turn_counts, {"scene_10": 1, "scene_20": 2})
         self.assertEqual(state["review.semantic.image_prompt.shards.scene_20.transport.status"], "recovered")
         self.assertEqual(state["review.semantic.image_prompt.shards.scene_20.transport.retry_count"], "1")
+
+    def test_missing_final_verdict_retries_as_image_prompt_output_contract_failure(self) -> None:
+        entries = [
+            {
+                "selector": "scene10_cut01",
+                "scene_id": 10,
+                "review_scope": "all_entries",
+            },
+            {
+                "selector": "scene10",
+                "scene_id": 10,
+                "review_scope": "scene_composite",
+            },
+        ]
+        turn_count = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output/sample_run"
+            run_dir.mkdir(parents=True)
+
+            def fake_build_pack(cmd, **_kwargs):
+                self._write_pack(run_dir, entries)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, **_kwargs):
+                    nonlocal turn_count
+                    turn_count += 1
+                    return _agent_message_transcript(
+                        "Review completed without the required verdict."
+                    )
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    lambda **_kwargs: FakeClient(),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"TOC_IMAGE_PROMPT_TRANSPORT_RETRY_ATTEMPTS": "2"},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "image_prompt scene shard transport failed",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="image_prompt",
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(turn_count, 2)
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_10.transport.error_kind"
+            ],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_10.transport.retry_count"
+            ],
+            "1",
+        )
+
+    def test_valid_commentary_with_malformed_final_answer_is_shard_output_contract_failure(
+        self,
+    ) -> None:
+        entries = [
+            {
+                "selector": "scene10_cut01",
+                "scene_id": 10,
+                "review_scope": "all_entries",
+            },
+            {
+                "selector": "scene10",
+                "scene_id": 10,
+                "review_scope": "scene_composite",
+            },
+        ]
+        turn_count = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output/sample_run"
+            run_dir.mkdir(parents=True)
+
+            def fake_build_pack(cmd, **_kwargs):
+                self._write_pack(run_dir, entries)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    nonlocal turn_count
+                    turn_count += 1
+                    report_path = _pending_report_path_from_prompt(text)
+                    expected = json.loads(
+                        text.split(
+                            "Expected reviewed_entries exactly once: ",
+                            1,
+                        )[1].splitlines()[0]
+                    )
+                    verdict = {
+                        "status": "passed",
+                        "semantic_review_input_digest": (
+                            _semantic_input_digest_for_report(report_path)
+                        ),
+                        "reviewed_entries": expected,
+                        "blocked_entries": [],
+                        "findings": [],
+                        "failed_selectors": [],
+                        "reason_keys": [],
+                        "notes": [],
+                    }
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "commentary",
+                                    "text": json.dumps(
+                                        verdict,
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            },
+                        },
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": '{"status": "passed"',
+                                }
+                            },
+                        },
+                    ]
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.subprocess.run", fake_build_pack),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    lambda **_kwargs: FakeClient(),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"TOC_IMAGE_PROMPT_TRANSPORT_RETRY_ATTEMPTS": "2"},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "image_prompt scene shard transport failed",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="image_prompt",
+                            attempt=1,
+                            max_attempts=2,
+                            final_attempt=False,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(turn_count, 2)
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_10.transport.error_kind"
+            ],
+            "output_contract_failed",
+        )
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_10.transport.retry_count"
+            ],
+            "1",
+        )
 
     def test_scope_validation_fails_closed_on_zero_missing_duplicate_or_collection_gap(self) -> None:
         valid = {

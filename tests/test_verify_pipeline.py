@@ -1,6 +1,7 @@
 import json
 import hashlib
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot
+from toc.image_request_snapshot import (
+    load_request_snapshot,
+    materialize_request_snapshot,
+    write_request_snapshot_atomic,
+)
+from toc.partial_media import (
+    PARTIAL_MEDIA_PROJECTION_RELPATH,
+    PARTIAL_MEDIA_RECEIPT_RELPATH,
+    PartialMediaProjectionError,
+    derive_partial_media_projection,
+    localize_semantic_failure_selectors,
+    write_partial_media_generation_receipt,
+    write_partial_media_projection,
+)
 from toc.grounding import (
     build_stage_grounding_audit,
     build_stage_grounding_readset,
@@ -924,6 +939,384 @@ def _write_semantic_review_passed(run_dir: Path, stage: str, *, entry_count: int
         run_dir / "state.txt",
         semantic_state_updates(stage, status="passed", entry_count=entry_count, error_count=0),
     )
+
+
+def _write_current_failed_semantic_review(
+    run_dir: Path,
+    *,
+    stage: str,
+    entry_ids: list[str],
+    failed_selectors: list[str],
+    blocked_entries: list[str],
+    request_revision: str | None = None,
+) -> None:
+    from toc.semantic_review import (
+        SEMANTIC_REVIEW_INPUT_SCHEMA,
+        semantic_review_input_digest,
+        semantic_review_relpaths,
+        semantic_review_scope_binding_sha256,
+        semantic_state_updates,
+    )
+
+    paths = semantic_review_relpaths(stage)
+    for relpath in paths.values():
+        (run_dir / relpath).parent.mkdir(parents=True, exist_ok=True)
+    collection_path = run_dir / paths["collection"]
+    scope_path = run_dir / paths["scope"]
+    prompt_path = run_dir / paths["prompt"]
+    report_path = run_dir / paths["report"]
+    source_path = scope_path.with_name(f"{stage}.partial-source.md")
+    collection_path.write_text(
+        f"# {stage} Collection\n\n"
+        + "\n".join(f"## {entry_id}\n" for entry_id in entry_ids),
+        encoding="utf-8",
+    )
+    prompt_path.write_text(
+        f"# {stage} localized partial-media review prompt\n",
+        encoding="utf-8",
+    )
+    source_path.write_text(
+        f"# {stage} current localized source\n",
+        encoding="utf-8",
+    )
+    source_relpath = source_path.relative_to(run_dir).as_posix()
+    source_digests = [
+        {
+            "path": source_relpath,
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+    ]
+    scope = {
+        "stage": stage,
+        "entry_count": len(entry_ids),
+        "entry_ids": entry_ids,
+        "selectors": entry_ids,
+        "review_scope": "all_entries",
+        "source_artifacts": [source_relpath],
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_digests,
+        "collection_sha256": hashlib.sha256(
+            collection_path.read_bytes()
+        ).hexdigest(),
+        "prompt_sha256": hashlib.sha256(
+            prompt_path.read_bytes()
+        ).hexdigest(),
+        "artifacts": {
+            key: value.as_posix()
+            for key, value in paths.items()
+        },
+    }
+    if request_revision is not None:
+        scope["request_revision"] = request_revision
+    binding = semantic_review_scope_binding_sha256(scope)
+    digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=source_digests,
+        request_revision=request_revision,
+        scope_binding_sha256=binding,
+    )
+    scope["scope_binding_sha256"] = binding
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(
+        json.dumps(scope, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        "\n".join(
+            [
+                "status: failed",
+                f"semantic_review_input_digest: {digest}",
+                f"reviewed_entries: [{', '.join(entry_ids)}]",
+                f"blocked_entries: [{', '.join(blocked_entries)}]",
+                f"failed_selectors: [{', '.join(failed_selectors)}]",
+                "reason_keys: [localized_visual_obligation_failed]",
+                "findings: [localized scene image failure]",
+                "notes: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        semantic_state_updates(
+            stage,
+            status="failed",
+            entry_count=len(entry_ids),
+            error_count=1,
+        ),
+    )
+
+
+def _append_strict_scene_provenance(
+    run_dir: Path,
+    *,
+    snapshot: object,
+    item_id: str,
+) -> None:
+    item = snapshot.item(item_id)
+    output_path = run_dir / item.destination
+    output_sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
+    reference_sha256s = [
+        hashlib.sha256((run_dir / reference.path).read_bytes()).hexdigest()
+        for reference in item.references
+    ]
+    log_dir = run_dir / "logs" / "app_server" / "image_gen"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "itemId": item.item_id,
+        "kind": "scene",
+        "destination": item.destination,
+        "apiPromptPolicyVersion": item.prompt_policy_version,
+        "status": "completed",
+        "source": "app_server",
+        "outputSha256": output_sha256,
+        "provenance": {
+            "policy": "request_bound_v2",
+            "authoritative": True,
+            "itemId": item.item_id,
+            "generationJobId": f"job-{item.item_id}",
+            "turnId": f"turn-{item.item_id}",
+            "imageGenerationItemId": f"generated-{item.item_id}",
+            "imageGenerationItemCount": 1,
+            "savedPath": str(output_path),
+            "destination": item.destination,
+            "promptSha256": item.prompt_sha256,
+            "referenceSha256s": reference_sha256s,
+            "requestDigest": item.request_digest,
+            "compilerVersion": item.compiler_version,
+            "sourceDigest": item.source_digest,
+            "outputSha256": output_sha256,
+        },
+    }
+    (log_dir / f"strict-{item.item_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_partial_image_p680_fixture(
+    run_dir: Path,
+    *,
+    stage: str = "image_prompt",
+    blocked_item_ids: list[str] | None = None,
+) -> dict[str, object]:
+    blocked_ids = blocked_item_ids or ["scene20_cut01"]
+    survivor_id = "scene10_cut01"
+    reference = "assets/characters/momotaro_seed.png"
+    outputs = {
+        survivor_id: "assets/scenes/scene10_cut01.png",
+        "scene20_cut01": "assets/scenes/scene20_cut01.png",
+    }
+    _write_basic_image_stage_artifacts(run_dir)
+    (run_dir / "script.md").write_text(
+        "# Script\n\n"
+        "局所的な画像QA失敗を除き、各sceneとcutの因果、人物の動作、"
+        "時間帯、場所、次の場面への引き継ぎを具体的に記した検証用台本。"
+        "この本文はsemantic review checkをp680で評価できる長さを持つ。\n",
+        encoding="utf-8",
+    )
+    _write_photo_like_test_png(run_dir / reference)
+    manifest_scenes = "\n".join(
+        [
+            f"""  - scene_id: {scene_number}
+    cuts:
+      - cut_id: 1
+        image_generation:
+          output: "{destination}"
+"""
+            for scene_number, destination in (
+                (10, outputs[survivor_id]),
+                (20, outputs["scene20_cut01"]),
+            )
+        ]
+    )
+    (run_dir / "video_manifest.md").write_text(
+        "```yaml\nvideo_metadata:\n  topic: 桃太郎\n"
+        "  experience: cinematic_story\nscenes:\n"
+        + manifest_scenes
+        + "```\n",
+        encoding="utf-8",
+    )
+    prompts = {
+        survivor_id: "実写映画調の朝の村道で桃太郎が前へ進む。",
+        "scene20_cut01": "実写映画調の夕方の森で桃太郎が立ち止まる。",
+    }
+    request_sections = ["# Image Generation Requests", ""]
+    for item_id, destination in outputs.items():
+        request_sections.extend(
+            [
+                f"## {item_id}",
+                "",
+                "- tool: `codex_builtin_image`",
+                f"- selector: `{item_id}`",
+                "- prompt_policy_version: `image_api_prompt_v2`",
+                "- execution_lane: `standard`",
+                "- reference_count: `1`",
+                f"- output: `{destination}`",
+                "- references:",
+                f"  - `momotaro_seed`: `{reference}`",
+                "",
+                "```api_prompt",
+                prompts[item_id],
+                "```",
+                "",
+            ]
+        )
+    request_path = run_dir / "image_generation_requests.md"
+    request_path.write_text(
+        "\n".join(request_sections),
+        encoding="utf-8",
+    )
+    snapshot = materialize_request_snapshot(
+        run_dir,
+        kind="scene",
+        items=[
+            {
+                "item_id": item_id,
+                "destination": destination,
+                "prompt": prompts[item_id],
+                "prompt_policy_version": "image_api_prompt_v2",
+                "compiler_version": "partial_media_test_v1",
+                "source_digest": hashlib.sha256(
+                    f"{item_id}:source".encode()
+                ).hexdigest(),
+                "references": [reference],
+            }
+            for item_id, destination in outputs.items()
+        ],
+        source_artifact="image_generation_requests.md",
+    )
+    write_request_snapshot_atomic(
+        run_dir / "image_generation_request_snapshot.json",
+        snapshot,
+        run_dir=run_dir,
+    )
+    _write_photo_like_test_png(run_dir / outputs[survivor_id])
+    _append_strict_scene_provenance(
+        run_dir,
+        snapshot=snapshot,
+        item_id=survivor_id,
+    )
+
+    if stage == "scene_detail":
+        entry_ids = ["scene:10", "scene:20"]
+        failed_selectors = ["scene:20"]
+        blocked_entries = ["scene:20"]
+    elif stage == "cut_blueprint":
+        entry_ids = ["cut:scene10_cut01", "cut:scene20_cut01"]
+        failed_selectors = ["scene20_cut1"]
+        blocked_entries = ["scene20_cut01"]
+    else:
+        entry_ids = ["scene10_cut01", "scene20_cut01"]
+        failed_selectors = ["scene20_cut1"]
+        blocked_entries = ["scene20_cut01"]
+    _write_current_failed_semantic_review(
+        run_dir,
+        stage=stage,
+        entry_ids=entry_ids,
+        failed_selectors=failed_selectors,
+        blocked_entries=blocked_entries,
+        request_revision=(
+            snapshot.request_revision
+            if stage == "image_prompt"
+            else None
+        ),
+    )
+    if stage != "image_prompt":
+        _write_semantic_review_passed(run_dir, "image_prompt")
+    if stage != "scene_detail":
+        _write_semantic_review_passed(run_dir, "scene_detail")
+    if stage != "cut_blueprint":
+        _write_semantic_review_passed(run_dir, "cut_blueprint")
+    blocked_values = ", ".join(blocked_ids)
+    state_updates = {
+        f"review.semantic.{stage}.partial_media_allowed": "true",
+        f"review.semantic.{stage}.blocked_image_items": blocked_values,
+        f"review.semantic.{stage}.blocked_image_item_count": str(
+            len(blocked_ids)
+        ),
+        f"review.semantic.{stage}.localization.status": (
+            "localized_to_image_items"
+        ),
+        f"review.semantic.{stage}.localization.blocked_image_items": (
+            blocked_values
+        ),
+        f"review.semantic.{stage}.localization.validation": "passed",
+    }
+    if stage == "image_prompt":
+        state_updates.update(
+            {
+                "review.image_prompt.request_freeze.status": "frozen",
+                "review.image_prompt.request_freeze.semantic_status": (
+                    "localized_failure"
+                ),
+                "review.image_prompt.request_freeze.request_revision": (
+                    snapshot.request_revision
+                ),
+                (
+                    "review.image_prompt.request_freeze."
+                    "reviewed_request_revision"
+                ): snapshot.request_revision,
+            }
+        )
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+    projection = derive_partial_media_projection(
+        run_dir,
+        stages=[stage],
+    )
+    write_partial_media_projection(run_dir, projection)
+    receipt = write_partial_media_generation_receipt(
+        run_dir,
+        projection=projection,
+        provider_submitted_item_ids=[survivor_id],
+        generated_item_ids=[survivor_id],
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "review.semantic.partial_media.generated": "true",
+            "review.semantic.partial_media.request_revision": (
+                snapshot.request_revision
+            ),
+            "review.semantic.partial_media.projection_sha256": (
+                projection["projection_sha256"]
+            ),
+            "review.semantic.partial_media.blocked_image_items": (
+                blocked_values
+            ),
+            "review.semantic.partial_media.blocked_image_item_count": str(
+                len(blocked_ids)
+            ),
+            "review.semantic.partial_media.synthetic_failed_candidates": (
+                blocked_values
+            ),
+            (
+                "review.semantic.partial_media."
+                "provider_submitted_image_items"
+            ): survivor_id,
+            "review.semantic.partial_media.receipt": (
+                PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
+            ),
+            "review.semantic.partial_media.receipt_sha256": (
+                receipt["receipt_sha256"]
+            ),
+            "image_generation.status": "partial",
+            "image_generation.blocked_item_count": str(len(blocked_ids)),
+            "image_generation.blocked_item_ids": blocked_values,
+        },
+    )
+    return {
+        "snapshot": snapshot,
+        "projection": projection,
+        "receipt": receipt,
+        "survivor_id": survivor_id,
+        "blocked_id": "scene20_cut01",
+        "blocked_destination": outputs["scene20_cut01"],
+    }
 
 
 def _write_p400_review_artifacts(run_dir: Path) -> None:
@@ -2658,6 +3051,83 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertEqual(stage["details"]["required_buckets"], ["p100", "p200", "p300"])
             self.assertEqual(updates["eval.orchestration.score"], "1.0000")
 
+    def test_check_orchestration_accepts_current_p500_bucket_pending_during_p570_gate(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0570"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p570")
+            result_path = (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "p500.supervisor_result.json"
+            )
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload.update(
+                {
+                    "status": "pending",
+                    "completed_slots": ["p520", "p530"],
+                    "state_keys": {
+                        "orchestration.p500.supervisor.call_status": "returned",
+                        "orchestration.p500.supervisor.status": "pending",
+                        "slot.p570.status": "pending",
+                    },
+                }
+            )
+            result_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "orchestration.p500.supervisor.status": "pending",
+                    "slot.p520.status": "done",
+                    "slot.p530.status": "done",
+                    "slot.p570.status": "pending",
+                },
+            )
+
+            stage, _ = VERIFY_MODULE.check_orchestration(
+                run_dir,
+                stage_target="p570",
+            )
+
+            self.assertTrue(stage["passed"], msg=stage)
+
+    def test_check_orchestration_rejects_p500_pending_after_asset_bucket(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_verify_orchestration_") as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0680"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(run_dir, stage_target="p680")
+            result_path = (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "p500.supervisor_result.json"
+            )
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload["status"] = "pending"
+            result_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {"orchestration.p500.supervisor.status": "pending"},
+            )
+
+            stage, _ = VERIFY_MODULE.check_orchestration(
+                run_dir,
+                stage_target="p680",
+            )
+
+            self.assertFalse(stage["passed"])
+
     def test_check_orchestration_fails_without_l2_progress_memo(self) -> None:
         import tempfile
 
@@ -2875,6 +3345,474 @@ class TestVerifyPipeline(unittest.TestCase):
             self.assertTrue(checks["image.generation_provenance_app_server"])
             self.assertTrue(checks["image.request_lane_consistency"])
             self.assertNotIn("image_regeneration_plan", stage["details"])
+
+    def test_p680_accepts_current_request_bound_localized_partial_media(
+        self,
+    ) -> None:
+        for semantic_stage in (
+            "scene_detail",
+            "cut_blueprint",
+            "image_prompt",
+        ):
+            with (
+                self.subTest(semantic_stage=semantic_stage),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_media_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / f"partial_{semantic_stage}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                _write_partial_image_p680_fixture(
+                    run_dir,
+                    stage=semantic_stage,
+                )
+
+                image_stage, _ = VERIFY_MODULE.check_image(
+                    run_dir,
+                    target_slot="p680",
+                )
+                image_checks = {
+                    check["id"]: check["passed"]
+                    for check in image_stage["checks"]
+                }
+
+                self.assertTrue(
+                    image_checks["image.localized_partial_media_contract"],
+                    msg=image_stage,
+                )
+                self.assertTrue(
+                    image_checks["image.output_files"],
+                    msg=image_stage,
+                )
+                self.assertTrue(
+                    image_checks["image.generation_provenance_app_server"],
+                    msg=image_stage,
+                )
+                self.assertTrue(
+                    image_checks["image.semantic_review_subagent_passed"],
+                    msg=image_stage,
+                )
+                self.assertTrue(
+                    image_checks["image.visual_not_vector_like"],
+                    msg=image_stage,
+                )
+                self.assertTrue(image_stage["passed"], msg=image_stage)
+
+                script_stage, _ = VERIFY_MODULE.check_script_single(
+                    run_dir,
+                    "standard",
+                    target_slot="p680",
+                )
+                script_checks = {
+                    check["id"]: check["passed"]
+                    for check in script_stage["checks"]
+                }
+                self.assertTrue(
+                    script_checks[
+                        "scene_detail.semantic_review_subagent_passed"
+                    ],
+                    msg=script_stage,
+                )
+                self.assertTrue(
+                    script_checks[
+                        "cut_blueprint.semantic_review_subagent_passed"
+                    ],
+                    msg=script_stage,
+                )
+
+    def test_p680_partial_media_rejects_missing_projection_or_receipt(
+        self,
+    ) -> None:
+        for missing_relpath in (
+            PARTIAL_MEDIA_PROJECTION_RELPATH,
+            PARTIAL_MEDIA_RECEIPT_RELPATH,
+        ):
+            with (
+                self.subTest(missing=missing_relpath.as_posix()),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_missing_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / "partial_missing"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                _write_partial_image_p680_fixture(run_dir)
+                (run_dir / missing_relpath).unlink()
+
+                stage, _ = VERIFY_MODULE.check_image(
+                    run_dir,
+                    target_slot="p680",
+                )
+                checks = {
+                    check["id"]: check["passed"]
+                    for check in stage["checks"]
+                }
+
+                self.assertFalse(
+                    checks["image.localized_partial_media_contract"]
+                )
+                self.assertFalse(stage["passed"])
+
+    def test_partial_media_rejects_stale_artifact_entries_without_state_claim(
+        self,
+    ) -> None:
+        for relpath in (
+            PARTIAL_MEDIA_PROJECTION_RELPATH,
+            PARTIAL_MEDIA_RECEIPT_RELPATH,
+        ):
+            for entry_kind in ("broken_symlink", "fifo", "directory"):
+                with (
+                    self.subTest(
+                        relpath=relpath.as_posix(),
+                        entry_kind=entry_kind,
+                    ),
+                    tempfile.TemporaryDirectory(
+                        prefix="toc_verify_partial_unclaimed_"
+                    ) as td,
+                ):
+                    run_dir = Path(td) / "out" / "partial_unclaimed"
+                    target = run_dir / relpath
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    (run_dir / "state.txt").write_text(
+                        "slot.current: p630\n",
+                        encoding="utf-8",
+                    )
+                    if entry_kind == "broken_symlink":
+                        target.symlink_to("missing-target.json")
+                    elif entry_kind == "fifo":
+                        os.mkfifo(target)
+                    else:
+                        target.mkdir()
+
+                    contract = (
+                        VERIFY_MODULE._localized_partial_media_contract(
+                            run_dir,
+                            require_generation_receipt=False,
+                        )
+                    )
+
+                    self.assertFalse(contract["valid"], contract)
+                    self.assertIn(
+                        "without a current localized semantic failure",
+                        "\n".join(contract["errors"]),
+                    )
+
+    def test_p680_partial_media_rejects_any_blocked_destination_entry(
+        self,
+    ) -> None:
+        for entry_kind in ("broken_symlink", "fifo", "directory"):
+            with (
+                self.subTest(entry_kind=entry_kind),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_stale_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / "partial_stale"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                fixture = _write_partial_image_p680_fixture(run_dir)
+                blocked_path = run_dir / str(
+                    fixture["blocked_destination"]
+                )
+                blocked_path.parent.mkdir(parents=True, exist_ok=True)
+                if entry_kind == "broken_symlink":
+                    blocked_path.symlink_to("missing-target.png")
+                elif entry_kind == "fifo":
+                    os.mkfifo(blocked_path)
+                else:
+                    blocked_path.mkdir()
+
+                stage, _ = VERIFY_MODULE.check_image(
+                    run_dir,
+                    target_slot="p680",
+                )
+                checks = {
+                    check["id"]: check["passed"]
+                    for check in stage["checks"]
+                }
+
+                self.assertFalse(
+                    checks["image.localized_partial_media_contract"]
+                )
+                if entry_kind != "broken_symlink":
+                    self.assertIn(
+                        "stale image outputs",
+                        "\n".join(
+                            stage["details"][
+                                "image_localized_partial_media_errors"
+                            ]
+                        ),
+                    )
+
+    def test_p680_partial_media_rejects_survivor_symlink_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_partial_symlink_"
+        ) as td:
+            run_dir = Path(td) / "out" / "partial_symlink"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fixture = _write_partial_image_p680_fixture(run_dir)
+            snapshot = fixture["snapshot"]
+            survivor = snapshot.item(str(fixture["survivor_id"]))
+            output_path = run_dir / survivor.destination
+            backing_path = output_path.with_name("survivor-backing.png")
+            output_path.rename(backing_path)
+            output_path.symlink_to(backing_path.name)
+
+            stage, _ = VERIFY_MODULE.check_image(
+                run_dir,
+                target_slot="p680",
+            )
+            checks = {
+                check["id"]: check["passed"]
+                for check in stage["checks"]
+            }
+
+            self.assertFalse(checks["image.output_files"])
+            self.assertFalse(
+                checks["image.generation_provenance_app_server"]
+            )
+
+    def test_p680_partial_media_rejects_digest_valid_receipt_tampering(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_partial_receipt_"
+        ) as td:
+            run_dir = Path(td) / "out" / "partial_receipt"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fixture = _write_partial_image_p680_fixture(run_dir)
+            receipt_path = run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH
+            receipt = json.loads(
+                receipt_path.read_text(encoding="utf-8")
+            )
+            blocked_id = str(fixture["blocked_id"])
+            receipt["synthetic_candidates"][blocked_id]["error"] = (
+                "tampered but self-consistently rehashed"
+            )
+            digest_payload = {
+                key: value
+                for key, value in receipt.items()
+                if key != "receipt_sha256"
+            }
+            encoded = json.dumps(
+                digest_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            receipt["receipt_sha256"] = (
+                "sha256:" + hashlib.sha256(encoded).hexdigest()
+            )
+            receipt_path.write_text(
+                json.dumps(
+                    receipt,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            stage, _ = VERIFY_MODULE.check_image(
+                run_dir,
+                target_slot="p680",
+            )
+            checks = {
+                check["id"]: check["passed"]
+                for check in stage["checks"]
+            }
+
+            self.assertFalse(
+                checks["image.localized_partial_media_contract"]
+            )
+
+    def test_p680_partial_media_rejects_adversarial_selector_accounting(
+        self,
+    ) -> None:
+        cases = {
+            "suffix_typo": (
+                ["scene10_cut01", "scene20_cut01"],
+                ["scene20_cut01_typo"],
+                ["scene20_cut01_typo"],
+            ),
+            "duplicate": (
+                ["scene10_cut01", "scene20_cut01"],
+                ["scene20_cut1", "scene20_cut1"],
+                ["scene20_cut01", "scene20_cut01"],
+            ),
+            "outside_scope": (
+                ["scene10_cut01"],
+                ["scene20_cut1"],
+                ["scene20_cut01"],
+            ),
+            "failed_blocked_mismatch": (
+                ["scene10_cut01", "scene20_cut01"],
+                ["scene20_cut1"],
+                ["scene10_cut01"],
+            ),
+        }
+        for case_name, (
+            entry_ids,
+            failed_selectors,
+            blocked_entries,
+        ) in cases.items():
+            with (
+                self.subTest(case=case_name),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_selector_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / case_name
+                run_dir.mkdir(parents=True, exist_ok=True)
+                fixture = _write_partial_image_p680_fixture(run_dir)
+                snapshot = fixture["snapshot"]
+                _write_current_failed_semantic_review(
+                    run_dir,
+                    stage="image_prompt",
+                    entry_ids=entry_ids,
+                    failed_selectors=failed_selectors,
+                    blocked_entries=blocked_entries,
+                    request_revision=snapshot.request_revision,
+                )
+
+                stage, _ = VERIFY_MODULE.check_image(
+                    run_dir,
+                    target_slot="p680",
+                )
+                checks = {
+                    check["id"]: check["passed"]
+                    for check in stage["checks"]
+                }
+
+                self.assertFalse(
+                    checks["image.localized_partial_media_contract"],
+                    msg=stage,
+                )
+
+    def test_partial_media_localizer_rejects_all_blocked_requests(
+        self,
+    ) -> None:
+        items = [
+            {
+                "item_id": "scene10_cut01",
+                "destination": "assets/scenes/scene10_cut01.png",
+            },
+            {
+                "item_id": "scene20_cut01",
+                "destination": "assets/scenes/scene20_cut01.png",
+            },
+        ]
+
+        blocked, issues = localize_semantic_failure_selectors(
+            stage="image_prompt",
+            items=items,
+            failed_selectors=["scene10", "scene20"],
+            blocked_entries=["scene10", "scene20"],
+            scope_entry_ids=["scene10", "scene20"],
+        )
+
+        self.assertEqual(
+            blocked,
+            {"scene10_cut01", "scene20_cut01"},
+        )
+        self.assertIn(
+            "at least one surviving scene image request item",
+            "\n".join(issues),
+        )
+
+    def test_p680_partial_media_preserves_multiple_localized_stages(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_partial_multistage_"
+        ) as td:
+            run_dir = Path(td) / "out" / "partial_multistage"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fixture = _write_partial_image_p680_fixture(
+                run_dir,
+                stage="scene_detail",
+            )
+            snapshot = fixture["snapshot"]
+            blocked_id = str(fixture["blocked_id"])
+            survivor_id = str(fixture["survivor_id"])
+            _write_current_failed_semantic_review(
+                run_dir,
+                stage="cut_blueprint",
+                entry_ids=[
+                    "cut:scene10_cut01",
+                    "cut:scene20_cut01",
+                ],
+                failed_selectors=["scene20_cut1"],
+                blocked_entries=["scene20_cut01"],
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.cut_blueprint.partial_media_allowed": (
+                        "true"
+                    ),
+                    "review.semantic.cut_blueprint.blocked_image_items": (
+                        blocked_id
+                    ),
+                    (
+                        "review.semantic.cut_blueprint."
+                        "blocked_image_item_count"
+                    ): "1",
+                    (
+                        "review.semantic.cut_blueprint.localization.status"
+                    ): "localized_to_image_items",
+                    (
+                        "review.semantic.cut_blueprint.localization."
+                        "blocked_image_items"
+                    ): blocked_id,
+                    (
+                        "review.semantic.cut_blueprint.localization.validation"
+                    ): "passed",
+                },
+            )
+            projection = derive_partial_media_projection(
+                run_dir,
+                stages=["scene_detail", "cut_blueprint"],
+            )
+            write_partial_media_projection(run_dir, projection)
+            receipt = write_partial_media_generation_receipt(
+                run_dir,
+                projection=projection,
+                provider_submitted_item_ids=[survivor_id],
+                generated_item_ids=[survivor_id],
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.partial_media.projection_sha256": (
+                        projection["projection_sha256"]
+                    ),
+                    "review.semantic.partial_media.receipt_sha256": (
+                        receipt["receipt_sha256"]
+                    ),
+                },
+            )
+
+            stage, _ = VERIFY_MODULE.check_image(
+                run_dir,
+                target_slot="p680",
+            )
+            checks = {
+                check["id"]: check["passed"]
+                for check in stage["checks"]
+            }
+
+            self.assertEqual(
+                projection["synthetic_candidates"][blocked_id][
+                    "blocking_stages"
+                ],
+                ["cut_blueprint", "scene_detail"],
+            )
+            self.assertTrue(
+                checks["image.localized_partial_media_contract"],
+                msg=stage,
+            )
 
     def test_check_image_requires_semantic_judgment_for_p640(self) -> None:
         import tempfile

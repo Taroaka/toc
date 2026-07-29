@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -18,9 +19,11 @@ from toc.review_loop import (
     loop_state_updates,
     render_aggregated_review,
     render_critic_prompt,
+    review_input_snapshot_issues,
     review_input_snapshot_relpath,
     stage_for_slot,
 )
+from toc.review_projection import review_source_fingerprint
 from toc.run_index import SLOT_BY_CODE, build_run_index_markdown, classify_run_file
 
 
@@ -32,6 +35,28 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(MODULE)
 
 REVIEW_DIGEST = "a" * 64
+P400_MANIFEST_BOUND_STAGES = (
+    "scene_set",
+    "scene_detail",
+    "cut_blueprint",
+    "script",
+    "production_readiness",
+)
+
+
+def _review_manifest_text(revision: str = "one") -> str:
+    return (
+        "# Video Manifest\n\n"
+        "```yaml\n"
+        "schema_version: scene_event_v1\n"
+        f"review_fixture_revision: {revision}\n"
+        "scenes:\n"
+        "  - scene_id: 1\n"
+        "    cuts:\n"
+        "      - cut_id: 1\n"
+        "        duration_seconds: 8\n"
+        "```\n"
+    )
 
 
 def _critic_reports(*, status: str, focus: str = "generic", digest: str = REVIEW_DIGEST) -> list[str]:
@@ -178,6 +203,136 @@ class TestReviewLoop(unittest.TestCase):
             self.assertFalse((run_dir / aggregated_review_relpath("story", 1)).exists())
             self.assertFalse((run_dir / REVIEW_LOOP_SPECS["story"].final_report).exists())
 
+    def test_p400_review_specs_bind_the_materialized_manifest(self) -> None:
+        expected_sources = ("story.md", "visual_value.md", "script.md", "video_manifest.md")
+
+        for stage in P400_MANIFEST_BOUND_STAGES:
+            with self.subTest(stage=stage):
+                self.assertEqual(REVIEW_LOOP_SPECS[stage].source_artifacts, expected_sources)
+        self.assertEqual(
+            REVIEW_LOOP_SPECS["visual_value"].source_artifacts,
+            ("research.md", "story.md", "visual_value.md"),
+        )
+        self.assertEqual(
+            REVIEW_LOOP_SPECS["scene_intent"].source_artifacts,
+            ("story.md", "visual_value.md", "script.md"),
+        )
+
+    def test_manifest_mutation_stales_passing_p400_snapshots_until_rematerialized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_review_loop_p400_manifest_stale_") as td:
+            run_dir = Path(td)
+            for relpath in ("story.md", "visual_value.md", "script.md"):
+                (run_dir / relpath).write_text(f"# {relpath}\n", encoding="utf-8")
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                _review_manifest_text("one"),
+                encoding="utf-8",
+            )
+
+            first_manifest_sha = review_source_fingerprint(
+                manifest_path,
+                artifact_relpath="video_manifest.md",
+                review_kind="review_loop",
+                stage="script",
+            ).sha256
+            first_input_digests: dict[str, str] = {}
+            for stage in P400_MANIFEST_BOUND_STAGES:
+                MODULE.write_review_loop_round(run_dir=run_dir, stage=stage, round_number=1)
+                snapshot_path = run_dir / review_input_snapshot_relpath(stage, 1)
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                sources = {
+                    str(item["path"]): str(item["sha256"])
+                    for item in snapshot["source_artifacts"]
+                }
+                self.assertEqual(sources["video_manifest.md"], first_manifest_sha, stage)
+                self.assertEqual(
+                    review_input_snapshot_issues(run_dir=run_dir, stage=stage, round_number=1),
+                    [],
+                    stage,
+                )
+
+                digest = str(snapshot["input_digest"])
+                first_input_digests[stage] = digest
+                critic_reports = _critic_reports(status="passed", digest=digest)
+                for critic_number, report in enumerate(critic_reports, start=1):
+                    (run_dir / critic_relpath(stage, 1, critic_number)).write_text(
+                        report,
+                        encoding="utf-8",
+                    )
+                aggregate = render_aggregated_review(
+                    stage=stage,
+                    round_number=1,
+                    critic_reports=critic_reports,
+                    status="passed",
+                    expected_input_digest=digest,
+                )
+                (run_dir / aggregated_review_relpath(stage, 1)).write_text(
+                    aggregate,
+                    encoding="utf-8",
+                )
+                (run_dir / REVIEW_LOOP_SPECS[stage].final_report).write_text(
+                    aggregate.replace("- status: passed", "- status: approved", 1),
+                    encoding="utf-8",
+                )
+
+            manifest_path.write_text(
+                _review_manifest_text("two"),
+                encoding="utf-8",
+            )
+            second_manifest_sha = review_source_fingerprint(
+                manifest_path,
+                artifact_relpath="video_manifest.md",
+                review_kind="review_loop",
+                stage="script",
+            ).sha256
+            self.assertNotEqual(first_manifest_sha, second_manifest_sha)
+
+            for stage in P400_MANIFEST_BOUND_STAGES:
+                with self.subTest(stage=stage):
+                    self.assertEqual(
+                        review_input_snapshot_issues(
+                            run_dir=run_dir,
+                            stage=stage,
+                            round_number=1,
+                        ),
+                        ["stale review source sha256: video_manifest.md"],
+                    )
+
+                    MODULE.write_review_loop_round(
+                        run_dir=run_dir,
+                        stage=stage,
+                        round_number=1,
+                    )
+                    snapshot_path = run_dir / review_input_snapshot_relpath(stage, 1)
+                    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                    sources = {
+                        str(item["path"]): str(item["sha256"])
+                        for item in snapshot["source_artifacts"]
+                    }
+                    self.assertEqual(sources["video_manifest.md"], second_manifest_sha)
+                    self.assertNotEqual(
+                        snapshot["input_digest"],
+                        first_input_digests[stage],
+                    )
+                    self.assertEqual(
+                        review_input_snapshot_issues(
+                            run_dir=run_dir,
+                            stage=stage,
+                            round_number=1,
+                        ),
+                        [],
+                    )
+                    for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
+                        self.assertFalse(
+                            (run_dir / critic_relpath(stage, 1, critic_number)).exists()
+                        )
+                    self.assertFalse(
+                        (run_dir / aggregated_review_relpath(stage, 1)).exists()
+                    )
+                    self.assertFalse(
+                        (run_dir / REVIEW_LOOP_SPECS[stage].final_report).exists()
+                    )
+
     def test_aggregate_rejects_failed_or_duplicate_critic_claims(self) -> None:
         failed_reports = _critic_reports(status="passed")
         failed_reports[2] = failed_reports[2].replace("status: passed", "status: changes_requested")
@@ -213,7 +368,14 @@ class TestReviewLoop(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="toc_p400_review_loop_") as td:
             run_dir = Path(td)
             for rel in REVIEW_LOOP_SPECS["scene_set"].source_artifacts:
-                (run_dir / rel).write_text(f"# {rel}\n", encoding="utf-8")
+                (run_dir / rel).write_text(
+                    (
+                        _review_manifest_text()
+                        if rel == "video_manifest.md"
+                        else f"# {rel}\n"
+                    ),
+                    encoding="utf-8",
+                )
 
             MODULE.write_review_loop_round(run_dir=run_dir, stage="scene_set", round_number=1)
             MODULE.write_review_loop_round(run_dir=run_dir, stage="scene_detail", round_number=1)
@@ -386,7 +548,14 @@ class TestReviewLoop(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="toc_asset_review_loop_") as td:
             run_dir = Path(td)
             for rel in REVIEW_LOOP_SPECS["asset"].source_artifacts:
-                (run_dir / rel).write_text(f"# {rel}\n", encoding="utf-8")
+                (run_dir / rel).write_text(
+                    (
+                        _review_manifest_text()
+                        if rel == "video_manifest.md"
+                        else f"# {rel}\n"
+                    ),
+                    encoding="utf-8",
+                )
 
             prompt = render_critic_prompt(run_dir=run_dir, stage="asset", round_number=1, critic_number=1)
 

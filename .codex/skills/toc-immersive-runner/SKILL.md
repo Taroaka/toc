@@ -19,6 +19,7 @@ Use it as a thin ToC run entrypoint. The caller provides:
 - run directory
 - stop target, normally `p680` for frontend image review handoff flows
 - experience, normally `cinematic_story`
+- source run, required when experience is `world_walk`
 
 ## Canonical References
 
@@ -205,6 +206,9 @@ generation flow inside it.
   directory.
 - Keep all user-facing generated artifacts in Japanese.
 - Keep the experience `cinematic_story` unless the caller specifies otherwise.
+- For `world_walk`, require an existing source run and preserve its `story.md` /
+  `assets/` as references through `video_metadata.source_run` and
+  `video_metadata.source_assets`.
 - Use `review_policy=frontend` for app-server Image Gen create flows.
 - Use the caller's exact `stop_target`. For app-server Image Gen create flows
   invoked by `server/image_gen_app.py`, this is normally `p680`; generate p660

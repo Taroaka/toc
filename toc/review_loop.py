@@ -10,6 +10,12 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
+from toc.review_projection import (
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    ReviewProjectionError,
+    review_source_fingerprint,
+)
+
 
 MAX_REVIEW_LOOP_ROUNDS = 5
 REVIEW_LOOP_CRITIC_COUNT = 5
@@ -260,28 +266,28 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
         slot_codes=("p430",),
         title="Script Eval/Improve Loop",
         final_report="script_review.md",
-        source_artifacts=("story.md", "visual_value.md", "script.md"),
+        source_artifacts=("story.md", "visual_value.md", "script.md", "video_manifest.md"),
     ),
     "production_readiness": ReviewLoopSpec(
         stage="production_readiness",
         slot_codes=("p435",),
         title="Production Readiness Council",
         final_report="production_readiness_review.md",
-        source_artifacts=("story.md", "visual_value.md", "script.md"),
+        source_artifacts=("story.md", "visual_value.md", "script.md", "video_manifest.md"),
     ),
     "scene_set": ReviewLoopSpec(
         stage="scene_set",
         slot_codes=("p410b",),
         title="Scene Set Eval/Improve Loop",
         final_report="scene_set_review.md",
-        source_artifacts=("story.md", "visual_value.md", "script.md"),
+        source_artifacts=("story.md", "visual_value.md", "script.md", "video_manifest.md"),
     ),
     "scene_detail": ReviewLoopSpec(
         stage="scene_detail",
         slot_codes=("p410c",),
         title="Scene Detail Eval/Improve Loop",
         final_report="scene_detail_review.md",
-        source_artifacts=("story.md", "visual_value.md", "script.md"),
+        source_artifacts=("story.md", "visual_value.md", "script.md", "video_manifest.md"),
     ),
     "scene_intent": ReviewLoopSpec(
         stage="scene_intent",
@@ -295,7 +301,7 @@ REVIEW_LOOP_SPECS: dict[str, ReviewLoopSpec] = {
         slot_codes=("p420",),
         title="Cut Blueprint Eval/Improve Loop",
         final_report="cut_blueprint_review.md",
-        source_artifacts=("story.md", "visual_value.md", "script.md"),
+        source_artifacts=("story.md", "visual_value.md", "script.md", "video_manifest.md"),
     ),
     "narration": ReviewLoopSpec(
         stage="narration",
@@ -455,11 +461,18 @@ def build_review_input_snapshot(*, run_dir: Path, stage: str, round_number: int)
         source_path, issue = _contained_review_source(resolved_run_dir, raw_relpath)
         if issue or source_path is None:
             raise FileNotFoundError(issue or raw_relpath)
+        fingerprint = review_source_fingerprint(
+            source_path,
+            artifact_relpath=Path(raw_relpath).as_posix(),
+            review_kind="review_loop",
+            stage=stage,
+        )
         sources.append(
             {
                 "path": Path(raw_relpath).as_posix(),
-                "sha256": _review_file_sha256(source_path),
-                "size_bytes": source_path.stat().st_size,
+                "sha256": fingerprint.sha256,
+                "size_bytes": fingerprint.size_bytes,
+                REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD: fingerprint.policy,
             }
         )
 
@@ -546,8 +559,39 @@ def review_input_snapshot_issues(*, run_dir: Path, stage: str, round_number: int
             expected_hash = str(item.get("sha256") or "")
             if not _SHA256_RE.fullmatch(expected_hash):
                 issues.append(f"invalid review source sha256: {raw_relpath}")
-            elif _review_file_sha256(source_path) != expected_hash:
-                issues.append(f"stale review source sha256: {raw_relpath}")
+            else:
+                raw_policy = item.get(
+                    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
+                )
+                try:
+                    fingerprint = review_source_fingerprint(
+                        source_path,
+                        artifact_relpath=Path(raw_relpath).as_posix(),
+                        review_kind="review_loop",
+                        stage=stage,
+                    )
+                except ReviewProjectionError as exc:
+                    issues.append(
+                        f"invalid review source projection: {raw_relpath}: {exc}"
+                    )
+                else:
+                    if raw_policy is None:
+                        # v1 snapshots created before fingerprint policies
+                        # were explicit used exact source bytes. Accept them
+                        # only while those exact bytes are still current.
+                        current_hash = _review_file_sha256(source_path)
+                    elif raw_policy != fingerprint.policy:
+                        issues.append(
+                            "review source fingerprint policy mismatch: "
+                            f"{raw_relpath}"
+                        )
+                        continue
+                    else:
+                        current_hash = fingerprint.sha256
+                    if current_hash != expected_hash:
+                        issues.append(
+                            f"stale review source sha256: {raw_relpath}"
+                        )
 
     raw_readset = snapshot.get("readset")
     if raw_readset is not None:

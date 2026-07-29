@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,26 +22,37 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.grounding import StageGroundingError, resolve_review_policy, review_policy_state_entries, run_stage_grounding
-from toc.harness import append_state_snapshot
+from toc.harness import append_state_snapshot, parse_state_file
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
     aggregator_prompt_relpath,
     critic_prompt_relpath,
+    final_review_relpath,
     loop_state_updates,
     render_aggregator_prompt,
     render_critic_prompt,
+    review_input_snapshot_issues,
 )
 from toc.review_loop_runner import materialize_review_loop_round
 from toc.stage_evaluator import check_manifest_single
+from scripts.world_walk_source import validate_world_walk_source_path
 
 EXPERIENCE_TEMPLATES: dict[str, Path] = {
     "cinematic_story": Path("workflow/immersive-ride-video-manifest-template.md"),
     "cloud_island_walk": Path("workflow/immersive-cloud-island-walk-video-manifest-template.md"),
+    "world_walk": Path("workflow/immersive-world-walk-video-manifest-template.md"),
     # legacy alias (kept for backward compatibility; canonicalized to cinematic_story)
     "ride_action_boat": Path("workflow/immersive-ride-video-manifest-template.md"),
 }
 SCENE_CONTE_TEMPLATE = Path("workflow/scene-conte-template.md")
 VISUAL_VALUE_TEMPLATE = Path("workflow/visual-value-template.yaml")
+P400_REVIEW_STAGES = (
+    "scene_set",
+    "scene_detail",
+    "cut_blueprint",
+    "script",
+    "production_readiness",
+)
 
 BIG_STAGE_HANDOFF_SLOTS: dict[str, str] = {
     "p100": "p130",
@@ -134,7 +146,7 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
         "slot.p435.status": "pending",
         "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
         "slot.p450.status": "pending",
-        "slot.p450.note": "skeleton manifest materialization waits for p400 readiness approval before p500",
+        "slot.p450.note": "review-bound skeleton exists; p450 readiness handoff remains pending before p500",
     },
     "narration": {
         "stage.narration.status": "pending",
@@ -221,7 +233,7 @@ REVIEW_HANDOFF_UPDATES: dict[str, dict[str, str]] = {
         "slot.p435.status": "pending",
         "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
         "slot.p450.status": "pending",
-        "slot.p450.note": "skeleton manifest materialization waits for p400 readiness approval before p500",
+        "slot.p450.note": "review-bound skeleton exists; p450 readiness handoff remains pending before p500",
     },
     "narration": {
         "stage.narration.status": "awaiting_approval",
@@ -316,8 +328,17 @@ def require_fresh_p400_readiness(run_dir: Path) -> None:
 
 def ensure_skeleton_manifest(manifest_text: str) -> str:
     if "manifest_phase:" in manifest_text:
-        return manifest_text
+        return re.sub(r"(?m)^(\s*manifest_phase:\s*).*$", r"\1skeleton", manifest_text, count=1)
     return manifest_text.replace("```yaml\n", "```yaml\nmanifest_phase: skeleton\n", 1)
+
+
+def ensure_skeleton_manifest_file(manifest_path: Path) -> None:
+    if not manifest_path.exists():
+        return
+    text = manifest_path.read_text(encoding="utf-8")
+    updated = ensure_skeleton_manifest(text)
+    if updated != text:
+        manifest_path.write_text(updated, encoding="utf-8")
 
 
 def ensure_production_manifest_file(manifest_path: Path) -> None:
@@ -386,6 +407,138 @@ def p400_review_stages_for_stop(stop_slot: str) -> tuple[str, ...]:
     return tuple(stages)
 
 
+def previous_stop_slot(state: dict[str, str]) -> str | None:
+    raw = str(state.get("runtime.stop_slot") or "").strip().lower()
+    return raw if re.fullmatch(r"p\d{3}", raw) else None
+
+
+def is_genuine_rewind(state: dict[str, str], stop_slot: str) -> bool:
+    previous = previous_stop_slot(state)
+    return previous is not None and slot_number(stop_slot) < slot_number(previous)
+
+
+def review_round_number(state: dict[str, str], stage: str) -> int:
+    raw = str(state.get(f"eval.{stage}.loop.current_round") or "").strip()
+    try:
+        round_number = int(raw)
+    except ValueError:
+        return 0
+    return round_number if round_number > 0 else 0
+
+
+def p400_review_is_current(run_dir: Path, state: dict[str, str], stage: str) -> bool:
+    round_number = review_round_number(state, stage)
+    if round_number == 0:
+        return False
+    if review_input_snapshot_issues(
+        run_dir=run_dir,
+        stage=stage,
+        round_number=round_number,
+    ):
+        return False
+    loop_status = str(state.get(f"eval.{stage}.loop.status") or "").strip().lower()
+    if loop_status in {"passed", "approved", "complete", "completed", "done"}:
+        return (run_dir / final_review_relpath(stage)).is_file()
+    return True
+
+
+def p400_review_inputs_changed(run_dir: Path, state: dict[str, str]) -> bool:
+    for stage in P400_REVIEW_STAGES:
+        round_number = review_round_number(state, stage)
+        if round_number == 0:
+            continue
+        if review_input_snapshot_issues(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=round_number,
+        ):
+            return True
+        loop_status = str(state.get(f"eval.{stage}.loop.status") or "").strip().lower()
+        if loop_status in {"passed", "approved", "complete", "completed", "done"}:
+            if not (run_dir / final_review_relpath(stage)).is_file():
+                return True
+    return False
+
+
+def merge_current_or_materialized_p400_reviews(
+    run_dir: Path,
+    *stage_names: str,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    state = parse_state_file(run_dir / "state.txt")
+    updates: dict[str, str] = {}
+    reused: list[str] = []
+    for stage_name in stage_names:
+        if p400_review_is_current(run_dir, state, stage_name):
+            reused.append(stage_name)
+            continue
+        updates.update(materialize_review_loop_prompts(run_dir, stage=stage_name))
+    return updates, tuple(reused)
+
+
+def preserved_p400_state_updates(
+    state: dict[str, str],
+    reused_stages: tuple[str, ...],
+) -> dict[str, str]:
+    reused = set(reused_stages)
+    updates: dict[str, str] = {}
+    review_status_keys = {
+        "scene_set": "review.script.scene_set.status",
+        "scene_detail": "review.script.scene_detail.status",
+        "cut_blueprint": "review.script.cut.status",
+        "script": "review.script.status",
+        "production_readiness": "review.script.production_readiness.status",
+    }
+    for stage in reused:
+        prefix = f"eval.{stage}.loop."
+        updates.update({key: value for key, value in state.items() if key.startswith(prefix)})
+        status_key = review_status_keys[stage]
+        if status_key in state:
+            updates[status_key] = state[status_key]
+
+    if {"scene_set", "scene_detail"}.issubset(reused) and "slot.p410.status" in state:
+        updates["slot.p410.status"] = state["slot.p410.status"]
+    for stage, slot in (
+        ("cut_blueprint", "p420"),
+        ("script", "p430"),
+        ("production_readiness", "p435"),
+    ):
+        if stage in reused and f"slot.{slot}.status" in state:
+            updates[f"slot.{slot}.status"] = state[f"slot.{slot}.status"]
+
+    if reused == set(P400_REVIEW_STAGES):
+        for key in (
+            "stage.script.status",
+            "artifact.script.status",
+            "review.script.status",
+            "gate.script_review",
+            "gate.script_scene_review",
+            "gate.script_cut_review",
+            "gate.script_production_readiness_review",
+            "slot.p450.status",
+            "slot.p450.note",
+            "eval.p400_readiness.status",
+            "eval.p400_readiness.reason_keys",
+        ):
+            if key in state:
+                updates[key] = state[key]
+    return updates
+
+
+def prepare_p400_review_updates(
+    run_dir: Path,
+    stop_slot: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    review_updates, reused_stages = merge_current_or_materialized_p400_reviews(
+        run_dir,
+        *p400_review_stages_for_stop(stop_slot),
+    )
+    preservation_updates = preserved_p400_state_updates(
+        parse_state_file(run_dir / "state.txt"),
+        reused_stages,
+    )
+    return review_updates, preservation_updates
+
+
 def finish_scaffold(
     state_path: Path,
     topic: str,
@@ -428,12 +581,56 @@ def scaffold_authoring_updates(*stage_names: str) -> dict[str, str]:
     return updates
 
 
+def reset_p400_review_handoff(
+    run_dir: Path,
+    *,
+    experience: str,
+    source_run: Path | None,
+) -> dict[str, str]:
+    stages = ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness")
+    updates = {
+        **scaffold_authoring_updates("script"),
+        **review_handoff_updates("script"),
+        "immersive.experience": experience,
+        "immersive.source_run": source_run.as_posix() if source_run is not None else "",
+        "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+        "eval.p400_readiness.status": "changes_requested",
+        "eval.p400_readiness.reason_keys": "p400.review_loop_integrity",
+    }
+    for stage in stages:
+        review_dir = run_dir / "logs" / "eval" / stage
+        if review_dir.is_symlink() or review_dir.is_file():
+            review_dir.unlink()
+        elif review_dir.exists():
+            shutil.rmtree(review_dir)
+        final_report = run_dir / final_review_relpath(stage)
+        if final_report.exists() or final_report.is_symlink():
+            final_report.unlink()
+
+        updates.update(loop_state_updates(stage=stage, status="pending", current_round=0))
+        round_prefix = f"eval.{stage}.loop.round_01"
+        updates[f"{round_prefix}.started_at"] = ""
+        updates[f"{round_prefix}.aggregated_review"] = ""
+        updates[f"{round_prefix}.aggregator_prompt"] = ""
+        updates[f"{round_prefix}.input_snapshot"] = ""
+        updates[f"{round_prefix}.input_digest"] = ""
+        for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
+            updates[f"{round_prefix}.critic_{critic_number}"] = ""
+            updates[f"{round_prefix}.critic_{critic_number}_prompt"] = ""
+    return updates
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scaffold an immersive run folder.")
     parser.add_argument("--topic", required=True, help="Video topic (used for folder name).")
     parser.add_argument("--timestamp", default=None, help="Timestamp (YYYYMMDD_HHMM).")
     parser.add_argument("--base", default="output", help="Base output directory.")
     parser.add_argument("--run-dir", default=None, help="Override run directory path.")
+    parser.add_argument(
+        "--source-run",
+        default=None,
+        help="Existing ToC run directory to reference. Required for --experience world_walk.",
+    )
     parser.add_argument(
         "--stage",
         type=normalize_stage_target,
@@ -469,6 +666,22 @@ def main() -> None:
     if experience == "ride_action_boat":
         print("[warn] --experience ride_action_boat is deprecated; using cinematic_story.")
         experience = "cinematic_story"
+    if experience == "world_walk" and args.stage is None:
+        # The world-walk template is an authored source-reference skeleton.
+        # Stop at the script/manifest handoff until its p400 design is approved.
+        stop_slot = "p450"
+    source_run_path: Path | None = Path(args.source_run) if args.source_run else None
+    if experience == "world_walk":
+        if source_run_path is None:
+            parser.error("--source-run is required when --experience world_walk")
+        try:
+            _resolved_source_run, source_run_relative = validate_world_walk_source_path(
+                REPO_ROOT,
+                source_run_path,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
+        source_run_path = Path(source_run_relative)
 
     run_dir = Path(args.run_dir) if args.run_dir else (Path(args.base) / f"{topic_slug}_{ts}")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -489,7 +702,24 @@ def main() -> None:
     (run_dir / "logs" / "grounding").mkdir(parents=True, exist_ok=True)
 
     state_path = run_dir / "state.txt"
-    if not state_path.exists():
+    state_preexisting = state_path.exists()
+    prior_state = parse_state_file(state_path) if state_preexisting else {}
+    genuine_rewind = state_preexisting and is_genuine_rewind(prior_state, stop_slot)
+    prior_p400_inputs_changed = (
+        state_preexisting
+        and p400_review_inputs_changed(run_dir, prior_state)
+    )
+    preserve_existing_authoring_grounding = (
+        state_preexisting
+        and not args.force
+        and not genuine_rewind
+        and not prior_p400_inputs_changed
+        and any(
+            review_round_number(prior_state, stage) > 0
+            for stage in P400_REVIEW_STAGES
+        )
+    )
+    if not state_preexisting:
         append_state_block(
             state_path,
             {
@@ -499,13 +729,15 @@ def main() -> None:
                 "runtime.stage": "immersive_ride_scaffold",
                 "gate.video_review": "required",
                 "immersive.experience": str(experience),
+                **({"immersive.source_run": str(source_run_path)} if source_run_path is not None else {}),
                 "runtime.review_policy": args.review_policy,
                 **review_policy_state_entries(review_policy),
             },
         )
 
     write_text(run_dir / "research.md", "# リサーチ（出力）\n\nTODO\n", force=args.force)
-    maybe_run_stage_grounding(run_dir, "research", flow="immersive")
+    if not preserve_existing_authoring_grounding:
+        maybe_run_stage_grounding(run_dir, "research", flow="immersive")
     if not target_reaches(stop_slot, "p210"):
         review_updates = materialize_review_loop_prompts(run_dir, stage="research")
         finish_scaffold(
@@ -523,7 +755,8 @@ def main() -> None:
         return
 
     write_text(run_dir / "story.md", "# 物語（story）\n\nTODO\n", force=args.force)
-    maybe_run_stage_grounding(run_dir, "story", flow="immersive")
+    if not preserve_existing_authoring_grounding:
+        maybe_run_stage_grounding(run_dir, "story", flow="immersive")
     if not target_reaches(stop_slot, "p310"):
         review_updates = materialize_review_loop_prompts(run_dir, stage="story")
         finish_scaffold(
@@ -551,7 +784,8 @@ def main() -> None:
         write_text(run_dir / "visual_value.md", visual_value, force=args.force)
     else:
         write_text(run_dir / "visual_value.md", "# 視覚化価値パート（visual value）\n\nTODO\n", force=args.force)
-    maybe_run_stage_grounding(run_dir, "visual_value", flow="immersive")
+    if not preserve_existing_authoring_grounding:
+        maybe_run_stage_grounding(run_dir, "visual_value", flow="immersive")
     if not target_reaches(stop_slot, "p410"):
         review_updates = materialize_review_loop_prompts(run_dir, stage="visual_value")
         finish_scaffold(
@@ -571,34 +805,8 @@ def main() -> None:
         return
 
     write_text(run_dir / "script.md", "# 台本（没入型 / cinematic）\n\nTODO\n", force=args.force)
-    maybe_run_stage_grounding(run_dir, "script", flow="immersive")
-    if not target_reaches(stop_slot, "p450"):
-        review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
-        finish_scaffold(
-            state_path,
-            topic_raw,
-            run_dir,
-            stop_slot,
-            {
-                **scaffold_authoring_updates("research", "story", "visual_value", "script"),
-                **review_updates,
-                **review_handoff_updates("script"),
-                "artifact.research": str((run_dir / "research.md").resolve()),
-                "artifact.story": str((run_dir / "story.md").resolve()),
-                "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
-                "artifact.script": str((run_dir / "script.md").resolve()),
-            },
-        )
-        return
-
-    if SCENE_CONTE_TEMPLATE.exists():
-        tmpl = SCENE_CONTE_TEMPLATE.read_text(encoding="utf-8")
-        tmpl = (
-            tmpl.replace("<topic>", topic_raw)
-            .replace("<timestamp>", ts)
-            .replace("<ISO8601>", now_iso())
-        )
-        write_text(run_dir / "scene_conte.md", tmpl, force=args.force)
+    if not preserve_existing_authoring_grounding:
+        maybe_run_stage_grounding(run_dir, "script", flow="immersive")
 
     template_path = EXPERIENCE_TEMPLATES.get(str(experience))
     if template_path is None:
@@ -609,6 +817,9 @@ def main() -> None:
             tmpl.replace("<topic>", topic_raw)
             .replace("<timestamp>", ts)
             .replace("<ISO8601>", now_iso())
+            .replace("<source_run>", source_run_path.as_posix() if source_run_path is not None else "")
+            .replace("<source_story>", (source_run_path / "story.md").as_posix() if source_run_path is not None else "")
+            .replace("<source_assets>", (source_run_path / "assets").as_posix() if source_run_path is not None else "")
         )
         if args.video_tool == "kling":
             tmpl = re.sub(r'(?m)^(\s*)tool: "google_veo_3_1"\s*$', r'\1tool: "kling_3_0"', tmpl)
@@ -625,9 +836,84 @@ def main() -> None:
         write_text(run_dir / "video_manifest.md", ensure_skeleton_manifest(tmpl), force=args.force)
     else:
         write_text(run_dir / "video_manifest.md", "```yaml\nmanifest_phase: skeleton\nvideo_metadata:\n  topic: \"<topic>\"\nscenes: []\n```\n", force=args.force)
+    manifest_path = run_dir / "video_manifest.md"
+    if genuine_rewind and not target_reaches(stop_slot, "p510"):
+        ensure_skeleton_manifest_file(manifest_path)
+    elif target_reaches(stop_slot, "p510"):
+        # P400 approvals bind video_manifest.md. Promote before refreshing the
+        # final P400 snapshots and before running the readiness gate.
+        ensure_production_manifest_file(manifest_path)
+
+    requested_source_run = source_run_path.as_posix() if source_run_path is not None else ""
+    review_context_changed = state_preexisting and (
+        str(prior_state.get("immersive.experience") or "") != experience
+        or str(prior_state.get("immersive.source_run") or "") != requested_source_run
+    )
+    review_inputs_changed = (
+        state_preexisting
+        and p400_review_inputs_changed(run_dir, prior_state)
+    )
+    p400_reset = bool(
+        state_preexisting
+        and (genuine_rewind or review_context_changed or review_inputs_changed)
+    )
+    if p400_reset:
+        append_state_block(
+            state_path,
+            reset_p400_review_handoff(
+                run_dir,
+                experience=experience,
+                source_run=source_run_path,
+            ),
+        )
+
+    if not target_reaches(stop_slot, "p450"):
+        review_updates, p400_preservation_updates = prepare_p400_review_updates(
+            run_dir,
+            stop_slot,
+        )
+        finish_scaffold(
+            state_path,
+            topic_raw,
+            run_dir,
+            stop_slot,
+            {
+                **scaffold_authoring_updates("research", "story", "visual_value", "script"),
+                **review_updates,
+                **review_handoff_updates("script"),
+                "artifact.research": str((run_dir / "research.md").resolve()),
+                "artifact.story": str((run_dir / "story.md").resolve()),
+                "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
+                "artifact.script": str((run_dir / "script.md").resolve()),
+                "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+                "immersive.experience": str(experience),
+                "immersive.source_run": (
+                    source_run_path.as_posix()
+                    if source_run_path is not None
+                    else ""
+                ),
+                **p400_preservation_updates,
+            },
+        )
+        return
+
+    if SCENE_CONTE_TEMPLATE.exists():
+        tmpl = SCENE_CONTE_TEMPLATE.read_text(encoding="utf-8")
+        tmpl = (
+            tmpl.replace("<topic>", topic_raw)
+            .replace("<timestamp>", ts)
+            .replace("<ISO8601>", now_iso())
+            .replace("<source_run>", source_run_path.as_posix() if source_run_path is not None else "")
+            .replace("<source_story>", (source_run_path / "story.md").as_posix() if source_run_path is not None else "")
+            .replace("<source_assets>", (source_run_path / "assets").as_posix() if source_run_path is not None else "")
+        )
+        write_text(run_dir / "scene_conte.md", tmpl, force=args.force)
 
     if not target_reaches(stop_slot, "p510"):
-        review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
+        review_updates, p400_preservation_updates = prepare_p400_review_updates(
+            run_dir,
+            stop_slot,
+        )
         finish_scaffold(
             state_path,
             topic_raw,
@@ -643,19 +929,25 @@ def main() -> None:
                 "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
                 "artifact.script": str((run_dir / "script.md").resolve()),
                 "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
+                "immersive.source_run": requested_source_run,
+                **p400_preservation_updates,
             },
         )
         return
 
     common_artifacts = {
         "immersive.experience": str(experience),
+        "immersive.source_run": requested_source_run,
         "artifact.research": str((run_dir / "research.md").resolve()),
         "artifact.story": str((run_dir / "story.md").resolve()),
         "artifact.visual_value": str((run_dir / "visual_value.md").resolve()),
         "artifact.script": str((run_dir / "script.md").resolve()),
         "artifact.video_manifest": str((run_dir / "video_manifest.md").resolve()),
     }
-    p400_review_updates = merge_review_loop_updates(run_dir, *p400_review_stages_for_stop(stop_slot))
+    p400_review_updates, p400_preservation_updates = prepare_p400_review_updates(
+        run_dir,
+        stop_slot,
+    )
 
     require_fresh_p400_readiness(run_dir)
     maybe_run_stage_grounding(run_dir, "asset", flow="immersive")
@@ -683,12 +975,12 @@ def main() -> None:
                 **review_handoff_updates("asset"),
                 **common_artifacts,
                 **asset_artifacts,
+                **p400_preservation_updates,
             },
             legacy_done=legacy_default,
         )
         return
 
-    ensure_production_manifest_file(run_dir / "video_manifest.md")
     maybe_run_stage_grounding(run_dir, "scene_implementation", flow="immersive")
     write_text(run_dir / "image_prompt_story_review.md", "# Image Prompt Story Review\n\nTODO\n", force=args.force)
     write_text(run_dir / "image_generation_requests.md", "# Image Generation Requests\n\nTODO\n", force=args.force)
@@ -716,6 +1008,7 @@ def main() -> None:
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
+                **p400_preservation_updates,
             },
         )
         return
@@ -738,6 +1031,7 @@ def main() -> None:
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
+                **p400_preservation_updates,
             },
         )
         return
@@ -765,6 +1059,7 @@ def main() -> None:
                 **asset_artifacts,
                 **scene_artifacts,
                 **video_artifacts,
+                **p400_preservation_updates,
             },
         )
         return
@@ -792,6 +1087,7 @@ def main() -> None:
             **video_artifacts,
             "artifact.run_report": str((run_dir / "run_report.md").resolve()),
             "artifact.eval_report": str((run_dir / "eval_report.json").resolve()),
+            **p400_preservation_updates,
         },
     )
 

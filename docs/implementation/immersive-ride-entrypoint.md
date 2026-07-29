@@ -11,6 +11,7 @@ Codex 主軸の assistant command を起点に、Claude Code slash command 互�
 ## 仕様（想定）
 
 - コマンド: `/toc-immersive-ride`
+- 関連コマンド: `/toc-world-walk`（既存 run の asset を参照する `world_walk` 専用入口）
 - 引数:
   - `--topic`（必須）
   - `--dry-run`（任意。外部生成APIは呼ばない）
@@ -30,7 +31,11 @@ Codex 主軸の assistant command を起点に、Claude Code slash command 互�
   - `--experience`（任意。default: `cloud_island_walk`）
     - `cinematic_story`: 物語を映画的に見せる（視点は必要に応じて。固定デバイスを前提にしない）
     - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
+    - `world_walk`: 既存 run の asset 内を観察者 POV で散歩し、物語を遠目に見かけるパターン
     - `ride_action_boat`: 互換用の legacy 名（内部的には `cinematic_story` 扱い）
+  - `--source-run`（`world_walk` では必須。既存 `output/<topic>_<timestamp>/` を参照）
+  - `world_walk` の scaffold helper は `--stage` 省略時に `p450` で停止する。
+    Image generation app のフロント作成は direct frontend runner で `p680` まで進める。
 
 ## 挙動（成果物）
 
@@ -70,6 +75,14 @@ run root:
   - 手元の“アンカー”（例: compass / journal）を前景に置き、POVの安定を作る
   - 島の各ゾーンを“概念の比喩（物理メタファ）”として設計する（文字で説明しない）
   - 道/橋/階段など「前進の導線」が常に画面にある（scene間の連続性を作る）
+
+`world_walk`:
+
+- 統一要素:
+  - source run の `story.md` / `assets/` を参照し、`video_metadata.source_run` / `source_assets` に記録する
+  - 観察者 POV。カメラは世界の中を歩くが、主人公本人や参照キャラ本人の視点にしない
+  - 少し遠目（中景〜遠景）を維持し、派手な演出・急接近・観察者の介入を避ける
+  - 序盤は物語が進まない asset 内散歩にし、中盤以降に参照キャラが遠景に現れて物語が別導線で始まる
 
 ## 生成設計（最小）
 

@@ -48,7 +48,7 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
     "asset_plan": {
         "slot": "p540",
         "owner": "asset planning producer",
-        "artifacts": ["asset_inventory.md", "asset_plan.md", "asset_generation_requests.md", "video_manifest.md"],
+        "artifacts": ["asset_inventory.md", "video_manifest.md"],
         "focus": "character/object/location coverage, asset category, story purpose, and prompt contract",
     },
     "image_prompt": {
@@ -299,6 +299,15 @@ def write_semantic_repair_prompt(
 - Keep historical `story_metadata.time` / `script_metadata.time` / `video_metadata.time` separate. A daypart repair controls sky brightness, natural and artificial light, shadows, and color temperature; it must not change historical clothing, architecture, materials, or technology.
 - Preserve scene order and authored transitions. If adjacent scenes change daypart, make the transition causally legible; do not infer or overwrite `time_of_day` from a location description or prompt prose.
 - Repair the earliest stage-owned scene projection, then keep the same value through downstream script/manifest projections. For a cut finding, fix the scene-level source and cut-local light plan rather than inventing a second historical-time field.
+"""
+    elif stage == "asset_plan":
+        stage_specific_repair = """
+## Asset Plan Repair Boundary
+
+- Treat `video_manifest.md.assets` as the canonical editable asset bible. Repair character, object, location, style, output, reference, and prompt-source contracts there, and keep `asset_inventory.md` aligned with the repaired coverage.
+- `asset_plan.md`, `asset_generation_manifest.md`, `asset_generation_requests.md`, and `asset_generation_request_snapshot.json` are compiler/materializer projections. Do not hand-edit `asset_generation_requests.md` or any of those derived files; the orchestrator will rebuild them from the canonical manifest after this repair.
+- Preserve every current scene/cut dependency while changing only the failed asset ids. Do not delete an asset merely to remove a finding, and do not attach an unrelated reference to make coverage appear complete.
+- Keep historical time and asset identity constraints at the canonical bible source. The orchestrator will compile the provider prompt, request digest, snapshot, and provenance contract from that source.
 """
     elif stage == "image_prompt":
         stage_specific_repair = """

@@ -8,6 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from toc.review_projection import (
+    RAW_REVIEW_SOURCE_FINGERPRINT_POLICY,
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+)
 from toc.semantic_pack import collect_entries
 from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
 
@@ -267,6 +271,9 @@ class TestSemanticPackFoundation(unittest.TestCase):
                         {
                             "path": source,
                             "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
+                            REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD: (
+                                RAW_REVIEW_SOURCE_FINGERPRINT_POLICY
+                            ),
                         }
                         for source in expected_sources
                     ],

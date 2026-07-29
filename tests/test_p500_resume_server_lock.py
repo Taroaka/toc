@@ -167,6 +167,7 @@ class P500ResumeServerLockTests(unittest.TestCase):
                 "script.md",
                 "asset_generation_requests.md",
                 "asset_generation_manifest.md",
+                "asset_generation_request_snapshot.json",
                 "image_generation_requests.md",
                 "image_generation_request_snapshot.json",
                 "p000_index.md",
@@ -210,6 +211,9 @@ class P500ResumeServerLockTests(unittest.TestCase):
                 ),
                 patch("server.image_gen_app._validate_semantic_reviews"),
                 patch(
+                    "server.image_gen_app._validate_semantic_reviews_for_media_generation"
+                ),
+                patch(
                     "server.image_gen_app._refresh_deterministic_image_prompt_review_if_stale"
                 ),
             ):
@@ -238,6 +242,11 @@ class P500ResumeAssetGenerationTests(unittest.IsolatedAsyncioTestCase):
                     "server.image_gen_app._set_create_job",
                     new=AsyncMock(),
                 ),
+                patch(
+                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("server.image_gen_app._validate_pre_asset_provider_gate"),
                 patch(
                     "server.image_gen_app._run_semantic_review_for_media_generation",
                     new=AsyncMock(return_value=None),

@@ -16,6 +16,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.harness import append_state_snapshot, now_iso  # noqa: E402
+from toc.review_projection import (  # noqa: E402
+    REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    review_source_fingerprint,
+)
 from toc.semantic_pack import collect_entries, load_manifest  # noqa: E402
 from toc.semantic_review import (  # noqa: E402
     FOUNDATION_SEMANTIC_CRITERIA,
@@ -93,7 +97,11 @@ def render_scope_json(
     diagnostics = entry_diagnostics(entries)
     entry_ids = [str(entry.get("id") or entry.get("selector") or "") for entry in entries]
     source_artifacts = _source_artifacts(run_dir, stage)
-    source_artifact_digests = _source_artifact_digest_records(run_dir, source_artifacts)
+    source_artifact_digests = _source_artifact_digest_records(
+        run_dir,
+        source_artifacts,
+        stage=stage,
+    )
     collection_sha256 = semantic_review_file_sha256(collection_path)
     prompt_sha256 = semantic_review_file_sha256(prompt_path)
     request_revision = _semantic_review_request_revision(
@@ -282,7 +290,11 @@ def materialize_image_prompt_scene_shards(
             + "\n",
         )
         source_artifacts = _source_artifacts(run_dir, "image_prompt")
-        source_artifact_digests = _source_artifact_digest_records(run_dir, source_artifacts)
+        source_artifact_digests = _source_artifact_digest_records(
+            run_dir,
+            source_artifacts,
+            stage="image_prompt",
+        )
         collection_sha256 = semantic_review_file_sha256(collection_path)
         prompt_sha256 = semantic_review_file_sha256(prompt_path)
         request_revision = _semantic_review_request_revision(
@@ -479,6 +491,8 @@ def _source_artifacts(run_dir: Path, stage: str) -> list[str]:
 def _source_artifact_digest_records(
     run_dir: Path,
     source_artifacts: list[str],
+    *,
+    stage: str,
 ) -> list[dict[str, str]]:
     run_root = run_dir.resolve(strict=True)
     records: list[dict[str, str]] = []
@@ -497,7 +511,21 @@ def _source_artifact_digest_records(
         if rel in seen:
             raise ValueError(f"semantic review source artifact is duplicated: {rel}")
         seen.add(rel)
-        records.append({"path": rel, "sha256": semantic_review_file_sha256(source_path)})
+        fingerprint = review_source_fingerprint(
+            source_path,
+            artifact_relpath=rel,
+            review_kind="semantic",
+            stage=stage,
+        )
+        records.append(
+            {
+                "path": rel,
+                "sha256": fingerprint.sha256,
+                REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD: (
+                    fingerprint.policy
+                ),
+            }
+        )
     return records
 
 

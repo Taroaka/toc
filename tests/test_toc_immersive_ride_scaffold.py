@@ -1,8 +1,14 @@
+import hashlib
 import importlib.util
+import json
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from toc.review_loop import review_input_snapshot_issues
+from toc.review_projection import review_source_fingerprint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "toc-immersive-ride.py"
@@ -41,6 +47,170 @@ def markdown_subsection(text: str, heading: str) -> str:
 
 
 class TestTocImmersiveRideScaffold(unittest.TestCase):
+    P400_REVIEW_STAGES = (
+        "scene_set",
+        "scene_detail",
+        "cut_blueprint",
+        "script",
+        "production_readiness",
+    )
+
+    def run_scaffold(
+        self,
+        base: Path,
+        stage: str,
+        *,
+        experience: str = "cloud_island_walk",
+        force: bool = True,
+    ) -> Path:
+        command = [
+            sys.executable,
+            "scripts/toc-immersive-ride.py",
+            "--topic",
+            "テスト トピック",
+            "--timestamp",
+            "20990101_0000",
+            "--base",
+            str(base),
+            "--stage",
+            stage,
+            "--experience",
+            experience,
+            "--review-policy",
+            "drafts",
+        ]
+        if force:
+            command.append("--force")
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        return base / "テスト_トピック_20990101_0000"
+
+    def assert_review_snapshot_binds_skeleton_manifest(self, run_dir: Path, stage: str) -> None:
+        manifest_path = run_dir / "video_manifest.md"
+        self.assertTrue(manifest_path.exists())
+        self.assertIn("manifest_phase: skeleton", manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            parse_state(run_dir / "state.txt")["artifact.video_manifest"],
+            str(manifest_path.resolve()),
+        )
+
+        snapshot_path = run_dir / "logs" / "eval" / stage / "round_01" / "review_input_snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            review_input_snapshot_issues(
+                run_dir=run_dir,
+                stage=stage,
+                round_number=1,
+            ),
+            [],
+        )
+        sources = {str(item["path"]): item for item in snapshot["source_artifacts"]}
+        expected_manifest_fingerprint = review_source_fingerprint(
+            manifest_path,
+            artifact_relpath="video_manifest.md",
+            review_kind="review_loop",
+            stage=stage,
+        )
+        self.assertEqual(
+            sources["video_manifest.md"]["sha256"],
+            expected_manifest_fingerprint.sha256,
+        )
+        self.assertEqual(
+            sources["video_manifest.md"]["fingerprint_policy"],
+            expected_manifest_fingerprint.policy,
+        )
+        state = parse_state(run_dir / "state.txt")
+        self.assertEqual(state[f"eval.{stage}.loop.current_round"], "1")
+        self.assertEqual(
+            state[f"eval.{stage}.loop.round_01.input_digest"],
+            snapshot["input_digest"],
+        )
+
+    def approve_existing_p435_run(self, run_dir: Path) -> dict[Path, bytes]:
+        manifest_path = run_dir / "video_manifest.md"
+        TOC_IMMERSIVE_RIDE.ensure_production_manifest_file(manifest_path)
+        approval_updates = {
+            "eval.p400_readiness.status": "approved",
+            "eval.p400_readiness.reason_keys": "",
+            "review.script.scene_set.status": "approved",
+            "review.script.scene_detail.status": "approved",
+            "review.script.cut.status": "approved",
+            "review.script.production_readiness.status": "approved",
+            "slot.p410.status": "done",
+            "slot.p420.status": "done",
+            "slot.p430.status": "done",
+            "slot.p435.status": "done",
+            "slot.p450.status": "done",
+        }
+        evidence: dict[Path, bytes] = {}
+        for stage in self.P400_REVIEW_STAGES:
+            review_updates = TOC_IMMERSIVE_RIDE.materialize_review_loop_prompts(
+                run_dir,
+                stage=stage,
+            )
+            approval_updates.update(review_updates)
+            approval_updates[f"eval.{stage}.loop.status"] = "passed"
+            approval_updates[f"eval.{stage}.loop.current_round"] = "1"
+            final_report = run_dir / TOC_IMMERSIVE_RIDE.final_review_relpath(stage)
+            final_report.write_text(
+                f"# {stage} approved evidence\n\nstatus: passed\n",
+                encoding="utf-8",
+            )
+            snapshot_path = (
+                run_dir
+                / "logs"
+                / "eval"
+                / stage
+                / "round_01"
+                / "review_input_snapshot.json"
+            )
+            evidence[final_report] = final_report.read_bytes()
+            evidence[snapshot_path] = snapshot_path.read_bytes()
+        TOC_IMMERSIVE_RIDE.append_state_block(run_dir / "state.txt", approval_updates)
+        return evidence
+
+    def continue_approved_run(self, run_dir: Path, stage: str) -> None:
+        argv = [
+            "toc-immersive-ride.py",
+            "--topic",
+            "テスト トピック",
+            "--timestamp",
+            "20990101_0000",
+            "--run-dir",
+            str(run_dir),
+            "--stage",
+            stage,
+            "--experience",
+            "cloud_island_walk",
+            "--review-policy",
+            "drafts",
+        ]
+
+        def assert_current_production_p400(candidate: Path) -> None:
+            manifest = (candidate / "video_manifest.md").read_text(encoding="utf-8")
+            self.assertIn("manifest_phase: production", manifest)
+            self.assertNotIn("manifest_phase: skeleton", manifest)
+            for review_stage in self.P400_REVIEW_STAGES:
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=candidate,
+                        stage=review_stage,
+                        round_number=1,
+                    ),
+                    [],
+                    review_stage,
+                )
+
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(TOC_IMMERSIVE_RIDE, "maybe_run_stage_grounding"),
+            mock.patch.object(
+                TOC_IMMERSIVE_RIDE,
+                "require_fresh_p400_readiness",
+                side_effect=assert_current_production_p400,
+            ),
+        ):
+            TOC_IMMERSIVE_RIDE.main()
+
     def test_stage_target_contract_normalizes_big_stages_to_handoff_slots(self) -> None:
         cases = {
             "p100": "p130",
@@ -173,6 +343,133 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertIn("一人称POVで前進しながら歩く", manifest)
             self.assertIn("画面内テキスト", manifest)
 
+    def test_scaffold_world_walk_requires_source_run(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "テスト トピック",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--experience",
+                    "world_walk",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--source-run", result.stderr)
+
+    def test_scaffold_world_walk_experience_uses_source_run_template(self) -> None:
+        import tempfile
+
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with (
+            tempfile.TemporaryDirectory(prefix="toc_test_out_") as td,
+            tempfile.TemporaryDirectory(prefix="world_walk_source_", dir=output_root) as source_td,
+        ):
+            base = Path(td) / "out"
+            source_run = Path(source_td)
+            (source_run / "assets" / "characters").mkdir(parents=True, exist_ok=True)
+            (source_run / "story.md").write_text("# 物語\n\nTODO source\n", encoding="utf-8")
+            base.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "桃太郎の世界観を散歩してみた",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--source-run",
+                    str(source_run),
+                    "--experience",
+                    "world_walk",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            run_dir = base / "桃太郎の世界観を散歩してみた_20990101_0000"
+            manifest_path = run_dir / "video_manifest.md"
+            self.assertTrue(manifest_path.exists())
+            manifest = manifest_path.read_text(encoding="utf-8")
+            self.assertIn("manifest_phase: skeleton", manifest)
+            self.assertIn('experience: "world_walk"', manifest)
+            source_run_relative = f"output/{source_run.name}"
+            self.assertIn(f'source_run: "{source_run_relative}"', manifest)
+            self.assertIn(f'source_assets: "{source_run_relative}/assets"', manifest)
+            self.assertIn("観察者POV", manifest)
+            self.assertIn("物語が進まない asset 内散歩", manifest)
+            self.assertIn("参照キャラが遠景に現れる", manifest)
+            parsed_state = parse_state(run_dir / "state.txt")
+            self.assertEqual(parsed_state["immersive.experience"], "world_walk")
+            self.assertEqual(parsed_state["immersive.source_run"], source_run_relative)
+
+    def test_world_walk_wrapper_derives_topic_from_source_run(self) -> None:
+        import tempfile
+
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with (
+            tempfile.TemporaryDirectory(prefix="toc_test_out_") as td,
+            tempfile.TemporaryDirectory(prefix="浦島太郎_", dir=output_root) as source_td,
+        ):
+            base = Path(td) / "out"
+            source_run = Path(source_td)
+            (source_run / "assets").mkdir(parents=True, exist_ok=True)
+            (source_run / "story.md").write_text("# 物語\n\nTODO source\n", encoding="utf-8")
+            base.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-world-walk.py",
+                    "--source-run",
+                    str(source_run),
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "script",
+                    "--force",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            derived_title = f"{source_run.name}の世界観を散歩してみた"
+            run_dir = base / f"{derived_title}_20990101_0000"
+            manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            self.assertIn(f'topic: "{derived_title}"', manifest)
+            self.assertIn('experience: "world_walk"', manifest)
+
     def test_scaffold_accepts_numeric_p300_stage_target_as_visual_handoff(self) -> None:
         import tempfile
 
@@ -223,8 +520,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertEqual(parsed_state["slot.p320.status"], "pending")
             self.assertEqual(parsed_state["slot.p330.status"], "pending")
             self.assertEqual(parsed_state["artifact.visual_value.status"], "scaffold")
-            self.assertEqual(parsed_state["eval.visual_value.loop.status"], "pending")
-            self.assertEqual(parsed_state["eval.visual_value.loop.current_round"], "0")
+            self.assertEqual(parsed_state["eval.visual_value.loop.status"], "running")
+            self.assertEqual(parsed_state["eval.visual_value.loop.current_round"], "1")
             self.assertEqual(parsed_state["eval.visual_value.loop.max_rounds"], "5")
             self.assertTrue((run_dir / "logs" / "eval" / "visual_value" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
             self.assertTrue((run_dir / "logs" / "eval" / "visual_value" / "round_01" / "prompts" / "aggregator.prompt.md").exists())
@@ -363,12 +660,18 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertIn("review.script.scene_detail.status=pending", state)
             self.assertIn("review.script.cut.status=pending", state)
             self.assertIn("review.script.production_readiness.status=pending", state)
-            self.assertIn("eval.scene_set.loop.status=pending", state)
-            self.assertIn("eval.scene_detail.loop.status=pending", state)
-            self.assertIn("eval.cut_blueprint.loop.status=pending", state)
-            self.assertIn("eval.production_readiness.loop.status=pending", state)
-            self.assertIn("slot.p410.status=pending", state)
-            self.assertIn("slot.p435.status=pending", state)
+            parsed_state = parse_state(run_dir / "state.txt")
+            for review_stage in (
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "script",
+                "production_readiness",
+            ):
+                self.assertEqual(parsed_state[f"eval.{review_stage}.loop.status"], "running")
+            self.assertEqual(parsed_state["slot.p410.status"], "pending")
+            self.assertEqual(parsed_state["slot.p435.status"], "pending")
+            self.assertEqual(parsed_state["slot.p450.status"], "pending")
 
     def test_scaffold_p410_materializes_only_scene_reviews(self) -> None:
         import tempfile
@@ -403,6 +706,13 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "eval" / "scene_detail" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
             self.assertFalse((run_dir / "logs" / "eval" / "cut_blueprint").exists())
             self.assertFalse((run_dir / "logs" / "eval" / "script").exists())
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "scene_set")
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "scene_detail")
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["eval.scene_set.loop.status"], "running")
+            self.assertEqual(state["eval.scene_detail.loop.status"], "running")
+            self.assertEqual(state["slot.p410.status"], "pending")
+            self.assertEqual(state["slot.p450.status"], "pending")
 
     def test_scaffold_p420_materializes_cut_review_but_not_script_review(self) -> None:
         import tempfile
@@ -438,6 +748,11 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "eval" / "cut_blueprint" / "round_01" / "prompts" / "critic_1.prompt.md").exists())
             self.assertFalse((run_dir / "logs" / "eval" / "script").exists())
             self.assertFalse((run_dir / "logs" / "eval" / "production_readiness").exists())
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "cut_blueprint")
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["eval.cut_blueprint.loop.status"], "running")
+            self.assertEqual(state["slot.p420.status"], "pending")
+            self.assertEqual(state["slot.p450.status"], "pending")
 
     def test_scaffold_p435_materializes_production_readiness_after_script_review(self) -> None:
         import tempfile
@@ -473,8 +788,303 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             state = parse_state(run_dir / "state.txt")
             self.assertEqual(state["runtime.stop_slot"], "p435")
             self.assertEqual(state["review.script.production_readiness.status"], "pending")
-            self.assertEqual(state["eval.production_readiness.loop.status"], "pending")
+            self.assertEqual(state["eval.production_readiness.loop.status"], "running")
             self.assertEqual(state["slot.p435.status"], "pending")
+            self.assertEqual(state["slot.p450.status"], "pending")
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "script")
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "production_readiness")
+
+    def test_scaffold_p430_materializes_script_review_without_production_readiness(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            self.run_scaffold(base, "p435")
+            run_dir = self.run_scaffold(base, "p430")
+
+            for review_stage in ("scene_set", "scene_detail", "cut_blueprint", "script"):
+                self.assert_review_snapshot_binds_skeleton_manifest(run_dir, review_stage)
+            self.assertFalse((run_dir / "logs" / "eval" / "production_readiness").exists())
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["runtime.stop_slot"], "p430")
+            self.assertEqual(state["eval.script.loop.status"], "running")
+            self.assertEqual(state["eval.production_readiness.loop.status"], "pending")
+            self.assertEqual(state["eval.production_readiness.loop.current_round"], "0")
+            self.assertEqual(state["eval.production_readiness.loop.round_01.input_snapshot"], "")
+            self.assertEqual(state["slot.p430.status"], "pending")
+            self.assertEqual(state["slot.p435.status"], "pending")
+            self.assertEqual(state["slot.p450.status"], "pending")
+
+    def test_scaffold_p410_rewind_invalidates_later_p400_reviews_and_approval(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            run_dir = self.run_scaffold(base, "p435")
+            for review_stage in ("cut_blueprint", "script", "production_readiness"):
+                (run_dir / f"{review_stage}_review.md").write_text("status: passed\n", encoding="utf-8")
+            TOC_IMMERSIVE_RIDE.append_state_block(
+                run_dir / "state.txt",
+                {
+                    "eval.p400_readiness.status": "approved",
+                    "eval.p400_readiness.reason_keys": "",
+                    "review.script.scene_set.status": "approved",
+                    "review.script.scene_detail.status": "approved",
+                    "review.script.cut.status": "approved",
+                    "review.script.production_readiness.status": "approved",
+                    "slot.p410.status": "done",
+                    "slot.p420.status": "done",
+                    "slot.p430.status": "done",
+                    "slot.p435.status": "done",
+                    "slot.p450.status": "done",
+                },
+            )
+
+            self.run_scaffold(base, "p410")
+
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_set").exists())
+            self.assertTrue((run_dir / "logs" / "eval" / "scene_detail").exists())
+            for review_stage in ("cut_blueprint", "script", "production_readiness"):
+                self.assertFalse((run_dir / "logs" / "eval" / review_stage).exists())
+                self.assertFalse((run_dir / f"{review_stage}_review.md").exists())
+
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["eval.p400_readiness.status"], "changes_requested")
+            self.assertEqual(state["eval.p400_readiness.reason_keys"], "p400.review_loop_integrity")
+            self.assertEqual(state["eval.scene_set.loop.status"], "running")
+            self.assertEqual(state["eval.scene_detail.loop.status"], "running")
+            for review_stage in ("cut_blueprint", "script", "production_readiness"):
+                self.assertEqual(state[f"eval.{review_stage}.loop.status"], "pending")
+                self.assertEqual(state[f"eval.{review_stage}.loop.current_round"], "0")
+                self.assertEqual(state[f"eval.{review_stage}.loop.round_01.input_snapshot"], "")
+                self.assertEqual(state[f"eval.{review_stage}.loop.round_01.input_digest"], "")
+            self.assertEqual(state["review.script.scene_set.status"], "pending")
+            self.assertEqual(state["review.script.scene_detail.status"], "pending")
+            self.assertEqual(state["review.script.cut.status"], "pending")
+            self.assertEqual(state["review.script.production_readiness.status"], "pending")
+            for slot in ("p410", "p420", "p430", "p435", "p450"):
+                self.assertEqual(state[f"slot.{slot}.status"], "pending")
+
+    def test_scaffold_non_force_rewind_demotes_existing_production_manifest(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            run_dir = self.run_scaffold(base, "p435")
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    "manifest_phase: skeleton",
+                    "manifest_phase: production",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            self.run_scaffold(base, "p410", force=False)
+
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "scene_set")
+            self.assert_review_snapshot_binds_skeleton_manifest(run_dir, "scene_detail")
+            manifest = manifest_path.read_text(encoding="utf-8")
+            self.assertIn("manifest_phase: skeleton", manifest)
+            self.assertNotIn("manifest_phase: production", manifest)
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(
+                state["slot.p450.note"],
+                "review-bound skeleton exists; p450 readiness handoff remains pending before p500",
+            )
+            self.assertEqual(state["slot.p450.status"], "pending")
+
+    def test_scaffold_forced_early_rewind_refreshes_experience_state(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+
+            run_dir = self.run_scaffold(base, "p435", experience="cloud_island_walk")
+            self.assertEqual(parse_state(run_dir / "state.txt")["immersive.experience"], "cloud_island_walk")
+            TOC_IMMERSIVE_RIDE.append_state_block(
+                run_dir / "state.txt",
+                {"immersive.source_run": "output/stale_source_run"},
+            )
+
+            self.run_scaffold(base, "p410", experience="cinematic_story")
+
+            state = parse_state(run_dir / "state.txt")
+            self.assertEqual(state["immersive.experience"], "cinematic_story")
+            self.assertEqual(state["immersive.source_run"], "")
+            manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
+            self.assertIn('experience: "cinematic_story"', manifest)
+
+    def test_approved_p435_continues_to_p500_without_rewriting_p400_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+            run_dir = self.run_scaffold(base, "p435")
+            evidence_before = self.approve_existing_p435_run(run_dir)
+            state_before = parse_state(run_dir / "state.txt")
+            manifest_before = (run_dir / "video_manifest.md").read_bytes()
+
+            self.continue_approved_run(run_dir, "p500")
+
+            self.assertTrue((run_dir / "asset_plan.md").exists())
+            self.assertEqual((run_dir / "video_manifest.md").read_bytes(), manifest_before)
+            for path, content in evidence_before.items():
+                self.assertTrue(path.exists(), path)
+                self.assertEqual(path.read_bytes(), content, path)
+            state = parse_state(run_dir / "state.txt")
+            for stage in self.P400_REVIEW_STAGES:
+                self.assertEqual(state[f"eval.{stage}.loop.status"], "passed", stage)
+                self.assertEqual(
+                    state[f"eval.{stage}.loop.round_01.input_digest"],
+                    state_before[f"eval.{stage}.loop.round_01.input_digest"],
+                    stage,
+                )
+            self.assertEqual(state["slot.p435.status"], "done")
+            self.assertEqual(state["eval.p400_readiness.status"], "approved")
+
+    def test_approved_p435_continues_to_p610_with_production_bound_p400_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+            run_dir = self.run_scaffold(base, "p435")
+            evidence_before = self.approve_existing_p435_run(run_dir)
+            manifest_before = (run_dir / "video_manifest.md").read_bytes()
+
+            self.continue_approved_run(run_dir, "p610")
+
+            self.assertTrue((run_dir / "image_generation_requests.md").exists())
+            self.assertEqual((run_dir / "video_manifest.md").read_bytes(), manifest_before)
+            for path, content in evidence_before.items():
+                self.assertTrue(path.exists(), path)
+                self.assertEqual(path.read_bytes(), content, path)
+            state = parse_state(run_dir / "state.txt")
+            for stage in self.P400_REVIEW_STAGES:
+                self.assertEqual(state[f"eval.{stage}.loop.status"], "passed", stage)
+            self.assertEqual(state["slot.p435.status"], "done")
+            self.assertEqual(state["eval.p400_readiness.status"], "approved")
+
+    def test_forward_continuation_reruns_authoring_grounding_after_script_mutation(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="toc_test_out_") as td:
+            base = Path(td) / "out"
+            base.mkdir(parents=True, exist_ok=True)
+            run_dir = self.run_scaffold(base, "p435")
+            self.approve_existing_p435_run(run_dir)
+            script_readset_path = run_dir / "logs" / "grounding" / "script.readset.json"
+            script_path = run_dir / "script.md"
+            script_path.write_text(
+                script_path.read_text(encoding="utf-8")
+                + "\n外部 producer による review-bound script 更新\n",
+                encoding="utf-8",
+            )
+            grounded_stages: list[str] = []
+            original_grounding = TOC_IMMERSIVE_RIDE.maybe_run_stage_grounding
+
+            def selective_grounding(
+                candidate: Path,
+                stage: str,
+                *,
+                flow: str,
+                fatal: bool = True,
+            ) -> None:
+                grounded_stages.append(stage)
+                if stage in {"research", "story", "visual_value", "script"}:
+                    original_grounding(
+                        candidate,
+                        stage,
+                        flow=flow,
+                        fatal=fatal,
+                    )
+
+            def assert_current_p400(candidate: Path) -> None:
+                for review_stage in self.P400_REVIEW_STAGES:
+                    self.assertEqual(
+                        review_input_snapshot_issues(
+                            run_dir=candidate,
+                            stage=review_stage,
+                            round_number=1,
+                        ),
+                        [],
+                        review_stage,
+                    )
+
+            argv = [
+                "toc-immersive-ride.py",
+                "--topic",
+                "テスト トピック",
+                "--timestamp",
+                "20990101_0000",
+                "--run-dir",
+                str(run_dir),
+                "--stage",
+                "p500",
+                "--experience",
+                "cloud_island_walk",
+                "--review-policy",
+                "drafts",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    TOC_IMMERSIVE_RIDE,
+                    "maybe_run_stage_grounding",
+                    side_effect=selective_grounding,
+                ),
+                mock.patch.object(
+                    TOC_IMMERSIVE_RIDE,
+                    "require_fresh_p400_readiness",
+                    side_effect=assert_current_p400,
+                ),
+            ):
+                TOC_IMMERSIVE_RIDE.main()
+
+            self.assertEqual(
+                grounded_stages[:4],
+                ["research", "story", "visual_value", "script"],
+            )
+            current_readset_sha = hashlib.sha256(script_readset_path.read_bytes()).hexdigest()
+            for review_stage in self.P400_REVIEW_STAGES:
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage=review_stage,
+                        round_number=1,
+                    ),
+                    [],
+                    review_stage,
+                )
+                snapshot_path = (
+                    run_dir
+                    / "logs"
+                    / "eval"
+                    / review_stage
+                    / "round_01"
+                    / "review_input_snapshot.json"
+                )
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    snapshot["readset"]["path"],
+                    "logs/grounding/script.readset.json",
+                    review_stage,
+                )
+                self.assertEqual(
+                    snapshot["readset"]["sha256"],
+                    current_readset_sha,
+                    review_stage,
+                )
 
     def test_scaffold_script_stage_stops_before_narration(self) -> None:
         import tempfile

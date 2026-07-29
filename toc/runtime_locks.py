@@ -7,6 +7,7 @@ import fcntl
 import os
 from pathlib import Path
 import re
+import stat
 import time
 from typing import AsyncIterator, Iterator, TextIO
 
@@ -32,18 +33,79 @@ def _safe_namespace(namespace: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", namespace).strip("._") or "lock"
 
 
+def _unsafe_lock_path(path: Path, reason: str) -> FileLockUnavailable:
+    return FileLockUnavailable(f"unsafe file lock path: {path} ({reason})")
+
+
+def _open_lock_file_nofollow(path: Path) -> TextIO:
+    """Open a regular, single-link lock file without following its parent or leaf."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    if not nofollow or not directory:
+        raise _unsafe_lock_path(path, "platform lacks no-follow directory opens")
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _unsafe_lock_path(path, f"lock directory unavailable: {exc}") from exc
+
+    parent_fd = -1
+    lock_fd = -1
+    try:
+        # Opening the immediate parent with O_NOFOLLOW prevents a malicious
+        # `.locks` symlink from redirecting creation outside the run.
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | directory | cloexec | nofollow,
+        )
+        try:
+            created_fd = os.open(
+                path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | cloexec | nofollow,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(created_fd)
+        lock_fd = os.open(
+            path.name,
+            os.O_RDONLY | cloexec | nofollow | nonblock,
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(lock_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise _unsafe_lock_path(path, "lock target is not a regular file")
+        if opened.st_nlink != 1:
+            raise _unsafe_lock_path(path, "lock target has multiple hard links")
+        lock_file = os.fdopen(lock_fd, "r", encoding="utf-8")
+        lock_fd = -1
+        return lock_file
+    except FileLockUnavailable:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _unsafe_lock_path(path, str(exc)) from exc
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def _try_lock(path: Path, *, slot: int | None = None) -> FileLockLease | None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = path.open("a+", encoding="utf-8")
+    lock_file = _open_lock_file_nofollow(path)
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         lock_file.close()
         return None
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(f"pid={os.getpid()}\nacquired_at={time.time():.6f}\n")
-    lock_file.flush()
+    except BaseException:
+        lock_file.close()
+        raise
     return FileLockLease(path=path, file=lock_file, slot=slot)
 
 
