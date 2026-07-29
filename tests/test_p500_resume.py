@@ -355,6 +355,187 @@ class P500ResumeTests(unittest.TestCase):
             )
 
     @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
+    def test_apply_rejects_downstream_ancestor_swap_without_moving_outside_files(
+        self,
+        _readiness,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = self._run_fixture(root)
+            plan = build_resume_plan(
+                repo_root=root,
+                run_dir=run_dir,
+                checkpoint_id="downstream-ancestor-swap",
+            )
+            original_assets = run_dir / "assets-before-swap"
+            outside_assets = root / "outside-assets"
+            outside_hero = outside_assets / "characters/hero.png"
+            outside_scene = outside_assets / "scenes/scene01_cut01.png"
+            outside_hero.parent.mkdir(parents=True)
+            outside_scene.parent.mkdir(parents=True)
+            outside_hero.write_bytes(b"outside-hero-must-not-move")
+            outside_scene.write_bytes(b"outside-scene-must-not-move")
+            real_build = p500_resume.build_resume_plan
+            swapped = False
+
+            def build_then_swap(**kwargs):
+                nonlocal swapped
+                current = real_build(**kwargs)
+                if not swapped:
+                    swapped = True
+                    (run_dir / "assets").rename(original_assets)
+                    (run_dir / "assets").symlink_to(
+                        outside_assets,
+                        target_is_directory=True,
+                    )
+                return current
+
+            with (
+                patch.object(
+                    p500_resume,
+                    "build_resume_plan",
+                    side_effect=build_then_swap,
+                ),
+                self.assertRaisesRegex(
+                    P500ResumeError,
+                    "directory identity changed|unsafe downstream",
+                ),
+            ):
+                apply_resume_plan(plan)
+
+            self.assertEqual(
+                outside_hero.read_bytes(),
+                b"outside-hero-must-not-move",
+            )
+            self.assertEqual(
+                outside_scene.read_bytes(),
+                b"outside-scene-must-not-move",
+            )
+            self.assertEqual(
+                (original_assets / "characters/hero.png").read_bytes(),
+                b"old image bytes\n",
+            )
+            self.assertEqual(
+                (original_assets / "scenes/scene01_cut01.png").read_bytes(),
+                b"old scene bytes\n",
+            )
+
+    @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
+    def test_apply_rejects_run_root_replacement_bound_to_dry_run_identity(
+        self,
+        _readiness,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = self._run_fixture(root)
+            plan = build_resume_plan(
+                repo_root=root,
+                run_dir=run_dir,
+                checkpoint_id="run-root-replaced",
+            )
+            original_run = run_dir.with_name(f"{run_dir.name}-original")
+            run_dir.rename(original_run)
+            shutil.copytree(original_run, run_dir)
+
+            with self.assertRaisesRegex(
+                P500ResumeError,
+                "run directory identity changed",
+            ):
+                apply_resume_plan(plan)
+
+            self.assertEqual(
+                (run_dir / "assets/characters/hero.png").read_bytes(),
+                b"old image bytes\n",
+            )
+            self.assertFalse(Path(plan.checkpoint_dir).exists())
+
+    @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
+    def test_rollback_rejects_ancestor_swap_without_overwriting_outside_files(
+        self,
+        _readiness,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = self._run_fixture(root)
+            plan = build_resume_plan(
+                repo_root=root,
+                run_dir=run_dir,
+                checkpoint_id="rollback-ancestor-swap",
+            )
+            original_assets = run_dir / "assets-before-rollback"
+            outside_assets = root / "outside-rollback-assets"
+            outside_hero = outside_assets / "characters/hero.png"
+            outside_scene = outside_assets / "scenes/scene01_cut01.png"
+            outside_hero.parent.mkdir(parents=True)
+            outside_scene.parent.mkdir(parents=True)
+            outside_hero.write_bytes(b"outside-hero-must-not-overwrite")
+            outside_scene.write_bytes(b"outside-scene-must-not-overwrite")
+
+            def swap_then_fail(*_args, **_kwargs):
+                (run_dir / "assets").rename(original_assets)
+                (run_dir / "assets").symlink_to(
+                    outside_assets,
+                    target_is_directory=True,
+                )
+                raise RuntimeError("force rollback after ancestor swap")
+
+            with (
+                patch.object(
+                    p500_resume,
+                    "append_state_snapshot",
+                    side_effect=swap_then_fail,
+                ),
+                self.assertRaises(Exception),
+            ):
+                apply_resume_plan(plan)
+
+            self.assertEqual(
+                outside_hero.read_bytes(),
+                b"outside-hero-must-not-overwrite",
+            )
+            self.assertEqual(
+                outside_scene.read_bytes(),
+                b"outside-scene-must-not-overwrite",
+            )
+            checkpoint = Path(plan.checkpoint_dir)
+            self.assertTrue(
+                (
+                    checkpoint
+                    / "artifacts/assets/characters/hero.png"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    checkpoint
+                    / "artifacts/assets/scenes/scene01_cut01.png"
+                ).is_file()
+            )
+
+    @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
+    def test_stale_legacy_frontend_marker_does_not_block_p500_apply(
+        self,
+        _readiness,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = self._run_fixture(root)
+            marker = run_dir / ".toc_frontend_create.lock"
+            marker.write_text("pid=dead-owner\n", encoding="utf-8")
+            plan = build_resume_plan(
+                repo_root=root,
+                run_dir=run_dir,
+                checkpoint_id="stale-legacy-marker",
+            )
+
+            checkpoint = apply_resume_plan(plan)
+
+            self.assertTrue((checkpoint / "checkpoint.json").is_file())
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "pid=dead-owner\n",
+            )
+
+    @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
     def test_apply_rejects_p000_index_changed_after_dry_run_before_writes(
         self,
         _readiness,

@@ -1,8 +1,10 @@
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -177,6 +179,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             "20990101_0000",
             "--run-dir",
             str(run_dir),
+            "--base",
+            str(run_dir.parent),
             "--stage",
             stage,
             "--experience",
@@ -375,8 +379,6 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             self.assertIn("--source-run", result.stderr)
 
     def test_scaffold_world_walk_experience_uses_source_run_template(self) -> None:
-        import tempfile
-
         output_root = REPO_ROOT / "output"
         output_root.mkdir(exist_ok=True)
         with (
@@ -427,6 +429,330 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             parsed_state = parse_state(run_dir / "state.txt")
             self.assertEqual(parsed_state["immersive.experience"], "world_walk")
             self.assertEqual(parsed_state["immersive.source_run"], source_run_relative)
+
+    def test_scaffold_rejects_timestamp_traversal_without_writing_outside_base(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_ride_timestamp_") as td:
+            root = Path(td)
+            base = root / "output"
+            base.mkdir()
+            escaped = root / "escaped"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "test",
+                    "--timestamp",
+                    "../../../escaped",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "p100",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("timestamp", result.stderr.lower())
+            self.assertFalse(escaped.exists())
+            self.assertEqual(list(base.iterdir()), [])
+
+    def test_scaffold_rejects_run_dir_outside_base(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_ride_run_dir_") as td:
+            root = Path(td)
+            base = root / "output"
+            base.mkdir()
+            escaped = root / "escaped"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "test",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--run-dir",
+                    str(escaped),
+                    "--stage",
+                    "p100",
+                    "--review-policy",
+                    "drafts",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--run-dir", result.stderr)
+            self.assertFalse(escaped.exists())
+            self.assertEqual(list(base.iterdir()), [])
+
+    def test_scaffold_rejects_broken_and_live_artifact_symlinks_without_external_write(
+        self,
+    ) -> None:
+        for label, target_exists, force in (
+            ("broken", False, False),
+            ("live", True, True),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory(
+                prefix=f"toc_ride_{label}_symlink_"
+            ) as td:
+                root = Path(td)
+                base = root / "output"
+                run_dir = base / "test_20990101_0000"
+                run_dir.mkdir(parents=True)
+                outside = root / "outside-research.md"
+                if target_exists:
+                    outside.write_text("outside-original\n", encoding="utf-8")
+                (run_dir / "research.md").symlink_to(outside)
+                command = [
+                    sys.executable,
+                    "scripts/toc-immersive-ride.py",
+                    "--topic",
+                    "test",
+                    "--timestamp",
+                    "20990101_0000",
+                    "--base",
+                    str(base),
+                    "--stage",
+                    "p100",
+                    "--review-policy",
+                    "drafts",
+                ]
+                if force:
+                    command.append("--force")
+
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((run_dir / "research.md").is_symlink())
+                if target_exists:
+                    self.assertEqual(
+                        outside.read_text(encoding="utf-8"),
+                        "outside-original\n",
+                    )
+                else:
+                    self.assertFalse(outside.exists())
+
+    def test_rewind_cleanup_rejects_symlinked_ancestor_without_external_deletion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_ride_cleanup_") as td:
+            root = Path(td)
+            run_dir = root / "run"
+            outside = root / "outside"
+            run_dir.mkdir()
+            victim_dir = outside / "eval" / "scene_set"
+            victim_dir.mkdir(parents=True)
+            victim = victim_dir / "victim.txt"
+            victim.write_text("preserve\n", encoding="utf-8")
+            (run_dir / "logs").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises((OSError, ValueError)):
+                TOC_IMMERSIVE_RIDE.reset_p400_review_handoff(
+                    run_dir,
+                    experience="cinematic_story",
+                    source_run=None,
+                )
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "preserve\n")
+            self.assertTrue((run_dir / "logs").is_symlink())
+
+    def test_scaffold_rejects_run_root_replacement_before_later_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_ride_root_swap_") as td:
+            root = Path(td)
+            base = root / "output"
+            base.mkdir()
+            run_dir = base / "test_20990101_0000"
+            original_run = base / "test_20990101_0000-original"
+            outside = root / "outside"
+            outside.mkdir()
+            outside_state = outside / "state.txt"
+            outside_state.write_text("outside-original\n", encoding="utf-8")
+            swapped = False
+
+            def replace_root(
+                candidate: Path,
+                _stage: str,
+                *,
+                flow: str,
+                fatal: bool = True,
+            ) -> None:
+                nonlocal swapped
+                self.assertEqual(flow, "immersive")
+                self.assertTrue(fatal)
+                if swapped:
+                    return
+                swapped = True
+                candidate.rename(original_run)
+                candidate.symlink_to(outside, target_is_directory=True)
+
+            argv = [
+                "toc-immersive-ride.py",
+                "--topic",
+                "test",
+                "--timestamp",
+                "20990101_0000",
+                "--base",
+                str(base),
+                "--stage",
+                "p100",
+                "--review-policy",
+                "drafts",
+            ]
+            try:
+                with (
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(
+                        TOC_IMMERSIVE_RIDE,
+                        "maybe_run_stage_grounding",
+                        side_effect=replace_root,
+                    ),
+                    self.assertRaises((OSError, ValueError)),
+                ):
+                    TOC_IMMERSIVE_RIDE.main()
+                self.assertTrue(swapped)
+                self.assertEqual(
+                    outside_state.read_text(encoding="utf-8"),
+                    "outside-original\n",
+                )
+                self.assertEqual(
+                    sorted(path.name for path in outside.iterdir()),
+                    ["state.txt"],
+                )
+            finally:
+                if run_dir.is_symlink():
+                    run_dir.unlink()
+                if original_run.exists():
+                    original_run.rename(run_dir)
+
+    def test_world_walk_same_path_source_replacement_invalidates_p400_approval(
+        self,
+    ) -> None:
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with (
+            tempfile.TemporaryDirectory(prefix="toc_ride_target_") as td,
+            tempfile.TemporaryDirectory(
+                prefix="toc_ride_source_",
+                dir=output_root,
+            ) as source_td,
+        ):
+            base = Path(td) / "output"
+            base.mkdir()
+            source_run = Path(source_td)
+            source_backup = source_run.with_name(source_run.name + "-original")
+            source_asset = source_run / "assets" / "characters" / "hero.png"
+            source_asset.parent.mkdir(parents=True)
+            source_asset.write_bytes(b"source-v1")
+            (source_run / "story.md").write_text(
+                "# Source Story\n\nversion one\n",
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                "scripts/toc-immersive-ride.py",
+                "--topic",
+                "world walk",
+                "--timestamp",
+                "20990101_0000",
+                "--base",
+                str(base),
+                "--source-run",
+                f"output/{source_run.name}",
+                "--experience",
+                "world_walk",
+                "--stage",
+                "p435",
+                "--review-policy",
+                "drafts",
+                "--force",
+            ]
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            run_dir = base / "world_walk_20990101_0000"
+            self.approve_existing_p435_run(run_dir)
+            state_before = parse_state(run_dir / "state.txt")
+            receipt_before = state_before[
+                "immersive.source_receipt.bundle_sha256"
+            ]
+            root_identity_before = state_before[
+                "immersive.source_receipt.root_identity"
+            ]
+            self.assertTrue((run_dir / "production_readiness_review.md").exists())
+
+            source_run.rename(source_backup)
+            source_run.mkdir()
+            replacement_asset = (
+                source_run / "assets" / "characters" / "hero.png"
+            )
+            replacement_asset.parent.mkdir(parents=True)
+            replacement_asset.write_bytes(b"source-v2")
+            (source_run / "story.md").write_text(
+                "# Source Story\n\nversion two\n",
+                encoding="utf-8",
+            )
+            try:
+                subprocess.run(
+                    [arg for arg in command if arg != "--force"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+                state_after = parse_state(run_dir / "state.txt")
+                receipt_after = state_after[
+                    "immersive.source_receipt.bundle_sha256"
+                ]
+                self.assertNotEqual(receipt_after, receipt_before)
+                self.assertNotEqual(
+                    state_after["immersive.source_receipt.root_identity"],
+                    root_identity_before,
+                )
+                self.assertEqual(
+                    state_after["eval.p400_readiness.status"],
+                    "changes_requested",
+                )
+                self.assertEqual(
+                    state_after["eval.production_readiness.loop.status"],
+                    "running",
+                )
+                self.assertFalse(
+                    (run_dir / "production_readiness_review.md").exists()
+                )
+                manifest = (run_dir / "video_manifest.md").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn(receipt_after, manifest)
+                self.assertEqual(
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage="production_readiness",
+                        round_number=1,
+                    ),
+                    [],
+                )
+            finally:
+                shutil.rmtree(source_run)
+                source_backup.rename(source_run)
 
     def test_world_walk_wrapper_derives_topic_from_source_run(self) -> None:
         import tempfile
@@ -1029,6 +1355,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
                 "20990101_0000",
                 "--run-dir",
                 str(run_dir),
+                "--base",
+                str(run_dir.parent),
                 "--stage",
                 "p500",
                 "--experience",

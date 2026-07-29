@@ -4,19 +4,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 from pathlib import Path
 from typing import Any, Iterable
 
 from toc.harness import append_state_snapshot, parse_state_file
 from toc.run_index import classify_run_file
-from toc.runtime_locks import FileLockUnavailable, sync_file_lock
 from toc.stage_evaluator import check_manifest_single
 
 
@@ -169,6 +168,7 @@ _DOWNSTREAM_STATE_PREFIXES = (
 @dataclass(frozen=True)
 class ResumePlan:
     run_dir: str
+    run_dir_identity: tuple[int, int]
     checkpoint_id: str
     checkpoint_dir: str
     preserved_files: tuple[str, ...]
@@ -204,6 +204,590 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
+
+
+def _directory_open_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise P500ResumeError(
+            "p500 resume requires no-follow directory descriptor support"
+        )
+    return (
+        os.O_RDONLY
+        | nofollow
+        | directory
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_real_directory(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> int:
+    try:
+        lexical = path.lstat()
+    except OSError as exc:
+        raise P500ResumeError(f"run directory is unavailable: {path}") from exc
+    if stat.S_ISLNK(lexical.st_mode) or not stat.S_ISDIR(lexical.st_mode):
+        raise P500ResumeError(f"run directory must be a real directory: {path}")
+    descriptor = -1
+    try:
+        descriptor = os.open(path, _directory_open_flags())
+        opened = os.fstat(descriptor)
+        opened_identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened_identity != (lexical.st_dev, lexical.st_ino)
+            or (
+                expected_identity is not None
+                and opened_identity != expected_identity
+            )
+        ):
+            raise P500ResumeError(
+                f"run directory identity changed: {path}"
+            )
+        return descriptor
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+
+
+def _verify_real_directory_identity(
+    path: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    descriptor = _open_real_directory(
+        path,
+        expected_identity=expected_identity,
+    )
+    os.close(descriptor)
+
+
+def _safe_relative_parts(value: str | Path, *, label: str) -> tuple[str, ...]:
+    relative = Path(value)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(
+            part in {"", ".", ".."} or "/" in part
+            for part in relative.parts
+        )
+    ):
+        raise P500ResumeError(f"unsafe {label} path: {value}")
+    return relative.parts
+
+
+def _open_relative_directory(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+    label: str,
+) -> int:
+    current = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            try:
+                child = os.open(
+                    part,
+                    _directory_open_flags(),
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=current)
+                except FileExistsError:
+                    pass
+                child = os.open(
+                    part,
+                    _directory_open_flags(),
+                    dir_fd=current,
+                )
+            os.close(current)
+            current = child
+        return current
+    except Exception as exc:
+        os.close(current)
+        if isinstance(exc, P500ResumeError):
+            raise
+        joined = "/".join(parts) or "."
+        raise P500ResumeError(
+            f"unsafe {label} directory identity changed: {joined}"
+        ) from exc
+
+
+def _descriptor_identity(descriptor: int) -> tuple[int, int]:
+    opened = os.fstat(descriptor)
+    if not stat.S_ISDIR(opened.st_mode):
+        raise P500ResumeError("p500 resume directory descriptor is not a directory")
+    return opened.st_dev, opened.st_ino
+
+
+def _verify_relative_directory_identity(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    expected_identity: tuple[int, int],
+    label: str,
+) -> None:
+    verification = _open_relative_directory(
+        root_descriptor,
+        parts,
+        create=False,
+        label=label,
+    )
+    try:
+        if _descriptor_identity(verification) != expected_identity:
+            raise P500ResumeError(
+                f"unsafe {label} directory identity changed: "
+                f"{'/'.join(parts) or '.'}"
+            )
+    finally:
+        os.close(verification)
+
+
+def _regular_file_fingerprint_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], os.stat_result]:
+    try:
+        lexical = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise P500ResumeError(f"{label} disappeared or became unsafe") from exc
+    if not stat.S_ISREG(lexical.st_mode):
+        raise P500ResumeError(f"{label} must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        opened = os.fstat(descriptor)
+        if _stat_identity(opened) != _stat_identity(lexical):
+            raise P500ResumeError(f"{label} identity changed while opening")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if _stat_identity(os.fstat(descriptor)) != _stat_identity(opened):
+            raise P500ResumeError(f"{label} changed while hashing")
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if _stat_identity(current) != _stat_identity(opened):
+            raise P500ResumeError(f"{label} identity changed after hashing")
+        return (
+            {
+                "exists": True,
+                "lexical_type": "regular_file",
+                "is_symlink": False,
+                "bytes_sha256": digest.hexdigest(),
+            },
+            opened,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)
+
+
+def _require_missing_entry(
+    parent_descriptor: int,
+    name: str,
+    *,
+    label: str,
+) -> None:
+    try:
+        os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    raise P500ResumeError(f"{label} already exists")
+
+
+def _rename_regular_file_at(
+    *,
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
+) -> None:
+    """Rename one verified leaf using only pinned parent descriptors."""
+
+    os.rename(
+        source_name,
+        destination_name,
+        src_dir_fd=source_parent_descriptor,
+        dst_dir_fd=destination_parent_descriptor,
+    )
+
+
+def _restore_renamed_file_between_open_parents(
+    *,
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
+    expected_entry_identity: tuple[int, int, int],
+) -> None:
+    _require_missing_entry(
+        source_parent_descriptor,
+        source_name,
+        label=f"rollback destination {source_name}",
+    )
+    destination = os.stat(
+        destination_name,
+        dir_fd=destination_parent_descriptor,
+        follow_symlinks=False,
+    )
+    if _entry_identity(destination) != expected_entry_identity:
+        raise P500ResumeError(
+            f"rollback source identity changed: {destination_name}"
+        )
+    _rename_regular_file_at(
+        source_parent_descriptor=destination_parent_descriptor,
+        source_name=destination_name,
+        destination_parent_descriptor=source_parent_descriptor,
+        destination_name=source_name,
+    )
+    restored = os.stat(
+        source_name,
+        dir_fd=source_parent_descriptor,
+        follow_symlinks=False,
+    )
+    if _entry_identity(restored) != expected_entry_identity:
+        raise P500ResumeError(
+            f"rollback destination identity changed: {source_name}"
+        )
+
+
+def _move_planned_downstream_file(
+    *,
+    run_descriptor: int,
+    artifacts_descriptor: int,
+    rel: str,
+    expected_fingerprint: dict[str, Any],
+) -> None:
+    parts = _safe_relative_parts(rel, label="downstream artifact")
+    source_parent = _open_relative_directory(
+        run_descriptor,
+        parts[:-1],
+        create=False,
+        label="downstream source",
+    )
+    destination_parent = _open_relative_directory(
+        artifacts_descriptor,
+        parts[:-1],
+        create=True,
+        label="checkpoint destination",
+    )
+    renamed = False
+    source_entry_identity: tuple[int, int, int] | None = None
+    try:
+        source_parent_identity = _descriptor_identity(source_parent)
+        destination_parent_identity = _descriptor_identity(destination_parent)
+        actual_fingerprint, source_stat = _regular_file_fingerprint_at(
+            source_parent,
+            parts[-1],
+            label=f"planned downstream artifact {rel}",
+        )
+        if actual_fingerprint != expected_fingerprint:
+            raise P500ResumeError(
+                "downstream artifact bytes or lexical type changed before "
+                f"checkpoint move: {rel}"
+            )
+        source_entry_identity = _entry_identity(source_stat)
+        _require_missing_entry(
+            destination_parent,
+            parts[-1],
+            label=f"checkpoint destination {rel}",
+        )
+        _rename_regular_file_at(
+            source_parent_descriptor=source_parent,
+            source_name=parts[-1],
+            destination_parent_descriptor=destination_parent,
+            destination_name=parts[-1],
+        )
+        renamed = True
+        destination_stat = os.stat(
+            parts[-1],
+            dir_fd=destination_parent,
+            follow_symlinks=False,
+        )
+        if _entry_identity(destination_stat) != source_entry_identity:
+            raise P500ResumeError(
+                f"checkpoint destination identity changed after move: {rel}"
+            )
+        _verify_relative_directory_identity(
+            run_descriptor,
+            parts[:-1],
+            expected_identity=source_parent_identity,
+            label="downstream source",
+        )
+        _verify_relative_directory_identity(
+            artifacts_descriptor,
+            parts[:-1],
+            expected_identity=destination_parent_identity,
+            label="checkpoint destination",
+        )
+    except Exception as exc:
+        if renamed and source_entry_identity is not None:
+            try:
+                _restore_renamed_file_between_open_parents(
+                    source_parent_descriptor=source_parent,
+                    source_name=parts[-1],
+                    destination_parent_descriptor=destination_parent,
+                    destination_name=parts[-1],
+                    expected_entry_identity=source_entry_identity,
+                )
+            except Exception as rollback_exc:
+                raise P500ResumeError(
+                    "unsafe downstream move could not be rolled back for "
+                    f"{rel}: {rollback_exc}"
+                ) from exc
+        raise
+    finally:
+        os.close(destination_parent)
+        os.close(source_parent)
+
+
+def _restore_one_moved_file(
+    *,
+    run_descriptor: int,
+    artifacts_descriptor: int,
+    rel: str,
+    expected_fingerprint: dict[str, Any],
+) -> None:
+    parts = _safe_relative_parts(rel, label="rollback artifact")
+    source_parent = _open_relative_directory(
+        artifacts_descriptor,
+        parts[:-1],
+        create=False,
+        label="checkpoint rollback source",
+    )
+    destination_parent = _open_relative_directory(
+        run_descriptor,
+        parts[:-1],
+        create=True,
+        label="downstream rollback destination",
+    )
+    renamed = False
+    source_entry_identity: tuple[int, int, int] | None = None
+    try:
+        source_parent_identity = _descriptor_identity(source_parent)
+        destination_parent_identity = _descriptor_identity(destination_parent)
+        actual_fingerprint, source_stat = _regular_file_fingerprint_at(
+            source_parent,
+            parts[-1],
+            label=f"checkpoint rollback artifact {rel}",
+        )
+        if actual_fingerprint != expected_fingerprint:
+            raise P500ResumeError(
+                f"checkpoint rollback artifact changed: {rel}"
+            )
+        source_entry_identity = _entry_identity(source_stat)
+        _require_missing_entry(
+            destination_parent,
+            parts[-1],
+            label=f"rollback destination {rel}",
+        )
+        _rename_regular_file_at(
+            source_parent_descriptor=source_parent,
+            source_name=parts[-1],
+            destination_parent_descriptor=destination_parent,
+            destination_name=parts[-1],
+        )
+        renamed = True
+        destination_stat = os.stat(
+            parts[-1],
+            dir_fd=destination_parent,
+            follow_symlinks=False,
+        )
+        if _entry_identity(destination_stat) != source_entry_identity:
+            raise P500ResumeError(
+                f"rollback destination identity changed after move: {rel}"
+            )
+        _verify_relative_directory_identity(
+            artifacts_descriptor,
+            parts[:-1],
+            expected_identity=source_parent_identity,
+            label="checkpoint rollback source",
+        )
+        _verify_relative_directory_identity(
+            run_descriptor,
+            parts[:-1],
+            expected_identity=destination_parent_identity,
+            label="downstream rollback destination",
+        )
+    except Exception as exc:
+        if renamed and source_entry_identity is not None:
+            try:
+                _restore_renamed_file_between_open_parents(
+                    source_parent_descriptor=source_parent,
+                    source_name=parts[-1],
+                    destination_parent_descriptor=destination_parent,
+                    destination_name=parts[-1],
+                    expected_entry_identity=source_entry_identity,
+                )
+            except Exception as rollback_exc:
+                raise P500ResumeError(
+                    "unsafe checkpoint rollback could not preserve "
+                    f"{rel}: {rollback_exc}"
+                ) from exc
+        raise
+    finally:
+        os.close(destination_parent)
+        os.close(source_parent)
+
+
+def _remove_tree_at(parent_descriptor: int, name: str) -> None:
+    entry = os.stat(
+        name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    if not stat.S_ISDIR(entry.st_mode):
+        os.unlink(name, dir_fd=parent_descriptor)
+        return
+    child = os.open(
+        name,
+        _directory_open_flags(),
+        dir_fd=parent_descriptor,
+    )
+    try:
+        for child_name in os.listdir(child):
+            _remove_tree_at(child, child_name)
+    finally:
+        os.close(child)
+    os.rmdir(name, dir_fd=parent_descriptor)
+
+
+def _write_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    data: bytes,
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(
+        name,
+        flags,
+        0o600,
+        dir_fd=parent_descriptor,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise P500ResumeError(
+                f"checkpoint metadata is not a private regular file: {name}"
+            )
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("checkpoint metadata write made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if _entry_identity(current) != _entry_identity(opened):
+            raise P500ResumeError(
+                f"checkpoint metadata identity changed after write: {name}"
+            )
+    finally:
+        os.close(descriptor)
+
+
+def _descriptor_root_path(descriptor: int) -> Path:
+    for root in (Path("/dev/fd"), Path("/proc/self/fd")):
+        candidate = root / str(descriptor)
+        if candidate.exists():
+            return candidate
+    raise P500ResumeError(
+        "platform cannot address the pinned p500 run directory descriptor"
+    )
+
+
+def _acquire_resume_file_lock_at(run_descriptor: int) -> tuple[int, int]:
+    """Acquire the legacy create/resume lock without resolving the run path."""
+
+    namespace_descriptor = _open_relative_directory(
+        run_descriptor,
+        (".locks",),
+        create=True,
+        label="create/resume lock namespace",
+    )
+    lock_descriptor = -1
+    try:
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        lexical = None
+        try:
+            lexical = os.stat(
+                "create_resume.lock",
+                dir_fd=namespace_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        lock_descriptor = os.open(
+            "create_resume.lock",
+            flags,
+            0o600,
+            dir_fd=namespace_descriptor,
+        )
+        opened = os.fstat(lock_descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (
+                lexical is not None
+                and _entry_identity(opened) != _entry_identity(lexical)
+            )
+        ):
+            raise P500ResumeError(
+                "create/resume lock must be a private regular file"
+            )
+        try:
+            fcntl.flock(
+                lock_descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError as exc:
+            raise P500ResumeError(
+                "another create/resume process owns this run"
+            ) from exc
+        return namespace_descriptor, lock_descriptor
+    except Exception:
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+        os.close(namespace_descriptor)
+        raise
 
 
 def _lexical_path_fingerprint(path: Path) -> dict[str, Any]:
@@ -536,6 +1120,7 @@ def canonical_state_before_sha256(state: dict[str, str]) -> str:
 def _plan_token(
     *,
     run_dir: Path,
+    run_dir_identity: tuple[int, int] | list[int] | None = None,
     checkpoint_id: str,
     upstream_sha256: dict[str, str],
     state_fingerprint: dict[str, Any],
@@ -546,6 +1131,21 @@ def _plan_token(
     resume_input_identity: dict[str, str] | None = None,
     state_before_sha256: str | None = None,
 ) -> str:
+    normalized_run_identity: tuple[int, int] | None = None
+    if run_dir_identity is not None:
+        if (
+            not isinstance(run_dir_identity, (tuple, list))
+            or len(run_dir_identity) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in run_dir_identity
+            )
+        ):
+            raise P500ResumeError("run directory identity is malformed")
+        normalized_run_identity = (
+            int(run_dir_identity[0]),
+            int(run_dir_identity[1]),
+        )
     include_input_identity = resume_input_identity is not None
     normalized_input_identity = _normalize_resume_input_identity(
         resume_input_identity
@@ -565,6 +1165,8 @@ def _plan_token(
         "downstream_files": downstream_files,
         "downstream_fingerprints": downstream_fingerprints,
     }
+    if normalized_run_identity is not None:
+        payload["run_dir_identity"] = normalized_run_identity
     if include_input_identity:
         payload["resume_input_identity"] = normalized_input_identity
     if state_before_sha256 is not None:
@@ -585,6 +1187,12 @@ def build_resume_plan(
         resume_input_identity
     )
     resolved = resolve_run_dir(repo_root, run_dir)
+    root_descriptor = _open_real_directory(resolved)
+    try:
+        opened_root = os.fstat(root_descriptor)
+        run_dir_identity = (opened_root.st_dev, opened_root.st_ino)
+    finally:
+        os.close(root_descriptor)
     _validate_upstream(resolved)
     _validate_no_active_bulk_jobs(resolved)
     _status, reason_keys = _p400_readiness(resolved)
@@ -615,8 +1223,9 @@ def build_resume_plan(
         raise P500ResumeError(
             f"checkpoint path escapes the run directory: {checkpoint_dir}"
         ) from exc
-    return ResumePlan(
+    plan = ResumePlan(
         run_dir=str(resolved),
+        run_dir_identity=run_dir_identity,
         checkpoint_id=checkpoint,
         checkpoint_dir=str(checkpoint_dir),
         preserved_files=PRESERVED_CANONICAL_FILES,
@@ -631,6 +1240,7 @@ def build_resume_plan(
         p400_reason_keys=reason_keys,
         plan_token=_plan_token(
             run_dir=resolved,
+            run_dir_identity=run_dir_identity,
             checkpoint_id=checkpoint,
             upstream_sha256=upstream_sha256,
             state_fingerprint=state_fingerprint,
@@ -642,6 +1252,8 @@ def build_resume_plan(
             resume_input_identity=normalized_input_identity,
         ),
     )
+    _verify_real_directory_identity(resolved, run_dir_identity)
+    return plan
 
 
 def _state_key_is_downstream(key: str) -> bool:
@@ -720,34 +1332,66 @@ def _state_updates_for_reset(
     return updates
 
 
-def _restore_moved_files(run_dir: Path, quarantine_root: Path, moved: list[str]) -> None:
+def _restore_moved_files(
+    *,
+    run_descriptor: int,
+    artifacts_descriptor: int,
+    plan: ResumePlan,
+    moved: list[str],
+) -> tuple[str, ...]:
+    errors: list[str] = []
     for rel in reversed(moved):
-        quarantined = quarantine_root / rel
-        original = run_dir / rel
-        if not quarantined.exists():
-            continue
-        original.parent.mkdir(parents=True, exist_ok=True)
-        quarantined.replace(original)
+        try:
+            _restore_one_moved_file(
+                run_descriptor=run_descriptor,
+                artifacts_descriptor=artifacts_descriptor,
+                rel=rel,
+                expected_fingerprint=plan.downstream_fingerprints[rel],
+            )
+        except Exception as exc:
+            errors.append(f"{rel}: {exc}")
+    return tuple(errors)
 
 
-def _apply_resume_plan_locked(plan: ResumePlan) -> Path:
+def _apply_resume_plan_locked(
+    plan: ResumePlan,
+    *,
+    run_descriptor: int,
+) -> Path:
     run_dir = Path(plan.run_dir)
     checkpoint_dir = Path(plan.checkpoint_dir)
-    quarantine_root = checkpoint_dir / "artifacts"
-    if checkpoint_dir.exists():
-        raise P500ResumeError(f"checkpoint already exists: {checkpoint_dir}")
-    if (run_dir / ".toc_frontend_create.lock").exists():
-        raise P500ResumeError(f"frontend create is active for this run: {run_dir}")
+    expected_checkpoint_dir = (
+        run_dir / "logs" / "resume" / "p500" / plan.checkpoint_id
+    )
+    if os.path.normpath(checkpoint_dir) != os.path.normpath(
+        expected_checkpoint_dir
+    ):
+        raise P500ResumeError(
+            "checkpoint path does not match the inspected resume plan"
+        )
 
     moved: list[str] = []
     state_committed = False
+    p500_parent_descriptor = -1
+    checkpoint_descriptor = -1
+    artifacts_descriptor = -1
+    checkpoint_created = False
     try:
+        if _descriptor_identity(run_descriptor) != plan.run_dir_identity:
+            raise P500ResumeError(
+                f"run directory identity changed: {run_dir}"
+            )
+        _verify_real_directory_identity(run_dir, plan.run_dir_identity)
         current = build_resume_plan(
             repo_root=run_dir.parents[1],
             run_dir=run_dir,
             checkpoint_id=plan.checkpoint_id,
             resume_input_identity=plan.resume_input_identity,
         )
+        if current.run_dir_identity != plan.run_dir_identity:
+            raise P500ResumeError(
+                f"run directory identity changed: {run_dir}"
+            )
         if current.upstream_sha256 != plan.upstream_sha256:
             raise P500ResumeError(
                 "upstream artifacts changed after the resume plan was built; run dry-run again"
@@ -794,17 +1438,50 @@ def _apply_resume_plan_locked(plan: ResumePlan) -> Path:
                 "run dry-run again"
             )
 
-        checkpoint_dir.mkdir(parents=True, exist_ok=False)
+        _verify_real_directory_identity(run_dir, plan.run_dir_identity)
+        p500_parent_descriptor = _open_relative_directory(
+            run_descriptor,
+            ("logs", "resume", "p500"),
+            create=True,
+            label="checkpoint parent",
+        )
+        try:
+            os.mkdir(
+                plan.checkpoint_id,
+                0o700,
+                dir_fd=p500_parent_descriptor,
+            )
+        except FileExistsError as exc:
+            raise P500ResumeError(
+                f"checkpoint already exists: {checkpoint_dir}"
+            ) from exc
+        checkpoint_created = True
+        checkpoint_descriptor = _open_relative_directory(
+            p500_parent_descriptor,
+            (plan.checkpoint_id,),
+            create=False,
+            label="checkpoint",
+        )
+        os.mkdir("artifacts", 0o700, dir_fd=checkpoint_descriptor)
+        artifacts_descriptor = _open_relative_directory(
+            checkpoint_descriptor,
+            ("artifacts",),
+            create=False,
+            label="checkpoint artifacts",
+        )
         for rel in plan.downstream_files:
-            source = run_dir / rel
-            if not source.exists():
-                raise P500ResumeError(f"planned downstream artifact disappeared: {rel}")
-            destination = quarantine_root / rel
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            source.replace(destination)
+            _move_planned_downstream_file(
+                run_descriptor=run_descriptor,
+                artifacts_descriptor=artifacts_descriptor,
+                rel=rel,
+                expected_fingerprint=plan.downstream_fingerprints[rel],
+            )
             moved.append(rel)
+            _verify_real_directory_identity(run_dir, plan.run_dir_identity)
 
-        state = parse_state_file(run_dir / "state.txt")
+        pinned_run_dir = _descriptor_root_path(run_descriptor)
+        pinned_state_path = pinned_run_dir / "state.txt"
+        state = parse_state_file(pinned_state_path)
         if canonical_state_before_sha256(state) != plan.state_before_sha256:
             raise P500ResumeError(
                 "state_before changed before checkpoint metadata was written; "
@@ -816,31 +1493,76 @@ def _apply_resume_plan_locked(plan: ResumePlan) -> Path:
             "moved_file_count": len(moved),
             "state_before": state,
         }
-        (checkpoint_dir / "checkpoint.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        _write_regular_file_at(
+            checkpoint_descriptor,
+            "checkpoint.json",
+            (
+                json.dumps(
+                    metadata,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
         )
         try:
             append_state_snapshot(
-                run_dir / "state.txt",
+                pinned_state_path,
                 _state_updates_for_reset(run_dir=run_dir, plan=plan, state=state),
             )
             state_committed = True
         except Exception:
-            committed_state = parse_state_file(run_dir / "state.txt")
+            committed_state = parse_state_file(pinned_state_path)
             state_committed = (
                 committed_state.get("runtime.resume.p500.checkpoint")
                 == str(checkpoint_dir.relative_to(run_dir))
                 and committed_state.get("runtime.resume.p500.status") == "prepared"
             )
             raise
-    except Exception:
+        _verify_real_directory_identity(run_dir, plan.run_dir_identity)
+    except Exception as exc:
         if not state_committed:
-            _restore_moved_files(run_dir, quarantine_root, moved)
-            if checkpoint_dir.exists():
-                shutil.rmtree(checkpoint_dir)
+            rollback_errors: tuple[str, ...] = ()
+            if artifacts_descriptor >= 0:
+                rollback_errors = _restore_moved_files(
+                    run_descriptor=run_descriptor,
+                    artifacts_descriptor=artifacts_descriptor,
+                    plan=plan,
+                    moved=moved,
+                )
+            if not rollback_errors and checkpoint_created:
+                if artifacts_descriptor >= 0:
+                    os.close(artifacts_descriptor)
+                    artifacts_descriptor = -1
+                if checkpoint_descriptor >= 0:
+                    os.close(checkpoint_descriptor)
+                    checkpoint_descriptor = -1
+                try:
+                    _remove_tree_at(
+                        p500_parent_descriptor,
+                        plan.checkpoint_id,
+                    )
+                    checkpoint_created = False
+                except Exception as cleanup_exc:
+                    rollback_errors = (
+                        f"checkpoint cleanup: {cleanup_exc}",
+                    )
+            if rollback_errors:
+                raise P500ResumeError(
+                    "p500 rollback could not safely restore the inspected "
+                    "run; checkpoint preserved: "
+                    + "; ".join(rollback_errors)
+                ) from exc
         raise
-    return checkpoint_dir
+    finally:
+        if artifacts_descriptor >= 0:
+            os.close(artifacts_descriptor)
+        if checkpoint_descriptor >= 0:
+            os.close(checkpoint_descriptor)
+        if p500_parent_descriptor >= 0:
+            os.close(p500_parent_descriptor)
+    return expected_checkpoint_dir
 
 
 def apply_resume_plan(
@@ -849,18 +1571,42 @@ def apply_resume_plan(
     lock_already_held: bool = False,
 ) -> Path:
     run_dir = Path(plan.run_dir)
-    if lock_already_held:
-        return _apply_resume_plan_locked(plan)
+    run_descriptor = _open_real_directory(
+        run_dir,
+        expected_identity=plan.run_dir_identity,
+    )
+    root_lock_acquired = False
+    namespace_descriptor = -1
+    lock_descriptor = -1
     try:
-        with sync_file_lock(
-            run_dir / ".locks" / "create_resume.lock",
-            wait=False,
-        ):
-            return _apply_resume_plan_locked(plan)
-    except FileLockUnavailable as exc:
-        raise P500ResumeError(
-            f"another create/resume process owns this run: {run_dir}"
-        ) from exc
+        try:
+            fcntl.flock(
+                run_descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            root_lock_acquired = True
+        except BlockingIOError as exc:
+            raise P500ResumeError(
+                f"frontend create is active for this run: {run_dir}"
+            ) from exc
+        if not lock_already_held:
+            namespace_descriptor, lock_descriptor = (
+                _acquire_resume_file_lock_at(run_descriptor)
+            )
+        _verify_real_directory_identity(run_dir, plan.run_dir_identity)
+        return _apply_resume_plan_locked(
+            plan,
+            run_descriptor=run_descriptor,
+        )
+    finally:
+        if lock_descriptor >= 0:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            os.close(lock_descriptor)
+        if namespace_descriptor >= 0:
+            os.close(namespace_descriptor)
+        if root_lock_acquired:
+            fcntl.flock(run_descriptor, fcntl.LOCK_UN)
+        os.close(run_descriptor)
 
 
 def prepare_p500_resume(

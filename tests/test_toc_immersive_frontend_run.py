@@ -318,6 +318,121 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(references, ["assets/source_references/characters/hero.png"])
             self.assertEqual((run_dir / references[0]).read_bytes(), b"source-image")
 
+    def test_world_walk_source_reference_lease_blocks_concurrent_mutation(
+        self,
+    ) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_run = root / "source"
+            run_dir = root / "target"
+            first_image = (
+                source_run / "assets" / "characters" / "hero.png"
+            )
+            second_image = (
+                source_run / "assets" / "locations" / "village.png"
+            )
+            first_image.parent.mkdir(parents=True)
+            second_image.parent.mkdir(parents=True)
+            first_image.write_bytes(b"hero-v1")
+            second_image.write_bytes(b"village-v1")
+            run_dir.mkdir()
+            source_identity = module.directory_identity_nofollow(source_run)
+            destination_identity = module.directory_identity_nofollow(run_dir)
+            lease = module._freeze_world_walk_source_reference_inventory(
+                source_run,
+                source_root_identity=source_identity,
+            )
+            original_copy = module.copy_regular_file_atomic_nofollow
+            copy_count = 0
+
+            def mutate_after_first_copy(**kwargs):
+                nonlocal copy_count
+                result = original_copy(**kwargs)
+                copy_count += 1
+                if copy_count == 1:
+                    second_image.write_bytes(b"village-mutated")
+                return result
+
+            with (
+                patch.object(
+                    module,
+                    "copy_regular_file_atomic_nofollow",
+                    side_effect=mutate_after_first_copy,
+                ),
+                self.assertRaisesRegex(
+                    (RuntimeError, ValueError),
+                    "source (reference inventory changed|sha256 mismatch)",
+                ),
+            ):
+                module._materialize_world_walk_source_references(
+                    source_run,
+                    run_dir,
+                    source_root_identity=source_identity,
+                    destination_root_identity=destination_identity,
+                    source_reference_lease=lease,
+                )
+
+            copied_root = run_dir / "assets" / "source_references"
+            self.assertFalse(
+                copied_root.exists()
+                and any(
+                    path.is_file()
+                    for path in copied_root.rglob("*")
+                )
+            )
+
+    def test_world_walk_source_reference_lease_rejects_root_replacement(
+        self,
+    ) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_run = root / "source"
+            original_source = root / "source-original"
+            run_dir = root / "target"
+            source_image = (
+                source_run / "assets" / "characters" / "hero.png"
+            )
+            source_image.parent.mkdir(parents=True)
+            source_image.write_bytes(b"trusted-hero")
+            run_dir.mkdir()
+            source_identity = module.directory_identity_nofollow(source_run)
+            lease = module._freeze_world_walk_source_reference_inventory(
+                source_run,
+                source_root_identity=source_identity,
+            )
+            source_run.rename(original_source)
+            replacement_image = (
+                source_run / "assets" / "characters" / "hero.png"
+            )
+            replacement_image.parent.mkdir(parents=True)
+            replacement_image.write_bytes(b"replacement-hero")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "directory identity changed",
+            ):
+                module._materialize_world_walk_source_references(
+                    source_run,
+                    run_dir,
+                    source_root_identity=source_identity,
+                    destination_root_identity=(
+                        module.directory_identity_nofollow(run_dir)
+                    ),
+                    source_reference_lease=lease,
+                )
+
+            self.assertFalse(
+                (
+                    run_dir
+                    / "assets"
+                    / "source_references"
+                    / "characters"
+                    / "hero.png"
+                ).exists()
+            )
+
     def test_fresh_run_validator_accepts_safe_server_preamble(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
@@ -400,42 +515,38 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                     run_dir.unlink()
                     locked_original.rename(run_dir)
 
-            if hasattr(os, "chflags"):
-                protected_target = parent / "run-protected-rename"
-                with module._run_materialization_lock(
-                    run_dir,
-                    expected_identity=(
-                        module.directory_identity_nofollow(run_dir)
-                    ),
-                    protect_pathname=True,
-                ):
-                    (run_dir / "state.txt").write_text(
-                        "status=AUTHORING\n---\n",
-                        encoding="utf-8",
+            with module._run_materialization_lock(
+                run_dir,
+                expected_identity=(
+                    module.directory_identity_nofollow(run_dir)
+                ),
+                protect_pathname=True,
+            ):
+                (run_dir / "state.txt").write_text(
+                    "status=AUTHORING\n---\n",
+                    encoding="utf-8",
+                )
+                (run_dir / "logs").mkdir()
+                outside_research = outside / "research.md"
+                outside_research.write_text(
+                    "outside-original",
+                    encoding="utf-8",
+                )
+                injected_research = run_dir / "research.md"
+                injected_research.symlink_to(outside_research)
+                with self.assertRaises(OSError):
+                    module._write_run_text_nofollow(
+                        run_dir,
+                        injected_research,
+                        "must-not-escape",
                     )
-                    (run_dir / "logs").mkdir()
-                    outside_research = outside / "research.md"
-                    outside_research.write_text(
-                        "outside-original",
-                        encoding="utf-8",
-                    )
-                    injected_research = run_dir / "research.md"
-                    injected_research.symlink_to(outside_research)
-                    with self.assertRaises(OSError):
-                        module._write_run_text_nofollow(
-                            run_dir,
-                            injected_research,
-                            "must-not-escape",
-                        )
-                    self.assertEqual(
-                        outside_research.read_text(encoding="utf-8"),
-                        "outside-original",
-                    )
-                    with self.assertRaises(PermissionError):
-                        run_dir.rename(protected_target)
-                self.assertTrue(run_dir.is_dir())
-                self.assertTrue((run_dir / "state.txt").is_file())
-                (run_dir / "research.md").unlink()
+                self.assertEqual(
+                    outside_research.read_text(encoding="utf-8"),
+                    "outside-original",
+                )
+            self.assertTrue(run_dir.is_dir())
+            self.assertTrue((run_dir / "state.txt").is_file())
+            (run_dir / "research.md").unlink()
 
     def test_fresh_run_lock_fails_closed_without_chflags(self) -> None:
         module = load_frontend_run_module()
@@ -490,6 +601,211 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertFalse((run_dir / "story.md").exists())
             shutil.rmtree(run_dir)
             original_run.rename(run_dir)
+
+    def test_frontend_lock_recovers_after_owner_process_dies(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_owner_death_lock_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td)
+            legacy_marker = run_dir / ".toc_frontend_create.lock"
+            legacy_marker.write_text("pid=stale\n", encoding="utf-8")
+            self.assertEqual(
+                module._validated_fresh_cli_run_dir(str(run_dir)),
+                run_dir,
+            )
+            child = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "\n".join(
+                        (
+                            "import importlib.util, os",
+                            (
+                                "spec=importlib.util.spec_from_file_location("
+                                "'frontend_child', "
+                                f"{str(REPO_ROOT / 'scripts' / 'toc-immersive-frontend-run.py')!r})"
+                            ),
+                            "module=importlib.util.module_from_spec(spec)",
+                            "spec.loader.exec_module(module)",
+                            (
+                                "lock=module._run_materialization_lock("
+                                f"module.Path({str(run_dir)!r}))"
+                            ),
+                            "lock.__enter__()",
+                            "os._exit(0)",
+                        )
+                    ),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+            )
+            self.assertEqual(child.returncode, 0)
+            with module._run_materialization_lock(run_dir):
+                module._write_run_text_nofollow(
+                    run_dir,
+                    run_dir / "owner_death_recovered.md",
+                    "recovered",
+                )
+            self.assertEqual(
+                legacy_marker.read_text(encoding="utf-8"),
+                "pid=stale\n",
+            )
+
+    def test_frontend_lock_rejects_a_live_owner(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_live_owner_lock_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td)
+            with module._run_materialization_lock(run_dir):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "another frontend-create process owns this run",
+                ):
+                    with module._run_materialization_lock(run_dir):
+                        self.fail("a second live owner must not acquire")
+
+    def test_frontend_lock_never_deletes_a_replaced_legacy_marker(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_lock_name_substitution_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td)
+            marker = run_dir / ".toc_frontend_create.lock"
+            old_marker = run_dir / ".toc_frontend_create.lock.old"
+            marker.write_text("legacy-owner\n", encoding="utf-8")
+            with module._run_materialization_lock(run_dir):
+                marker.rename(old_marker)
+                marker.write_text("replacement-owner\n", encoding="utf-8")
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "replacement-owner\n",
+            )
+            self.assertEqual(
+                old_marker.read_text(encoding="utf-8"),
+                "legacy-owner\n",
+            )
+
+    def test_state_writer_does_not_follow_replaced_run_without_chflags(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_state_root_replacement_",
+            dir=output_root,
+        ) as td:
+            parent = Path(td)
+            run_dir = parent / "run"
+            run_dir.mkdir()
+            run_identity = module.directory_identity_nofollow(run_dir)
+            original_run = parent / "run-original"
+
+            with (
+                patch.object(module.os, "chflags", None),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "directory identity changed",
+                ),
+            ):
+                with module._run_materialization_lock(
+                    run_dir,
+                    expected_identity=run_identity,
+                    protect_pathname=True,
+                ):
+                    run_dir.rename(original_run)
+                    run_dir.mkdir()
+                    (run_dir / "state.txt").write_text(
+                        "replacement=untouched\n---\n",
+                        encoding="utf-8",
+                    )
+                    module.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {"runtime.stage": "must_not_reach_replacement"},
+                    )
+
+            self.assertEqual(
+                (run_dir / "state.txt").read_text(encoding="utf-8"),
+                "replacement=untouched\n---\n",
+            )
+
+    def test_subprocess_uses_pinned_run_root_without_chflags(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_subprocess_root_replacement_",
+            dir=output_root,
+        ) as td:
+            parent = Path(td)
+            run_dir = parent / "run"
+            run_dir.mkdir()
+            run_identity = module.directory_identity_nofollow(run_dir)
+            original_run = parent / "run-original"
+
+            def replace_root_and_write(command, **kwargs):
+                output_arg = Path(command[command.index("--out") + 1])
+                run_dir.rename(original_run)
+                run_dir.mkdir()
+                root_descriptor = int(kwargs["pass_fds"][0])
+                output_descriptor = os.open(
+                    output_arg,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=root_descriptor,
+                )
+                try:
+                    os.write(
+                        output_descriptor,
+                        b"written-via-pinned-root",
+                    )
+                finally:
+                    os.close(output_descriptor)
+                self.assertTrue(callable(kwargs["preexec_fn"]))
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(module.os, "chflags", None),
+                patch.object(
+                    module.subprocess,
+                    "run",
+                    side_effect=replace_root_and_write,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "directory identity changed",
+                ),
+            ):
+                with module._run_materialization_lock(
+                    run_dir,
+                    expected_identity=run_identity,
+                    protect_pathname=True,
+                ):
+                    module._run_materialization_subprocess(
+                        run_dir,
+                        [
+                            sys.executable,
+                            "synthetic-child.py",
+                            "--out",
+                            str(run_dir / "child.txt"),
+                        ],
+                        check=True,
+                    )
+
+            self.assertFalse((run_dir / "child.txt").exists())
+            self.assertEqual(
+                (original_run / "child.txt").read_text(encoding="utf-8"),
+                "written-via-pinned-root",
+            )
 
     def test_prepare_grounding_preserves_frozen_authoring_readsets(self) -> None:
         module = load_frontend_run_module()

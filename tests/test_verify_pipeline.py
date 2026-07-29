@@ -1272,8 +1272,10 @@ def _write_partial_image_p680_fixture(
     receipt = write_partial_media_generation_receipt(
         run_dir,
         projection=projection,
-        provider_submitted_item_ids=[survivor_id],
+        provider_submitted_item_ids=[],
+        reused_item_ids=[survivor_id],
         generated_item_ids=[survivor_id],
+        satisfied_item_ids=[survivor_id],
     )
     append_state_snapshot(
         run_dir / "state.txt",
@@ -1297,7 +1299,14 @@ def _write_partial_image_p680_fixture(
             (
                 "review.semantic.partial_media."
                 "provider_submitted_image_items"
-            ): survivor_id,
+            ): "",
+            "review.semantic.partial_media.reused_image_items": survivor_id,
+            "review.semantic.partial_media.generated_image_items": (
+                survivor_id
+            ),
+            "review.semantic.partial_media.satisfied_image_items": (
+                survivor_id
+            ),
             "review.semantic.partial_media.receipt": (
                 PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
             ),
@@ -1317,6 +1326,41 @@ def _write_partial_image_p680_fixture(
         "blocked_id": "scene20_cut01",
         "blocked_destination": outputs["scene20_cut01"],
     }
+
+
+def _rewrite_partial_media_receipt(
+    run_dir: Path,
+    updates: dict[str, object],
+) -> dict[str, object]:
+    receipt_path = run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.update(updates)
+    digest_payload = {
+        key: value
+        for key, value in receipt.items()
+        if key != "receipt_sha256"
+    }
+    encoded = json.dumps(
+        digest_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    receipt["receipt_sha256"] = (
+        "sha256:" + hashlib.sha256(encoded).hexdigest()
+    )
+    receipt_path.write_text(
+        json.dumps(
+            receipt,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return receipt
 
 
 def _write_p400_review_artifacts(run_dir: Path) -> None:
@@ -3420,6 +3464,227 @@ class TestVerifyPipeline(unittest.TestCase):
                     msg=script_stage,
                 )
 
+    def test_p680_partial_media_accepts_provider_submitted_survivor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_partial_submitted_"
+        ) as td:
+            run_dir = Path(td) / "out" / "partial_submitted"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            fixture = _write_partial_image_p680_fixture(run_dir)
+            survivor_id = str(fixture["survivor_id"])
+            receipt = write_partial_media_generation_receipt(
+                run_dir,
+                projection=fixture["projection"],
+                provider_submitted_item_ids=[survivor_id],
+                reused_item_ids=[],
+                generated_item_ids=[survivor_id],
+                satisfied_item_ids=[survivor_id],
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    (
+                        "review.semantic.partial_media."
+                        "provider_submitted_image_items"
+                    ): survivor_id,
+                    "review.semantic.partial_media.reused_image_items": "",
+                    (
+                        "review.semantic.partial_media."
+                        "generated_image_items"
+                    ): survivor_id,
+                    (
+                        "review.semantic.partial_media."
+                        "satisfied_image_items"
+                    ): survivor_id,
+                    "review.semantic.partial_media.receipt_sha256": (
+                        receipt["receipt_sha256"]
+                    ),
+                },
+            )
+
+            contract = VERIFY_MODULE._localized_partial_media_contract(
+                run_dir,
+                require_generation_receipt=True,
+            )
+
+            self.assertTrue(contract["valid"], contract)
+
+    def test_p680_partial_media_rejects_false_receipt_truth_sets(
+        self,
+    ) -> None:
+        cases = {
+            "submitted_reused_overlap": {
+                "provider_submitted_item_ids": ["scene10_cut01"],
+                "reused_item_ids": ["scene10_cut01"],
+                "generated_item_ids": ["scene10_cut01"],
+                "satisfied_item_ids": ["scene10_cut01"],
+            },
+            "unaccounted_survivor": {
+                "provider_submitted_item_ids": [],
+                "reused_item_ids": [],
+                "generated_item_ids": ["scene10_cut01"],
+                "satisfied_item_ids": ["scene10_cut01"],
+            },
+            "missing_generated_survivor": {
+                "provider_submitted_item_ids": [],
+                "reused_item_ids": ["scene10_cut01"],
+                "generated_item_ids": [],
+                "satisfied_item_ids": ["scene10_cut01"],
+            },
+            "missing_satisfied_survivor": {
+                "provider_submitted_item_ids": [],
+                "reused_item_ids": ["scene10_cut01"],
+                "generated_item_ids": ["scene10_cut01"],
+                "satisfied_item_ids": [],
+            },
+            "duplicate_reused_survivor": {
+                "provider_submitted_item_ids": [],
+                "reused_item_ids": [
+                    "scene10_cut01",
+                    "scene10_cut01",
+                ],
+                "generated_item_ids": ["scene10_cut01"],
+                "satisfied_item_ids": ["scene10_cut01"],
+            },
+        }
+        state_key_by_receipt_key = {
+            "provider_submitted_item_ids": (
+                "review.semantic.partial_media."
+                "provider_submitted_image_items"
+            ),
+            "reused_item_ids": (
+                "review.semantic.partial_media.reused_image_items"
+            ),
+            "generated_item_ids": (
+                "review.semantic.partial_media.generated_image_items"
+            ),
+            "satisfied_item_ids": (
+                "review.semantic.partial_media.satisfied_image_items"
+            ),
+        }
+        for case_name, truth_sets in cases.items():
+            with (
+                self.subTest(case=case_name),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_truth_sets_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / case_name
+                run_dir.mkdir(parents=True, exist_ok=True)
+                _write_partial_image_p680_fixture(run_dir)
+                receipt = _rewrite_partial_media_receipt(
+                    run_dir,
+                    {
+                        **truth_sets,
+                        "provider_call_count": len(
+                            truth_sets["provider_submitted_item_ids"]
+                        ),
+                    },
+                )
+                state_updates = {
+                    state_key_by_receipt_key[key]: ", ".join(values)
+                    for key, values in truth_sets.items()
+                }
+                state_updates[
+                    "review.semantic.partial_media.receipt_sha256"
+                ] = str(receipt["receipt_sha256"])
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    state_updates,
+                )
+
+                contract = (
+                    VERIFY_MODULE._localized_partial_media_contract(
+                        run_dir,
+                        require_generation_receipt=True,
+                    )
+                )
+
+                self.assertFalse(contract["valid"], contract)
+                self.assertIn(
+                    "receipt",
+                    "\n".join(contract["errors"]),
+                )
+
+    def test_p680_partial_media_rejects_state_truth_set_mismatch(
+        self,
+    ) -> None:
+        state_overrides = {
+            (
+                "review.semantic.partial_media."
+                "provider_submitted_image_items"
+            ): "scene10_cut01",
+            "review.semantic.partial_media.reused_image_items": "",
+            "review.semantic.partial_media.generated_image_items": "",
+            "review.semantic.partial_media.satisfied_image_items": "",
+        }
+        for state_key, mismatched_value in state_overrides.items():
+            with (
+                self.subTest(state_key=state_key),
+                tempfile.TemporaryDirectory(
+                    prefix="toc_verify_partial_state_truth_"
+                ) as td,
+            ):
+                run_dir = Path(td) / "out" / "state_truth_mismatch"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                _write_partial_image_p680_fixture(run_dir)
+                append_state_snapshot(
+                    run_dir / "state.txt",
+                    {state_key: mismatched_value},
+                )
+
+                contract = (
+                    VERIFY_MODULE._localized_partial_media_contract(
+                        run_dir,
+                        require_generation_receipt=True,
+                    )
+                )
+
+                self.assertFalse(contract["valid"], contract)
+                self.assertIn(
+                    "state receipt",
+                    "\n".join(contract["errors"]),
+                )
+
+    def test_p680_partial_media_rejects_legacy_receipt_schema(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_partial_legacy_receipt_"
+        ) as td:
+            run_dir = Path(td) / "out" / "legacy_receipt"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_partial_image_p680_fixture(run_dir)
+            receipt = _rewrite_partial_media_receipt(
+                run_dir,
+                {
+                    "schema_version": (
+                        "toc.partial_media_generation_receipt.v1"
+                    ),
+                },
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.partial_media.receipt_sha256": (
+                        receipt["receipt_sha256"]
+                    ),
+                },
+            )
+
+            contract = VERIFY_MODULE._localized_partial_media_contract(
+                run_dir,
+                require_generation_receipt=True,
+            )
+
+            self.assertFalse(contract["valid"], contract)
+            self.assertIn(
+                "schema is unsupported",
+                "\n".join(contract["errors"]),
+            )
+
     def test_p680_partial_media_rejects_missing_projection_or_receipt(
         self,
     ) -> None:
@@ -3779,8 +4044,10 @@ class TestVerifyPipeline(unittest.TestCase):
             receipt = write_partial_media_generation_receipt(
                 run_dir,
                 projection=projection,
-                provider_submitted_item_ids=[survivor_id],
+                provider_submitted_item_ids=[],
+                reused_item_ids=[survivor_id],
                 generated_item_ids=[survivor_id],
+                satisfied_item_ids=[survivor_id],
             )
             append_state_snapshot(
                 run_dir / "state.txt",

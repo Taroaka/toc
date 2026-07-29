@@ -237,6 +237,25 @@ def _state_list_values(state: dict[str, str], key: str) -> list[str]:
     ]
 
 
+def _receipt_item_id_set(
+    receipt: dict[str, Any],
+    field: str,
+) -> set[str] | None:
+    values = receipt.get(field)
+    if (
+        not isinstance(values, list)
+        or any(
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            for value in values
+        )
+        or len(set(values)) != len(values)
+    ):
+        return None
+    return set(values)
+
+
 def _scene_detail_transport_failed_scene_numbers(
     state: dict[str, str],
 ) -> set[str]:
@@ -424,25 +443,56 @@ def _localized_partial_media_contract(
             derived.get("surviving_image_item_ids") or []
         )
         expected_candidates = derived.get("synthetic_candidates")
-        submitted_values = receipt.get("provider_submitted_item_ids")
-        generated_values = receipt.get("generated_item_ids")
-        skipped_values = receipt.get("skipped_item_ids")
+        submitted_item_ids = _receipt_item_id_set(
+            receipt,
+            "provider_submitted_item_ids",
+        )
+        reused_item_ids = _receipt_item_id_set(
+            receipt,
+            "reused_item_ids",
+        )
+        generated_item_ids = _receipt_item_id_set(
+            receipt,
+            "generated_item_ids",
+        )
+        satisfied_item_ids = _receipt_item_id_set(
+            receipt,
+            "satisfied_item_ids",
+        )
+        skipped_item_ids = _receipt_item_id_set(
+            receipt,
+            "skipped_item_ids",
+        )
+        truth_sets_are_well_formed = all(
+            item_ids is not None
+            for item_ids in (
+                submitted_item_ids,
+                reused_item_ids,
+                generated_item_ids,
+                satisfied_item_ids,
+                skipped_item_ids,
+            )
+        )
+        submitted = submitted_item_ids or set()
+        reused = reused_item_ids or set()
+        generated = generated_item_ids or set()
+        satisfied = satisfied_item_ids or set()
+        skipped = skipped_item_ids or set()
+        provider_call_count = receipt.get("provider_call_count")
         if (
             receipt.get("request_revision")
             != derived.get("request_revision")
             or receipt.get("projection_sha256")
             != derived.get("projection_sha256")
-            or not isinstance(submitted_values, list)
-            or set(submitted_values) != surviving_item_ids
-            or len(set(submitted_values)) != len(submitted_values)
-            or receipt.get("provider_call_count")
-            != len(surviving_item_ids)
-            or not isinstance(generated_values, list)
-            or set(generated_values) != surviving_item_ids
-            or len(set(generated_values)) != len(generated_values)
-            or not isinstance(skipped_values, list)
-            or set(skipped_values) != blocked_item_ids
-            or len(set(skipped_values)) != len(skipped_values)
+            or not truth_sets_are_well_formed
+            or not submitted.isdisjoint(reused)
+            or (submitted | reused) != surviving_item_ids
+            or generated != surviving_item_ids
+            or satisfied != surviving_item_ids
+            or satisfied != (generated | reused)
+            or skipped != blocked_item_ids
+            or type(provider_call_count) is not int
+            or provider_call_count != len(submitted)
             or receipt.get("synthetic_candidates")
             != expected_candidates
         ):
@@ -462,6 +512,42 @@ def _localized_partial_media_contract(
         submitted_state_values = _state_list_values(
             state,
             "review.semantic.partial_media.provider_submitted_image_items",
+        )
+        reused_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.reused_image_items",
+        )
+        generated_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.generated_image_items",
+        )
+        satisfied_state_values = _state_list_values(
+            state,
+            "review.semantic.partial_media.satisfied_image_items",
+        )
+        truth_state_values = {
+            "review.semantic.partial_media.provider_submitted_image_items": (
+                submitted_state_values,
+                submitted,
+            ),
+            "review.semantic.partial_media.reused_image_items": (
+                reused_state_values,
+                reused,
+            ),
+            "review.semantic.partial_media.generated_image_items": (
+                generated_state_values,
+                generated,
+            ),
+            "review.semantic.partial_media.satisfied_image_items": (
+                satisfied_state_values,
+                satisfied,
+            ),
+        }
+        truth_state_matches_receipt = all(
+            key in state
+            and len(set(values)) == len(values)
+            and set(values) == expected
+            for key, (values, expected) in truth_state_values.items()
         )
         if (
             state.get("review.semantic.partial_media.generated") != "true"
@@ -483,9 +569,7 @@ def _localized_partial_media_contract(
             or set(synthetic_state_values) != blocked_item_ids
             or len(set(synthetic_state_values))
             != len(synthetic_state_values)
-            or set(submitted_state_values) != surviving_item_ids
-            or len(set(submitted_state_values))
-            != len(submitted_state_values)
+            or not truth_state_matches_receipt
             or state.get("image_generation.status") != "partial"
             or state.get("image_generation.blocked_item_count")
             != str(len(blocked_item_ids))

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from copy import deepcopy
+import fcntl
 import hashlib
 import json
 import math
@@ -22,6 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import traceback
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
@@ -49,9 +51,12 @@ from toc.cut_context_packet import materialize_cut_context_packet
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.cut_design_logging import (
     SCENE_GENERATION_PROMPTS_FILENAME,
-    write_cut_design_context as _write_cut_design_context,
-    write_cut_design_failure_log as _write_cut_design_failure_log,
-    write_scene_design_json as _write_scene_design_json,
+    profile_failure_summary,
+    read_scene_design_json as _raw_read_scene_design_json,
+    scene_design_log_relpath,
+    write_cut_design_context as _raw_write_cut_design_context,
+    write_cut_design_failure_log as _raw_write_cut_design_failure_log,
+    write_scene_design_json as _raw_write_scene_design_json,
 )
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
@@ -143,7 +148,7 @@ DOWNSTREAM_REVIEW_STAGES = (
 CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
 CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
 _ACTIVE_MATERIALIZATION_ROOT: ContextVar[
-    tuple[str, PathIdentity] | None
+    tuple[str, PathIdentity, int, bool] | None
 ] = ContextVar(
     "toc_frontend_active_materialization_root",
     default=None,
@@ -156,6 +161,7 @@ def _exact_materialization_source(
     experience: str,
     source_run: Path | None,
     source_root_identity: PathIdentity | None = None,
+    expected_source_sha256: str | None = None,
 ) -> str:
     """Return the exact bytes used to reconstruct the story profile."""
 
@@ -168,11 +174,18 @@ def _exact_materialization_source(
         if source_root_identity is not None
         else directory_identity_nofollow(source_run)
     )
-    return read_regular_file_nofollow(
+    source_bytes = read_regular_file_nofollow(
         source_run,
         "story.md",
         expected_root_identity=expected_identity,
-    ).decode("utf-8")
+    )
+    if (
+        expected_source_sha256 is not None
+        and hashlib.sha256(source_bytes).hexdigest()
+        != expected_source_sha256
+    ):
+        raise ValueError("world-walk source story sha256 changed")
+    return source_bytes.decode("utf-8")
 
 
 def _write_create_input_contract(
@@ -1096,6 +1109,727 @@ def _write_run_text_nofollow(
     )
 
 
+def _active_materialization_root(
+    run_dir: Path,
+) -> tuple[str, PathIdentity, int, bool] | None:
+    active_root = _ACTIVE_MATERIALIZATION_ROOT.get()
+    lexical_root = os.path.abspath(os.fspath(run_dir))
+    if active_root is None or active_root[0] != lexical_root:
+        return None
+    return active_root
+
+
+def _verify_active_materialization_root(
+    run_dir: Path,
+    active_root: tuple[str, PathIdentity, int, bool],
+) -> None:
+    descriptor = open_directory_nofollow(
+        run_dir,
+        expected_identity=active_root[1],
+    )
+    os.close(descriptor)
+
+
+def _read_active_root_file(
+    *,
+    run_dir: Path,
+    relative_path: str | Path,
+    active_root: tuple[str, PathIdentity, int, bool],
+    missing_ok: bool = False,
+) -> bytes:
+    try:
+        return read_regular_file_nofollow(
+            run_dir,
+            relative_path,
+            expected_root_identity=active_root[1],
+        )
+    except FileNotFoundError:
+        if missing_ok:
+            return b""
+        raise
+
+
+def _append_active_root_regular_file(
+    *,
+    run_dir: Path,
+    relative_path: str | Path,
+    data: bytes,
+    active_root: tuple[str, PathIdentity, int, bool],
+) -> None:
+    relative = Path(relative_path)
+    if len(relative.parts) != 1 or relative.parts[0] in {"", ".", ".."}:
+        raise ValueError(
+            f"append target must be a direct run artifact: {relative}"
+        )
+    _verify_active_materialization_root(run_dir, active_root)
+    root_descriptor = os.dup(active_root[2])
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            relative.parts[0],
+            flags,
+            0o600,
+            dir_fd=root_descriptor,
+        )
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(
+                f"append target must be a regular file: {relative}"
+            )
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("state append made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        current = os.stat(
+            relative.parts[0],
+            dir_fd=root_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise ValueError(
+                f"append target identity changed: {relative}"
+            )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(root_descriptor)
+    _verify_active_materialization_root(run_dir, active_root)
+
+
+def _parse_state_text(text: str) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if (
+            not line
+            or line == "---"
+            or line.startswith("#")
+            or "=" not in line
+        ):
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            merged[key] = value.strip().replace("\n", " ")
+    return merged
+
+
+def write_run_index(
+    run_dir: Path,
+    *,
+    state: dict[str, str] | None = None,
+) -> Path:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return _write_run_index(run_dir, state=state)
+    _verify_active_materialization_root(run_dir, active_root)
+    current_state = state
+    if current_state is None:
+        current_state = _parse_state_text(
+            _read_active_root_file(
+                run_dir=run_dir,
+                relative_path="state.txt",
+                active_root=active_root,
+                missing_ok=True,
+            ).decode("utf-8")
+        )
+    output_path = run_dir / "p000_index.md"
+    _write_run_text_nofollow(
+        run_dir,
+        output_path,
+        build_run_index_markdown(run_dir, state=current_state),
+    )
+    return output_path
+
+
+def _sync_active_run_status(
+    run_dir: Path,
+    state: dict[str, str],
+    active_root: tuple[str, PathIdentity, int, bool],
+) -> None:
+    write_run_index(run_dir, state=state)
+    payload: dict[str, Any] = {
+        "generated_at": harness_now_iso(),
+        "run_dir": str(run_dir.resolve()),
+        "state_file": str((run_dir / "state.txt").resolve()),
+        "state_flat": state,
+        "state": nested_state(state),
+        "artifacts": artifact_inventory(run_dir, state),
+        "pending_gates": pending_gates(state),
+    }
+    eval_bytes = _read_active_root_file(
+        run_dir=run_dir,
+        relative_path="eval_report.json",
+        active_root=active_root,
+        missing_ok=True,
+    )
+    if eval_bytes:
+        try:
+            payload["eval_report"] = json.loads(eval_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeError):
+            payload["eval_report"] = {
+                "error": "Failed to parse eval_report.json"
+            }
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "run_status.json",
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    write_run_index(run_dir, state=state)
+
+
+def append_state_snapshot(
+    state_path: Path,
+    updates: dict[str, str],
+) -> dict[str, str]:
+    run_dir = state_path.parent
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return _append_state_snapshot(state_path, updates)
+    if state_path.name != "state.txt":
+        raise ValueError(
+            f"state snapshot must target state.txt: {state_path}"
+        )
+    _verify_active_materialization_root(run_dir, active_root)
+    current_text = _read_active_root_file(
+        run_dir=run_dir,
+        relative_path="state.txt",
+        active_root=active_root,
+        missing_ok=True,
+    ).decode("utf-8")
+    merged = _parse_state_text(current_text)
+    if "job_id" not in merged or not merged["job_id"].strip():
+        merged["job_id"] = new_job_id()
+    if "status" not in merged or not merged["status"].strip():
+        merged["status"] = "INIT"
+    merged.setdefault(
+        "artifact.run_index",
+        str((run_dir / "p000_index.md").resolve()),
+    )
+    cleaned = {
+        key: value.replace("\n", " ").strip()
+        for key, value in updates.items()
+    }
+    merged.update(cleaned)
+    merged["timestamp"] = harness_now_iso()
+    block = (
+        "\n".join(f"{key}={merged[key]}" for key in _order_keys(merged))
+        + "\n---\n"
+    )
+    _append_active_root_regular_file(
+        run_dir=run_dir,
+        relative_path="state.txt",
+        data=block.encode("utf-8"),
+        active_root=active_root,
+    )
+    _sync_active_run_status(run_dir, merged, active_root)
+    return merged
+
+
+def _write_scene_design_json(
+    run_dir: Path,
+    filename: str,
+    payload: dict[str, Any],
+) -> None:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        _raw_write_scene_design_json(run_dir, filename, payload)
+        return
+    if Path(filename).name != filename:
+        raise ValueError(
+            f"scene design filename must be a basename: {filename}"
+        )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / "logs" / "scene_design" / filename,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def _read_scene_design_json(
+    run_dir: Path,
+    filename: str,
+) -> dict[str, Any]:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return _raw_read_scene_design_json(run_dir, filename)
+    if Path(filename).name != filename:
+        raise ValueError(
+            f"scene design filename must be a basename: {filename}"
+        )
+    try:
+        payload = json.loads(
+            _read_active_root_file(
+                run_dir=run_dir,
+                relative_path=(
+                    Path("logs") / "scene_design" / filename
+                ),
+                active_root=active_root,
+            ).decode("utf-8")
+        )
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, UnicodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_cut_design_context(
+    run_dir: Path,
+    *,
+    now: str,
+    topic: str,
+    phase: str,
+    profile: dict[str, Any] | None = None,
+    scene_context: dict[str, Any] | None = None,
+    cut_context: dict[str, Any] | None = None,
+    partial_counts: dict[str, Any] | None = None,
+    flow: str | None = None,
+    status: str | None = None,
+    reason: str | None = None,
+) -> None:
+    if _active_materialization_root(run_dir) is None:
+        _raw_write_cut_design_context(
+            run_dir,
+            now=now,
+            topic=topic,
+            phase=phase,
+            profile=profile,
+            scene_context=scene_context,
+            cut_context=cut_context,
+            partial_counts=partial_counts,
+            flow=flow,
+            status=status,
+            reason=reason,
+        )
+        return
+    payload: dict[str, Any] = {
+        "schema_version": "cut_design_generation_context_v1",
+        "updated_at": now,
+        "topic": topic,
+        "phase": phase,
+        "profile_summary": profile_failure_summary(profile or {}),
+        "scene_context": scene_context or {},
+        "cut_context": cut_context or {},
+        "partial_counts": partial_counts or {},
+    }
+    if flow:
+        payload["flow"] = flow
+    if status:
+        payload["status"] = status
+    if reason:
+        payload["reason"] = reason
+    _write_scene_design_json(
+        run_dir,
+        "latest_generation_context.json",
+        payload,
+    )
+
+
+def _write_cut_design_failure_log(
+    run_dir: Path,
+    *,
+    now: str,
+    topic: str,
+    phase: str,
+    profile: dict[str, Any] | None,
+    exc: BaseException,
+) -> None:
+    if _active_materialization_root(run_dir) is None:
+        _raw_write_cut_design_failure_log(
+            run_dir,
+            now=now,
+            topic=topic,
+            phase=phase,
+            profile=profile,
+            exc=exc,
+        )
+        return
+    latest_context = _read_scene_design_json(
+        run_dir,
+        "latest_generation_context.json",
+    )
+    scene_event_input = _read_scene_design_json(
+        run_dir,
+        "scene_event_input.json",
+    )
+    scene_event_output = _read_scene_design_json(
+        run_dir,
+        "scene_event_output.json",
+    )
+    scene_generation_prompts = _read_scene_design_json(
+        run_dir,
+        SCENE_GENERATION_PROMPTS_FILENAME,
+    )
+    payload = {
+        "schema_version": "cut_design_failure_v1",
+        "created_at": now,
+        "topic": topic,
+        "phase": phase,
+        "profile_summary": profile_failure_summary(profile or {}),
+        "latest_generation_context": latest_context,
+        "partial_artifacts": {
+            "scene_event_input": {
+                "path": scene_design_log_relpath(
+                    "scene_event_input.json"
+                ),
+                "scene_count": scene_event_input.get("scene_count"),
+            },
+            "scene_event_output": {
+                "path": scene_design_log_relpath(
+                    "scene_event_output.json"
+                ),
+                "scene_count": scene_event_output.get("scene_count"),
+            },
+            "scene_generation_prompts": {
+                "path": scene_design_log_relpath(
+                    SCENE_GENERATION_PROMPTS_FILENAME
+                ),
+                "scene_count": scene_generation_prompts.get("scene_count"),
+            },
+        },
+        "error": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exception(
+                type(exc),
+                exc,
+                exc.__traceback__,
+            ),
+        },
+    }
+    _write_scene_design_json(
+        run_dir,
+        "cut_contract_failure.json",
+        payload,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "runtime.stage": "cut_design_failed",
+            "runtime.cut_design.status": "failed",
+            "runtime.cut_design.phase": phase,
+            "runtime.cut_design.error_type": type(exc).__name__,
+            "runtime.cut_design.error": str(exc)[:2000],
+            "runtime.cut_design.latest_context": scene_design_log_relpath(
+                "latest_generation_context.json"
+            ),
+            "runtime.cut_design.failure_log": scene_design_log_relpath(
+                "cut_contract_failure.json"
+            ),
+            "slot.p420.status": "failed",
+            "slot.p420.note": (
+                "cut design failed before frontend handoff"
+            ),
+            "eval.cut_blueprint.status": "changes_requested",
+        },
+    )
+
+
+def write_review_input_snapshot(
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+    snapshot: dict[str, Any],
+    prompt_relpaths: tuple[Path, ...] = (),
+) -> Path:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return _write_review_input_snapshot(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=round_number,
+            snapshot=snapshot,
+            prompt_relpaths=prompt_relpaths,
+        )
+    prompt_sha256s: dict[str, str] = {}
+    for relpath in prompt_relpaths:
+        prompt_sha256s[relpath.as_posix()] = hashlib.sha256(
+            _read_active_root_file(
+                run_dir=run_dir,
+                relative_path=relpath,
+                active_root=active_root,
+            )
+        ).hexdigest()
+    payload = dict(snapshot)
+    payload["prompt_sha256s"] = prompt_sha256s
+    output_path = run_dir / review_input_snapshot_relpath(
+        stage,
+        round_number,
+    )
+    _write_run_text_nofollow(
+        run_dir,
+        output_path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+    return output_path
+
+
+def _unlink_active_root_regular_file(
+    *,
+    run_dir: Path,
+    relative_path: str | Path,
+    active_root: tuple[str, PathIdentity, int, bool],
+) -> None:
+    relative = Path(relative_path)
+    if (
+        not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError(f"unsafe run artifact path: {relative}")
+    _verify_active_materialization_root(run_dir, active_root)
+    parent_descriptor = os.dup(active_root[2])
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                child_descriptor = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return
+            os.close(parent_descriptor)
+            parent_descriptor = child_descriptor
+        try:
+            entry = os.stat(
+                relative.parts[-1],
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(entry.st_mode):
+            raise ValueError(
+                f"review artifact must be a regular file: {relative}"
+            )
+        os.unlink(relative.parts[-1], dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+    _verify_active_materialization_root(run_dir, active_root)
+
+
+def materialize_review_loop_round(
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+) -> dict[str, str]:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return _materialize_review_loop_round(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=round_number,
+        )
+    if stage not in REVIEW_LOOP_SPECS:
+        known = ", ".join(sorted(REVIEW_LOOP_SPECS))
+        raise ValueError(
+            f"unknown review-loop stage: {stage}; known stages: {known}"
+        )
+    spec = REVIEW_LOOP_SPECS[stage]
+    missing: list[str] = []
+    for relpath in spec.source_artifacts:
+        try:
+            _read_active_root_file(
+                run_dir=run_dir,
+                relative_path=relpath,
+                active_root=active_root,
+            )
+        except FileNotFoundError:
+            missing.append(relpath)
+    if missing:
+        raise FileNotFoundError(
+            "review-loop source artifacts are missing: "
+            + ", ".join(missing)
+        )
+
+    stale_paths: list[Path] = [
+        aggregated_review_relpath(stage, round_number),
+        aggregator_prompt_relpath(stage, round_number),
+        review_input_snapshot_relpath(stage, round_number),
+        final_review_relpath(stage),
+    ]
+    for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
+        stale_paths.extend(
+            (
+                critic_relpath(stage, round_number, critic_number),
+                critic_prompt_relpath(
+                    stage,
+                    round_number,
+                    critic_number,
+                ),
+            )
+        )
+    for stale_path in stale_paths:
+        _unlink_active_root_regular_file(
+            run_dir=run_dir,
+            relative_path=stale_path,
+            active_root=active_root,
+        )
+
+    snapshot = build_review_input_snapshot(
+        run_dir=run_dir,
+        stage=stage,
+        round_number=round_number,
+    )
+    input_digest = str(snapshot["input_digest"])
+    updates = loop_state_updates(
+        stage=stage,
+        status="running",
+        current_round=round_number,
+    )
+    round_prefix = f"eval.{stage}.loop.round_{round_number:02d}"
+    updates[f"{round_prefix}.started_at"] = harness_now_iso()
+    updates[f"{round_prefix}.aggregated_review"] = str(
+        aggregated_review_relpath(stage, round_number)
+    )
+
+    prompt_relpaths: list[Path] = []
+    for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
+        report_relpath = critic_relpath(
+            stage,
+            round_number,
+            critic_number,
+        )
+        prompt_relpath = critic_prompt_relpath(
+            stage,
+            round_number,
+            critic_number,
+        )
+        _write_run_text_nofollow(
+            run_dir,
+            run_dir / prompt_relpath,
+            render_critic_prompt(
+                run_dir=run_dir,
+                stage=stage,
+                round_number=round_number,
+                critic_number=critic_number,
+                input_digest=input_digest,
+            )
+            + "\n",
+        )
+        updates[f"{round_prefix}.critic_{critic_number}"] = str(
+            report_relpath
+        )
+        updates[f"{round_prefix}.critic_{critic_number}_prompt"] = str(
+            prompt_relpath
+        )
+        prompt_relpaths.append(prompt_relpath)
+
+    aggregate_prompt_relpath = aggregator_prompt_relpath(
+        stage,
+        round_number,
+    )
+    _write_run_text_nofollow(
+        run_dir,
+        run_dir / aggregate_prompt_relpath,
+        render_aggregator_prompt(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=round_number,
+            input_digest=input_digest,
+        )
+        + "\n",
+    )
+    prompt_relpaths.append(aggregate_prompt_relpath)
+    updates[f"{round_prefix}.aggregator_prompt"] = str(
+        aggregate_prompt_relpath
+    )
+    snapshot_path = write_review_input_snapshot(
+        run_dir=run_dir,
+        stage=stage,
+        round_number=round_number,
+        snapshot=snapshot,
+        prompt_relpaths=tuple(prompt_relpaths),
+    )
+    updates[f"{round_prefix}.input_snapshot"] = str(
+        snapshot_path.relative_to(run_dir)
+    )
+    updates[f"{round_prefix}.input_digest"] = input_digest
+    append_state_snapshot(run_dir / "state.txt", updates)
+    return updates
+
+
+def _rewrite_subprocess_run_paths(
+    command: list[str | os.PathLike[str]],
+    *,
+    lexical_root: str,
+) -> list[str]:
+    rewritten: list[str] = []
+    for raw_argument in command:
+        argument = os.fspath(raw_argument)
+        absolute_argument = os.path.abspath(argument)
+        try:
+            contained = os.path.commonpath(
+                (lexical_root, absolute_argument)
+            ) == lexical_root
+        except ValueError:
+            contained = False
+        if contained:
+            relative = os.path.relpath(absolute_argument, lexical_root)
+            rewritten.append("." if relative == "." else relative)
+        else:
+            rewritten.append(argument)
+    return rewritten
+
+
+def _run_materialization_subprocess(
+    run_dir: Path,
+    command: list[str | os.PathLike[str]],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    active_root = _active_materialization_root(run_dir)
+    if active_root is None:
+        return subprocess.run(command, **kwargs)
+    _verify_active_materialization_root(run_dir, active_root)
+    subprocess_command = [os.fspath(argument) for argument in command]
+    if not active_root[3]:
+        subprocess_command = _rewrite_subprocess_run_paths(
+            command,
+            lexical_root=active_root[0],
+        )
+        inherited_descriptors = set(kwargs.pop("pass_fds", ()))
+        inherited_descriptors.add(active_root[2])
+        kwargs["pass_fds"] = tuple(sorted(inherited_descriptors))
+        if "preexec_fn" in kwargs:
+            raise ValueError(
+                "frontend materialization subprocess cannot override "
+                "its pinned-root preexec"
+            )
+        root_descriptor = active_root[2]
+
+        def enter_pinned_root() -> None:
+            os.fchdir(root_descriptor)
+
+        kwargs["preexec_fn"] = enter_pinned_root
+    try:
+        return subprocess.run(subprocess_command, **kwargs)
+    finally:
+        _verify_active_materialization_root(run_dir, active_root)
+
+
 def _run_id_from_dir(run_dir: Path) -> str:
     resolved = run_dir.resolve()
     try:
@@ -1141,6 +1875,8 @@ def _validated_fresh_cli_run_dir(raw_run_dir: str) -> Path:
                     )
                     for path in descendants
                 )
+            elif entry.name == ".toc_frontend_create.lock":
+                safe = entry.is_file() and not entry.is_symlink()
             else:
                 safe = False
             if entry.is_symlink() or not safe:
@@ -1163,51 +1899,38 @@ def _run_materialization_lock(
     expected_identity: PathIdentity | None = None,
     protect_pathname: bool = False,
 ):
+    # Kept for caller compatibility. Root safety is provided by an
+    # owner-death-safe inode lock plus fd-relative writes; persistent
+    # filesystem flags would survive SIGKILL and strand the run.
+    _ = protect_pathname
     root_descriptor = open_directory_nofollow(
         run_dir,
         expected_identity=expected_identity,
     )
     opened_root = os.fstat(root_descriptor)
     root_identity = opened_root.st_dev, opened_root.st_ino
-    lock_name = ".toc_frontend_create.lock"
-    original_flags: int | None = None
-    pathname_protected = False
-    chflags = getattr(os, "chflags", None)
     active_root_token = None
     try:
-        descriptor = os.open(
-            lock_name,
-            os.O_CREAT
-            | os.O_EXCL
-            | os.O_WRONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=root_descriptor,
+        fcntl.flock(
+            root_descriptor,
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
         )
-    except FileExistsError as exc:
+    except BlockingIOError as exc:
         os.close(root_descriptor)
-        raise RuntimeError(f"another frontend-create process owns this run: {run_dir}") from exc
+        raise RuntimeError(
+            f"another frontend-create process owns this run: {run_dir}"
+        ) from exc
     except Exception:
         os.close(root_descriptor)
         raise
     try:
-        os.write(descriptor, f"pid={os.getpid()}\n".encode("utf-8"))
-        if protect_pathname and callable(chflags):
-            original_flags = int(getattr(opened_root, "st_flags", 0))
-            chflags(
-                run_dir,
-                original_flags | stat.UF_APPEND,
-                follow_symlinks=False,
-            )
-            pathname_protected = True
-            verified = open_directory_nofollow(
-                run_dir,
-                expected_identity=root_identity,
-            )
-            os.close(verified)
         active_root_token = _ACTIVE_MATERIALIZATION_ROOT.set(
-            (os.path.abspath(os.fspath(run_dir)), root_identity)
+            (
+                os.path.abspath(os.fspath(run_dir)),
+                root_identity,
+                root_descriptor,
+                False,
+            )
         )
         yield
         verified = open_directory_nofollow(
@@ -1218,21 +1941,7 @@ def _run_materialization_lock(
     finally:
         if active_root_token is not None:
             _ACTIVE_MATERIALIZATION_ROOT.reset(active_root_token)
-        if (
-            pathname_protected
-            and original_flags is not None
-            and callable(chflags)
-        ):
-            chflags(
-                run_dir,
-                original_flags,
-                follow_symlinks=False,
-            )
-        os.close(descriptor)
-        try:
-            os.unlink(lock_name, dir_fd=root_descriptor)
-        except FileNotFoundError:
-            pass
+        fcntl.flock(root_descriptor, fcntl.LOCK_UN)
         os.close(root_descriptor)
 
 
@@ -9258,11 +9967,171 @@ def _bind_experience_metadata(
 
 
 WORLD_WALK_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+WorldWalkSourceReferenceLease = tuple[tuple[str, str], ...]
 WORLD_WALK_PROMPT_CONTRACT = (
     "観察者POV。カメラは物語へ介入せず、自然な歩行速度と安定した水平線を保つ。"
     "人物は中景から遠景に置き、顔の大写し、自撮り、肩越し密着、急接近を避ける。"
     "序盤は物語を進めず参照世界の場所と生活痕跡を観察し、中盤以降に物語の出来事を遠目に見かける。"
 )
+
+
+def _world_walk_source_reference_inventory(
+    source_run: Path,
+    *,
+    source_root_identity: PathIdentity,
+) -> WorldWalkSourceReferenceLease:
+    root_descriptor = open_directory_nofollow(
+        source_run,
+        expected_identity=source_root_identity,
+    )
+    assets_descriptor: int | None = None
+    try:
+        try:
+            assets_descriptor = os.open(
+                "assets",
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_descriptor,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "world_walk source run has no reusable asset images"
+            ) from exc
+        inventory_paths: list[Path] = []
+
+        def scan_directory(
+            directory_descriptor: int,
+            relative_parent: Path,
+        ) -> None:
+            for name in sorted(os.listdir(directory_descriptor)):
+                if name in {"", ".", ".."} or "/" in name:
+                    raise ValueError(
+                        f"unsafe world-walk source asset entry: {name!r}"
+                    )
+                entry = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                relative = relative_parent / name
+                if stat.S_ISDIR(entry.st_mode):
+                    child_descriptor = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=directory_descriptor,
+                    )
+                    try:
+                        opened = os.fstat(child_descriptor)
+                        if (
+                            opened.st_dev,
+                            opened.st_ino,
+                        ) != (
+                            entry.st_dev,
+                            entry.st_ino,
+                        ):
+                            raise ValueError(
+                                "world-walk source asset directory "
+                                f"identity changed: {relative.as_posix()}"
+                            )
+                        scan_directory(child_descriptor, relative)
+                    finally:
+                        os.close(child_descriptor)
+                    continue
+                if stat.S_ISLNK(entry.st_mode):
+                    raise ValueError(
+                        "world-walk source assets must not contain symlinks: "
+                        f"{relative.as_posix()}"
+                    )
+                if not stat.S_ISREG(entry.st_mode):
+                    raise ValueError(
+                        "world-walk source assets must contain only regular "
+                        f"files and directories: {relative.as_posix()}"
+                    )
+                if relative.suffix.lower() in WORLD_WALK_IMAGE_SUFFIXES:
+                    inventory_paths.append(relative)
+
+        scan_directory(assets_descriptor, Path())
+    finally:
+        if assets_descriptor is not None:
+            os.close(assets_descriptor)
+        os.close(root_descriptor)
+    inventory = tuple(
+        (
+            (Path("assets") / relative).as_posix(),
+            sha256_regular_file_nofollow(
+                source_run,
+                Path("assets") / relative,
+                expected_root_identity=source_root_identity,
+            ),
+        )
+        for relative in sorted(inventory_paths)
+    )
+    return inventory
+
+
+def _freeze_world_walk_source_reference_inventory(
+    source_run: Path,
+    *,
+    source_root_identity: PathIdentity | None = None,
+) -> WorldWalkSourceReferenceLease:
+    expected_identity = (
+        source_root_identity
+        if source_root_identity is not None
+        else directory_identity_nofollow(source_run)
+    )
+    first = _world_walk_source_reference_inventory(
+        source_run,
+        source_root_identity=expected_identity,
+    )
+    second = _world_walk_source_reference_inventory(
+        source_run,
+        source_root_identity=expected_identity,
+    )
+    if first != second:
+        raise RuntimeError(
+            "world_walk source reference inventory changed while freezing"
+        )
+    if not first:
+        raise RuntimeError(
+            "world_walk source run has no reusable asset images"
+        )
+    return first
+
+
+def _verify_world_walk_source_reference_inventory(
+    source_run: Path,
+    *,
+    source_root_identity: PathIdentity,
+    source_reference_lease: WorldWalkSourceReferenceLease,
+) -> None:
+    current = _world_walk_source_reference_inventory(
+        source_run,
+        source_root_identity=source_root_identity,
+    )
+    if current != source_reference_lease:
+        raise RuntimeError(
+            "world_walk source reference inventory changed"
+        )
+
+
+def _verify_world_walk_source_story(
+    source_run: Path,
+    *,
+    source_root_identity: PathIdentity,
+    source_story_sha256: str,
+) -> None:
+    story_bytes = read_regular_file_nofollow(
+        source_run,
+        "story.md",
+        expected_root_identity=source_root_identity,
+    )
+    if hashlib.sha256(story_bytes).hexdigest() != source_story_sha256:
+        raise RuntimeError("world_walk source story sha256 changed")
 
 
 def _materialize_world_walk_source_references(
@@ -9271,6 +10140,8 @@ def _materialize_world_walk_source_references(
     *,
     source_root_identity: PathIdentity | None = None,
     destination_root_identity: PathIdentity | None = None,
+    source_reference_lease: WorldWalkSourceReferenceLease | None = None,
+    source_story_sha256: str | None = None,
 ) -> list[str]:
     expected_source_identity = (
         source_root_identity
@@ -9282,27 +10153,65 @@ def _materialize_world_walk_source_references(
         if destination_root_identity is not None
         else directory_identity_nofollow(run_dir)
     )
-    source_assets = source_run / "assets"
-    candidates = sorted(
-        path
-        for path in source_assets.rglob("*")
-        if path.is_file() and path.suffix.lower() in WORLD_WALK_IMAGE_SUFFIXES
-    )
-    if not candidates:
-        raise RuntimeError("world_walk source run has no reusable asset images")
-    references: list[str] = []
-    for source_path in candidates[:12]:
-        relative = source_path.relative_to(source_assets)
-        output_relative = Path("assets") / "source_references" / relative
-        copy_regular_file_atomic_nofollow(
-            source_root=source_run,
-            source_relative=Path("assets") / relative,
-            destination_root=run_dir,
-            destination_relative=output_relative,
-            expected_source_root_identity=expected_source_identity,
-            expected_destination_root_identity=expected_destination_identity,
+    lease = (
+        source_reference_lease
+        if source_reference_lease is not None
+        else _freeze_world_walk_source_reference_inventory(
+            source_run,
+            source_root_identity=expected_source_identity,
         )
-        references.append(output_relative.as_posix())
+    )
+    _verify_world_walk_source_reference_inventory(
+        source_run,
+        source_root_identity=expected_source_identity,
+        source_reference_lease=lease,
+    )
+    if source_story_sha256 is not None:
+        _verify_world_walk_source_story(
+            source_run,
+            source_root_identity=expected_source_identity,
+            source_story_sha256=source_story_sha256,
+        )
+    references: list[str] = []
+    copied: list[tuple[Path, str]] = []
+    try:
+        for source_relative_text, expected_sha256 in lease[:12]:
+            source_relative = Path(source_relative_text)
+            relative = source_relative.relative_to("assets")
+            output_relative = (
+                Path("assets") / "source_references" / relative
+            )
+            copied_sha256 = copy_regular_file_atomic_nofollow(
+                source_root=source_run,
+                source_relative=source_relative,
+                destination_root=run_dir,
+                destination_relative=output_relative,
+                expected_source_root_identity=expected_source_identity,
+                expected_destination_root_identity=expected_destination_identity,
+                expected_sha256=expected_sha256,
+            )
+            copied.append((output_relative, copied_sha256))
+            references.append(output_relative.as_posix())
+        _verify_world_walk_source_reference_inventory(
+            source_run,
+            source_root_identity=expected_source_identity,
+            source_reference_lease=lease,
+        )
+        if source_story_sha256 is not None:
+            _verify_world_walk_source_story(
+                source_run,
+                source_root_identity=expected_source_identity,
+                source_story_sha256=source_story_sha256,
+            )
+    except Exception:
+        for output_relative, copied_sha256 in reversed(copied):
+            unlink_regular_file_verified_nofollow(
+                root=run_dir,
+                relative_path=output_relative,
+                expected_root_identity=expected_destination_identity,
+                expected_sha256=copied_sha256,
+            )
+        raise
     return references
 
 
@@ -11278,7 +12187,8 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
             {"asset_generation_manifest": {"items": manifest_items}},
         ),
     )
-    subprocess.run(
+    _run_materialization_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "generate-assets-from-manifest.py"),
@@ -11297,7 +12207,8 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
 
 
 def _materialize_standard_request_files(run_dir: Path) -> None:
-    subprocess.run(
+    _run_materialization_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "generate-assets-from-manifest.py"),
@@ -11471,7 +12382,8 @@ def _build_semantic_review_packs(
     stages: tuple[str, ...],
 ) -> None:
     for semantic_stage in stages:
-        subprocess.run(
+        _run_materialization_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
@@ -11517,7 +12429,8 @@ def _refresh_downstream_review_artifacts(run_dir: Path) -> None:
     """Freeze asset/scene reviews only after requests and grounding exist."""
 
     _require_downstream_review_inputs(run_dir)
-    subprocess.run(
+    _run_materialization_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
@@ -11535,7 +12448,8 @@ def _refresh_downstream_review_artifacts(run_dir: Path) -> None:
         capture_output=True,
         text=True,
     )
-    subprocess.run(
+    _run_materialization_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "build-image-prompt-judgment-review.py"),
@@ -11980,6 +12894,10 @@ def materialize_run(
     source_run: Path | None = None,
     world_walk_source_identity: PathIdentity | None = None,
     world_walk_destination_identity: PathIdentity | None = None,
+    world_walk_source_reference_lease: (
+        WorldWalkSourceReferenceLease | None
+    ) = None,
+    world_walk_source_story_sha256: str | None = None,
 ) -> None:
     target_duration_seconds = normalize_target_duration(
         target_duration_seconds
@@ -11989,7 +12907,24 @@ def materialize_run(
         experience=experience,
         source_run=source_run,
         source_root_identity=world_walk_source_identity,
+        expected_source_sha256=world_walk_source_story_sha256,
     )
+    if experience == "world_walk" and source_run is not None:
+        if world_walk_source_identity is None:
+            world_walk_source_identity = directory_identity_nofollow(
+                source_run
+            )
+        if world_walk_source_story_sha256 is None:
+            world_walk_source_story_sha256 = hashlib.sha256(
+                source.encode("utf-8")
+            ).hexdigest()
+        if world_walk_source_reference_lease is None:
+            world_walk_source_reference_lease = (
+                _freeze_world_walk_source_reference_inventory(
+                    source_run,
+                    source_root_identity=world_walk_source_identity,
+                )
+            )
     run_dir.mkdir(parents=True, exist_ok=True)
     materialization_root_identity = (
         world_walk_destination_identity
@@ -12015,6 +12950,8 @@ def materialize_run(
             run_dir,
             source_root_identity=world_walk_source_identity,
             destination_root_identity=materialization_root_identity,
+            source_reference_lease=world_walk_source_reference_lease,
+            source_story_sha256=world_walk_source_story_sha256,
         )
         if experience == "world_walk" and source_run is not None
         else []
@@ -12028,6 +12965,53 @@ def materialize_run(
         target_duration_seconds=target_duration_seconds,
         expected_run_identity=materialization_root_identity,
     )
+    if (
+        experience == "world_walk"
+        and source_run is not None
+        and world_walk_source_reference_lease is not None
+        and world_walk_source_story_sha256 is not None
+    ):
+        lease_payload = {
+            "schema_version": "world_walk_source_reference_lease_v1",
+            "source_run": str(source_run),
+            "source_root_identity": {
+                "device": world_walk_source_identity[0],
+                "inode": world_walk_source_identity[1],
+            },
+            "source_story_sha256": world_walk_source_story_sha256,
+            "reference_inventory": [
+                {
+                    "path": relative_path,
+                    "sha256": sha256,
+                }
+                for relative_path, sha256
+                in world_walk_source_reference_lease
+            ],
+        }
+        lease_payload["lease_sha256"] = hashlib.sha256(
+            json.dumps(
+                lease_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        _write_run_text_nofollow(
+            run_dir,
+            (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "world_walk_source_reference_lease.json"
+            ),
+            json.dumps(
+                lease_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
     profile = _duration_aware_profile(
         _story_profile(topic, source, variant_seed=run_dir.name),
         target_duration_seconds=target_duration_seconds,
@@ -12349,7 +13333,8 @@ def materialize_run(
 
 def _prepare_authoring_grounding(run_dir: Path) -> None:
     for stage in ("research", "story", "visual_value", "script", "manifest"):
-        subprocess.run(
+        _run_materialization_subprocess(
+            run_dir,
             [sys.executable, str(REPO_ROOT / "scripts" / "prepare-stage-context.py"), "--stage", stage, "--run-dir", str(run_dir), "--flow", "immersive"],
             cwd=REPO_ROOT,
             check=True,
@@ -12363,7 +13348,8 @@ def prepare_grounding(run_dir: Path) -> None:
     # freezes the p400 review-loop snapshots. Re-running those stages here
     # changes readset hashes after the freeze and makes the otherwise-current
     # p400 review artifacts stale.
-    subprocess.run(
+    _run_materialization_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
@@ -12386,7 +13372,8 @@ def prepare_grounding(run_dir: Path) -> None:
         "scene_implementation": ("p610", "scene implementation grounding completed"),
     }
     for stage, (slot, note) in grounding_slots.items():
-        subprocess.run(
+        _run_materialization_subprocess(
+            run_dir,
             [sys.executable, str(REPO_ROOT / "scripts" / "prepare-stage-context.py"), "--stage", stage, "--run-dir", str(run_dir), "--flow", "immersive"],
             cwd=REPO_ROOT,
             check=True,
@@ -12540,6 +13527,10 @@ def main() -> None:
 
     source_run: Path | None = None
     world_walk_source_identity: PathIdentity | None = None
+    world_walk_source_reference_lease: (
+        WorldWalkSourceReferenceLease | None
+    ) = None
+    world_walk_source_story_sha256: str | None = None
     if args.experience == "world_walk":
         if not args.source_run:
             parser.error("--source-run is required for --experience world_walk")
@@ -12566,12 +13557,22 @@ def main() -> None:
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
         try:
-            source = read_regular_file_nofollow(
+            source_bytes = read_regular_file_nofollow(
                 source_run,
                 "story.md",
                 expected_root_identity=world_walk_source_identity,
-            ).decode("utf-8")
-        except (OSError, UnicodeError, ValueError) as exc:
+            )
+            source = source_bytes.decode("utf-8")
+            world_walk_source_story_sha256 = hashlib.sha256(
+                source_bytes
+            ).hexdigest()
+            world_walk_source_reference_lease = (
+                _freeze_world_walk_source_reference_inventory(
+                    source_run,
+                    source_root_identity=world_walk_source_identity,
+                )
+            )
+        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
             parser.error(f"world-walk source story could not be read safely: {exc}")
     else:
         if args.source_run:
@@ -12599,6 +13600,12 @@ def main() -> None:
             source_run=source_run,
             world_walk_source_identity=world_walk_source_identity,
             world_walk_destination_identity=run_dir_identity,
+            world_walk_source_reference_lease=(
+                world_walk_source_reference_lease
+            ),
+            world_walk_source_story_sha256=(
+                world_walk_source_story_sha256
+            ),
         )
         prepare_grounding(run_dir)
         _refresh_downstream_review_artifacts(run_dir)

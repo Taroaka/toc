@@ -326,6 +326,7 @@ P560_EVAL_EXPECTED_STAGES = frozenset(
         "asset",
     }
 )
+P680_EVAL_EXPECTED_STAGES = P560_EVAL_EXPECTED_STAGES | {"image"}
 P560_PROMPT_REPAIRABLE_VISUAL_ISSUES = frozenset(
     {
         "vector-like or low-detail raster image",
@@ -3912,6 +3913,67 @@ async def _run_toc_run_helper(*, topic: str, run_id: str) -> str:
     return stdout.decode("utf-8", errors="replace").strip()
 
 
+def _probe_frontend_create_directory_lock(run_dir: Path) -> None:
+    """Fail if a frontend runner owns the pinned run-directory inode."""
+
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if not directory_flag or not nofollow_flag:
+        raise RuntimeError(
+            "frontend-create locking requires no-follow directory opens"
+        )
+
+    expected = os.stat(run_dir, follow_symlinks=False)
+    expected_identity = expected.st_dev, expected.st_ino
+    if not stat.S_ISDIR(expected.st_mode):
+        raise RuntimeError(
+            f"frontend-create run path is not a directory: {run_dir}"
+        )
+
+    descriptor = os.open(
+        run_dir,
+        os.O_RDONLY
+        | directory_flag
+        | nofollow_flag
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    acquired = False
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != expected_identity
+        ):
+            raise RuntimeError(
+                f"frontend-create run directory identity changed: {run_dir}"
+            )
+        try:
+            fcntl.flock(
+                descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"another frontend-create process owns this run: {run_dir}"
+            ) from exc
+        acquired = True
+
+        current = os.stat(run_dir, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != expected_identity
+        ):
+            raise RuntimeError(
+                f"frontend-create run directory identity changed: {run_dir}"
+            )
+    finally:
+        try:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
 async def _run_toc_immersive_frontend_cli_helper(
     *,
     topic: str,
@@ -3946,6 +4008,7 @@ async def _run_toc_immersive_frontend_cli_helper(
     env = dict(os.environ)
     env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
     run_dir = safe_run_dir(run_id, ROOT)
+    _probe_frontend_create_directory_lock(run_dir)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(ROOT),
@@ -13139,7 +13202,12 @@ def _validate_request_bound_image_result(
         )
 
 
-async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) -> None:
+async def _generate_request_item_output(
+    *,
+    run_dir: Path,
+    kind: str,
+    item: Any,
+) -> str:
     provenance_policy = _image_generation_provenance_policy()
     async with _global_image_generation_slot(provenance_policy) as global_slot:
         write_app_server_debug_log(
@@ -13156,10 +13224,19 @@ async def _generate_request_item_output(*, run_dir: Path, kind: str, item: Any) 
                 else max(1, int(IMAGE_GENERATION_GLOBAL_PARALLELISM)),
             },
         )
-        await _generate_request_item_output_with_slot(run_dir=run_dir, kind=kind, item=item)
+        return await _generate_request_item_output_with_slot(
+            run_dir=run_dir,
+            kind=kind,
+            item=item,
+        )
 
 
-async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, item: Any) -> None:
+async def _generate_request_item_output_with_slot(
+    *,
+    run_dir: Path,
+    kind: str,
+    item: Any,
+) -> str:
     run_dir = run_dir.resolve()
     if not getattr(item, "output", None):
         write_app_server_debug_log(
@@ -13169,7 +13246,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
             item_id=str(getattr(item, "id", "")),
             request={"kind": kind, "reason": "missing output"},
         )
-        return
+        return "skipped"
     if not str(getattr(item, "prompt", "") or "").strip():
         raise RuntimeError(f"{kind} request has no prompt: {item.id}")
     try:
@@ -13234,7 +13311,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
                     "destination": str(destination),
                 },
             )
-            return
+            return "reused"
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="request_item_generation",
@@ -13472,6 +13549,7 @@ async def _generate_request_item_output_with_slot(*, run_dir: Path, kind: str, i
         raise
     finally:
         await client.stop()
+    return "provider_submitted"
 
 
 async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
@@ -13491,9 +13569,24 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
     blocked_item_ids = _semantic_blocked_image_item_ids(run_dir, items) if kind == "scene" else set()
     skipped_items = [item for item in items if str(getattr(item, "id", "") or "") in blocked_item_ids]
     if skipped_items:
-        partial_projection = _load_current_partial_media_projection(
-            run_dir,
-            items=items,
+        try:
+            partial_projection = _load_current_partial_media_projection(
+                run_dir,
+                items=items,
+            )
+        except Exception:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                _partial_media_generation_reset_updates(None),
+            )
+            raise
+        with suppress(FileNotFoundError):
+            (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+        append_state_snapshot(
+            run_dir / "state.txt",
+            _partial_media_generation_reset_updates(
+                partial_projection
+            ),
         )
         _assert_partial_media_blocked_destinations_absent(
             run_dir,
@@ -13501,30 +13594,6 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
         )
         items = [item for item in items if str(getattr(item, "id", "") or "") not in blocked_item_ids]
         blocked_ids = [str(getattr(item, "id", "") or "") for item in skipped_items]
-        submitted_ids = [
-            str(getattr(item, "id", "") or "")
-            for item in items
-        ]
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "review.semantic.partial_media.generated": "true",
-                "review.semantic.partial_media.request_revision": (
-                    partial_projection["request_revision"]
-                ),
-                "review.semantic.partial_media.projection_sha256": (
-                    partial_projection["projection_sha256"]
-                ),
-                "review.semantic.partial_media.blocked_image_items": ", ".join(blocked_ids),
-                "review.semantic.partial_media.blocked_image_item_count": str(len(blocked_ids)),
-                "review.semantic.partial_media.synthetic_failed_candidates": (
-                    ", ".join(blocked_ids)
-                ),
-                "review.semantic.partial_media.provider_submitted_image_items": (
-                    ", ".join(submitted_ids)
-                ),
-            },
-        )
         write_app_server_debug_log(
             run_dir=run_dir,
             operation="request_generation_skip",
@@ -13582,6 +13651,7 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
         },
     )
     semaphore = asyncio.Semaphore(parallelism_effective)
+    generation_outcomes: dict[str, str] = {}
     for index, group in enumerate(groups, start=1):
         group_started = time.monotonic()
         write_app_server_debug_log(
@@ -13608,7 +13678,14 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
                 if failure_event.is_set() and not continue_after_item_error:
                     return
                 try:
-                    await _generate_request_item_output(run_dir=run_dir, kind=kind, item=item)
+                    outcome = await _generate_request_item_output(
+                        run_dir=run_dir,
+                        kind=kind,
+                        item=item,
+                    )
+                    generation_outcomes[
+                        str(getattr(item, "id", "") or "")
+                    ] = outcome
                 except Exception:
                     if not continue_after_item_error:
                         failure_event.set()
@@ -13670,40 +13747,98 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
         },
     )
     if partial_projection is not None:
+        survivor_ids = [
+            str(getattr(item, "id", "") or "")
+            for item in items
+        ]
+        provider_submitted_ids = [
+            item_id
+            for item_id in survivor_ids
+            if generation_outcomes.get(item_id) == "provider_submitted"
+        ]
+        reused_ids = [
+            item_id
+            for item_id in survivor_ids
+            if generation_outcomes.get(item_id) == "reused"
+        ]
+        unaccounted_ids = [
+            item_id
+            for item_id in survivor_ids
+            if generation_outcomes.get(item_id)
+            not in {"provider_submitted", "reused"}
+        ]
+        if unaccounted_ids:
+            raise RuntimeError(
+                "partial-media generation completed without an exact "
+                "provider/reuse outcome for: "
+                + ", ".join(unaccounted_ids)
+            )
         generated_ids = [
             str(getattr(item, "id", "") or "")
             for item in items
             if item.output
             and resolve_run_relative(run_dir, item.output).is_file()
         ]
-        receipt = write_partial_media_generation_receipt(
-            run_dir,
-            projection=partial_projection,
-            provider_submitted_item_ids=[
-                str(getattr(item, "id", "") or "")
-                for item in items
-            ],
-            generated_item_ids=generated_ids,
-        )
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "review.semantic.partial_media.receipt": (
-                    PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
+        if generated_ids != survivor_ids:
+            raise RuntimeError(
+                "partial-media generation did not satisfy the exact survivor "
+                "set"
+            )
+        try:
+            receipt = write_partial_media_generation_receipt(
+                run_dir,
+                projection=partial_projection,
+                provider_submitted_item_ids=provider_submitted_ids,
+                reused_item_ids=reused_ids,
+                generated_item_ids=generated_ids,
+                satisfied_item_ids=survivor_ids,
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "review.semantic.partial_media.generated": "true",
+                    "review.semantic.partial_media.provider_submitted_image_items": (
+                        ", ".join(provider_submitted_ids)
+                    ),
+                    "review.semantic.partial_media.reused_image_items": (
+                        ", ".join(reused_ids)
+                    ),
+                    "review.semantic.partial_media.generated_image_items": (
+                        ", ".join(generated_ids)
+                    ),
+                    "review.semantic.partial_media.satisfied_image_items": (
+                        ", ".join(survivor_ids)
+                    ),
+                    "review.semantic.partial_media.receipt": (
+                        PARTIAL_MEDIA_RECEIPT_RELPATH.as_posix()
+                    ),
+                    "review.semantic.partial_media.receipt_sha256": (
+                        receipt["receipt_sha256"]
+                    ),
+                    "image_generation.status": "partial",
+                    "image_generation.generated_count": str(
+                        len(generated_ids)
+                    ),
+                    "image_generation.blocked_item_count": str(
+                        len(
+                            partial_projection[
+                                "blocked_image_item_ids"
+                            ]
+                        )
+                    ),
+                    "image_generation.blocked_item_ids": ", ".join(
+                        partial_projection["blocked_image_item_ids"]
+                    ),
+                },
+            )
+        except Exception:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                _partial_media_generation_reset_updates(
+                    partial_projection
                 ),
-                "review.semantic.partial_media.receipt_sha256": (
-                    receipt["receipt_sha256"]
-                ),
-                "image_generation.status": "partial",
-                "image_generation.generated_count": str(len(generated_ids)),
-                "image_generation.blocked_item_count": str(
-                    len(partial_projection["blocked_image_item_ids"])
-                ),
-                "image_generation.blocked_item_ids": ", ".join(
-                    partial_projection["blocked_image_item_ids"]
-                ),
-            },
-        )
+            )
+            raise
 
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
@@ -13808,11 +13943,38 @@ def _p680_image_stage_report_issues(
     if not isinstance(stages, dict):
         return ["eval_report.json stages are missing"]
 
-    stage_names = (
-        tuple(stages)
-        if mode == "terminal"
-        else ("asset", "image")
-    )
+    if mode == "terminal":
+        if (
+            report.get("flow") != "immersive"
+            or report.get("profile") != "standard"
+        ):
+            return [
+                "eval_report.json terminal flow/profile must be "
+                "immersive/standard"
+            ]
+        actual_stage_names = set(stages)
+        if actual_stage_names != P680_EVAL_EXPECTED_STAGES:
+            missing = sorted(
+                P680_EVAL_EXPECTED_STAGES - actual_stage_names
+            )
+            unexpected = sorted(
+                actual_stage_names - P680_EVAL_EXPECTED_STAGES
+            )
+            details: list[str] = []
+            if missing:
+                details.append("missing=" + ", ".join(missing))
+            if unexpected:
+                details.append(
+                    "unexpected=" + ", ".join(unexpected)
+                )
+            return [
+                "eval_report.json terminal p680 stage set must exactly match "
+                "the immersive contract"
+                + (": " + "; ".join(details) if details else "")
+            ]
+        stage_names = tuple(sorted(P680_EVAL_EXPECTED_STAGES))
+    else:
+        stage_names = ("asset", "image")
     if not stage_names:
         return ["eval_report.json emitted no stages"]
     for stage_name in stage_names:
@@ -13863,7 +14025,7 @@ def _p680_image_stage_report_issues(
         if overall.get("passed") is not True:
             return ["eval_report.json overall result did not pass"]
         failed_stages = overall.get("failed_stages")
-        if failed_stages not in (None, []):
+        if failed_stages != []:
             return [
                 "eval_report.json overall failed_stages must be empty"
             ]
@@ -13888,25 +14050,34 @@ def _validate_p680_visual_quality(
             previous_report_sha256 = _file_sha256(report_path)
         except OSError:
             baseline_read_failed = True
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(APP_ROOT / "scripts" / "verify-pipeline.py"),
-            "--run-dir",
-            str(run_dir),
-            "--flow",
-            "immersive",
-            "--profile",
-            "standard",
-            "--stage-target",
-            "p680",
-        ],
-        cwd=APP_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(APP_ROOT / "scripts" / "verify-pipeline.py"),
+                "--run-dir",
+                str(run_dir),
+                "--flow",
+                "immersive",
+                "--profile",
+                "standard",
+                "--stage-target",
+                "p680",
+            ],
+            cwd=APP_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except Exception as exc:
+        if mode == "terminal":
+            _invalidate_image_generation_review_handoff(
+                run_dir,
+                invalidated_by="p680.terminal_verifier_execution_failed",
+                reason=str(exc),
+            )
+        raise
     issues = _p680_image_stage_report_issues(
         run_dir,
         report_was_absent=report_was_absent,
@@ -13934,6 +14105,12 @@ def _validate_p680_visual_quality(
             if mode == "terminal"
             else "p680 visual quality gate"
         )
+        if mode == "terminal":
+            _invalidate_image_generation_review_handoff(
+                run_dir,
+                invalidated_by="p680.terminal_verification_failed",
+                reason=detail,
+            )
         raise RuntimeError(f"{gate_name} failed: {detail}")
 
 
@@ -14642,6 +14819,9 @@ def _partial_media_generation_reset_updates(
             ", ".join(blocked_item_ids)
         ),
         "review.semantic.partial_media.provider_submitted_image_items": "",
+        "review.semantic.partial_media.reused_image_items": "",
+        "review.semantic.partial_media.generated_image_items": "",
+        "review.semantic.partial_media.satisfied_image_items": "",
         "review.semantic.partial_media.receipt": "",
         "review.semantic.partial_media.receipt_sha256": "",
         "review.semantic.create_media_generated": "false",
@@ -15410,7 +15590,10 @@ async def _generate_scene_outputs_after_p650_preflight(
             _validate_p650_run(run_id)
             _validate_generated_outputs(run_dir, "asset")
             _validate_generated_outputs(run_dir, "scene")
-            _validate_p680_visual_quality(run_dir)
+            _validate_p680_visual_quality(
+                run_dir,
+                mode="terminal",
+            )
         except Exception as exc:
             generated_count = 0
             with suppress(Exception):
@@ -15707,6 +15890,30 @@ async def _run_image_prompt_semantic_review(job_id: str, *, run_dir: Path) -> No
     await _run_semantic_review(job_id, run_dir=run_dir, stage="image_prompt")
 
 
+def _semantic_transport_failure_phase(
+    exc: BaseException,
+    *,
+    run_dir: Path,
+    stage: str,
+) -> str:
+    diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(diagnostics, dict):
+        explicit_phase = str(
+            diagnostics.get("semanticFailurePhase") or ""
+        ).strip()
+        if explicit_phase:
+            return explicit_phase
+    state = parse_state_file(run_dir / "state.txt")
+    if (
+        str(
+            state.get(f"review.semantic.{stage}.repair.status") or ""
+        ).strip()
+        == "blocked_transport"
+    ):
+        return "semantic_producer_repair"
+    return "semantic_review"
+
+
 def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) -> None:
     result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
     if not result_path.exists():
@@ -15722,6 +15929,64 @@ def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) ->
     payload["invalidated_at"] = now_iso()
     payload["invalidated_by"] = invalidated_by
     _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def _invalidate_image_generation_review_handoff(
+    run_dir: Path,
+    *,
+    invalidated_by: str,
+    reason: str,
+) -> None:
+    """Demote a p680 review handoff that no longer verifies."""
+
+    _invalidate_p600_supervisor_result(
+        run_dir,
+        invalidated_by=invalidated_by,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "status": "P650",
+            "runtime.stage": "p680_terminal_verification_failed",
+            "runtime.failure.stage": "p680",
+            "runtime.failure.phase": "terminal_verification",
+            "runtime.failure.error_kind": "validation_failed",
+            "slot.p680.status": "pending",
+            "slot.p680.note": (
+                "frontend image review is unavailable because strict p680 "
+                "terminal verification failed"
+            ),
+            "stage.scene_implementation.status": "failed",
+            "review.image.status": "pending",
+            "review.semantic.create_scene_media_generated": "false",
+            "image_generation.status": "failed",
+            "image_generation.blocked_by": "p680_terminal_verification",
+            "image_generation.block_reason": str(reason)[:2000],
+            "orchestration.p600.supervisor.status": "invalidated",
+            "orchestration.p600.supervisor.invalidated_by": invalidated_by,
+        },
+    )
+
+
+def _invalidate_published_image_generation_review_handoff(
+    run_dir: Path,
+    *,
+    invalidated_by: str,
+    reason: str,
+) -> bool:
+    state = parse_state_file(run_dir / "state.txt")
+    published = (
+        state.get("slot.p680.status") == "awaiting_approval"
+        or state.get("orchestration.p600.supervisor.status") == "done"
+    )
+    if not published:
+        return False
+    _invalidate_image_generation_review_handoff(
+        run_dir,
+        invalidated_by=invalidated_by,
+        reason=reason,
+    )
+    return True
 
 
 def _mark_localized_image_prompt_request_freeze(
@@ -15778,26 +16043,52 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
         await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
         return None
     except Exception as exc:
+        transport_failure = is_codex_transport_error(exc)
+        failure_phase = (
+            _semantic_transport_failure_phase(
+                exc,
+                run_dir=run_dir,
+                stage=stage,
+            )
+            if transport_failure
+            else "semantic_review"
+        )
+        producer_repair_transport = (
+            transport_failure
+            and failure_phase == "semantic_producer_repair"
+        )
+        if producer_repair_transport:
+            # A producer repair never reached a terminal transport outcome.
+            # The older failed reviewer report is not proof that the repair
+            # result can be localized, so clear any previous projection before
+            # examining downstream readiness.
+            _clear_partial_media_stage(run_dir, stage=stage)
         semantic_failure_context = _semantic_review_failure_context(
             run_dir,
             stage,
         )
-        try:
-            scene_items = load_request_items(run_dir, "scene")
-        except (OSError, ValueError):
-            scene_items = []
-        blocked_item_ids, localization_issues = (
-            _localized_semantic_partial_media_disposition(
-                run_dir,
-                stage=stage,
-                items=scene_items,
+        if producer_repair_transport:
+            blocked_item_ids: set[str] = set()
+            localization_issues: tuple[str, ...] = (
+                "producer repair transport failure cannot be localized from "
+                "the pre-repair reviewer report",
             )
-        )
+        else:
+            try:
+                scene_items = load_request_items(run_dir, "scene")
+            except (OSError, ValueError):
+                scene_items = []
+            blocked_item_ids, localization_issues = (
+                _localized_semantic_partial_media_disposition(
+                    run_dir,
+                    stage=stage,
+                    items=scene_items,
+                )
+            )
         if not localization_issues:
             blocked_ids = sorted(blocked_item_ids)
             if stage == "image_prompt":
                 _mark_localized_image_prompt_request_freeze(run_dir)
-            transport_failure = is_codex_transport_error(exc)
             transport_kind = (
                 classify_codex_transport_error(str(exc)) or "unknown"
                 if transport_failure
@@ -15920,8 +16211,6 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
         if is_codex_transport_error(exc):
             transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
             current_state = parse_state_file(run_dir / "state.txt")
-            repair_status = str(current_state.get(f"review.semantic.{stage}.repair.status") or "")
-            failure_phase = "semantic_producer_repair" if repair_status else "semantic_review"
             blocked_by = f"semantic.{stage}.{failure_phase}"
             invalidated_by = f"semantic.{stage}.transport.{transport_kind}"
             last_progress_at = str(
@@ -15930,9 +16219,16 @@ async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Pat
                 or "unknown"
             )
             blocked_item_ids = (
-                _localized_semantic_blocked_image_item_ids(run_dir, stage=stage)
-                if stage in PARTIAL_MEDIA_SEMANTIC_STAGES
-                else set()
+                set()
+                if producer_repair_transport
+                else (
+                    _localized_semantic_blocked_image_item_ids(
+                        run_dir,
+                        stage=stage,
+                    )
+                    if stage in PARTIAL_MEDIA_SEMANTIC_STAGES
+                    else set()
+                )
             )
             _invalidate_p600_supervisor_result(run_dir, invalidated_by=invalidated_by)
             append_state_snapshot(
@@ -16202,6 +16498,15 @@ async def _run_semantic_review(
             response={"status": reusable_result.status, "entryCount": reusable_result.entry_count},
         )
         return
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            f"review.semantic.{stage}.repair.status": "",
+            f"review.semantic.{stage}.repair.transport.status": "",
+            f"review.semantic.{stage}.repair.transport.error_kind": "",
+            f"review.semantic.{stage}.repair.transport.error": "",
+        },
+    )
     last_result: SemanticReviewStatus | None = None
     for attempt in range(1, attempts + 1):
         append_state_snapshot(
@@ -16512,8 +16817,26 @@ async def _run_semantic_review(
                 error=f"TimeoutError: semantic producer repair no-progress timeout after {_semantic_repair_no_progress_timeout_seconds():.0f}s",
             )
             raise CodexAppServerTransportError(
-                f"{stage} semantic producer repair timed out after no observable progress"
+                f"{stage} semantic producer repair timed out after no observable progress",
+                diagnostics={
+                    "semanticFailurePhase": "semantic_producer_repair",
+                    "stage": stage,
+                },
             ) from exc
+        except CodexAppServerTransportError as exc:
+            diagnostics = (
+                dict(exc.diagnostics)
+                if isinstance(exc.diagnostics, dict)
+                else {}
+            )
+            diagnostics.update(
+                {
+                    "semanticFailurePhase": "semantic_producer_repair",
+                    "stage": stage,
+                }
+            )
+            exc.diagnostics = diagnostics
+            raise
         repair_source_fingerprint_after = (
             _semantic_repair_source_artifact_fingerprint(run_dir, stage)
         )
@@ -17308,8 +17631,21 @@ async def _run_semantic_review_once(
             report_path.read_text(encoding="utf-8"),
         )
     result = check_semantic_review(run_dir, stage)
-    output_contract_errors = _semantic_review_result_output_contract_errors(
-        result
+    report_text = (
+        report_path.read_text(encoding="utf-8", errors="replace")
+        if report_path.exists()
+        else ""
+    )
+    output_contract_errors = tuple(
+        [
+            *_semantic_review_result_output_contract_errors(result),
+            *_semantic_negative_verdict_contract_errors(
+                report_text,
+                scope_entry_ids=_semantic_review_scope_entry_ids(
+                    scope_path
+                ),
+            ),
+        ]
     )
     if output_contract_errors:
         output_contract_error = _semantic_review_output_contract_error(
@@ -17930,6 +18266,7 @@ def _image_prompt_shard_failure_result(
     shard: dict[str, Any],
     status: str,
     errors: list[str],
+    blocked_entries: list[str] | None = None,
     findings: list[str] | None = None,
     reason_keys: list[str] | None = None,
     transport_error_kind: str = "",
@@ -17941,7 +18278,11 @@ def _image_prompt_shard_failure_result(
         "entry_ids": list(shard.get("entry_ids") or []),
         "status": status,
         "errors": errors,
-        "blocked_entries": list(shard.get("entry_ids") or []),
+        "blocked_entries": (
+            list(shard.get("entry_ids") or [])
+            if blocked_entries is None
+            else list(blocked_entries)
+        ),
         "findings": list(findings or []),
         "reason_keys": list(reason_keys or ["image_prompt_shard_failed"]),
     }
@@ -18831,6 +19172,12 @@ async def _run_image_prompt_scene_shard_review(
                 "passed shard report must have empty failed_selectors: "
                 + ", ".join(reported_failed_selectors)
             )
+        contract_errors.extend(
+            _semantic_negative_verdict_contract_errors(
+                report_text,
+                scope_entry_ids=entry_ids,
+            )
+        )
         contract_errors.extend(coverage_errors)
         if contract_errors:
             output_contract_error = _semantic_review_output_contract_error(
@@ -18889,6 +19236,7 @@ async def _run_image_prompt_scene_shard_review(
                 shard=shard,
                 status="failed",
                 errors=errors,
+                blocked_entries=reported_blocked_entries,
                 findings=findings,
                 reason_keys=_dedupe_preserve_order(reason_keys),
             )
@@ -19649,6 +19997,12 @@ async def _run_scene_detail_shard_review(
             contract_errors.append(
                 "passed shard report must not contain failed_selectors"
             )
+        contract_errors.extend(
+            _semantic_negative_verdict_contract_errors(
+                report_text,
+                scope_entry_ids=[entry_id],
+            )
+        )
         if contract_errors:
             output_contract_error = _semantic_review_output_contract_error(
                 stage="scene_detail",
@@ -19689,11 +20043,6 @@ async def _run_scene_detail_shard_review(
                 f"shard report status must be passed, got {status}"
             )
         effective_status = "passed" if not errors else "failed"
-        if effective_status != "passed":
-            if not blocked_entries and not failed_selectors:
-                blocked_entries = [entry_id]
-            if not reason_keys:
-                reason_keys = ["scene_detail_shard_report_inconsistent"]
         result = {
             "entry_id": entry_id,
             "status": effective_status,
@@ -20139,7 +20488,6 @@ def _semantic_report_text_from_transcript(
         return text.rstrip() + "\n"
 
     explicit_final_messages: list[str] = []
-    legacy_messages: list[str] = []
     for notification in transcript:
         if notification.get("method") != "item/completed":
             continue
@@ -20148,22 +20496,15 @@ def _semantic_report_text_from_transcript(
         if not isinstance(item, dict) or item.get("type") != "agentMessage":
             continue
         text = str(item.get("text") or "")
-        if "phase" in item:
-            if str(item.get("phase") or "").strip() == "final_answer":
-                explicit_final_messages.append(text)
-            # Explicit commentary/analysis is never a canonical verdict.
-            continue
-        legacy_messages.append(text)
+        if str(item.get("phase") or "").strip() == "final_answer":
+            explicit_final_messages.append(text)
 
-    if explicit_final_messages:
-        # One explicit final_answer makes phase-aware output authoritative.
-        # Parse only the newest final; if it is malformed, fail the output
-        # contract instead of promoting an older commentary/legacy message.
-        return normalized_report(explicit_final_messages[-1])
-    for text in reversed(legacy_messages):
-        if (report := normalized_report(text)) is not None:
-            return report
-    return None
+    if not explicit_final_messages:
+        return None
+    # The newest explicit final is authoritative. A malformed newest final
+    # fails closed instead of falling back to commentary, a phase-less
+    # message, or an older final.
+    return normalized_report(explicit_final_messages[-1])
 
 
 def _semantic_json_verdict_to_report(text: str, *, stage: str) -> str | None:
@@ -20307,6 +20648,128 @@ def _semantic_review_result_output_contract_errors(
             if error != expected_status_error
         ]
     return tuple(errors)
+
+
+SEMANTIC_GLOBAL_FAILURE_SELECTOR = "all_entries"
+
+
+def _semantic_failure_selector_scope_key(
+    value: Any,
+    *,
+    scope_entry_ids: Iterable[str],
+) -> str | None:
+    """Resolve one reported failure selector to its current canonical scope."""
+
+    raw = str(value or "").strip().strip("`\"'")
+    if raw == SEMANTIC_GLOBAL_FAILURE_SELECTOR:
+        return SEMANTIC_GLOBAL_FAILURE_SELECTOR
+    if not raw:
+        return None
+
+    def normalized_selector(selector: str) -> str:
+        normalized = selector.strip().strip("`\"'").lower()
+        if normalized.startswith("cut:"):
+            normalized = normalized[4:]
+        cut_match = re.fullmatch(
+            r"scene[_:]?(\d+)[_:]?cut[_:]?(\d+)",
+            normalized,
+        )
+        if cut_match:
+            return (
+                f"scene{int(cut_match.group(1))}_cut"
+                f"{int(cut_match.group(2))}"
+            )
+        scene_match = re.fullmatch(r"scene[_:]?(\d+)", normalized)
+        if scene_match:
+            return f"scene:{int(scene_match.group(1))}"
+        return normalized
+
+    scope_by_key: dict[str, str] = {}
+    ambiguous_keys: set[str] = set()
+    for entry_id in scope_entry_ids:
+        canonical = str(entry_id or "").strip()
+        if not canonical:
+            continue
+        key = normalized_selector(canonical)
+        previous = scope_by_key.get(key)
+        if previous is not None and previous != canonical:
+            ambiguous_keys.add(key)
+        else:
+            scope_by_key[key] = canonical
+    selector_key = normalized_selector(raw)
+    if selector_key in ambiguous_keys:
+        return None
+    return scope_by_key.get(selector_key)
+
+
+def _semantic_negative_verdict_contract_errors(
+    report_text: str,
+    *,
+    scope_entry_ids: Iterable[str],
+) -> tuple[str, ...]:
+    """Require a negative verdict to identify concrete, current repair scope."""
+
+    status = parse_judgment_report_status(report_text)
+    if status not in {"failed", "changes_requested"}:
+        return ()
+
+    findings = _semantic_report_list_values(report_text, "findings")
+    reason_keys = _semantic_report_list_values(report_text, "reason_keys")
+    failed_selectors = _semantic_report_list_values(
+        report_text,
+        "failed_selectors",
+    )
+    blocked_entries = _semantic_report_list_values(
+        report_text,
+        "blocked_entries",
+    )
+    issues: list[str] = []
+    concrete_findings = [
+        finding
+        for finding in findings
+        if str(finding).strip().lower()
+        not in {"", "{}", "[]", "null", "none", "..."}
+    ]
+    if not concrete_findings:
+        issues.append(
+            "negative semantic verdict must contain at least one concrete finding"
+        )
+    if not reason_keys:
+        issues.append(
+            "negative semantic verdict must contain at least one reason_key"
+        )
+    if not failed_selectors:
+        issues.append(
+            "negative semantic verdict must contain scoped failed_selectors "
+            f"or {SEMANTIC_GLOBAL_FAILURE_SELECTOR}"
+        )
+    if not blocked_entries:
+        issues.append(
+            "negative semantic verdict must contain scoped blocked_entries "
+            f"or {SEMANTIC_GLOBAL_FAILURE_SELECTOR}"
+        )
+
+    current_scope = tuple(scope_entry_ids)
+    for field, selectors in (
+        ("failed_selectors", failed_selectors),
+        ("blocked_entries", blocked_entries),
+    ):
+        invalid = [
+            selector
+            for selector in selectors
+            if _semantic_failure_selector_scope_key(
+                selector,
+                scope_entry_ids=current_scope,
+            )
+            is None
+        ]
+        if invalid:
+            issues.append(
+                f"negative semantic verdict {field} must resolve to the "
+                "current scope or use the explicit all_entries selector: "
+                + ", ".join(invalid)
+            )
+    return tuple(_dedupe_preserve_order(issues))
 
 
 def _semantic_review_output_contract_error(
@@ -20874,6 +21337,12 @@ async def _run_create_job(
         else:
             await _set_create_job(job_id, {"status": "completed", "message": "作成完了", "currentProcess": "p680"})
     except Exception as exc:
+        with suppress(Exception):
+            _invalidate_published_image_generation_review_handoff(
+                run_dir_for_log,
+                invalidated_by="create_job.post_handoff_failure",
+                reason=str(exc),
+            )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         _cleanup_unscaffolded_run(run_id)
@@ -21766,6 +22235,12 @@ async def _run_image_only_resume_job(
         )
     except Exception as exc:
         with suppress(Exception):
+            _invalidate_published_image_generation_review_handoff(
+                run_dir,
+                invalidated_by="image_only_resume.post_handoff_failure",
+                reason=str(exc),
+            )
+        with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         detail = _create_run_error_message(exc)
         write_app_server_debug_log(
@@ -21901,6 +22376,12 @@ async def _run_p500_resume_job(
     except Exception as exc:
         # The subprocess owns both the create/resume lease and canonical resume
         # state. Preserve its semantic failure and applied checkpoint verbatim.
+        with suppress(Exception):
+            _invalidate_published_image_generation_review_handoff(
+                run_dir,
+                invalidated_by="p500_resume.post_handoff_failure",
+                reason=str(exc),
+            )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         detail = _create_run_error_message(exc)
@@ -23821,6 +24302,11 @@ async def _create_bulk_generation_job(
     run_dir: Path,
     req: BulkGenerateRequest,
 ) -> dict[str, Any]:
+    _assert_scene_candidate_items_not_semantically_blocked(
+        run_dir,
+        kind=req.kind,
+        item_ids=[item.item_id for item in req.items],
+    )
     groups = _prepare_bulk_generation_plan(run_dir=run_dir, req=req)
     fingerprint = _bulk_generation_fingerprint(
         run_id=req.run_id,
@@ -23900,7 +24386,47 @@ async def _create_bulk_generation_job(
     return deepcopy(job)
 
 
+def _assert_scene_candidate_items_not_semantically_blocked(
+    run_dir: Path,
+    *,
+    kind: str,
+    item_ids: Iterable[Any],
+) -> None:
+    if kind != "scene":
+        return
+    requested_ids = {
+        str(item_id or "").strip()
+        for item_id in item_ids
+        if str(item_id or "").strip()
+    }
+    try:
+        blocked_ids = _semantic_blocked_image_item_ids(run_dir)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "scene candidate generation is blocked because canonical "
+                f"semantic partial-media state is invalid: {exc}"
+            ),
+        ) from exc
+    selected_blocked_ids = sorted(requested_ids & blocked_ids)
+    if selected_blocked_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "scene candidate generation is blocked by canonical semantic "
+                "review for: "
+                + ", ".join(selected_blocked_ids)
+            ),
+        )
+
+
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
+    _assert_scene_candidate_items_not_semantically_blocked(
+        run_dir,
+        kind=req.kind,
+        item_ids=[req.item_id],
+    )
     if not req.prompt.strip():
         detail = (
             "api_prompt_missing_for_new_prompt_policy"
@@ -24176,6 +24702,11 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
 @router.post("/api/image-gen/generate")
 async def api_generate(req: GenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
+    _assert_scene_candidate_items_not_semantically_blocked(
+        run_dir,
+        kind=req.kind,
+        item_ids=[req.item_id],
+    )
     lease_id = f"image-foreground-{uuid.uuid4().hex}"
     try:
         await _acquire_run_execution_lease(lease_id, run_dir)
@@ -24262,6 +24793,11 @@ async def _run_foreground_bulk_generation(
 @router.post("/api/image-gen/generate-bulk")
 async def api_generate_bulk(req: BulkGenerateRequest) -> Any:
     run_dir = safe_run_dir(req.run_id, ROOT)
+    _assert_scene_candidate_items_not_semantically_blocked(
+        run_dir,
+        kind=req.kind,
+        item_ids=[item.item_id for item in req.items],
+    )
     total_candidates = sum(item.candidate_count for item in req.items)
     if total_candidates > 100:
         raise HTTPException(status_code=400, detail="bulk generation is limited to 100 total candidates")

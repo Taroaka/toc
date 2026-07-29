@@ -57,6 +57,7 @@ def _agent_message_transcript(report_text: str) -> list[dict[str, object]]:
             "params": {
                 "item": {
                     "type": "agentMessage",
+                    "phase": "final_answer",
                     "text": report_text,
                 }
             },
@@ -314,6 +315,205 @@ class ImagePromptSemanticServerShardTests(unittest.TestCase):
         self.assertEqual(state["review.semantic.image_prompt.shards.count"], "2")
         self.assertEqual(state["review.semantic.image_prompt.shards.status"], "passed")
         self.assertIn("reviewed_entries:\n  - scene10_cut01\n  - scene10\n  - scene20_cut01\n  - scene20", report)
+
+    def test_semantic_failure_preserves_only_reported_blocked_cut_set(
+        self,
+    ) -> None:
+        entries = [
+            {
+                "selector": "scene10_cut01",
+                "scene_id": 10,
+                "review_scope": "all_entries",
+            },
+            {
+                "selector": "scene10_cut02",
+                "scene_id": 10,
+                "review_scope": "all_entries",
+            },
+            {
+                "selector": "scene10",
+                "scene_id": 10,
+                "review_scope": "scene_composite",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output/sample_run"
+            run_dir.mkdir(parents=True)
+
+            def fake_build_pack(cmd, **_kwargs):
+                self._write_pack(run_dir, entries)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    report_path = _pending_report_path_from_prompt(text)
+                    expected = json.loads(
+                        text.split(
+                            "Expected reviewed_entries exactly once: ",
+                            1,
+                        )[1].splitlines()[0]
+                    )
+                    return _agent_message_transcript(
+                        "\n".join(
+                            [
+                                "status: failed",
+                                "semantic_review_input_digest: "
+                                + _semantic_input_digest_for_report(
+                                    report_path
+                                ),
+                                "reviewed_entries: ["
+                                + ", ".join(expected)
+                                + "]",
+                                "blocked_entries: [scene10_cut02]",
+                                "findings: [scene10_cut02 reverses the intended action]",
+                                "failed_selectors: [scene10_cut02]",
+                                "reason_keys: [semantic_action_direction_mismatch]",
+                            ]
+                        )
+                    )
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.subprocess.run",
+                    fake_build_pack,
+                ),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    lambda **_kwargs: FakeClient(),
+                ),
+            ):
+                result = asyncio.run(
+                    image_gen_app._run_semantic_review_once(
+                        "job-1",
+                        run_dir=run_dir,
+                        stage="image_prompt",
+                        attempt=1,
+                        max_attempts=1,
+                        final_attempt=True,
+                    )
+                )
+
+            report = (
+                run_dir
+                / image_gen_app.semantic_review_relpaths("image_prompt")[
+                    "report"
+                ]
+            ).read_text(encoding="utf-8")
+
+        self.assertFalse(result.passed)
+        self.assertIn("blocked_entries:\n  - scene10_cut02\n", report)
+        self.assertNotIn("blocked_entries:\n  - scene10_cut01", report)
+        self.assertNotIn(
+            "blocked_entries:\n  - scene10_cut02\n  - scene10",
+            report,
+        )
+
+    def test_contentless_failed_shard_is_output_contract_failure(self) -> None:
+        entries = [
+            {
+                "selector": "scene10_cut01",
+                "scene_id": 10,
+                "review_scope": "all_entries",
+            },
+            {
+                "selector": "scene10",
+                "scene_id": 10,
+                "review_scope": "scene_composite",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output/sample_run"
+            run_dir.mkdir(parents=True)
+
+            def fake_build_pack(cmd, **_kwargs):
+                self._write_pack(run_dir, entries)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            class FakeClient:
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, text: str, **_kwargs):
+                    report_path = _pending_report_path_from_prompt(text)
+                    expected = json.loads(
+                        text.split(
+                            "Expected reviewed_entries exactly once: ",
+                            1,
+                        )[1].splitlines()[0]
+                    )
+                    return _agent_message_transcript(
+                        "\n".join(
+                            [
+                                "status: failed",
+                                "semantic_review_input_digest: "
+                                + _semantic_input_digest_for_report(
+                                    report_path
+                                ),
+                                "reviewed_entries: ["
+                                + ", ".join(expected)
+                                + "]",
+                                "blocked_entries: []",
+                                "findings: []",
+                                "failed_selectors: []",
+                                "reason_keys: []",
+                            ]
+                        )
+                    )
+
+                async def stop(self):
+                    return None
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.subprocess.run",
+                    fake_build_pack,
+                ),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    lambda **_kwargs: FakeClient(),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"TOC_IMAGE_PROMPT_TRANSPORT_RETRY_ATTEMPTS": "1"},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CodexAppServerTransportError,
+                    "image_prompt scene shard transport failed",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_once(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="image_prompt",
+                            attempt=1,
+                            max_attempts=1,
+                            final_attempt=True,
+                        )
+                    )
+
+            state = image_gen_app.parse_state_file(
+                run_dir / "state.txt"
+            )
+
+        self.assertEqual(
+            state[
+                "review.semantic.image_prompt.shards.scene_10.transport.error_kind"
+            ],
+            "output_contract_failed",
+        )
 
     def test_selector_coverage_error_retries_only_its_scene_as_output_contract_failure(
         self,

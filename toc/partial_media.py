@@ -36,7 +36,7 @@ PARTIAL_MEDIA_SEMANTIC_STAGES = (
     "image_prompt",
 )
 PARTIAL_MEDIA_PROJECTION_SCHEMA = "toc.partial_media_projection.v1"
-PARTIAL_MEDIA_RECEIPT_SCHEMA = "toc.partial_media_generation_receipt.v1"
+PARTIAL_MEDIA_RECEIPT_SCHEMA = "toc.partial_media_generation_receipt.v2"
 PARTIAL_MEDIA_PROJECTION_RELPATH = Path(
     "logs/review/semantic/partial_media_projection.json"
 )
@@ -588,11 +588,17 @@ def run_relative_entry_exists_no_follow(
     opened_fds = [current_fd]
     try:
         for component in parts[:-1]:
-            current_fd = os.open(
-                component,
-                directory_flags,
-                dir_fd=current_fd,
-            )
+            try:
+                current_fd = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=current_fd,
+                )
+            except FileNotFoundError:
+                # A missing ancestor proves that the exact destination entry
+                # does not exist yet.  This is the normal pre-generation
+                # state; only an existing but unsafe ancestor must fail closed.
+                return False
             opened_fds.append(current_fd)
         try:
             os.stat(
@@ -1618,8 +1624,12 @@ def write_partial_media_generation_receipt(
     *,
     projection: Mapping[str, Any],
     provider_submitted_item_ids: Sequence[str],
+    reused_item_ids: Sequence[str],
     generated_item_ids: Sequence[str],
+    satisfied_item_ids: Sequence[str],
 ) -> dict[str, Any]:
+    """Write receipt truth sets; generated includes reused surviving files."""
+
     blocked_item_ids = list(projection.get("blocked_image_item_ids") or [])
     synthetic_candidates = projection.get("synthetic_candidates")
     receipt: dict[str, Any] = {
@@ -1628,7 +1638,9 @@ def write_partial_media_generation_receipt(
         "projection_sha256": projection.get("projection_sha256"),
         "provider_submitted_item_ids": list(provider_submitted_item_ids),
         "provider_call_count": len(provider_submitted_item_ids),
+        "reused_item_ids": list(reused_item_ids),
         "generated_item_ids": list(generated_item_ids),
+        "satisfied_item_ids": list(satisfied_item_ids),
         "skipped_item_ids": blocked_item_ids,
         "synthetic_candidates": synthetic_candidates,
     }

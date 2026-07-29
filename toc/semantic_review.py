@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -148,8 +149,131 @@ def semantic_review_scope_binding_sha256(scope: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _semantic_entry_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _semantic_file_snapshot(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _semantic_directory_open_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise ValueError(
+            "semantic artifact writes require no-follow directory operations"
+        )
+    return (
+        os.O_RDONLY
+        | nofollow
+        | directory
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _verify_semantic_directory_chain(
+    *,
+    run_root: Path,
+    root_fd: int,
+    links: Sequence[tuple[int, str, int]],
+) -> None:
+    """Verify every caller-visible name still identifies its retained FD."""
+
+    try:
+        root_entry = os.stat(run_root, follow_symlinks=False)
+        opened_root = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_entry.st_mode)
+            or _semantic_entry_identity(root_entry)
+            != _semantic_entry_identity(opened_root)
+        ):
+            raise ValueError(
+                "semantic artifact run directory identity changed"
+            )
+        for parent_fd, name, child_fd in links:
+            entry = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            opened = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(entry.st_mode)
+                or _semantic_entry_identity(entry)
+                != _semantic_entry_identity(opened)
+            ):
+                raise ValueError(
+                    "semantic artifact ancestor identity changed: "
+                    f"{name}"
+                )
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(
+            "semantic artifact ancestry became unsafe"
+        ) from exc
+
+
+def _semantic_named_stat(
+    parent_fd: int,
+    name: str,
+) -> os.stat_result | None:
+    try:
+        return os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _semantic_unlink_if_identity(
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    current = _semantic_named_stat(parent_fd, name)
+    if (
+        current is None
+        or _semantic_entry_identity(current) != expected_identity
+    ):
+        return current is None
+    os.unlink(name, dir_fd=parent_fd)
+    return True
+
+
+def _semantic_link_without_clobber(
+    parent_fd: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    os.link(
+        source_name,
+        destination_name,
+        src_dir_fd=parent_fd,
+        dst_dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+
+
 def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
-    """Atomically write a semantic artifact without following symlinks."""
+    """Atomically write a run-local artifact through retained directory FDs."""
 
     run_root = run_dir.resolve(strict=True)
     raw_candidate = path if path.is_absolute() else run_root / path
@@ -174,35 +298,437 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
             raise ValueError(f"semantic artifact escapes run directory: {path}")
         raw_cursor = parent
 
-    cursor = run_root
-    for part in relative.parts[:-1]:
-        cursor = cursor / part
-        if cursor.is_symlink():
-            raise ValueError(f"semantic artifact ancestor is a symlink: {cursor}")
-        cursor.mkdir(mode=0o755, exist_ok=True)
-        if not cursor.is_dir() or cursor.is_symlink():
-            raise ValueError(f"semantic artifact ancestor is not a safe directory: {cursor}")
-    if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
-        raise ValueError(f"semantic artifact target is not a safe regular file: {candidate}")
+    directory_flags = _semantic_directory_open_flags()
+    file_nofollow = getattr(os, "O_NOFOLLOW")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    encoded = text.encode("utf-8")
+    opened_directories: list[int] = []
+    directory_links: list[tuple[int, str, int]] = []
+    root_fd = -1
+    parent_fd = -1
+    target_fd = -1
+    temporary_fd = -1
+    backup_reserve_fd = -1
+    temporary_name = (
+        f".semantic-write-{candidate.name}-{uuid.uuid4().hex}.tmp"
+    )
+    temporary_identity: tuple[int, int, int] | None = None
+    temporary_present = False
+    backup_name = (
+        f".semantic-write-backup-{candidate.name}-{uuid.uuid4().hex}.tmp"
+    )
+    backup_identity: tuple[int, int, int] | None = None
+    backup_role = ""
+    backup_present = False
+    published = False
+    committed = False
+    target_initial_snapshot: tuple[int, int, int, int, int, int, int] | None = (
+        None
+    )
 
-    temporary = candidate.with_name(f".{candidate.name}.{uuid.uuid4().hex}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(temporary, flags, 0o600)
+    def restore_backup_without_clobber(*, keep_backup: bool) -> None:
+        nonlocal backup_present
+        if (
+            not backup_present
+            or backup_identity is None
+            or parent_fd < 0
+        ):
+            return
+        current_backup = _semantic_named_stat(parent_fd, backup_name)
+        if (
+            current_backup is None
+            or _semantic_entry_identity(current_backup) != backup_identity
+            or not stat.S_ISREG(current_backup.st_mode)
+        ):
+            return
+        current_target = _semantic_named_stat(parent_fd, relative.parts[-1])
+        if current_target is None:
+            try:
+                _semantic_link_without_clobber(
+                    parent_fd,
+                    backup_name,
+                    relative.parts[-1],
+                )
+            except FileExistsError:
+                return
+            current_target = _semantic_named_stat(
+                parent_fd,
+                relative.parts[-1],
+            )
+        if (
+            not keep_backup
+            and current_target is not None
+            and _semantic_entry_identity(current_target) == backup_identity
+            and _semantic_unlink_if_identity(
+                parent_fd,
+                backup_name,
+                backup_identity,
+            )
+        ):
+            backup_present = False
+
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, candidate)
-        directory_fd = os.open(candidate.parent, os.O_RDONLY)
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            root_entry = os.stat(run_root, follow_symlinks=False)
+            root_fd = os.open(run_root, directory_flags)
+            opened_directories.append(root_fd)
+            opened_root = os.fstat(root_fd)
+        except OSError as exc:
+            raise ValueError(
+                f"semantic artifact run directory is unsafe: {run_root}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(root_entry.st_mode)
+            or _semantic_entry_identity(root_entry)
+            != _semantic_entry_identity(opened_root)
+        ):
+            raise ValueError(
+                "semantic artifact run directory identity changed"
+            )
+
+        parent_fd = root_fd
+        for part in relative.parts[:-1]:
+            try:
+                child_fd = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    child_fd = os.open(
+                        part,
+                        directory_flags,
+                        dir_fd=parent_fd,
+                    )
+                except OSError as exc:
+                    raise ValueError(
+                        "semantic artifact ancestor became unsafe: "
+                        f"{part}"
+                    ) from exc
+            except OSError as exc:
+                raise ValueError(
+                    f"semantic artifact ancestor is unsafe: {part}"
+                ) from exc
+
+            opened_directories.append(child_fd)
+            directory_links.append((parent_fd, part, child_fd))
+            child_entry = _semantic_named_stat(parent_fd, part)
+            opened_child = os.fstat(child_fd)
+            if (
+                child_entry is None
+                or not stat.S_ISDIR(child_entry.st_mode)
+                or _semantic_entry_identity(child_entry)
+                != _semantic_entry_identity(opened_child)
+            ):
+                raise ValueError(
+                    "semantic artifact ancestor identity changed: "
+                    f"{part}"
+                )
+            parent_fd = child_fd
+
+        _verify_semantic_directory_chain(
+            run_root=run_root,
+            root_fd=root_fd,
+            links=directory_links,
+        )
+        target_name = relative.parts[-1]
+        target_entry = _semantic_named_stat(parent_fd, target_name)
+        if target_entry is not None:
+            if not stat.S_ISREG(target_entry.st_mode):
+                raise ValueError(
+                    "semantic artifact target is not a safe regular file: "
+                    f"{candidate}"
+                )
+            if target_entry.st_nlink != 1:
+                raise ValueError(
+                    "semantic artifact target has multiple hard links: "
+                    f"{candidate}"
+                )
+            try:
+                target_fd = os.open(
+                    target_name,
+                    os.O_RDONLY
+                    | file_nofollow
+                    | cloexec
+                    | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                raise ValueError(
+                    f"semantic artifact target became unsafe: {candidate}"
+                ) from exc
+            opened_target = os.fstat(target_fd)
+            current_target = _semantic_named_stat(parent_fd, target_name)
+            if (
+                current_target is None
+                or not stat.S_ISREG(opened_target.st_mode)
+                or _semantic_file_snapshot(opened_target)
+                != _semantic_file_snapshot(current_target)
+            ):
+                raise ValueError(
+                    "semantic artifact target identity changed before write"
+                )
+            target_initial_snapshot = _semantic_file_snapshot(opened_target)
+
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | file_nofollow
+            | cloexec,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        temporary_stat = os.fstat(temporary_fd)
+        if (
+            not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+        ):
+            raise ValueError(
+                "semantic artifact temporary file is not a safe regular file"
+            )
+        temporary_identity = _semantic_entry_identity(temporary_stat)
+        temporary_present = True
+
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(temporary_fd, remaining)
+            if written <= 0:
+                raise OSError(
+                    "semantic artifact write made no progress"
+                )
+            remaining = remaining[written:]
+        os.fsync(temporary_fd)
+
+        _verify_semantic_directory_chain(
+            run_root=run_root,
+            root_fd=root_fd,
+            links=directory_links,
+        )
+        held_temporary = os.fstat(temporary_fd)
+        named_temporary = _semantic_named_stat(parent_fd, temporary_name)
+        if (
+            named_temporary is None
+            or not stat.S_ISREG(named_temporary.st_mode)
+            or held_temporary.st_nlink != 1
+            or named_temporary.st_nlink != 1
+            or _semantic_entry_identity(held_temporary)
+            != temporary_identity
+            or _semantic_entry_identity(named_temporary)
+            != temporary_identity
+        ):
+            raise ValueError(
+                "semantic artifact temporary name identity changed"
+            )
+
+        if target_fd >= 0:
+            current_opened_target = os.fstat(target_fd)
+            current_named_target = _semantic_named_stat(
+                parent_fd,
+                target_name,
+            )
+            if (
+                current_named_target is None
+                or current_named_target.st_nlink != 1
+                or current_opened_target.st_nlink != 1
+                or _semantic_file_snapshot(current_opened_target)
+                != target_initial_snapshot
+                or _semantic_file_snapshot(current_named_target)
+                != target_initial_snapshot
+            ):
+                raise ValueError(
+                    "semantic artifact target identity changed during write"
+                )
+
+            backup_reserve_fd = os.open(
+                backup_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | file_nofollow
+                | cloexec,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            reserve_stat = os.fstat(backup_reserve_fd)
+            backup_identity = _semantic_entry_identity(reserve_stat)
+            backup_role = "reserve"
+            backup_present = True
+            # Move whichever entry owns the target name onto a reserved name
+            # before inspecting it. Unlike replacing target with the new temp,
+            # this rename never destroys a leaf inserted after our precheck.
+            os.replace(
+                target_name,
+                backup_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+
+            moved_target = _semantic_named_stat(parent_fd, backup_name)
+            opened_target_after_move = os.fstat(target_fd)
+            if moved_target is None:
+                backup_role = "unknown"
+                raise ValueError(
+                    "semantic artifact target disappeared during rename"
+                )
+            backup_identity = _semantic_entry_identity(moved_target)
+            if (
+                not stat.S_ISREG(moved_target.st_mode)
+                or _semantic_entry_identity(opened_target_after_move)
+                != backup_identity
+            ):
+                backup_role = "unrelated"
+                restore_backup_without_clobber(keep_backup=True)
+                raise ValueError(
+                    "semantic artifact target identity changed during rename"
+                )
+            if (
+                moved_target.st_nlink != 1
+                or opened_target_after_move.st_nlink != 1
+            ):
+                backup_role = "unrelated"
+                restore_backup_without_clobber(keep_backup=True)
+                raise ValueError(
+                    "semantic artifact target has multiple hard links "
+                    "during rename"
+                )
+            backup_role = "expected"
+            _verify_semantic_directory_chain(
+                run_root=run_root,
+                root_fd=root_fd,
+                links=directory_links,
+            )
+        elif _semantic_named_stat(parent_fd, target_name) is not None:
+            raise ValueError(
+                "semantic artifact target appeared during write"
+            )
+
+        try:
+            # Link publication is the portable no-clobber equivalent of
+            # renameat2(RENAME_NOREPLACE). A leaf that reappears after the
+            # checks wins; it is never unlinked or overwritten here.
+            _semantic_link_without_clobber(
+                parent_fd,
+                temporary_name,
+                target_name,
+            )
+        except FileExistsError as exc:
+            raise ValueError(
+                "semantic artifact target appeared during publish"
+            ) from exc
+        published = True
+
+        published_stat = _semantic_named_stat(parent_fd, target_name)
+        if (
+            published_stat is None
+            or not stat.S_ISREG(published_stat.st_mode)
+            or _semantic_entry_identity(published_stat)
+            != temporary_identity
+        ):
+            raise ValueError(
+                "semantic artifact target identity changed after publish"
+            )
+        _verify_semantic_directory_chain(
+            run_root=run_root,
+            root_fd=root_fd,
+            links=directory_links,
+        )
+
+        if not _semantic_unlink_if_identity(
+            parent_fd,
+            temporary_name,
+            temporary_identity,
+        ):
+            raise ValueError(
+                "semantic artifact temporary name changed before cleanup"
+            )
+        temporary_present = False
+        if backup_role == "expected" and backup_identity is not None:
+            if not _semantic_unlink_if_identity(
+                parent_fd,
+                backup_name,
+                backup_identity,
+            ):
+                raise ValueError(
+                    "semantic artifact backup identity changed before cleanup"
+                )
+            backup_present = False
+        os.fsync(parent_fd)
+
+        _verify_semantic_directory_chain(
+            run_root=run_root,
+            root_fd=root_fd,
+            links=directory_links,
+        )
+        final_target = _semantic_named_stat(parent_fd, target_name)
+        final_temporary = os.fstat(temporary_fd)
+        if (
+            final_target is None
+            or not stat.S_ISREG(final_target.st_mode)
+            or final_target.st_nlink != 1
+            or _semantic_entry_identity(final_target)
+            != temporary_identity
+            or _semantic_entry_identity(final_temporary)
+            != temporary_identity
+        ):
+            raise ValueError(
+                "semantic artifact target identity changed after commit"
+            )
+        committed = True
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(
+            f"semantic artifact write became unsafe: {candidate}"
+        ) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        if not committed and parent_fd >= 0:
+            if published and temporary_identity is not None:
+                _semantic_unlink_if_identity(
+                    parent_fd,
+                    relative.parts[-1],
+                    temporary_identity,
+                )
+                published = False
+            if backup_role == "expected":
+                restore_backup_without_clobber(keep_backup=False)
+            elif backup_role == "unrelated":
+                restore_backup_without_clobber(keep_backup=True)
+            elif (
+                backup_role == "reserve"
+                and backup_present
+                and backup_identity is not None
+                and _semantic_unlink_if_identity(
+                    parent_fd,
+                    backup_name,
+                    backup_identity,
+                )
+            ):
+                backup_present = False
+        if (
+            temporary_present
+            and temporary_identity is not None
+            and parent_fd >= 0
+        ):
+            _semantic_unlink_if_identity(
+                parent_fd,
+                temporary_name,
+                temporary_identity,
+            )
+        if backup_reserve_fd >= 0:
+            os.close(backup_reserve_fd)
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if target_fd >= 0:
+            os.close(target_fd)
+        for directory_fd in reversed(opened_directories):
+            os.close(directory_fd)
     return candidate
 
 

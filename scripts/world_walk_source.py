@@ -398,6 +398,121 @@ def sha256_regular_file_nofollow(
     return digest.hexdigest()
 
 
+def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+    )
+
+
+def _unlink_private_name_if_identity_matches(
+    *,
+    parent_descriptor: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    try:
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return True
+    if _entry_identity(current) != expected_identity:
+        return False
+    os.unlink(name, dir_fd=parent_descriptor)
+    return True
+
+
+def _restore_quarantined_entry_nofollow(
+    *,
+    parent_descriptor: int,
+    quarantine_name: str,
+    original_name: str,
+    quarantined_identity: tuple[int, int, int],
+) -> bool:
+    try:
+        os.link(
+            quarantine_name,
+            original_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False
+    return _unlink_private_name_if_identity_matches(
+        parent_descriptor=parent_descriptor,
+        name=quarantine_name,
+        expected_identity=quarantined_identity,
+    )
+
+
+def _remove_owned_name_nofollow(
+    *,
+    parent_descriptor: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    """Remove only the directory entry that still names the owned inode.
+
+    A plain lstat/unlink pair can delete a replacement installed between the
+    two syscalls. Moving the entry to an unpredictable quarantine name first
+    makes the identity check happen before any unlink. If the moved entry is
+    not ours, restore a regular/symlink entry with a no-clobber hard link and
+    leave it in quarantine when restoration cannot be proven safe.
+    """
+
+    try:
+        current = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return True
+    if _entry_identity(current) != expected_identity:
+        return False
+
+    quarantine_name = (
+        f".{name}.cleanup-{os.getpid()}-{secrets.token_hex(16)}"
+    )
+    try:
+        os.rename(
+            name,
+            quarantine_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+    except FileNotFoundError:
+        return False
+
+    try:
+        quarantined = os.stat(
+            quarantine_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return False
+    quarantined_identity = _entry_identity(quarantined)
+    if quarantined_identity != expected_identity:
+        _restore_quarantined_entry_nofollow(
+            parent_descriptor=parent_descriptor,
+            quarantine_name=quarantine_name,
+            original_name=name,
+            quarantined_identity=quarantined_identity,
+        )
+        return False
+    return _unlink_private_name_if_identity_matches(
+        parent_descriptor=parent_descriptor,
+        name=quarantine_name,
+        expected_identity=expected_identity,
+    )
+
+
 def write_regular_file_nofollow(
     *,
     destination_root: Path,
@@ -413,43 +528,123 @@ def write_regular_file_nofollow(
     )
     root_descriptor: int | None = None
     parent_descriptor: int | None = None
-    file_descriptor: int | None = None
+    temporary_descriptor: int | None = None
     verification_parent: int | None = None
     verification_file: int | None = None
+    temporary_name = ""
+    temporary_identity: tuple[int, int, int] | None = None
+    backup_name = ""
+    backup_identity: tuple[int, int, int] | None = None
+    previous_identity: tuple[int, int, int] | None = None
+    destination_published = False
+    publication_committed = False
+    preserve_backup = False
     try:
         root_descriptor = _open_root_directory(
             destination_root,
             expected_identity=expected_destination_root_identity,
         )
+        root_stat = os.fstat(root_descriptor)
+        root_identity = root_stat.st_dev, root_stat.st_ino
         parent_descriptor = _open_parent_directory(
             root_descriptor,
             parts[:-1],
             create=True,
         )
-        flags = os.O_WRONLY | os.O_CREAT
-        flags |= os.O_EXCL if exclusive else os.O_TRUNC
+        opened_parent = os.fstat(parent_descriptor)
+        destination_name = parts[-1]
+        try:
+            previous = os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            if exclusive:
+                raise FileExistsError(
+                    f"destination already exists: "
+                    f"{destination_rel.as_posix()}"
+                )
+            if not stat.S_ISREG(previous.st_mode):
+                raise ValueError(
+                    f"destination must be a regular file, not a symlink "
+                    f"or special file: {destination_rel.as_posix()}"
+                )
+            previous_identity = _entry_identity(previous)
+
+        temporary_name = (
+            f".{destination_name}.write-{os.getpid()}-"
+            f"{secrets.token_hex(16)}"
+        )
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        file_descriptor = os.open(
-            parts[-1],
+        temporary_descriptor = os.open(
+            temporary_name,
             flags,
             0o600,
             dir_fd=parent_descriptor,
         )
-        opened_file = os.fstat(file_descriptor)
-        if not stat.S_ISREG(opened_file.st_mode):
+        opened_temporary = os.fstat(temporary_descriptor)
+        temporary_identity = _entry_identity(opened_temporary)
+        if (
+            not stat.S_ISREG(opened_temporary.st_mode)
+            or opened_temporary.st_nlink != 1
+        ):
             raise ValueError(
-                f"destination must be a regular file: "
+                f"destination temporary file is unsafe: "
                 f"{destination_rel.as_posix()}"
             )
         remaining = memoryview(data)
         while remaining:
-            written = os.write(file_descriptor, remaining)
+            written = os.write(temporary_descriptor, remaining)
             if written <= 0:
-                raise OSError("exclusive destination write made no progress")
+                raise OSError("destination write made no progress")
             remaining = remaining[written:]
-        os.fsync(file_descriptor)
-        opened_parent = os.fstat(parent_descriptor)
+        os.fsync(temporary_descriptor)
+        written_temporary = os.fstat(temporary_descriptor)
+        if (
+            not stat.S_ISREG(written_temporary.st_mode)
+            or written_temporary.st_nlink != 1
+            or _entry_identity(written_temporary) != temporary_identity
+        ):
+            raise ValueError(
+                f"destination temporary file identity changed: "
+                f"{destination_rel.as_posix()}"
+            )
+        expected_digest = hashlib.sha256(data).hexdigest()
+        os.lseek(temporary_descriptor, 0, os.SEEK_SET)
+        temporary_digest = hashlib.sha256()
+        while True:
+            chunk = os.read(temporary_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            temporary_digest.update(chunk)
+        if (
+            temporary_digest.hexdigest() != expected_digest
+            or _stat_identity(os.fstat(temporary_descriptor))
+            != _stat_identity(written_temporary)
+        ):
+            raise ValueError(
+                f"destination temporary sha256 mismatch: "
+                f"{destination_rel.as_posix()}"
+            )
+        named_temporary = os.stat(
+            temporary_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            _entry_identity(named_temporary) != temporary_identity
+            or named_temporary.st_nlink != 1
+        ):
+            raise ValueError(
+                f"destination temporary path identity changed: "
+                f"{destination_rel.as_posix()}"
+            )
+
         verification_parent = _open_parent_directory(
             root_descriptor,
             parts[:-1],
@@ -467,46 +662,258 @@ def write_regular_file_nofollow(
                 f"destination parent identity changed: "
                 f"{destination_rel.as_posix()}"
             )
-        verification_file = os.open(
-            parts[-1],
-            _file_read_flags(),
-            dir_fd=verification_parent,
+        verified_root_descriptor = _open_root_directory(
+            destination_root,
+            expected_identity=root_identity,
         )
-        verified_file = os.fstat(verification_file)
-        if (
-            verified_file.st_dev,
-            verified_file.st_ino,
-            stat.S_IFMT(verified_file.st_mode),
-        ) != (
-            opened_file.st_dev,
-            opened_file.st_ino,
-            stat.S_IFMT(opened_file.st_mode),
+        os.close(verified_root_descriptor)
+
+        try:
+            current_destination = os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            current_destination = None
+        if previous_identity is None:
+            if current_destination is not None:
+                raise ValueError(
+                    f"destination appeared before publishing: "
+                    f"{destination_rel.as_posix()}"
+                )
+        elif (
+            current_destination is None
+            or _entry_identity(current_destination) != previous_identity
         ):
             raise ValueError(
-                f"destination identity changed: "
+                f"destination changed before publishing: "
                 f"{destination_rel.as_posix()}"
             )
-        digest = hashlib.sha256()
+        if previous_identity is not None:
+            backup_name = (
+                f".{destination_name}.backup-{os.getpid()}-"
+                f"{secrets.token_hex(16)}"
+            )
+            os.link(
+                destination_name,
+                backup_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            backup_identity = previous_identity
+            backup_stat = os.stat(
+                backup_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            current_destination = os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _entry_identity(backup_stat) != previous_identity
+                or _entry_identity(current_destination) != previous_identity
+            ):
+                raise ValueError(
+                    f"destination changed while preserving rollback state: "
+                    f"{destination_rel.as_posix()}"
+                )
+
+        if previous_identity is None:
+            os.link(
+                temporary_name,
+                destination_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        else:
+            os.replace(
+                temporary_name,
+                destination_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            temporary_name = ""
+        destination_published = True
+
+        published = os.stat(
+            destination_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if _entry_identity(published) != temporary_identity:
+            raise ValueError(
+                f"destination identity changed while publishing: "
+                f"{destination_rel.as_posix()}"
+            )
+        if previous_identity is None:
+            linked_temporary = os.fstat(temporary_descriptor)
+            if linked_temporary.st_nlink != 2:
+                raise ValueError(
+                    f"destination temporary link count changed: "
+                    f"{destination_rel.as_posix()}"
+                )
+            if not _remove_owned_name_nofollow(
+                parent_descriptor=parent_descriptor,
+                name=temporary_name,
+                expected_identity=temporary_identity,
+            ):
+                raise ValueError(
+                    f"destination temporary path changed while publishing: "
+                    f"{destination_rel.as_posix()}"
+                )
+            temporary_name = ""
+
+        verification_file = os.open(
+            destination_name,
+            _file_read_flags(),
+            dir_fd=parent_descriptor,
+        )
+        verified_file = os.fstat(verification_file)
+        if _entry_identity(verified_file) != temporary_identity:
+            raise ValueError(
+                f"destination identity changed after publishing: "
+                f"{destination_rel.as_posix()}"
+            )
+        published_digest = hashlib.sha256()
         while True:
             chunk = os.read(verification_file, 1024 * 1024)
             if not chunk:
                 break
-            digest.update(chunk)
-        expected_digest = hashlib.sha256(data).hexdigest()
-        if digest.hexdigest() != expected_digest:
+            published_digest.update(chunk)
+        if (
+            published_digest.hexdigest() != expected_digest
+            or _stat_identity(os.fstat(verification_file))
+            != _stat_identity(verified_file)
+        ):
             raise ValueError(
-                f"destination sha256 mismatch: "
+                f"destination sha256 mismatch after publishing: "
                 f"{destination_rel.as_posix()}"
             )
+        _verify_opened_regular_path_identity(
+            root=destination_root,
+            relative_path=destination_rel,
+            opened_file=verified_file,
+            expected_root_identity=root_identity,
+            expected_parent_identity=(
+                opened_parent.st_dev,
+                opened_parent.st_ino,
+            ),
+            operation="writing",
+        )
         os.fsync(parent_descriptor)
+        publication_committed = True
+        if (
+            backup_name
+            and backup_identity is not None
+            and not _remove_owned_name_nofollow(
+                parent_descriptor=parent_descriptor,
+                name=backup_name,
+                expected_identity=backup_identity,
+            )
+        ):
+            preserve_backup = True
+            raise ValueError(
+                f"destination rollback backup changed after publishing: "
+                f"{destination_rel.as_posix()}"
+            )
+        backup_name = ""
         return expected_digest
+    except BaseException as exc:
+        rollback_failure = ""
+        if (
+            destination_published
+            and not publication_committed
+            and parent_descriptor is not None
+            and temporary_identity is not None
+        ):
+            try:
+                current_destination = os.stat(
+                    parts[-1],
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                current_destination = None
+            if (
+                previous_identity is not None
+                and backup_name
+                and backup_identity is not None
+            ):
+                try:
+                    current_backup = os.stat(
+                        backup_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    current_backup = None
+                if (
+                    current_destination is not None
+                    and _entry_identity(current_destination)
+                    == temporary_identity
+                    and current_backup is not None
+                    and _entry_identity(current_backup) == backup_identity
+                ):
+                    os.replace(
+                        backup_name,
+                        parts[-1],
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                    )
+                    backup_name = ""
+                else:
+                    preserve_backup = True
+                    rollback_failure = (
+                        "destination changed before safe rollback"
+                    )
+            elif current_destination is not None:
+                if not _remove_owned_name_nofollow(
+                    parent_descriptor=parent_descriptor,
+                    name=parts[-1],
+                    expected_identity=temporary_identity,
+                ):
+                    rollback_failure = (
+                        "destination changed before safe rollback"
+                    )
+        if rollback_failure:
+            raise ValueError(
+                f"{exc}; {rollback_failure}: "
+                f"{destination_rel.as_posix()}"
+            ) from exc
+        raise
     finally:
         if verification_file is not None:
             os.close(verification_file)
         if verification_parent is not None:
             os.close(verification_parent)
-        if file_descriptor is not None:
-            os.close(file_descriptor)
+        if temporary_name and parent_descriptor is not None:
+            if (
+                temporary_identity is None
+                or not _remove_owned_name_nofollow(
+                    parent_descriptor=parent_descriptor,
+                    name=temporary_name,
+                    expected_identity=temporary_identity,
+                )
+            ):
+                pass
+        if (
+            backup_name
+            and not preserve_backup
+            and parent_descriptor is not None
+            and backup_identity is not None
+        ):
+            _remove_owned_name_nofollow(
+                parent_descriptor=parent_descriptor,
+                name=backup_name,
+                expected_identity=backup_identity,
+            )
+        if temporary_descriptor is not None:
+            os.close(temporary_descriptor)
         if parent_descriptor is not None:
             os.close(parent_descriptor)
         if root_descriptor is not None:
@@ -580,20 +987,12 @@ def unlink_regular_file_verified_nofollow(
             != _stat_identity(opened)
         ):
             return False
-        current = os.stat(
-            parts[-1],
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-        if (
-            current.st_dev,
-            current.st_ino,
-        ) != (
-            opened.st_dev,
-            opened.st_ino,
+        if not _remove_owned_name_nofollow(
+            parent_descriptor=parent_descriptor,
+            name=parts[-1],
+            expected_identity=_entry_identity(opened),
         ):
             return False
-        os.unlink(parts[-1], dir_fd=parent_descriptor)
         os.fsync(parent_descriptor)
         return True
     except FileNotFoundError:
@@ -630,7 +1029,8 @@ def copy_regular_file_atomic_nofollow(
     destination_descriptor: int | None = None
     published_parent: int | None = None
     published_descriptor: int | None = None
-    linked_identity: tuple[int, int] | None = None
+    linked_identity: tuple[int, int, int] | None = None
+    temporary_identity: tuple[int, int, int] | None = None
     publication_committed = False
     temporary_name = ""
     temporary_present = False
@@ -690,6 +1090,16 @@ def copy_regular_file_atomic_nofollow(
             dir_fd=destination_parent,
         )
         temporary_present = True
+        opened_temporary = os.fstat(destination_descriptor)
+        temporary_identity = _entry_identity(opened_temporary)
+        if (
+            not stat.S_ISREG(opened_temporary.st_mode)
+            or opened_temporary.st_nlink != 1
+        ):
+            raise ValueError(
+                f"destination temporary file is unsafe: "
+                f"{destination_rel.as_posix()}"
+            )
         digest = hashlib.sha256()
         while True:
             chunk = os.read(source_descriptor, 1024 * 1024)
@@ -756,6 +1166,20 @@ def copy_regular_file_atomic_nofollow(
         finally:
             os.close(verification_parent)
         try:
+            named_temporary = os.stat(
+                temporary_name,
+                dir_fd=destination_parent,
+                follow_symlinks=False,
+            )
+            if (
+                _entry_identity(named_temporary) != temporary_identity
+                or named_temporary.st_nlink != 1
+            ):
+                raise ValueError(
+                    f"destination temporary path identity changed: "
+                    f"{destination_rel.as_posix()}"
+                )
+            linked_identity = temporary_identity
             os.link(
                 temporary_name,
                 destination_name,
@@ -773,7 +1197,11 @@ def copy_regular_file_atomic_nofollow(
             dir_fd=destination_parent,
             follow_symlinks=False,
         )
-        linked_identity = linked_stat.st_dev, linked_stat.st_ino
+        if _entry_identity(linked_stat) != linked_identity:
+            raise ValueError(
+                f"published destination identity mismatch: "
+                f"{destination_rel.as_posix()}"
+            )
         published_parent = _open_parent_directory(
             destination_root_descriptor,
             destination_parts[:-1],
@@ -833,7 +1261,15 @@ def copy_regular_file_atomic_nofollow(
             ),
             operation="publishing",
         )
-        os.unlink(temporary_name, dir_fd=destination_parent)
+        if not _remove_owned_name_nofollow(
+            parent_descriptor=destination_parent,
+            name=temporary_name,
+            expected_identity=temporary_identity,
+        ):
+            raise ValueError(
+                f"destination temporary path changed after publish: "
+                f"{destination_rel.as_posix()}"
+            )
         temporary_present = False
         os.fsync(destination_parent)
         publication_committed = True
@@ -851,19 +1287,11 @@ def copy_regular_file_atomic_nofollow(
             and destination_parent is not None
         ):
             try:
-                current_link = os.stat(
-                    destination_parts[-1],
-                    dir_fd=destination_parent,
-                    follow_symlinks=False,
+                _remove_owned_name_nofollow(
+                    parent_descriptor=destination_parent,
+                    name=destination_parts[-1],
+                    expected_identity=linked_identity,
                 )
-                if (
-                    current_link.st_dev,
-                    current_link.st_ino,
-                ) == linked_identity:
-                    os.unlink(
-                        destination_parts[-1],
-                        dir_fd=destination_parent,
-                    )
             except OSError:
                 pass
         if (
@@ -872,7 +1300,12 @@ def copy_regular_file_atomic_nofollow(
             and destination_parent is not None
         ):
             try:
-                os.unlink(temporary_name, dir_fd=destination_parent)
+                if temporary_identity is not None:
+                    _remove_owned_name_nofollow(
+                        parent_descriptor=destination_parent,
+                        name=temporary_name,
+                        expected_identity=temporary_identity,
+                    )
             except OSError:
                 pass
         if destination_parent is not None:
