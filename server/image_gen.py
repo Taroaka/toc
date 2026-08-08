@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat as stat_module
 import tempfile
 import time
 import zipfile
@@ -22,6 +23,15 @@ from toc.image_request_snapshot import (
     sha256_file,
     write_request_snapshot_atomic,
 )
+from toc.run_root_binding import (
+    RunRootBindingError,
+    append_run_file_text,
+    bind_run_root,
+    current_run_root_binding,
+    require_live_run_root_binding,
+    write_run_file_text,
+)
+from scripts.world_walk_source import read_regular_file_nofollow
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -606,17 +616,45 @@ def parse_request_markdown(text: str, *, kind: str, run_dir: Path) -> list[Image
     return items
 
 
-def load_request_items(run_dir: Path, kind: str) -> list[ImageRequestItem]:
+def load_request_items(
+    run_dir: Path,
+    kind: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> list[ImageRequestItem]:
     filename = REQUEST_FILE_BY_KIND.get(kind)
     if not filename:
         raise ValueError("kind must be asset or scene")
     path = run_dir / filename
-    if not path.exists():
-        return []
-    markdown_items = parse_request_markdown(path.read_text(encoding="utf-8"), kind=kind, run_dir=run_dir)
+    if expected_root_identity is None:
+        if not path.exists():
+            return []
+        markdown_text = path.read_text(encoding="utf-8")
+    else:
+        try:
+            markdown_text = read_regular_file_nofollow(
+                Path(os.path.abspath(os.fspath(run_dir))),
+                filename,
+                expected_root_identity=expected_root_identity,
+            ).decode("utf-8")
+        except FileNotFoundError:
+            return []
+    markdown_items = parse_request_markdown(markdown_text, kind=kind, run_dir=run_dir)
     snapshot_filename = REQUEST_SNAPSHOT_FILE_BY_KIND[kind]
     snapshot_path = run_dir / snapshot_filename
-    if not snapshot_path.exists():
+    snapshot_exists = snapshot_path.exists()
+    if expected_root_identity is not None:
+        try:
+            read_regular_file_nofollow(
+                Path(os.path.abspath(os.fspath(run_dir))),
+                snapshot_filename,
+                expected_root_identity=expected_root_identity,
+            )
+        except FileNotFoundError:
+            snapshot_exists = False
+        else:
+            snapshot_exists = True
+    if not snapshot_exists:
         if any(
             str(item.prompt_policy_version or "").startswith(IMAGE_API_PROMPT_POLICY_PREFIX)
             and item.prompt_policy_version != IMAGE_API_PROMPT_POLICY_VERSION
@@ -626,7 +664,12 @@ def load_request_items(run_dir: Path, kind: str) -> list[ImageRequestItem]:
                 f"request_snapshot_missing_for_new_prompt_policy: {snapshot_filename}"
             )
         return markdown_items
-    snapshot = load_request_snapshot(snapshot_path, run_dir=run_dir, verify_references=True)
+    snapshot = load_request_snapshot(
+        snapshot_path,
+        run_dir=run_dir,
+        verify_references=True,
+        expected_root_identity=expected_root_identity,
+    )
     if snapshot.kind != kind:
         raise ImageRequestSnapshotError(
             f"request snapshot kind mismatch: expected {kind}, got {snapshot.kind}"
@@ -993,6 +1036,279 @@ def _path_debug_details(run_dir: Path, path: Path) -> dict[str, Any]:
     return details
 
 
+def _inspect_run_file_for_debug(
+    run_dir: Path,
+    path: Path,
+    *,
+    include_sha256: bool,
+) -> dict[str, Any]:
+    """Inspect one run artifact without reopening a bound run by pathname."""
+
+    display_path = _run_relative_or_string(run_dir, path)
+    binding = current_run_root_binding()
+    if binding is None:
+        details = _path_debug_details(run_dir, path)
+        if include_sha256 and details.get("isFile"):
+            try:
+                details["sha256"] = _sha256_file(path)
+            except OSError as exc:
+                details["sha256Error"] = str(exc)
+        return details
+
+    require_live_run_root_binding(binding)
+    lexical_run = Path(os.path.abspath(os.fspath(run_dir)))
+    if os.fspath(lexical_run) != binding.lexical_root:
+        raise RunRootBindingError(
+            "debug inspection escaped the active bound run root: "
+            f"{lexical_run} != {binding.lexical_root}"
+        )
+    lexical_path = Path(
+        os.path.abspath(
+            os.fspath(path if path.is_absolute() else lexical_run / path)
+        )
+    )
+    try:
+        relative = lexical_path.relative_to(lexical_run)
+    except ValueError:
+        return {
+            "path": display_path,
+            "exists": False,
+            "isFile": False,
+            "inspectionSkipped": "outside_bound_run_root",
+        }
+    if not relative.parts or any(
+        component in {"", ".", ".."} for component in relative.parts
+    ):
+        return {
+            "path": display_path,
+            "exists": False,
+            "isFile": False,
+            "inspectionSkipped": "unsafe_run_relative_path",
+        }
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    parent_descriptor = -1
+    file_descriptor = -1
+    locked = False
+    ancestry: list[tuple[str, tuple[int, int]]] = []
+    details: dict[str, Any] = {
+        "path": display_path,
+        "exists": False,
+        "isFile": False,
+    }
+
+    def mark_disappeared() -> dict[str, Any]:
+        details.clear()
+        details.update(
+            {
+                "path": display_path,
+                "exists": False,
+                "isFile": False,
+                "inspectionError": (
+                    "target disappeared while debug inspection was in progress"
+                ),
+            }
+        )
+        return details
+
+    def verify_ancestry() -> None:
+        verification_descriptor = -1
+        try:
+            verification_descriptor = os.dup(binding.descriptor)
+            verification_root = os.fstat(verification_descriptor)
+            if (
+                not stat_module.S_ISDIR(verification_root.st_mode)
+                or (verification_root.st_dev, verification_root.st_ino)
+                != binding.identity
+            ):
+                raise RunRootBindingError(
+                    f"bound debug-inspection ancestry changed: {relative}"
+                )
+            for component, expected_identity in ancestry:
+                next_descriptor = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=verification_descriptor,
+                )
+                try:
+                    opened_parent = os.fstat(next_descriptor)
+                    named_parent = os.stat(
+                        component,
+                        dir_fd=verification_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        not stat_module.S_ISDIR(opened_parent.st_mode)
+                        or not stat_module.S_ISDIR(named_parent.st_mode)
+                        or (opened_parent.st_dev, opened_parent.st_ino)
+                        != expected_identity
+                        or (named_parent.st_dev, named_parent.st_ino)
+                        != expected_identity
+                    ):
+                        raise RunRootBindingError(
+                            f"bound debug-inspection ancestry changed: {relative}"
+                        )
+                except BaseException:
+                    os.close(next_descriptor)
+                    raise
+                os.close(verification_descriptor)
+                verification_descriptor = next_descriptor
+        except RunRootBindingError:
+            raise
+        except OSError as exc:
+            raise RunRootBindingError(
+                f"bound debug-inspection ancestry changed: {relative}"
+            ) from exc
+        finally:
+            if verification_descriptor >= 0:
+                os.close(verification_descriptor)
+
+    try:
+        parent_descriptor = os.dup(binding.descriptor)
+        root_stat = os.fstat(parent_descriptor)
+        if (
+            not stat_module.S_ISDIR(root_stat.st_mode)
+            or (root_stat.st_dev, root_stat.st_ino) != binding.identity
+        ):
+            raise RunRootBindingError(
+                f"bound run descriptor identity changed: {binding.lexical_root}"
+        )
+        for component in relative.parts[:-1]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return details
+            try:
+                opened_parent = os.fstat(next_descriptor)
+                named_parent = os.stat(
+                    component,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat_module.S_ISDIR(opened_parent.st_mode)
+                    or not stat_module.S_ISDIR(named_parent.st_mode)
+                    or (opened_parent.st_dev, opened_parent.st_ino)
+                    != (named_parent.st_dev, named_parent.st_ino)
+                ):
+                    raise RunRootBindingError(
+                        f"bound debug-inspection ancestry changed: {relative}"
+                    )
+                ancestry.append(
+                    (
+                        component,
+                        (opened_parent.st_dev, opened_parent.st_ino),
+                    )
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(parent_descriptor)
+            parent_descriptor = next_descriptor
+
+        name = relative.parts[-1]
+        try:
+            named = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return details
+        details["exists"] = True
+        details["isFile"] = stat_module.S_ISREG(named.st_mode)
+        details["sizeBytes"] = named.st_size
+        details["mtimeMs"] = int(named.st_mtime * 1000)
+        if not stat_module.S_ISREG(named.st_mode):
+            return details
+
+        try:
+            file_descriptor = os.open(
+                name,
+                file_flags,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            return mark_disappeared()
+        opened = os.fstat(file_descriptor)
+        identity = opened.st_dev, opened.st_ino
+        if (
+            not stat_module.S_ISREG(opened.st_mode)
+            or identity != (named.st_dev, named.st_ino)
+            or opened.st_nlink != 1
+            or named.st_nlink != 1
+        ):
+            raise RunRootBindingError(
+                f"bound debug-inspection target changed or is unsafe: {relative}"
+            )
+        fcntl.flock(file_descriptor, fcntl.LOCK_SH)
+        locked = True
+        if include_sha256:
+            digest = hashlib.sha256()
+            while chunk := os.read(file_descriptor, 1024 * 1024):
+                digest.update(chunk)
+            details["sha256"] = digest.hexdigest()
+        after = os.fstat(file_descriptor)
+        try:
+            named_after = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return mark_disappeared()
+        if (
+            (after.st_dev, after.st_ino) != identity
+            or (named_after.st_dev, named_after.st_ino) != identity
+            or after.st_nlink != 1
+            or named_after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_ctime_ns != opened.st_ctime_ns
+        ):
+            raise RunRootBindingError(
+                f"bound debug-inspection target changed while reading: {relative}"
+            )
+        details["sizeBytes"] = after.st_size
+        details["mtimeMs"] = int(after.st_mtime * 1000)
+        return details
+    except OSError as exc:
+        details["inspectionError"] = str(exc)
+        return details
+    finally:
+        try:
+            try:
+                if file_descriptor >= 0:
+                    try:
+                        if locked:
+                            fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+                    finally:
+                        os.close(file_descriptor)
+            finally:
+                if parent_descriptor >= 0:
+                    os.close(parent_descriptor)
+        finally:
+            try:
+                verify_ancestry()
+            finally:
+                require_live_run_root_binding(binding)
+
+
 def write_app_server_image_debug_log(
     *,
     run_dir: Path,
@@ -1014,8 +1330,68 @@ def write_app_server_image_debug_log(
     trusted_output_sha256: str | None = None,
     trusted_destination_size_bytes: int | None = None,
 ) -> Path:
+    if current_run_root_binding() is None:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        if not nofollow or not directory:
+            raise RunRootBindingError(
+                "image debug logging requires no-follow directory opens"
+            )
+        run_descriptor = -1
+        try:
+            named_run = os.stat(run_dir, follow_symlinks=False)
+            if not stat_module.S_ISDIR(named_run.st_mode):
+                raise RunRootBindingError(
+                    f"image debug run root is not a real directory: {run_dir}"
+                )
+            run_descriptor = os.open(
+                run_dir,
+                os.O_RDONLY
+                | directory
+                | nofollow
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened_run = os.fstat(run_descriptor)
+            identity = opened_run.st_dev, opened_run.st_ino
+            if (
+                not stat_module.S_ISDIR(opened_run.st_mode)
+                or identity != (named_run.st_dev, named_run.st_ino)
+            ):
+                raise RunRootBindingError(
+                    f"image debug run root identity changed: {run_dir}"
+                )
+            with bind_run_root(
+                run_dir,
+                expected_identity=identity,
+                descriptor=run_descriptor,
+            ):
+                return write_app_server_image_debug_log(
+                    run_dir=run_dir,
+                    item_id=item_id,
+                    index=index,
+                    destination=destination,
+                    references=references,
+                    prompt=prompt,
+                    kind=kind,
+                    prompt_policy_version=prompt_policy_version,
+                    debug_prompt_source=debug_prompt_source,
+                    request_revision=request_revision,
+                    request_digest=request_digest,
+                    compiler_version=compiler_version,
+                    source_digest=source_digest,
+                    result=result,
+                    error=error,
+                    inspect_destination=inspect_destination,
+                    trusted_output_sha256=trusted_output_sha256,
+                    trusted_destination_size_bytes=(
+                        trusted_destination_size_bytes
+                    ),
+                )
+        finally:
+            if run_descriptor >= 0:
+                os.close(run_descriptor)
+
     log_dir = run_dir / "logs" / "app_server" / "image_gen"
-    log_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
     log_path = log_dir / f"{stamp}_{time.time_ns()}_{safe_id}_candidate_{index:02d}.json"
@@ -1023,15 +1399,12 @@ def write_app_server_image_debug_log(
     result_reference_sha256s = getattr(result, "reference_sha256s", None) if result is not None else None
     reference_sha256s = result_reference_sha256s if isinstance(result_reference_sha256s, list) else []
     if inspect_destination:
-        output_sha256 = (
-            _sha256_file(destination)
-            if destination.exists() and destination.is_file()
-            else None
-        )
-        destination_details = _path_debug_details(
+        destination_details = _inspect_run_file_for_debug(
             run_dir,
             destination,
+            include_sha256=True,
         )
+        output_sha256 = destination_details.get("sha256")
     else:
         output_sha256 = trusted_output_sha256
         destination_details = {
@@ -1073,7 +1446,14 @@ def write_app_server_image_debug_log(
         "destination": _run_relative_or_string(run_dir, destination),
         "destinationDetails": destination_details,
         "references": [_run_relative_or_string(run_dir, reference) for reference in references],
-        "referenceDetails": [_path_debug_details(run_dir, reference) for reference in references],
+        "referenceDetails": [
+            _inspect_run_file_for_debug(
+                run_dir,
+                reference,
+                include_sha256=True,
+            )
+            for reference in references
+        ],
         "referenceCount": len(references),
         "prompt": prompt,
         "promptLength": len(prompt or ""),
@@ -1103,11 +1483,24 @@ def write_app_server_image_debug_log(
         "error": error,
         "transcript": transcript if isinstance(transcript, list) else [],
     }
-    log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_run_file_text(
+        run_dir,
+        log_path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
     index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    with index_path.open("a", encoding="utf-8") as index_file:
-        index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")
+    append_run_file_text(
+        run_dir,
+        index_path,
+        json.dumps(
+            {
+                **payload,
+                "debugLog": _run_relative_or_string(run_dir, log_path),
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
     return log_path
 
 
@@ -1122,7 +1515,6 @@ def write_app_server_image_provenance_invalidation_log(
     """Record a canonical-image mutation that supersedes older provider provenance."""
 
     log_dir = run_dir / "logs" / "app_server" / "image_gen"
-    log_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id).strip("_") or "item"
     log_path = (
@@ -1140,23 +1532,24 @@ def write_app_server_image_provenance_invalidation_log(
         "destination": _run_relative_or_string(run_dir, destination),
         "candidatePath": _run_relative_or_string(run_dir, candidate),
     }
-    log_path.write_text(
+    write_run_file_text(
+        run_dir,
+        log_path,
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
     index_path = run_dir / "logs" / "image_generation_prompts.jsonl"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    with index_path.open("a", encoding="utf-8") as index_file:
-        index_file.write(
-            json.dumps(
-                {
-                    **payload,
-                    "debugLog": _run_relative_or_string(run_dir, log_path),
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
+    append_run_file_text(
+        run_dir,
+        index_path,
+        json.dumps(
+            {
+                **payload,
+                "debugLog": _run_relative_or_string(run_dir, log_path),
+            },
+            ensure_ascii=False,
         )
+        + "\n",
+    )
     return log_path
 
 
@@ -1173,7 +1566,6 @@ def write_app_server_debug_log(
 ) -> Path:
     safe_operation = re.sub(r"[^a-zA-Z0-9_.-]+", "_", operation).strip("_") or "operation"
     log_dir = run_dir / "logs" / "app_server" / safe_operation
-    log_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", item_id or "operation").strip("_") or "operation"
     log_path = log_dir / f"{stamp}_{time.time_ns()}_{safe_id}.json"
@@ -1187,11 +1579,24 @@ def write_app_server_debug_log(
         "transcript": transcript or [],
         "error": error,
     }
-    log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_run_file_text(
+        run_dir,
+        log_path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
     index_path = run_dir / "logs" / "app_server" / "events.jsonl"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    with index_path.open("a", encoding="utf-8") as index_file:
-        index_file.write(json.dumps({**payload, "debugLog": _run_relative_or_string(run_dir, log_path)}, ensure_ascii=False) + "\n")
+    append_run_file_text(
+        run_dir,
+        index_path,
+        json.dumps(
+            {
+                **payload,
+                "debugLog": _run_relative_or_string(run_dir, log_path),
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
     return log_path
 
 

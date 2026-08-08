@@ -1,12 +1,21 @@
 # ToC SNS Marketing Guide
 
-更新日: 2026-07-18
+更新日: 2026-08-08
 
 `marketing/SNS/` は、ToC の価値をチャネルごとに証明し、persona-specific LP と利用開始へ接続する配信正本を置く。
 
 ## Channel job
 
 SNS は完成動画を並べるだけの作品棚でも、動画内で直接売り切る販売ページでもない。
+
+```text
+0秒の約束: あなたの想いを、映像に。
+見せる証拠: 一行の想い -> 完成映像
+信じる理由: 速く、簡単で、繰り返せる制作フロー
+次の行動: persona-specific CTA
+```
+
+brand line は共通の入口であり、各投稿は persona 固有の obstacle、proof、CTA へ具体化する。同じ文言を全投稿へ機械的に付けず、入力した想いと完成映像の対比で意味を見せる。
 
 - ToC なら動画制作を速く、簡単に進められることを見せる
 - visitor が自分にも作れそうだと感じる proof を渡す
@@ -69,7 +78,12 @@ SNS は完成動画を並べるだけの作品棚でも、動画内で直接売�
 persona-specific post / ad
   -> dedicated LP
   -> one-line video idea
-  -> native form / onboarding
+  -> native form
+  -> qualified lead
+  -> consultation
+  -> proposal
+  -> closed won / lost
+  -> system delivery
   -> first video
   -> next video
 ```

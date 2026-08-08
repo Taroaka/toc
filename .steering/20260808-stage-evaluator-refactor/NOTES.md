@@ -1,0 +1,21 @@
+# NOTES
+
+## Chronological notes
+
+- 2026-08-08: Baseline HEAD is `fc439442b9d22acb07e33805103bb1a14b3229f8` with extensive unrelated dirty work in server, scripts, toc, tests, docs, and workflow paths.
+- 2026-08-08: Root `SPEC.md`, `GOAL.md`, and `PLAN.md` belong to another image-generation concurrency task and are protected.
+- 2026-08-08: Initial code metrics: `toc/stage_evaluator.py` 5,205 lines, `scripts/verify-pipeline.py` about 3,000 lines, five nearly identical review scripts, seven over-200-line functions in the surveyed target set, and zero detected `toc`/`server` internal import cycles.
+- 2026-08-08: `scripts/verify-pipeline.py` acquired a separate 20-line p680 supervisor-result validation hunk during planning. The user allowed it to be ignored as a blocker. Preserve its behavior unless directly adapting surrounding code.
+- 2026-08-08: Canonical and pipeline evaluators intentionally differ. Research/story canonical checks are stricter; script/video pipeline checks are slot-aware; scoring schemas and updates differ. Preserve both policies.
+- 2026-08-08: Existing tests monkeypatch pipeline `_probe_duration`, import `shared_check_manifest_single`, access evaluator private helpers, and execute all five review scripts by filename. These are compatibility contracts.
+- 2026-08-08: The repository has no coverage package. Use standard-library `trace` for the 80% changed-code requirement; do not add a dependency.
+- 2026-08-08: Goal Forge config inspection found Codex CLI 0.144.0, trusted project, goals enabled, approval `never`, and `danger-full-access`. The configured model is `gpt-5.6-sol` with medium reasoning and no explicit long-context/auto-compact/plan-effort keys, so the autonomous profile is reported not ready. User config remains untouched; the active task follows the generated goal contract directly.
+- 2026-08-08: The canonical evaluator is now an explicit facade over `common`, `manifest_nodes`, `research_story`, `script`, `manifest`, `video`, and `runner`; pipeline-only gates live in `pipeline`. Canonical warning scoring and pipeline all-check scoring remain deliberately separate.
+- 2026-08-08: Structural audit is green: the facade is under 300 physical lines, every target-package function is at most 200 lines, shared primitives have one implementation under the package, and the package import graph is acyclic.
+- 2026-08-08: The broad evaluator/CLI regression passed 131 tests and 14 subtests in 514.62 seconds. Pipeline/full/golden/coverage gates remain pending at this checkpoint.
+- 2026-08-08: A worker's final manifest sync temporarily raised `check_manifest_single` to 212 lines after an earlier green structural run. Contract checks were extracted verbatim into `_append_manifest_contract_checks`; parity returned to 40/40 green and all package functions are again at most 200 lines.
+- 2026-08-08: Coverage evidence is stored in `coverage-report.json`. Python 3.12 target-local `sys.monitoring` line events plus `trace._find_executable_linenos` measured 3,966/4,895 target executable lines (81.02%) while 201 focused tests and 74 subtests passed. This uses no third-party dependency.
+- 2026-08-08: Independent review found and then verified the fix for ten missing non-underscore facade callables. All 34 legacy public callables are callable and present in `__all__`; the parity suite now includes a representative canonical/pipeline ordered result snapshot and passes 41 tests.
+- 2026-08-08: Current-worktree full-suite blockers are outside the allowed evaluator scope: `test_build_subagent_audit_prompt` expects a different prompt artifact name, while three bulk-image tests receive the dirty server's active run-root binding 400. The user explicitly allowed new changes to be ignored.
+- 2026-08-08: CI golden and placeholder entrypoints currently stop before evaluator execution with grounding `missing_inputs` for script/narration. No evaluator changed-path traceback occurs, and prompt/workflow/grounding scope was not widened.
+- 2026-08-08: Final scoped audit: compatibility facade is 120 lines; all 34 legacy public callables are callable and listed in `__all__`; no target-package function exceeds 200 lines; parity is 41/41; compileall, pointer validation, and diff check pass; independent review approves with no actionable CRITICAL/HIGH/MEDIUM findings.

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from copy import deepcopy
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+import ctypes
 from dataclasses import dataclass
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -78,7 +80,7 @@ from .codex_app_server import (
     CodexAppServerTransportError,
     app_server_disabled,
     classify_codex_transport_error,
-    create_codex_app_server_client,
+    create_codex_app_server_client as _create_codex_app_server_client_unbound,
     is_codex_transport_error,
     latest_generated_image_mtime_ns,
     reject_local_raster_image_result,
@@ -108,8 +110,8 @@ from toc.video_provider_capabilities import resolve_video_provider_capabilities
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
     bind_request_snapshot_references,
-    current_reference_sha256s,
-    load_request_snapshot,
+    current_reference_sha256s as _current_reference_sha256s_unbound,
+    load_request_snapshot as _load_request_snapshot_unbound,
     materialize_request_snapshot,
     sha256_canonical_json,
     write_request_snapshot_atomic,
@@ -121,6 +123,18 @@ from toc.immersive_manifest import (
     selector_aliases,
 )
 from toc.harness import append_state_snapshot, load_structured_document, now_iso, parse_state_file
+from toc.run_root_binding import (
+    RunRootBinding,
+    RunRootBindingError,
+    bind_run_root,
+    current_run_root_binding,
+    read_run_file_bytes,
+    require_bound_run_root,
+    require_live_run_root_binding,
+    run_file_entry_exists,
+    unlink_run_file,
+    verify_run_root,
+)
 from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
@@ -164,7 +178,11 @@ from toc.partial_media import (
     write_partial_media_projection,
 )
 from toc.story_duration import audit_duration, measure_manifest_runtime, normalize_target_duration
-from scripts.world_walk_source import validate_world_walk_source_path
+from scripts.world_walk_source import (
+    read_regular_file_nofollow,
+    validate_world_walk_source_path,
+    write_regular_file_nofollow,
+)
 from toc.runtime_locks import (
     FileLockLease,
     FileLockUnavailable,
@@ -198,6 +216,7 @@ from toc.semantic_review import (
 )
 from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
+    read_committed_semantic_repair_prompt,
     semantic_loop_state_updates,
     scene_detail_review_concurrency,
     scene_detail_transport_retry_attempts,
@@ -223,11 +242,10 @@ from .image_gen import (
     list_candidate_items,
     list_first_image_retentions,
     list_runs,
-    load_request_items,
+    load_request_items as _load_request_items_unbound,
     output_root,
     prompt_setting_targets,
     reference_to_api,
-    reserve_run_dir,
     require_image_file,
     require_candidate_path,
     read_prompt_setting,
@@ -236,17 +254,18 @@ from .image_gen import (
     repo_root,
     restore_first_image_retention_run,
     retain_first_image,
-    resolve_run_relative,
-    safe_run_dir,
+    sanitize_run_title,
+    resolve_run_relative as _resolve_run_relative_unbound,
+    safe_run_dir as _safe_run_dir_unbound,
     is_first_image_retention_restored_run,
     target_matches_item,
     target_to_request_kind,
     update_request_prompts,
     validate_candidate_insertion,
     validate_image_bytes,
-    write_app_server_debug_log,
-    write_app_server_image_debug_log,
-    write_app_server_image_provenance_invalidation_log,
+    write_app_server_debug_log as _write_app_server_debug_log_unbound,
+    write_app_server_image_debug_log as _write_app_server_image_debug_log_unbound,
+    write_app_server_image_provenance_invalidation_log as _write_app_server_image_provenance_invalidation_log_unbound,
     write_prompt_setting,
 )
 
@@ -257,6 +276,221 @@ WEB_DIR = ROOT / "server" / "web"
 DIST_DIR = WEB_DIR / "dist"
 
 router = APIRouter()
+
+
+def _assert_bound_run_root(run_dir: Path) -> RunRootBinding | None:
+    """Fail closed when a frontend/resume owner pinned a different inode."""
+
+    return require_bound_run_root(Path(run_dir))
+
+
+def create_codex_app_server_client(
+    *,
+    cwd: Path,
+    **kwargs: Any,
+) -> CodexAppServerClient:
+    binding = current_run_root_binding()
+    if binding is not None and "submission_guard" not in kwargs:
+        bound_root = Path(binding.lexical_root)
+
+        def guard_submission() -> None:
+            require_live_run_root_binding(binding)
+            verify_run_root(
+                bound_root,
+                expected_identity=binding.identity,
+            )
+            require_live_run_root_binding(binding)
+            active = current_run_root_binding()
+            if active is not None and (
+                active.lexical_root != binding.lexical_root
+                or active.identity != binding.identity
+            ):
+                raise RunRootBindingError(
+                    "app-server submission escaped its captured run binding"
+                )
+            require_live_run_root_binding(binding)
+
+        kwargs["submission_guard"] = guard_submission
+    return _create_codex_app_server_client_unbound(
+        cwd=cwd,
+        **kwargs,
+    )
+
+
+def safe_run_dir(run_id: str, root: Path | None = None) -> Path:
+    """Resolve an API run while preserving an active frontend inode binding."""
+
+    binding = current_run_root_binding()
+    if binding is None:
+        return _safe_run_dir_unbound(run_id, root)
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    lexical = Path(os.path.abspath(os.fspath(output_root(root) / run_id)))
+    if os.path.abspath(os.fspath(lexical)) != binding.lexical_root:
+        raise RunRootBindingError(
+            "requested run does not match the active bound run root"
+        )
+    _assert_bound_run_root(lexical)
+    resolved = _safe_run_dir_unbound(run_id, root)
+    _assert_bound_run_root(lexical)
+    opened = os.stat(resolved, follow_symlinks=False)
+    if (opened.st_dev, opened.st_ino) != binding.identity:
+        raise RunRootBindingError(
+            f"resolved run does not match the bound run root: {run_id}"
+        )
+    return lexical
+
+
+def resolve_run_relative(run_dir: Path, value: str) -> Path:
+    _assert_bound_run_root(run_dir)
+    result = _resolve_run_relative_unbound(run_dir, value)
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def load_request_items(run_dir: Path, kind: str) -> list[Any]:
+    binding = _assert_bound_run_root(run_dir)
+    result = _load_request_items_unbound(
+        run_dir,
+        kind,
+        expected_root_identity=(binding.identity if binding else None),
+    )
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def load_request_snapshot(
+    path: Path,
+    *,
+    run_dir: Path | None = None,
+    verify_references: bool = True,
+):
+    base = run_dir or path.parent
+    binding = _assert_bound_run_root(base)
+    result = _load_request_snapshot_unbound(
+        path,
+        run_dir=run_dir,
+        verify_references=verify_references,
+        expected_root_identity=(binding.identity if binding else None),
+    )
+    _assert_bound_run_root(base)
+    return result
+
+
+def current_reference_sha256s(
+    run_dir: Path,
+    item: Any,
+    *,
+    allow_deferred: bool = False,
+):
+    binding = _assert_bound_run_root(run_dir)
+    result = _current_reference_sha256s_unbound(
+        run_dir,
+        item,
+        allow_deferred=allow_deferred,
+        expected_root_identity=(binding.identity if binding else None),
+    )
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def write_app_server_debug_log(*, run_dir: Path, **kwargs: Any) -> Path:
+    _assert_bound_run_root(run_dir)
+    result = _write_app_server_debug_log_unbound(
+        run_dir=run_dir,
+        **kwargs,
+    )
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def write_app_server_image_debug_log(
+    *,
+    run_dir: Path,
+    **kwargs: Any,
+) -> Path | None:
+    _assert_bound_run_root(run_dir)
+    result = _write_app_server_image_debug_log_unbound(
+        run_dir=run_dir,
+        **kwargs,
+    )
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def write_app_server_image_provenance_invalidation_log(
+    *,
+    run_dir: Path,
+    **kwargs: Any,
+) -> Path:
+    _assert_bound_run_root(run_dir)
+    result = _write_app_server_image_provenance_invalidation_log_unbound(
+        run_dir=run_dir,
+        **kwargs,
+    )
+    _assert_bound_run_root(run_dir)
+    return result
+
+
+def _rewrite_bound_subprocess_paths(
+    command: Iterable[str | os.PathLike[str]],
+    *,
+    binding: RunRootBinding,
+) -> list[str]:
+    rewritten: list[str] = []
+    for raw_argument in command:
+        argument = os.fspath(raw_argument)
+        absolute_argument = os.path.abspath(argument)
+        try:
+            contained = os.path.commonpath(
+                (binding.lexical_root, absolute_argument)
+            ) == binding.lexical_root
+        except ValueError:
+            contained = False
+        if contained:
+            relative = os.path.relpath(
+                absolute_argument,
+                binding.lexical_root,
+            )
+            rewritten.append("." if relative == "." else relative)
+        else:
+            rewritten.append(argument)
+    return rewritten
+
+
+def _run_bound_subprocess(
+    run_dir: Path,
+    command: Iterable[str | os.PathLike[str]],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[Any]:
+    """Run verifiers from the pinned run descriptor when a binding is active."""
+
+    binding = _assert_bound_run_root(run_dir)
+    subprocess_command = [os.fspath(argument) for argument in command]
+    if binding is None:
+        return subprocess.run(subprocess_command, **kwargs)
+    if "preexec_fn" in kwargs:
+        raise ValueError("bound run subprocess cannot override preexec_fn")
+    subprocess_command = _rewrite_bound_subprocess_paths(
+        subprocess_command,
+        binding=binding,
+    )
+    inherited = set(kwargs.pop("pass_fds", ()))
+    inherited.add(binding.descriptor)
+    kwargs["pass_fds"] = tuple(sorted(inherited))
+
+    subprocess_command = [
+        sys.executable,
+        str(APP_ROOT / "scripts" / "run-from-directory-fd.py"),
+        "--fd",
+        str(binding.descriptor),
+        "--",
+        *subprocess_command,
+    ]
+    try:
+        return subprocess.run(subprocess_command, **kwargs)
+    finally:
+        _assert_bound_run_root(run_dir)
 PLACEHOLDER_MARKERS = (
     "placeholder",
     "scaffold placeholder",
@@ -745,6 +979,7 @@ _chat_threads: dict[str, str] = {}
 _create_jobs: dict[str, dict[str, Any]] = {}
 _bulk_generation_jobs: dict[str, dict[str, Any]] = {}
 _bulk_generation_tasks: dict[str, asyncio.Task[None]] = {}
+_create_tasks: dict[str, asyncio.Task[None]] = {}
 _resume_tasks: dict[str, asyncio.Task[None]] = {}
 _codex_client: CodexAppServerClient | None = None
 _client_lock = asyncio.Lock()
@@ -759,7 +994,15 @@ _chat_semaphore = asyncio.Semaphore(2)
 _scene_detail_canonical_progress_lock = threading.Lock()
 _run_write_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _run_write_locks_guard = asyncio.Lock()
-_run_execution_leases: dict[str, FileLockLease] = {}
+
+@dataclass
+class _RunExecutionLease:
+    runtime_lease: FileLockLease
+    run_descriptor: int
+    identity: tuple[int, int]
+
+
+_run_execution_leases: dict[str, _RunExecutionLease] = {}
 _run_execution_leases_guard = asyncio.Lock()
 MAX_ZIP_BYTES = 250 * 1024 * 1024
 MAX_CREATE_JOBS = 64
@@ -887,28 +1130,119 @@ async def _serialized_run_write(run_dir: Path, resource: str):
     safe_resource = re.sub(r"[^A-Za-z0-9_.-]+", "_", resource).strip("._") or "artifact"
     process_lock = await _run_write_lock(run_dir.name, safe_resource)
     async with process_lock:
+        binding = _assert_bound_run_root(run_dir)
         async with async_file_lock(
             run_dir / ".locks" / f"{safe_resource}.lock",
             wait=True,
+            **(
+                {
+                    "run_root_descriptor": binding.descriptor,
+                    "expected_run_root_identity": binding.identity,
+                }
+                if binding is not None
+                else {}
+            ),
         ):
             yield
 
 
-async def _acquire_run_execution_lease(job_id: str, run_dir: Path) -> None:
+async def _acquire_run_execution_lease(
+    job_id: str,
+    run_dir: Path,
+    *,
+    run_descriptor: int | None = None,
+    expected_run_identity: tuple[int, int] | None = None,
+) -> _RunExecutionLease:
+    retained_descriptor = -1
+    runtime_lease: FileLockLease | None = None
+    if run_descriptor is None:
+        try:
+            with _frontend_create_directory_lock(
+                run_dir,
+                expected_identity=expected_run_identity,
+            ) as directory_lease:
+                retained_descriptor = os.dup(directory_lease.descriptor)
+                expected_run_identity = directory_lease.identity
+        except FrontendCreateLockOwnedError as exc:
+            raise FileLockUnavailable(
+                f"run execution directory is already locked: {run_dir}"
+            ) from exc
+    else:
+        try:
+            opened = os.fstat(run_descriptor)
+        except OSError as exc:
+            raise FileLockUnavailable(
+                f"run execution descriptor is unavailable: {run_dir}"
+            ) from exc
+        actual_identity = opened.st_dev, opened.st_ino
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or expected_run_identity is None
+            or actual_identity != expected_run_identity
+        ):
+            raise FileLockUnavailable(
+                f"run execution descriptor identity changed: {run_dir}"
+            )
+        retained_descriptor = os.dup(run_descriptor)
+
+    assert expected_run_identity is not None
     lock_path = run_dir / ".locks" / "create_resume.lock"
-    lease = await acquire_file_lock(lock_path, wait=False)
-    async with _run_execution_leases_guard:
-        previous = _run_execution_leases.pop(job_id, None)
+    try:
+        runtime_lease = await acquire_file_lock(
+            lock_path,
+            wait=False,
+            run_root_descriptor=retained_descriptor,
+            expected_run_root_identity=expected_run_identity,
+        )
+        try:
+            fcntl.flock(
+                retained_descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError as exc:
+            raise FileLockUnavailable(
+                f"frontend create is active for this run: {run_dir}"
+            ) from exc
+        lease = _RunExecutionLease(
+            runtime_lease=runtime_lease,
+            run_descriptor=retained_descriptor,
+            identity=expected_run_identity,
+        )
+        runtime_lease = None
+        retained_descriptor = -1
+        async with _run_execution_leases_guard:
+            previous = _run_execution_leases.pop(job_id, None)
+            _run_execution_leases[job_id] = lease
         if previous is not None:
-            await release_file_lock(previous)
-        _run_execution_leases[job_id] = lease
+            await _release_run_execution_lease_value(previous)
+        return lease
+    finally:
+        if runtime_lease is not None:
+            await release_file_lock(runtime_lease)
+        if retained_descriptor >= 0:
+            os.close(retained_descriptor)
+
+
+async def _release_run_execution_lease_value(
+    lease: _RunExecutionLease | FileLockLease,
+) -> None:
+    if isinstance(lease, FileLockLease):
+        await release_file_lock(lease)
+        return
+    try:
+        fcntl.flock(lease.run_descriptor, fcntl.LOCK_UN)
+    finally:
+        try:
+            os.close(lease.run_descriptor)
+        finally:
+            await release_file_lock(lease.runtime_lease)
 
 
 async def _release_run_execution_lease(job_id: str) -> None:
     async with _run_execution_leases_guard:
         lease = _run_execution_leases.pop(job_id, None)
     if lease is not None:
-        await release_file_lock(lease)
+        await _release_run_execution_lease_value(lease)
 
 
 async def get_codex_client() -> CodexAppServerClient:
@@ -924,15 +1258,27 @@ async def get_codex_client() -> CodexAppServerClient:
 
 async def shutdown_codex_client() -> None:
     global _codex_client
+    tracked_job_ids = {
+        *_bulk_generation_tasks.keys(),
+        *_create_tasks.keys(),
+        *_resume_tasks.keys(),
+    }
     tasks = [
         *list(_bulk_generation_tasks.values()),
+        *list(_create_tasks.values()),
         *list(_resume_tasks.values()),
     ]
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    # A task cancelled before its coroutine takes its first step never reaches
+    # the worker's finally block.  Release the pre-acquired lease explicitly;
+    # this is idempotent for workers that already released their own lease.
+    for job_id in tracked_job_ids:
+        await _release_run_execution_lease(job_id)
     _bulk_generation_tasks.clear()
+    _create_tasks.clear()
     _resume_tasks.clear()
     if _codex_client:
         await _codex_client.stop()
@@ -1404,7 +1750,12 @@ def _write_asset_request_files(run_dir: Path) -> list[dict[str, Any]]:
     return entries
 
 
-async def _set_create_job(job_id: str, patch: dict[str, Any]) -> None:
+async def _set_create_job(
+    job_id: str,
+    patch: dict[str, Any],
+    *,
+    write_run_log: bool = True,
+) -> None:
     log_payload: dict[str, Any] | None = None
     async with _create_jobs_lock:
         job = _create_jobs.get(job_id)
@@ -1412,7 +1763,7 @@ async def _set_create_job(job_id: str, patch: dict[str, Any]) -> None:
             job.update(patch)
             log_payload = dict(job)
     await asyncio.to_thread(_update_process_record_best_effort, job_id=job_id, patch=patch)
-    if log_payload:
+    if log_payload and write_run_log:
         try:
             run_dir = safe_run_dir(str(log_payload.get("runId") or ""), ROOT)
             write_app_server_debug_log(
@@ -1858,6 +2209,7 @@ def _copy_saved_image_to_generation_destination_nofollow(
     output: str,
     kind: str,
 ) -> _GenerationDestinationCopyReceipt:
+    binding = _assert_bound_run_root(run_dir)
     relative, destination = _canonical_regeneration_output(
         run_dir,
         output,
@@ -1907,6 +2259,11 @@ def _copy_saved_image_to_generation_destination_nofollow(
             )
             root_stat = os.fstat(root_descriptor)
             root_identity = (root_stat.st_dev, root_stat.st_ino)
+            if binding is not None and root_identity != binding.identity:
+                raise _UnsafeGenerationDestinationError(
+                    "generation run directory no longer matches its "
+                    "frontend/resume binding"
+                )
             parent_descriptor = _open_generation_directory_nofollow(
                 root_descriptor,
                 parent_parts,
@@ -1976,6 +2333,7 @@ def _copy_saved_image_to_generation_destination_nofollow(
             parent_parts=parent_parts,
             parent_identity=parent_identity,
         )
+        _assert_bound_run_root(run_dir)
         previous_destination_stat = (
             _ensure_generation_destination_entry_is_safe(
                 parent_descriptor,
@@ -2277,17 +2635,47 @@ def _inspect_p680_regeneration_plan(
     *,
     current_request_paths: dict[str, dict[str, Path]],
 ) -> _P680RegenerationPlanClassification:
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        try:
+            named = os.stat(run_dir, follow_symlinks=False)
+        except OSError:
+            return _p680_plan_classification_error(
+                "eval_report.json run binding is unreadable"
+            )
+        if not stat.S_ISDIR(named.st_mode):
+            return _p680_plan_classification_error(
+                "eval_report.json run binding is unreadable"
+            )
+        with bind_run_root(
+            run_dir,
+            expected_identity=(named.st_dev, named.st_ino),
+        ):
+            return _inspect_p680_regeneration_plan(
+                run_dir,
+                current_request_paths=current_request_paths,
+            )
+
+    expected_run_dirs = {
+        binding.lexical_root,
+        os.path.realpath(binding.lexical_root),
+    }
     empty = _P680RegenerationPlanClassification(
         targets={},
         asset_targets=frozenset(),
         actions=frozenset(),
         errors=(),
     )
-    report_path = run_dir / "eval_report.json"
-    if not report_path.is_file():
-        return empty
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report_bytes = read_run_file_bytes(run_dir, "eval_report.json")
+    except FileNotFoundError:
+        return empty
+    except OSError:
+        return _p680_plan_classification_error(
+            "eval_report.json is unreadable or malformed"
+        )
+    try:
+        report = json.loads(report_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return _p680_plan_classification_error(
             "eval_report.json is unreadable or malformed"
@@ -2297,14 +2685,12 @@ def _inspect_p680_regeneration_plan(
             "eval_report.json is not a p680 report"
         )
     report_run_dir = str(report.get("run_dir") or "").strip()
-    try:
-        if not report_run_dir or Path(report_run_dir).resolve() != run_dir.resolve():
-            return _p680_plan_classification_error(
-                "eval_report.json belongs to a different run"
-            )
-    except OSError:
+    if (
+        not report_run_dir
+        or os.path.abspath(report_run_dir) not in expected_run_dirs
+    ):
         return _p680_plan_classification_error(
-            "eval_report.json run binding is unreadable"
+            "eval_report.json belongs to a different run"
         )
     stages = report.get("stages")
     image_stage = stages.get("image") if isinstance(stages, dict) else None
@@ -2470,51 +2856,68 @@ def _classify_p680_regeneration_plan(
 def _unlink_regeneration_output_nofollow(
     run_dir: Path,
     relative: str,
+    *,
+    expected_identity: tuple[int, int, int] | None,
 ) -> tuple[bool, str | None]:
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    directory = getattr(os, "O_DIRECTORY", 0)
-    cloexec = getattr(os, "O_CLOEXEC", 0)
-    if not nofollow or not directory:
-        return False, "platform lacks no-follow directory operations"
-
-    parts = relative.split("/")
-    current_fd = -1
+    if expected_identity is None:
+        return False, None
     try:
-        current_fd = os.open(
-            run_dir.resolve(),
-            os.O_RDONLY | directory | cloexec | nofollow,
+        was_deleted = unlink_run_file(
+            run_dir,
+            relative,
+            missing_ok=True,
+            expected_identity=expected_identity,
         )
-        for part in parts[:-1]:
-            next_fd = os.open(
-                part,
-                os.O_RDONLY | directory | cloexec | nofollow,
-                dir_fd=current_fd,
-            )
-            os.close(current_fd)
-            current_fd = next_fd
+        return was_deleted, None
+    except FileNotFoundError:
+        return False, None
+    except (OSError, RunRootBindingError, ValueError) as exc:
+        return False, f"unsafe regeneration path: {exc}"
+
+
+def _inspect_regeneration_output_nofollow(
+    run_dir: Path,
+    relative: str,
+) -> tuple[tuple[int, int, int] | None, str | None]:
+    """Capture the exact bound leaf identity that a later delete may remove."""
+
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        return None, "regeneration deletion requires a retained run binding"
+    parts = relative.split("/")
+    parent_descriptor = -1
+    try:
+        parent_descriptor = _open_generation_directory_nofollow(
+            binding.descriptor,
+            parts[:-1],
+            create=False,
+        )
         try:
             target_stat = os.stat(
                 parts[-1],
-                dir_fd=current_fd,
+                dir_fd=parent_descriptor,
                 follow_symlinks=False,
             )
         except FileNotFoundError:
-            return False, None
+            return None, None
         if stat.S_ISLNK(target_stat.st_mode):
-            return False, "regeneration target is a symlink"
+            return None, "regeneration target is a symlink"
         if not stat.S_ISREG(target_stat.st_mode):
-            return False, "regeneration target is not a regular file"
+            return None, "regeneration target is not a regular file"
         if target_stat.st_nlink != 1:
-            return False, "regeneration target has multiple hard links"
-        os.unlink(parts[-1], dir_fd=current_fd)
-        return True, None
+            return None, "regeneration target has multiple hard links"
+        return (
+            target_stat.st_dev,
+            target_stat.st_ino,
+            stat.S_IFMT(target_stat.st_mode),
+        ), None
     except FileNotFoundError:
-        return False, None
+        return None, None
     except OSError as exc:
-        return False, f"unsafe regeneration path: {exc}"
+        return None, f"unsafe regeneration path: {exc}"
     finally:
-        if current_fd >= 0:
-            os.close(current_fd)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
 def _preserved_image_outputs_nofollow(
@@ -2522,40 +2925,103 @@ def _preserved_image_outputs_nofollow(
     *,
     image_suffixes: set[str],
 ) -> tuple[list[str], str | None]:
-    assets_dir = run_dir / "assets"
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        return [], "could not enumerate preserved images without a retained run binding"
     preserved: list[str] = []
+
+    def walk(directory_descriptor: int, prefix: Path) -> None:
+        for name in sorted(os.listdir(directory_descriptor)):
+            entry_stat = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            relative = prefix / name
+            if stat.S_ISDIR(entry_stat.st_mode):
+                child_descriptor = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_descriptor,
+                )
+                try:
+                    opened = os.fstat(child_descriptor)
+                    if (
+                        not stat.S_ISDIR(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino)
+                        != (entry_stat.st_dev, entry_stat.st_ino)
+                    ):
+                        raise RunRootBindingError(
+                            f"preserved image directory changed while opening: {relative}"
+                        )
+                    walk(child_descriptor, relative)
+                finally:
+                    os.close(child_descriptor)
+                continue
+            if relative.suffix.lower() not in image_suffixes:
+                continue
+            if not (
+                stat.S_ISREG(entry_stat.st_mode)
+                or stat.S_ISLNK(entry_stat.st_mode)
+            ):
+                continue
+            preserved.append(relative.as_posix())
+
+    assets_descriptor = -1
     try:
-        for directory_path, directory_names, file_names, directory_fd in os.fwalk(
-            assets_dir,
-            topdown=True,
-            follow_symlinks=False,
-        ):
-            directory_names.sort()
-            for file_name in sorted(file_names):
-                if Path(file_name).suffix.lower() not in image_suffixes:
-                    continue
-                file_stat = os.stat(
-                    file_name,
-                    dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-                if not (
-                    stat.S_ISREG(file_stat.st_mode)
-                    or stat.S_ISLNK(file_stat.st_mode)
-                ):
-                    continue
-                preserved.append(
-                    (Path(directory_path) / file_name)
-                    .relative_to(run_dir)
-                    .as_posix()
-                )
+        assets_descriptor = _open_generation_directory_nofollow(
+            binding.descriptor,
+            ["assets"],
+            create=False,
+        )
+        walk(assets_descriptor, Path("assets"))
+    except FileNotFoundError:
+        return [], None
     except (OSError, ValueError) as exc:
         return sorted(preserved), f"could not enumerate preserved images safely: {exc}"
+    finally:
+        if assets_descriptor >= 0:
+            os.close(assets_descriptor)
     return sorted(preserved), None
 
 
 def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
-    assets_dir = run_dir / "assets"
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        try:
+            named = os.stat(run_dir, follow_symlinks=False)
+        except OSError as exc:
+            raise RunRootBindingError(
+                f"image resume run root is unavailable: {run_dir}"
+            ) from exc
+        if not stat.S_ISDIR(named.st_mode):
+            raise RunRootBindingError(
+                f"image resume run root is not a real directory: {run_dir}"
+            )
+        with bind_run_root(
+            run_dir,
+            expected_identity=(named.st_dev, named.st_ino),
+        ):
+            return _delete_existing_images_for_image_resume(run_dir)
+
+    try:
+        assets_stat = os.stat(
+            "assets",
+            dir_fd=binding.descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        assets_stat = None
+        assets_error = None
+    except OSError as exc:
+        assets_stat = None
+        assets_error = f"unsafe assets directory: {exc}"
+    else:
+        assets_error = None
+
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
     deleted: list[str] = []
     preserved: list[str] = []
@@ -2566,7 +3032,9 @@ def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
             "canonical p500 resume is required for the current p680 "
             "asset/reference regeneration plan"
         )
-    if not assets_dir.exists():
+    if assets_stat is None:
+        if assets_error:
+            errors.append(assets_error)
         return {
             "deletedCount": 0,
             "deleted": [],
@@ -2577,7 +3045,7 @@ def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
             "assetTargets": sorted(classification.asset_targets)[:200],
             "regenerationActions": sorted(classification.actions),
         }
-    if assets_dir.is_symlink():
+    if stat.S_ISLNK(assets_stat.st_mode):
         return {
             "deletedCount": 0,
             "deleted": [],
@@ -2588,34 +3056,53 @@ def _delete_existing_images_for_image_resume(run_dir: Path) -> dict[str, Any]:
             "assetTargets": sorted(classification.asset_targets)[:200],
             "regenerationActions": sorted(classification.actions),
         }
+    if not stat.S_ISDIR(assets_stat.st_mode):
+        return {
+            "deletedCount": 0,
+            "deleted": [],
+            "preservedCount": 0,
+            "preserved": [],
+            "errors": [*errors, "unsafe assets entry is not a directory"][:200],
+            "requiresCanonicalP500": classification.requires_canonical_p500,
+            "assetTargets": sorted(classification.asset_targets)[:200],
+            "regenerationActions": sorted(classification.actions),
+        }
     regeneration_targets = (
         {}
         if classification.requires_canonical_p500
         else classification.targets
     )
-    deletion_targets: list[str] = []
-    for relative, path in sorted(regeneration_targets.items()):
-        if path.suffix.lower() not in image_suffixes:
+    deletion_targets: list[tuple[str, tuple[int, int, int] | None]] = []
+    for relative, _path in sorted(regeneration_targets.items()):
+        if Path(relative).suffix.lower() not in image_suffixes:
             errors.append(f"regeneration target is not a supported image: {relative}")
             continue
-        deletion_targets.append(relative)
         try:
-            _validate_generation_destination_nofollow(
+            _canonical_regeneration_output(
                 run_dir,
                 relative,
                 kind="scene" if relative.startswith("assets/scenes/") else "asset",
             )
         except ValueError as exc:
             errors.append(f"unsafe regeneration target ignored: {relative} ({exc})")
+            continue
+        expected_identity, inspection_error = (
+            _inspect_regeneration_output_nofollow(run_dir, relative)
+        )
+        if inspection_error:
+            errors.append(f"{inspection_error}: {relative}")
+            continue
+        deletion_targets.append((relative, expected_identity))
 
     # Validation is deliberately complete before the first unlink. A mixed
     # plan containing one unsafe target must preserve every otherwise-safe
     # image so the caller can fail closed without a partial regeneration set.
     if not errors:
-        for relative in deletion_targets:
+        for relative, expected_identity in deletion_targets:
             was_deleted, error = _unlink_regeneration_output_nofollow(
                 run_dir,
                 relative,
+                expected_identity=expected_identity,
             )
             if was_deleted:
                 deleted.append(relative)
@@ -3856,17 +4343,101 @@ def _validate_semantic_reviews_for_media_generation(
         )
 
 
-def _cleanup_unscaffolded_run(run_id: str) -> None:
+def _cleanup_unscaffolded_run(
+    run_id: str,
+    *,
+    expected_run_identity: tuple[int, int] | None = None,
+    reservation: _FrontendCreateRunReservation | None = None,
+) -> None:
+    if reservation is not None:
+        acquired = False
+        try:
+            lease = reservation.lease
+            if lease.name != run_id:
+                return
+            fcntl.flock(
+                lease.descriptor,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            acquired = True
+            current = _frontend_create_named_stat(
+                lease.parent_descriptor,
+                lease.name,
+            )
+            if (
+                current is None
+                or _frontend_create_entry_identity(current)
+                != lease.identity
+            ):
+                return
+            if not _frontend_create_run_has_scaffold(lease):
+                _quarantine_frontend_create_run(lease)
+        except (FrontendCreateLockError, OSError):
+            return
+        finally:
+            if acquired:
+                with suppress(OSError):
+                    fcntl.flock(
+                        reservation.descriptor,
+                        fcntl.LOCK_UN,
+                    )
+        return
+    if expected_run_identity is None:
+        return
+    if (
+        not run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or run_id in {".", ".."}
+    ):
+        return
+    run_dir = output_root(ROOT) / run_id
     try:
-        run_dir = safe_run_dir(run_id, ROOT)
-    except Exception:
+        with _frontend_create_directory_lock(
+            run_dir,
+            expected_identity=expected_run_identity,
+        ) as lease:
+            if _frontend_create_run_has_scaffold(lease):
+                return
+            _quarantine_frontend_create_run(lease)
+    except (FrontendCreateLockError, OSError):
         return
-    if (run_dir / "state.txt").exists() or (run_dir / "video_manifest.md").exists():
-        return
-    shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def _write_cli_process_logs(run_dir: Path, log_name: str, stdout: bytes, stderr: bytes) -> None:
+def _write_cli_process_logs(
+    run_dir: Path,
+    log_name: str,
+    stdout: bytes,
+    stderr: bytes,
+    *,
+    expected_run_identity: tuple[int, int] | None = None,
+) -> None:
+    if expected_run_identity is not None:
+        try:
+            write_regular_file_nofollow(
+                destination_root=run_dir,
+                destination_relative=f"logs/{log_name}/stdout.log",
+                data=stdout.decode(
+                    "utf-8",
+                    errors="replace",
+                ).encode("utf-8"),
+                expected_destination_root_identity=expected_run_identity,
+            )
+            write_regular_file_nofollow(
+                destination_root=run_dir,
+                destination_relative=f"logs/{log_name}/stderr.log",
+                data=stderr.decode(
+                    "utf-8",
+                    errors="replace",
+                ).encode("utf-8"),
+                expected_destination_root_identity=expected_run_identity,
+            )
+        except (OSError, ValueError) as exc:
+            raise FrontendCreateLockError(
+                "frontend-create run directory identity changed before "
+                "CLI log publication"
+            ) from exc
+        return
     log_dir = run_dir / "logs" / log_name
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "stdout.log").write_text(stdout.decode("utf-8", errors="replace"), encoding="utf-8")
@@ -3913,38 +4484,634 @@ async def _run_toc_run_helper(*, topic: str, run_id: str) -> str:
     return stdout.decode("utf-8", errors="replace").strip()
 
 
-def _probe_frontend_create_directory_lock(run_dir: Path) -> None:
-    """Fail if a frontend runner owns the pinned run-directory inode."""
+class FrontendCreateLockError(RuntimeError):
+    """The frontend-create ownership or path-identity check failed."""
+
+
+class FrontendCreateLockOwnedError(FrontendCreateLockError):
+    """Another process holds the frontend-create directory lease."""
+
+
+@dataclass(frozen=True)
+class _FrontendCreateDirectoryLease:
+    """Retained descriptors for one verified frontend-create run entry."""
+
+    descriptor: int
+    parent_descriptor: int
+    name: str
+    identity: tuple[int, int]
+
+
+@dataclass
+class _FrontendCreateRunReservation:
+    """Owned descriptors for one atomically published fresh run."""
+
+    run_id: str
+    run_dir: Path
+    identity: tuple[int, int]
+    descriptor: int
+    parent_descriptor: int
+    _closed: bool = False
+
+    @property
+    def lease(self) -> _FrontendCreateDirectoryLease:
+        if self._closed:
+            raise FrontendCreateLockError(
+                "frontend-create reservation is already closed"
+            )
+        return _FrontendCreateDirectoryLease(
+            descriptor=self.descriptor,
+            parent_descriptor=self.parent_descriptor,
+            name=self.run_id,
+            identity=self.identity,
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        descriptor = self.descriptor
+        parent_descriptor = self.parent_descriptor
+        self.descriptor = -1
+        self.parent_descriptor = -1
+        try:
+            if descriptor >= 0:
+                os.close(descriptor)
+        finally:
+            if parent_descriptor >= 0:
+                os.close(parent_descriptor)
+
+    def __iter__(self):
+        """Preserve the former tuple contract for read-only callers."""
+
+        yield self.run_id
+        yield self.run_dir
+        yield self.identity
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
+
+
+def _frontend_create_entry_identity(
+    entry: os.stat_result,
+) -> tuple[int, int]:
+    return entry.st_dev, entry.st_ino
+
+
+def _frontend_create_named_stat(
+    parent_descriptor: int,
+    name: str,
+) -> os.stat_result | None:
+    try:
+        return os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create entry became unsafe: {name}"
+        ) from exc
+
+
+def _frontend_create_run_has_scaffold(
+    lease: _FrontendCreateDirectoryLease,
+) -> bool:
+    """Inspect cleanup sentinels relative to the retained run descriptor."""
+
+    try:
+        opened = os.fstat(lease.descriptor)
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            "frontend-create cleanup lease became unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or _frontend_create_entry_identity(opened) != lease.identity
+    ):
+        raise FrontendCreateLockError(
+            "frontend-create cleanup lease identity changed"
+        )
+    return any(
+        _frontend_create_named_stat(lease.descriptor, name) is not None
+        for name in ("state.txt", "video_manifest.md")
+    )
+
+
+def _frontend_create_private_name(prefix: str) -> str:
+    return f".{prefix}-{uuid.uuid4().hex}.quarantine"
+
+
+def _frontend_create_public_candidate(
+    slug: str,
+    stamp: str,
+    *,
+    suffix: int | None,
+    name_max: int,
+) -> str:
+    collision_suffix = "" if suffix is None else f"_{suffix}"
+    timestamp_suffix = f"_{stamp}{collision_suffix}"
+    encoded_slug = os.fsencode(slug)
+    encoded_tail = os.fsencode(timestamp_suffix)
+    if len(encoded_slug) + len(encoded_tail) <= name_max:
+        return f"{slug}{timestamp_suffix}"
+
+    digest_suffix = (
+        "_" + hashlib.sha256(encoded_slug).hexdigest()[:12]
+    )
+    fixed_bytes = len(os.fsencode(digest_suffix)) + len(encoded_tail)
+    budget = name_max - fixed_bytes
+    if budget < 1:
+        raise FrontendCreateLockError(
+            "frontend-create filesystem name limit is too small"
+        )
+    filesystem_encoding = sys.getfilesystemencoding() or "utf-8"
+    bounded_slug = encoded_slug[:budget].decode(
+        filesystem_encoding,
+        errors="ignore",
+    ).rstrip("._-")
+    if not bounded_slug:
+        bounded_slug = "run"
+    candidate = f"{bounded_slug}{digest_suffix}{timestamp_suffix}"
+    while len(os.fsencode(candidate)) > name_max and bounded_slug:
+        bounded_slug = bounded_slug[:-1].rstrip("._-")
+        candidate = f"{bounded_slug or 'run'}{digest_suffix}{timestamp_suffix}"
+    if len(os.fsencode(candidate)) > name_max:
+        raise FrontendCreateLockError(
+            "frontend-create public run name cannot fit filesystem limit"
+        )
+    return candidate
+
+
+def _frontend_create_rename_noreplace(
+    *,
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
+) -> None:
+    """Atomically rename without clobbering a raced destination entry."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    encoded_source = os.fsencode(source_name)
+    encoded_destination = os.fsencode(destination_name)
+    if sys.platform == "darwin":
+        operation = getattr(libc, "renameatx_np", None)
+        flags = 0x00000004  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        operation = getattr(libc, "renameat2", None)
+        flags = 0x00000001  # RENAME_NOREPLACE
+    else:
+        operation = None
+        flags = 0
+    if operation is None:
+        raise FrontendCreateLockError(
+            "frontend-create cleanup requires atomic no-clobber rename"
+        )
+    operation.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    operation.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = operation(
+        source_parent_descriptor,
+        encoded_source,
+        destination_parent_descriptor,
+        encoded_destination,
+        flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(
+            error_number,
+            f"{os.strerror(error_number)}: "
+            f"{source_name} -> {destination_name}",
+        )
+
+
+def _reserve_frontend_create_run_dir(
+    title: str,
+) -> _FrontendCreateRunReservation:
+    """Publish a new run directory while retaining its original identity."""
 
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
     if not directory_flag or not nofollow_flag:
-        raise RuntimeError(
-            "frontend-create locking requires no-follow directory opens"
+        raise FrontendCreateLockError(
+            "frontend-create reservation requires no-follow directory opens"
         )
 
-    expected = os.stat(run_dir, follow_symlinks=False)
-    expected_identity = expected.st_dev, expected.st_ino
-    if not stat.S_ISDIR(expected.st_mode):
-        raise RuntimeError(
-            f"frontend-create run path is not a directory: {run_dir}"
+    base = output_root(ROOT)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        expected_parent = os.stat(base, follow_symlinks=False)
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create output directory is unavailable: {base}"
+        ) from exc
+    if not stat.S_ISDIR(expected_parent.st_mode):
+        raise FrontendCreateLockError(
+            f"frontend-create output path is not a directory: {base}"
         )
+    expected_parent_identity = _frontend_create_entry_identity(
+        expected_parent
+    )
 
-    descriptor = os.open(
-        run_dir,
+    open_flags = (
         os.O_RDONLY
         | directory_flag
         | nofollow_flag
-        | getattr(os, "O_CLOEXEC", 0),
+        | getattr(os, "O_CLOEXEC", 0)
     )
+    parent_descriptor = -1
+    run_descriptor = -1
+    staging_name = f".toc-reservation-{uuid.uuid4().hex}.private"
+    owned_name = staging_name
+    staging_entry: os.stat_result | None = None
+    reservation_transferred = False
+    try:
+        parent_descriptor = os.open(base, open_flags)
+        opened_parent = os.fstat(parent_descriptor)
+        current_parent = os.stat(base, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or not stat.S_ISDIR(current_parent.st_mode)
+            or _frontend_create_entry_identity(opened_parent)
+            != expected_parent_identity
+            or _frontend_create_entry_identity(current_parent)
+            != expected_parent_identity
+        ):
+            raise FrontendCreateLockError(
+                f"frontend-create output directory identity changed: {base}"
+            )
+
+        # The unguessable mode-0700 directory is the run itself. Retain its
+        # descriptor before publishing it under the predictable public name.
+        os.mkdir(
+            staging_name,
+            0o700,
+            dir_fd=parent_descriptor,
+        )
+        staging_entry = _frontend_create_named_stat(
+            parent_descriptor,
+            staging_name,
+        )
+        if staging_entry is None or not stat.S_ISDIR(staging_entry.st_mode):
+            raise FrontendCreateLockError(
+                "frontend-create private reservation became unavailable"
+            )
+        expected_run_identity = _frontend_create_entry_identity(staging_entry)
+        run_descriptor = os.open(
+            staging_name,
+            open_flags,
+            dir_fd=parent_descriptor,
+        )
+        opened_run = os.fstat(run_descriptor)
+        current_run = _frontend_create_named_stat(
+            parent_descriptor,
+            staging_name,
+        )
+        if (
+            current_run is None
+            or not stat.S_ISDIR(opened_run.st_mode)
+            or not stat.S_ISDIR(current_run.st_mode)
+            or _frontend_create_entry_identity(opened_run)
+            != expected_run_identity
+            or _frontend_create_entry_identity(current_run)
+            != expected_run_identity
+        ):
+            raise FrontendCreateLockError(
+                "frontend-create private reservation identity changed"
+            )
+
+        stamp = time.strftime("%Y%m%d_%H%M")
+        slug = sanitize_run_title(title)
+        try:
+            name_max = int(os.fpathconf(parent_descriptor, "PC_NAME_MAX"))
+        except (OSError, ValueError) as exc:
+            raise FrontendCreateLockError(
+                "frontend-create filesystem name limit is unavailable"
+            ) from exc
+        suffix: int | None = None
+        while True:
+            candidate_id = _frontend_create_public_candidate(
+                slug,
+                stamp,
+                suffix=suffix,
+                name_max=name_max,
+            )
+            try:
+                _frontend_create_rename_noreplace(
+                    source_parent_descriptor=parent_descriptor,
+                    source_name=staging_name,
+                    destination_parent_descriptor=parent_descriptor,
+                    destination_name=candidate_id,
+                )
+                owned_name = candidate_id
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise FrontendCreateLockError(
+                        "frontend-create run publication failed"
+                    ) from exc
+                suffix = 2 if suffix is None else suffix + 1
+
+        published = _frontend_create_named_stat(
+            parent_descriptor,
+            candidate_id,
+        )
+        retained = os.fstat(run_descriptor)
+        if (
+            published is None
+            or not stat.S_ISDIR(published.st_mode)
+            or not stat.S_ISDIR(retained.st_mode)
+            or _frontend_create_entry_identity(published)
+            != expected_run_identity
+            or _frontend_create_entry_identity(retained)
+            != expected_run_identity
+        ):
+            # Never adopt whatever appeared at the public name; leave every
+            # raced entry untouched on failure.
+            raise FrontendCreateLockError(
+                "frontend-create published run identity changed"
+            )
+        os.fchmod(run_descriptor, 0o755)
+        published = _frontend_create_named_stat(
+            parent_descriptor,
+            candidate_id,
+        )
+        retained = os.fstat(run_descriptor)
+        if (
+            published is None
+            or not stat.S_ISDIR(published.st_mode)
+            or not stat.S_ISDIR(retained.st_mode)
+            or _frontend_create_entry_identity(published)
+            != expected_run_identity
+            or _frontend_create_entry_identity(retained)
+            != expected_run_identity
+        ):
+            raise FrontendCreateLockError(
+                "frontend-create published run identity changed"
+            )
+        reservation = _FrontendCreateRunReservation(
+            run_id=candidate_id,
+            run_dir=base / candidate_id,
+            identity=expected_run_identity,
+            descriptor=run_descriptor,
+            parent_descriptor=parent_descriptor,
+        )
+        reservation_transferred = True
+        run_descriptor = -1
+        parent_descriptor = -1
+        return reservation
+    except FrontendCreateLockError:
+        raise
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            "frontend-create run reservation failed"
+        ) from exc
+    finally:
+        if (
+            not reservation_transferred
+            and parent_descriptor >= 0
+            and staging_entry is not None
+        ):
+            try:
+                current_staging = _frontend_create_named_stat(
+                    parent_descriptor,
+                    owned_name,
+                )
+                if (
+                    current_staging is not None
+                    and _frontend_create_entry_identity(current_staging)
+                    == _frontend_create_entry_identity(staging_entry)
+                ):
+                    _frontend_create_rename_verified_entry(
+                        parent_descriptor=parent_descriptor,
+                        source_name=owned_name,
+                        expected=staging_entry,
+                        quarantine_name=_frontend_create_private_name(
+                            "toc-reservation-failed"
+                        ),
+                    )
+            except (FrontendCreateLockError, OSError):
+                pass
+        if run_descriptor >= 0:
+            os.close(run_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _frontend_create_rename_verified_entry(
+    *,
+    parent_descriptor: int,
+    source_name: str,
+    expected: os.stat_result,
+    quarantine_name: str,
+) -> None:
+    """Move an entry to a private name and retain it only on identity match."""
+
+    current = _frontend_create_named_stat(
+        parent_descriptor,
+        source_name,
+    )
+    expected_identity = _frontend_create_entry_identity(expected)
+    if (
+        current is None
+        or _frontend_create_entry_identity(current) != expected_identity
+    ):
+        raise FrontendCreateLockError(
+            f"frontend-create cleanup entry identity changed: {source_name}"
+        )
+    try:
+        _frontend_create_rename_noreplace(
+            source_parent_descriptor=parent_descriptor,
+            source_name=source_name,
+            destination_parent_descriptor=parent_descriptor,
+            destination_name=quarantine_name,
+        )
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create cleanup could not quarantine: {source_name}"
+        ) from exc
+    quarantined = _frontend_create_named_stat(
+        parent_descriptor,
+        quarantine_name,
+    )
+    if (
+        quarantined is None
+        or _frontend_create_entry_identity(quarantined)
+        != expected_identity
+    ):
+        # The moved name is deliberately left behind. Its identity is not
+        # trusted, so attempting rollback or deletion could target a raced
+        # replacement.
+        raise FrontendCreateLockError(
+            f"frontend-create cleanup quarantine identity changed: {source_name}"
+        )
+
+
+def _quarantine_frontend_create_run(
+    lease: _FrontendCreateDirectoryLease,
+) -> None:
+    try:
+        opened = os.fstat(lease.descriptor)
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            "frontend-create cleanup lease became unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or _frontend_create_entry_identity(opened) != lease.identity
+    ):
+        raise FrontendCreateLockError(
+            "frontend-create cleanup lease identity changed"
+        )
+    if _frontend_create_run_has_scaffold(lease):
+        return
+    quarantine_name = _frontend_create_private_name("toc-cleanup")
+    _frontend_create_rename_verified_entry(
+        parent_descriptor=lease.parent_descriptor,
+        source_name=lease.name,
+        expected=opened,
+        quarantine_name=quarantine_name,
+    )
+    quarantined = _frontend_create_named_stat(
+        lease.parent_descriptor,
+        quarantine_name,
+    )
+    if (
+        quarantined is None
+        or not stat.S_ISDIR(quarantined.st_mode)
+        or _frontend_create_entry_identity(quarantined) != lease.identity
+    ):
+        raise FrontendCreateLockError(
+            "frontend-create cleanup run quarantine identity changed"
+        )
+    # POSIX offers no portable unlink-by-descriptor or conditional unlink.
+    # Leave the verified tree under its private quarantine name: deleting it
+    # by pathname would reintroduce a final identity-check/use race. A future
+    # explicit GC may reclaim these residues only under exclusive ownership.
+
+
+@contextmanager
+def _frontend_create_directory_lock(
+    run_dir: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+):
+    """Hold the frontend runner's lock on a verified run-directory inode."""
+
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if not directory_flag or not nofollow_flag:
+        raise FrontendCreateLockError(
+            "frontend-create locking requires no-follow directory opens"
+        )
+
+    if not run_dir.name or run_dir.name in {".", ".."}:
+        raise FrontendCreateLockError(
+            f"frontend-create run path is not a direct child: {run_dir}"
+        )
+
+    try:
+        expected = os.stat(run_dir, follow_symlinks=False)
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create run directory is unavailable: {run_dir}"
+        ) from exc
+    named_identity = expected.st_dev, expected.st_ino
+    if stat.S_ISLNK(expected.st_mode):
+        raise FrontendCreateLockError(
+            f"frontend-create run path must not be a symlink: {run_dir}"
+        )
+    if not stat.S_ISDIR(expected.st_mode):
+        raise FrontendCreateLockError(
+            f"frontend-create run path is not a directory: {run_dir}"
+        )
+    if (
+        expected_identity is not None
+        and named_identity != expected_identity
+    ):
+        raise FrontendCreateLockError(
+            f"frontend-create run directory identity changed: {run_dir}"
+        )
+    lease_identity = expected_identity or named_identity
+
+    parent_path = run_dir.parent
+    try:
+        expected_parent = os.stat(parent_path, follow_symlinks=False)
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create output directory is unavailable: {parent_path}"
+        ) from exc
+    if not stat.S_ISDIR(expected_parent.st_mode):
+        raise FrontendCreateLockError(
+            f"frontend-create output path is not a directory: {parent_path}"
+        )
+    expected_parent_identity = _frontend_create_entry_identity(
+        expected_parent
+    )
+
+    try:
+        parent_descriptor = os.open(
+            parent_path,
+            os.O_RDONLY
+            | directory_flag
+            | nofollow_flag
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise FrontendCreateLockError(
+            f"frontend-create output directory is unavailable: {parent_path}"
+        ) from exc
+    descriptor = -1
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        current_parent = os.stat(parent_path, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or not stat.S_ISDIR(current_parent.st_mode)
+            or _frontend_create_entry_identity(opened_parent)
+            != expected_parent_identity
+            or _frontend_create_entry_identity(current_parent)
+            != expected_parent_identity
+        ):
+            raise FrontendCreateLockError(
+                "frontend-create output directory identity changed: "
+                f"{parent_path}"
+            )
+        descriptor = os.open(
+            run_dir.name,
+            os.O_RDONLY
+            | directory_flag
+            | nofollow_flag
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_descriptor,
+        )
+    except FrontendCreateLockError:
+        os.close(parent_descriptor)
+        raise
+    except OSError as exc:
+        os.close(parent_descriptor)
+        raise FrontendCreateLockError(
+            f"frontend-create run directory is unavailable: {run_dir}"
+        ) from exc
     acquired = False
     try:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISDIR(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != expected_identity
+            or (opened.st_dev, opened.st_ino) != lease_identity
         ):
-            raise RuntimeError(
+            raise FrontendCreateLockError(
                 f"frontend-create run directory identity changed: {run_dir}"
             )
         try:
@@ -3953,25 +5120,81 @@ def _probe_frontend_create_directory_lock(run_dir: Path) -> None:
                 fcntl.LOCK_EX | fcntl.LOCK_NB,
             )
         except BlockingIOError as exc:
-            raise RuntimeError(
+            raise FrontendCreateLockOwnedError(
                 f"another frontend-create process owns this run: {run_dir}"
+            ) from exc
+        except OSError as exc:
+            raise FrontendCreateLockError(
+                f"frontend-create run directory could not be locked: {run_dir}"
             ) from exc
         acquired = True
 
-        current = os.stat(run_dir, follow_symlinks=False)
+        try:
+            current = os.stat(
+                run_dir.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise FrontendCreateLockError(
+                f"frontend-create run directory identity changed: {run_dir}"
+            ) from exc
         if (
             not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != expected_identity
+            or (current.st_dev, current.st_ino) != lease_identity
         ):
-            raise RuntimeError(
+            raise FrontendCreateLockError(
                 f"frontend-create run directory identity changed: {run_dir}"
             )
+        yield _FrontendCreateDirectoryLease(
+            descriptor=descriptor,
+            parent_descriptor=parent_descriptor,
+            name=run_dir.name,
+            identity=lease_identity,
+        )
     finally:
         try:
             if acquired:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            finally:
+                os.close(parent_descriptor)
+
+
+def _probe_frontend_create_directory_lock(
+    run_dir: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    """Return the unlocked-but-identity-bound run inode after a lock probe."""
+
+    with _frontend_create_directory_lock(
+        run_dir,
+        expected_identity=expected_identity,
+    ) as lease:
+        return lease.identity
+
+
+def _retain_frontend_create_run(
+    run_dir: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> _FrontendCreateRunReservation:
+    """Probe an existing run once and retain its exact descriptors."""
+
+    with _frontend_create_directory_lock(
+        run_dir,
+        expected_identity=expected_identity,
+    ) as lease:
+        return _FrontendCreateRunReservation(
+            run_id=lease.name,
+            run_dir=run_dir,
+            identity=lease.identity,
+            descriptor=os.dup(lease.descriptor),
+            parent_descriptor=os.dup(lease.parent_descriptor),
+        )
 
 
 async def _run_toc_immersive_frontend_cli_helper(
@@ -3984,6 +5207,8 @@ async def _run_toc_immersive_frontend_cli_helper(
     source_run_id: str | None = None,
     target_duration_seconds: int = 300,
     materialize_only: bool = False,
+    expected_run_identity: tuple[int, int] | None = None,
+    run_descriptor: int | None = None,
 ) -> str:
     cmd = [
         sys.executable,
@@ -4007,26 +5232,111 @@ async def _run_toc_immersive_frontend_cli_helper(
         cmd.append("--materialize-only")
     env = dict(os.environ)
     env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
-    run_dir = safe_run_dir(run_id, ROOT)
-    _probe_frontend_create_directory_lock(run_dir)
+    if expected_run_identity is None:
+        run_dir = safe_run_dir(run_id, ROOT)
+    else:
+        if (
+            not run_id
+            or "/" in run_id
+            or "\\" in run_id
+            or run_id in {".", ".."}
+        ):
+            raise ValueError("invalid run_id")
+        run_dir = output_root(ROOT) / run_id
+    if run_descriptor is None:
+        expected_run_identity = _probe_frontend_create_directory_lock(
+            run_dir,
+            expected_identity=expected_run_identity,
+        )
+    else:
+        opened = os.fstat(run_descriptor)
+        descriptor_identity = opened.st_dev, opened.st_ino
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or expected_run_identity is None
+            or descriptor_identity != expected_run_identity
+        ):
+            raise FrontendCreateLockError(
+                "frontend-create inherited run descriptor identity changed"
+            )
+        cmd.extend(
+            [
+                "--inherited-run-fd",
+                str(run_descriptor),
+            ]
+        )
+    cmd.extend(
+        [
+            "--expected-run-device",
+            str(expected_run_identity[0]),
+            "--expected-run-inode",
+            str(expected_run_identity[1]),
+        ]
+    )
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(ROOT),
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+        **(
+            {"pass_fds": (run_descriptor,)}
+            if run_descriptor is not None
+            else {}
+        ),
     )
+    communicate_task = asyncio.create_task(proc.communicate())
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS)
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError as cancellation:
+        with suppress(asyncio.CancelledError):
+            await _await_resume_process_cleanup(proc, communicate_task)
+        raise cancellation
     except asyncio.TimeoutError:
-        proc.kill()
-        stdout, stderr = await proc.communicate()
-        _write_cli_process_logs(run_dir, "frontend_create_cli", stdout, stderr)
+        stdout, stderr = await _await_resume_process_cleanup(
+            proc,
+            communicate_task,
+        )
+        _write_cli_process_logs(
+            run_dir,
+            "frontend_create_cli",
+            stdout,
+            stderr,
+            expected_run_identity=expected_run_identity,
+        )
         raise
-    _write_cli_process_logs(run_dir, "frontend_create_cli", stdout, stderr)
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
+        if "another frontend-create process owns this run:" in detail:
+            raise FrontendCreateLockOwnedError(detail)
+        if any(
+            marker in detail
+            for marker in (
+                "destination run identity changed after server reservation",
+                "destination run could not be opened safely",
+                "frontend-create run directory identity changed",
+            )
+        ):
+            raise FrontendCreateLockError(detail)
+        _write_cli_process_logs(
+            run_dir,
+            "frontend_create_cli",
+            stdout,
+            stderr,
+            expected_run_identity=expected_run_identity,
+        )
         raise RuntimeError(detail or f"toc-immersive-frontend-run exited with status {proc.returncode}")
+    _write_cli_process_logs(
+        run_dir,
+        "frontend_create_cli",
+        stdout,
+        stderr,
+        expected_run_identity=expected_run_identity,
+    )
     return stdout.decode("utf-8", errors="replace").strip()
 
 
@@ -11244,12 +12554,16 @@ def _prepare_storyboard_transaction(
     return transaction_dir
 
 
-def _hardlink_or_copy(source: str, destination: str) -> str:
-    try:
-        os.link(source, destination)
-        return destination
-    except OSError:
-        return shutil.copy2(source, destination)
+def _copy_storyboard_stage_file(source: str, destination: str) -> str:
+    """Copy a canonical input into the mutable storyboard workspace.
+
+    Hard-linking made the supposedly isolated staging tree share canonical
+    inodes.  Besides violating the single-link invariant used by retained-FD
+    readers, any in-place staged edit could mutate the canonical run before
+    the transaction committed.
+    """
+
+    return shutil.copy2(source, destination)
 
 
 def _materialize_scene_storyboard_video_requests(
@@ -11273,7 +12587,7 @@ def _materialize_scene_storyboard_video_requests(
             run_dir,
             staging_run_dir,
             dirs_exist_ok=True,
-            copy_function=_hardlink_or_copy,
+            copy_function=_copy_storyboard_stage_file,
             symlinks=True,
         )
         staged_result = (
@@ -12446,6 +13760,8 @@ def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
 def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
     """Compile repaired plans and atomically rematerialize request + snapshot files."""
 
+    _assert_bound_run_root(run_dir)
+
     tracked_paths = (
         run_dir / "video_manifest.md",
         run_dir / "image_generation_requests.md",
@@ -12483,7 +13799,8 @@ def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
     try:
         compiled_selectors = _recompile_image_prompt_payloads_from_plans(run_dir)
         _write_asset_request_files(run_dir)
-        result = subprocess.run(
+        result = _run_bound_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(ROOT / "scripts" / "generate-assets-from-manifest.py"),
@@ -12504,7 +13821,8 @@ def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(detail or "image prompt request rematerialization failed")
-        deterministic_review = subprocess.run(
+        deterministic_review = _run_bound_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
@@ -12836,13 +14154,19 @@ def _finalize_p600_supervisor_result(
 
     result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
     if not result_path.is_file():
-        return
+        raise RuntimeError(
+            "p600 supervisor result is missing; refusing to publish a later handoff"
+        )
     try:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "p600 supervisor result is malformed; refusing to publish a later handoff"
+        ) from exc
     if not isinstance(payload, dict):
-        return
+        raise RuntimeError(
+            "p600 supervisor result is malformed; refusing to publish a later handoff"
+        )
     completed = _dedupe_preserve_order(
         [
             *[str(value).strip() for value in payload.get("completed_slots") or [] if str(value).strip()],
@@ -13231,13 +14555,124 @@ async def _generate_request_item_output(
         )
 
 
+def _prepare_bound_image_provider_workspace(
+    *,
+    run_dir: Path,
+    destination: Path,
+    references: list[Path],
+    binding: RunRootBinding | None,
+) -> tuple[
+    tempfile.TemporaryDirectory[str] | None,
+    Path,
+    Path,
+    list[Path],
+]:
+    """Detach external provider inputs from a mutable run pathname."""
+
+    if binding is None:
+        return None, run_dir, destination, references
+    _assert_bound_run_root(run_dir)
+    workspace_lease = tempfile.TemporaryDirectory(
+        prefix="toc-image-provider-",
+    )
+    workspace = Path(workspace_lease.name)
+    provider_references: list[Path] = []
+    try:
+        for index, reference in enumerate(references, start=1):
+            try:
+                relative = reference.relative_to(run_dir)
+            except ValueError as exc:
+                raise RunRootBindingError(
+                    f"provider reference escapes the bound run: {reference}"
+                ) from exc
+            data = read_regular_file_nofollow(
+                Path(binding.lexical_root),
+                relative,
+                expected_root_identity=binding.identity,
+            )
+            private_parent = workspace / "references" / f"{index:03d}"
+            private_parent.mkdir(parents=True, exist_ok=False)
+            private_reference = private_parent / reference.name
+            private_reference.write_bytes(data)
+            require_image_file(private_reference)
+            validate_image_bytes(private_reference)
+            provider_references.append(private_reference)
+        provider_output = (
+            workspace
+            / "generated"
+            / f"candidate{destination.suffix.lower()}"
+        )
+        provider_output.parent.mkdir(parents=True, exist_ok=False)
+        _assert_bound_run_root(run_dir)
+        return (
+            workspace_lease,
+            workspace,
+            provider_output,
+            provider_references,
+        )
+    except BaseException:
+        workspace_lease.cleanup()
+        raise
+
+
+def _assert_bound_generation_item_is_current(
+    *,
+    run_dir: Path,
+    kind: str,
+    item: Any,
+    binding: RunRootBinding | None,
+) -> None:
+    """Rebind a provider item to the descriptor-read canonical snapshot."""
+
+    if binding is None or not str(
+        getattr(item, "request_revision", "") or ""
+    ).strip():
+        return
+    current_items = load_request_items(run_dir, kind)
+    current = next(
+        (
+            candidate
+            for candidate in current_items
+            if str(getattr(candidate, "id", "") or "")
+            == str(getattr(item, "id", "") or "")
+        ),
+        None,
+    )
+    if current is None:
+        raise RunRootBindingError(
+            f"provider item disappeared from the bound snapshot: {item.id}"
+        )
+    fields = (
+        "prompt",
+        "output",
+        "references",
+        "prompt_sha256",
+        "reference_sha256s",
+        "request_revision",
+        "request_digest",
+        "compiler_version",
+        "source_digest",
+    )
+    changed = [
+        field
+        for field in fields
+        if getattr(current, field, None) != getattr(item, field, None)
+    ]
+    if changed:
+        raise RunRootBindingError(
+            f"provider item changed after review for {item.id}: "
+            + ", ".join(changed)
+        )
+
+
 async def _generate_request_item_output_with_slot(
     *,
     run_dir: Path,
     kind: str,
     item: Any,
 ) -> str:
-    run_dir = run_dir.resolve()
+    run_dir = Path(os.path.abspath(os.fspath(run_dir)))
+    binding = _assert_bound_run_root(run_dir)
     if not getattr(item, "output", None):
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -13326,6 +14761,33 @@ async def _generate_request_item_output_with_slot(
                 "referenceSha256s": reference_sha256s,
             },
         )
+    (
+        provider_workspace_lease,
+        provider_run_dir,
+        provider_destination,
+        provider_references,
+    ) = _prepare_bound_image_provider_workspace(
+        run_dir=run_dir,
+        destination=destination,
+        references=references,
+        binding=binding,
+    )
+    _assert_bound_generation_item_is_current(
+        run_dir=run_dir,
+        kind=kind,
+        item=item,
+        binding=binding,
+    )
+    if binding is not None:
+        isolated_reference_sha256s = [
+            _file_sha256(reference)
+            for reference in provider_references
+        ]
+        if isolated_reference_sha256s != reference_sha256s:
+            provider_workspace_lease.cleanup()
+            raise RunRootBindingError(
+                "provider reference snapshot changed while isolating inputs"
+            )
     started = time.monotonic()
     generation_job_id = uuid.uuid4().hex
     provenance_policy = _image_generation_provenance_policy()
@@ -13354,7 +14816,7 @@ async def _generate_request_item_output_with_slot(
         },
     )
     client = create_codex_app_server_client(
-        cwd=run_dir,
+        cwd=provider_run_dir,
         scrub_sensitive_env=True,
         require_chatgpt_account=True,
         require_chatgpt_pro=True,
@@ -13364,19 +14826,31 @@ async def _generate_request_item_output_with_slot(
     retention_record: dict[str, Any] | None = None
     copy_receipt: _GenerationDestinationCopyReceipt | None = None
     try:
+        _assert_bound_run_root(run_dir)
         await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         async with _generated_images_fallback_claim_scope(allow_generated_images_fallback):
             generated_root = client.generated_images_root() if hasattr(client, "generated_images_root") else None
             fallback_cutoff_ns = latest_generated_image_mtime_ns(generated_root) if allow_generated_images_fallback else None
             for attempt in range(1, IMAGE_GENERATION_ITEM_MAX_ATTEMPTS + 1):
                 try:
+                    # This is the last root-identity check before an
+                    # irreversible external submission. Provider inputs and
+                    # cwd are private copies, so a later lexical rename cannot
+                    # redirect the in-flight request into another run.
+                    _assert_bound_run_root(run_dir)
+                    _assert_bound_generation_item_is_current(
+                        run_dir=run_dir,
+                        kind=kind,
+                        item=item,
+                        binding=binding,
+                    )
                     result = await asyncio.wait_for(
                         client.generate_image(
                             prompt=item.prompt,
-                            output_path=destination,
-                            reference_images=references,
+                            output_path=provider_destination,
+                            reference_images=provider_references,
                             item_id=item.id,
-                            run_dir=run_dir,
+                            run_dir=provider_run_dir,
                             fallback_cutoff_ns=fallback_cutoff_ns,
                             generation_job_id=generation_job_id,
                             allow_generated_images_fallback=allow_generated_images_fallback,
@@ -13395,10 +14869,11 @@ async def _generate_request_item_output_with_slot(
                             result,
                             generation_job_id=generation_job_id,
                             item_id=str(item.id),
-                            destination=destination,
+                            destination=provider_destination,
                             prompt_sha256=prompt_sha256,
                             reference_sha256s=reference_sha256s,
                         )
+                    _assert_bound_run_root(run_dir)
                     retention_record = retain_first_image(
                         result.saved_path,
                         root=ROOT,
@@ -13439,7 +14914,7 @@ async def _generate_request_item_output_with_slot(
                     )
                     await client.stop()
                     client = create_codex_app_server_client(
-                        cwd=run_dir,
+                        cwd=provider_run_dir,
                         scrub_sensitive_env=True,
                         require_chatgpt_account=True,
                         require_chatgpt_pro=True,
@@ -13447,6 +14922,7 @@ async def _generate_request_item_output_with_slot(
                     await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         if result.saved_path is None:
             raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
+        _assert_bound_run_root(run_dir)
         try:
             _destination_relative, destination = _validate_generation_destination_nofollow(
                 run_dir,
@@ -13548,18 +15024,25 @@ async def _generate_request_item_output_with_slot(
         )
         raise
     finally:
-        await client.stop()
+        try:
+            await client.stop()
+        finally:
+            if provider_workspace_lease is not None:
+                provider_workspace_lease.cleanup()
     return "provider_submitted"
 
 
 async def _generate_request_outputs(*, run_dir: Path, kind: str) -> None:
     # Keep the immutable request snapshot stable from load through provider
     # submission. Prompt edits/materialization use this same revision lock.
+    _assert_bound_run_root(run_dir)
     async with _serialized_run_write(run_dir, f"{kind}_request_revision"):
         await _generate_request_outputs_unlocked(run_dir=run_dir, kind=kind)
+    _assert_bound_run_root(run_dir)
 
 
 async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> None:
+    _assert_bound_run_root(run_dir)
     items = load_request_items(run_dir, kind)
     if not items:
         raise RuntimeError(f"{kind} request file has no {kind} items")
@@ -13580,8 +15063,11 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
                 _partial_media_generation_reset_updates(None),
             )
             raise
-        with suppress(FileNotFoundError):
-            (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+        unlink_run_file(
+            run_dir,
+            PARTIAL_MEDIA_RECEIPT_RELPATH,
+            missing_ok=True,
+        )
         append_state_snapshot(
             run_dir / "state.txt",
             _partial_media_generation_reset_updates(
@@ -13911,34 +15397,46 @@ def _p680_image_stage_report_issues(
 ) -> list[str]:
     """Require a fresh, run-bound p680 report with no failed checks."""
 
-    report_path = run_dir / "eval_report.json"
-    if not report_path.is_file():
-        return ["eval_report.json is missing"]
+    binding = _assert_bound_run_root(run_dir)
+    expected_run_dir = (
+        binding.lexical_root
+        if binding is not None
+        else os.path.abspath(os.fspath(run_dir))
+    )
+    expected_report_run_dirs = {
+        expected_run_dir,
+        os.path.realpath(expected_run_dir),
+    }
     try:
-        current_report_sha256 = _file_sha256(report_path)
-        current_report_mtime_ns = report_path.stat().st_mtime_ns
+        report_bytes = read_run_file_bytes(
+            run_dir,
+            "eval_report.json",
+        )
+    except FileNotFoundError:
+        return ["eval_report.json is missing"]
     except OSError:
         return ["eval_report.json is unreadable"]
+
+    # Hash and parse one captured byte sequence.  Reopening the lexical path
+    # for stat/hash/parse would let a concurrent rename make freshness and
+    # validation refer to different report revisions.
+    current_report_sha256 = hashlib.sha256(report_bytes).hexdigest()
     if (
         not report_was_absent
         and current_report_sha256 == previous_report_sha256
-        and current_report_mtime_ns == previous_report_mtime_ns
     ):
         return ["eval_report.json was not refreshed by the p680 verifier"]
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        report = json.loads(report_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return ["eval_report.json is malformed"]
     if not isinstance(report, dict) or report.get("stage_target") != "p680":
         return ["eval_report.json does not describe the p680 target"]
     report_run_dir = str(report.get("run_dir") or "").strip()
     if not report_run_dir:
         return ["eval_report.json does not bind the reviewed run"]
-    try:
-        if Path(report_run_dir).resolve() != run_dir.resolve():
-            return ["eval_report.json belongs to a different run"]
-    except OSError:
-        return ["eval_report.json run binding is unreadable"]
+    if os.path.abspath(report_run_dir) not in expected_report_run_dirs:
+        return ["eval_report.json belongs to a different run"]
     stages = report.get("stages")
     if not isinstance(stages, dict):
         return ["eval_report.json stages are missing"]
@@ -14037,21 +15535,29 @@ def _validate_p680_visual_quality(
     *,
     mode: Literal["pre_handoff", "terminal"] = "pre_handoff",
 ) -> None:
+    _assert_bound_run_root(run_dir)
     if mode not in {"pre_handoff", "terminal"}:
         raise ValueError("p680 validation mode must be pre_handoff or terminal")
-    report_path = run_dir / "eval_report.json"
-    report_was_absent = not report_path.is_file()
+    report_was_absent = False
     previous_report_mtime_ns: int | None = None
     previous_report_sha256: str | None = None
     baseline_read_failed = False
-    if not report_was_absent:
-        try:
-            previous_report_mtime_ns = report_path.stat().st_mtime_ns
-            previous_report_sha256 = _file_sha256(report_path)
-        except OSError:
-            baseline_read_failed = True
     try:
-        completed = subprocess.run(
+        previous_report_bytes = read_run_file_bytes(
+            run_dir,
+            "eval_report.json",
+        )
+    except FileNotFoundError:
+        report_was_absent = True
+    except OSError:
+        baseline_read_failed = True
+    else:
+        previous_report_sha256 = hashlib.sha256(
+            previous_report_bytes
+        ).hexdigest()
+    try:
+        completed = _run_bound_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(APP_ROOT / "scripts" / "verify-pipeline.py"),
@@ -14269,6 +15775,7 @@ def _p560_visual_failure_is_prompt_repairable(
 
 
 def _validate_p560_asset_quality(run_dir: Path) -> None:
+    _assert_bound_run_root(run_dir)
     report_path = run_dir / "eval_report.json"
     report_was_absent = not report_path.is_file()
     baseline_read_failed = False
@@ -14283,7 +15790,8 @@ def _validate_p560_asset_quality(run_dir: Path) -> None:
             previous_report_mtime_ns = None
             previous_report_sha256 = None
     try:
-        completed = subprocess.run(
+        completed = _run_bound_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(APP_ROOT / "scripts" / "verify-pipeline.py"),
@@ -14460,6 +15968,7 @@ def _remove_bootstrap_asset_outputs(run_dir: Path) -> None:
 
 
 async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure_detail: str, attempt: int) -> None:
+    _assert_bound_run_root(run_dir)
     items = _bootstrap_asset_items(run_dir)
     if not items or app_server_disabled():
         return
@@ -14487,9 +15996,12 @@ async def _repair_bootstrap_asset_prompts(job_id: str, *, run_dir: Path, failure
                 operation="prompt_repair",
             )
             prompts[item.id] = prompt
+        _assert_bound_run_root(run_dir)
         async with _serialized_run_write(run_dir, "run_artifacts"):
             async with _serialized_run_write(run_dir, "asset_request_revision"):
+                _assert_bound_run_root(run_dir)
                 update_result = update_request_prompts(run_dir, "asset", prompts, allow_inline_prompt=True)
+                _assert_bound_run_root(run_dir)
                 if update_result["missing"]:
                     raise RuntimeError(f"asset prompt repair failed for {', '.join(update_result['missing'])}")
                 append_state_snapshot(
@@ -14519,12 +16031,32 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
         and resolve_run_relative(run_dir, item.output).is_file()
     )
     partial_media = bool(blocked_item_ids)
-    _finalize_p600_supervisor_result(
-        run_dir,
-        completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
-        terminal_slot="p680",
-        terminal_status="awaiting_approval",
-    )
+    try:
+        _finalize_p600_supervisor_result(
+            run_dir,
+            completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
+            terminal_slot="p680",
+            terminal_status="awaiting_approval",
+        )
+    except RuntimeError as exc:
+        _invalidate_image_generation_review_handoff(
+            run_dir,
+            invalidated_by="p680_publication",
+            reason=str(exc),
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "image_generation.generated_count": str(generated_count),
+                "image_generation.blocked_item_count": str(
+                    len(blocked_item_ids)
+                ),
+                "image_generation.blocked_item_ids": ", ".join(
+                    sorted(blocked_item_ids)
+                ),
+            },
+        )
+        raise
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -14781,8 +16313,11 @@ def _refresh_partial_media_projection_artifact(
 ) -> dict[str, Any]:
     projection = _derive_current_partial_media_projection(run_dir)
     write_partial_media_projection(run_dir, projection)
-    with suppress(FileNotFoundError):
-        (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+    unlink_run_file(
+        run_dir,
+        PARTIAL_MEDIA_RECEIPT_RELPATH,
+        missing_ok=True,
+    )
     return projection
 
 
@@ -14936,10 +16471,16 @@ def _clear_partial_media_stage(
         )
         write_partial_media_projection(run_dir, projection)
     else:
-        with suppress(FileNotFoundError):
-            (run_dir / PARTIAL_MEDIA_PROJECTION_RELPATH).unlink()
-    with suppress(FileNotFoundError):
-        (run_dir / PARTIAL_MEDIA_RECEIPT_RELPATH).unlink()
+        unlink_run_file(
+            run_dir,
+            PARTIAL_MEDIA_PROJECTION_RELPATH,
+            missing_ok=True,
+        )
+    unlink_run_file(
+        run_dir,
+        PARTIAL_MEDIA_RECEIPT_RELPATH,
+        missing_ok=True,
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -15439,6 +16980,8 @@ async def _run_pre_asset_semantic_fixed_point(
 def _validate_pre_asset_provider_gate(run_dir: Path) -> None:
     """Fail closed before any asset prompt is submitted to the image provider."""
 
+    _assert_bound_run_root(run_dir)
+
     frontend = _load_frontend_review_runner()
     frontend._require_fresh_p400_readiness(run_dir)
     semantic_issues: list[str] = []
@@ -15486,7 +17029,8 @@ def _validate_pre_asset_provider_gate(run_dir: Path) -> None:
     if not snapshot.items:
         raise RuntimeError("asset request snapshot has no provider items")
     try:
-        completed = subprocess.run(
+        completed = _run_bound_subprocess(
+            run_dir,
             [
                 sys.executable,
                 str(APP_ROOT / "scripts" / "verify-pipeline.py"),
@@ -15525,6 +17069,8 @@ async def _generate_scene_outputs_after_p650_preflight(
     scene_revision_lock_held: bool = False,
 ) -> None:
     """Validate, submit, and hand off one immutable scene request revision."""
+
+    _assert_bound_run_root(run_dir)
 
     # Prompt edits and request rematerialization use this same lock.  Keeping
     # the final p650 validation, provider submission, and p680 handoff in one
@@ -15651,6 +17197,7 @@ async def _generate_scene_outputs_after_p650_preflight(
 
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     run_dir = safe_run_dir(run_id, ROOT)
+    _assert_bound_run_root(run_dir)
     semantic_failures: list[str] = []
     failed_semantic_stages: set[str] = set()
     await _set_create_job(job_id, {"message": "上流設計をsemantic QA中"})
@@ -15916,15 +17463,26 @@ def _semantic_transport_failure_phase(
 
 def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) -> None:
     result_path = run_dir / "logs/orchestration/p600.supervisor_result.json"
-    if not result_path.exists():
-        return
+    payload: dict[str, Any]
     try:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        payload = {
+            "bucket": "p600",
+            "previous_status": "missing_or_malformed",
+        }
+    if not isinstance(payload, dict):
+        payload = {
+            "bucket": "p600",
+            "previous_status": "malformed",
+        }
+    if payload.get("status") == "invalidated":
         return
-    if not isinstance(payload, dict) or payload.get("status") == "invalidated":
-        return
-    payload["previous_status"] = str(payload.get("status") or "unknown")
+    payload.setdefault(
+        "previous_status",
+        str(payload.get("status") or "unknown"),
+    )
+    payload["bucket"] = "p600"
     payload["status"] = "invalidated"
     payload["invalidated_at"] = now_iso()
     payload["invalidated_by"] = invalidated_by
@@ -15958,6 +17516,7 @@ def _invalidate_image_generation_review_handoff(
             ),
             "stage.scene_implementation.status": "failed",
             "review.image.status": "pending",
+            "review.semantic.create_media_generated": "false",
             "review.semantic.create_scene_media_generated": "false",
             "image_generation.status": "failed",
             "image_generation.blocked_by": "p680_terminal_verification",
@@ -16039,6 +17598,7 @@ def _mark_localized_image_prompt_request_freeze(
 
 
 async def _run_semantic_review_for_media_generation(job_id: str, *, run_dir: Path, stage: str) -> str | None:
+    _assert_bound_run_root(run_dir)
     try:
         await _run_semantic_review(job_id, run_dir=run_dir, stage=stage)
         return None
@@ -16465,6 +18025,7 @@ async def _run_semantic_review(
     max_attempts: int | None = None,
     image_prompt_provider_ready: bool = True,
 ) -> None:
+    _assert_bound_run_root(run_dir)
     attempts = max(1, max_attempts or semantic_review_max_attempts())
     if stage == "image_prompt":
         # The semantic pack must review the exact provider-ready snapshot.
@@ -17420,6 +18981,955 @@ def _record_semantic_repair_salvaged_after_source_change(
     append_state_snapshot(run_dir / "state.txt", updates)
 
 
+@dataclass
+class _BoundSemanticReviewWorkspace:
+    lease: tempfile.TemporaryDirectory[str]
+    run_dir: Path
+    binding: RunRootBinding
+    root: Path
+    prompt_path: Path
+    report_path: Path
+    canonical_report_path: Path
+    expected_input_digest: str
+    canonical_input_sha256s: dict[Path, str]
+    private_input_sha256s: dict[Path, str]
+
+    def cleanup(self) -> None:
+        self.lease.cleanup()
+
+
+def _bound_semantic_relative_path(
+    run_dir: Path,
+    path: Path,
+) -> Path:
+    lexical_root = Path(os.path.abspath(os.fspath(run_dir)))
+    lexical_path = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise RunRootBindingError(
+            f"semantic review artifact escapes the bound run: {path}"
+        ) from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise RunRootBindingError(
+            f"semantic review artifact is not a safe run-relative path: {path}"
+        )
+    return relative
+
+
+def _read_bound_semantic_artifact(
+    workspace: _BoundSemanticReviewWorkspace,
+    relative: Path,
+) -> bytes:
+    return read_regular_file_nofollow(
+        workspace.run_dir,
+        relative,
+        expected_root_identity=workspace.binding.identity,
+    )
+
+
+def _semantic_workspace_relpath(
+    raw: Any,
+    *,
+    field: str,
+) -> Path | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    relative = Path(value)
+    if (
+        "\\" in value
+        or relative.is_absolute()
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise RunRootBindingError(
+            f"semantic review workspace {field} is not a safe run-relative path"
+        )
+    return relative
+
+
+def _semantic_workspace_dependencies(
+    scope: Mapping[str, Any],
+    *,
+    explicit: Iterable[Path],
+) -> tuple[set[Path], set[Path]]:
+    dependencies = set(explicit)
+    mutable_reports: set[Path] = set()
+    source_artifacts = scope.get("source_artifacts")
+    if source_artifacts is not None and not isinstance(source_artifacts, list):
+        raise RunRootBindingError(
+            "semantic review workspace source_artifacts must be a list"
+        )
+    for raw in source_artifacts or []:
+        relative = _semantic_workspace_relpath(
+            raw,
+            field="source_artifact",
+        )
+        if relative is not None:
+            dependencies.add(relative)
+    for field in ("canonical_scope", "canonical_report"):
+        relative = _semantic_workspace_relpath(scope.get(field), field=field)
+        if relative is not None:
+            dependencies.add(relative)
+            if field == "canonical_report":
+                mutable_reports.add(relative)
+    artifacts = scope.get("artifacts")
+    if isinstance(artifacts, Mapping):
+        for key, raw in artifacts.items():
+            relative = _semantic_workspace_relpath(
+                raw,
+                field=f"artifact.{key}",
+            )
+            if relative is not None:
+                dependencies.add(relative)
+                if str(key) == "report":
+                    mutable_reports.add(relative)
+    return dependencies, mutable_reports
+
+
+def _rewrite_semantic_workspace_text(
+    data: bytes,
+    *,
+    lexical_root: Path,
+    private_root: Path,
+) -> bytes:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        return data
+    private = os.path.abspath(os.fspath(private_root))
+    aliases = {
+        os.path.abspath(os.fspath(lexical_root)),
+        os.path.realpath(os.fspath(lexical_root)),
+    }
+    for alias in sorted(aliases, key=len, reverse=True):
+        text = text.replace(alias, private)
+    return text.encode("utf-8")
+
+
+def _restore_semantic_workspace_text(
+    text: str,
+    *,
+    private_root: Path,
+    lexical_root: Path,
+) -> str:
+    canonical = os.path.abspath(os.fspath(lexical_root))
+    aliases = {
+        os.path.abspath(os.fspath(private_root)),
+        os.path.realpath(os.fspath(private_root)),
+    }
+    for alias in sorted(aliases, key=len, reverse=True):
+        text = text.replace(alias, canonical)
+    return text
+
+
+def _read_private_semantic_workspace_file(
+    path: Path,
+    *,
+    label: str,
+) -> bytes:
+    def snapshot(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            stat.S_IFMT(value.st_mode),
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    try:
+        lexical = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"{label} is unavailable") from exc
+    if (
+        not stat.S_ISREG(lexical.st_mode)
+        or stat.S_ISLNK(lexical.st_mode)
+        or lexical.st_nlink != 1
+    ):
+        raise RuntimeError(f"{label} is unsafe")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        opened_snapshot = snapshot(opened)
+        lexical_snapshot = snapshot(lexical)
+        if opened_snapshot != lexical_snapshot:
+            raise RuntimeError(f"{label} identity changed before reading")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        if snapshot(os.fstat(descriptor)) != opened_snapshot:
+            raise RuntimeError(f"{label} changed while reading")
+        named = path.lstat()
+        if snapshot(named) != opened_snapshot:
+            raise RuntimeError(f"{label} identity changed after reading")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise RuntimeError(f"{label} could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _read_private_semantic_workspace_text(
+    path: Path,
+    *,
+    label: str,
+) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"{label} is unavailable") from exc
+    return _read_private_semantic_workspace_file(
+        path,
+        label=label,
+    ).decode("utf-8", errors="replace")
+
+
+def _private_semantic_review_report_completed(path: Path) -> bool:
+    report_text = _read_private_semantic_workspace_text(
+        path,
+        label="semantic review private report",
+    )
+    return bool(
+        report_text is not None
+        and _semantic_review_report_text_completed(report_text)
+    )
+
+
+def _private_semantic_repair_report_completed(path: Path) -> bool:
+    report_text = _read_private_semantic_workspace_text(
+        path,
+        label="semantic repair private report",
+    )
+    return bool(
+        report_text is not None
+        and _semantic_repair_report_text_completed(report_text)
+    )
+
+
+def _prepare_bound_semantic_review_workspace(
+    *,
+    run_dir: Path,
+    collection_path: Path,
+    scope_path: Path,
+    prompt_path: Path,
+    report_path: Path,
+) -> _BoundSemanticReviewWorkspace | None:
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        return None
+    lexical_root = Path(binding.lexical_root)
+    explicit = {
+        _bound_semantic_relative_path(lexical_root, collection_path),
+        _bound_semantic_relative_path(lexical_root, scope_path),
+        _bound_semantic_relative_path(lexical_root, prompt_path),
+        _bound_semantic_relative_path(lexical_root, report_path),
+    }
+    scope_relative = _bound_semantic_relative_path(lexical_root, scope_path)
+    scope_bytes = read_regular_file_nofollow(
+        lexical_root,
+        scope_relative,
+        expected_root_identity=binding.identity,
+    )
+    try:
+        scope = json.loads(scope_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"semantic review scope is unreadable before provider submission: {scope_path}"
+        ) from exc
+    if not isinstance(scope, Mapping):
+        raise RuntimeError(
+            f"semantic review scope must be an object: {scope_path}"
+        )
+    expected_input_digest = str(
+        scope.get("semantic_review_input_digest") or ""
+    ).strip()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", expected_input_digest) is None:
+        raise RuntimeError(
+            f"semantic review scope lacks a current input digest: {scope_path}"
+        )
+    dependencies, mutable_reports = _semantic_workspace_dependencies(
+        scope,
+        explicit=explicit,
+    )
+    report_relative = _bound_semantic_relative_path(lexical_root, report_path)
+    mutable_reports.add(report_relative)
+    lease = tempfile.TemporaryDirectory(prefix="toc-semantic-review-")
+    private_root = Path(lease.name)
+    canonical_sha256s: dict[Path, str] = {}
+    private_sha256s: dict[Path, str] = {}
+    try:
+        for relative in sorted(dependencies, key=lambda value: value.as_posix()):
+            destination = private_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if relative == report_relative:
+                # The provider receives one writable output pathname.  It never
+                # receives a writable copy of any canonical run artifact.
+                canonical = read_regular_file_nofollow(
+                    lexical_root,
+                    relative,
+                    expected_root_identity=binding.identity,
+                )
+                canonical_sha256s[relative] = hashlib.sha256(
+                    canonical
+                ).hexdigest()
+                continue
+            canonical = read_regular_file_nofollow(
+                lexical_root,
+                relative,
+                expected_root_identity=binding.identity,
+            )
+            private = _rewrite_semantic_workspace_text(
+                canonical,
+                lexical_root=lexical_root,
+                private_root=private_root,
+            )
+            destination.write_bytes(private)
+            destination.chmod(0o400)
+            if relative not in mutable_reports:
+                canonical_sha256s[relative] = hashlib.sha256(canonical).hexdigest()
+            if relative != report_relative:
+                private_sha256s[relative] = hashlib.sha256(private).hexdigest()
+        workspace = _BoundSemanticReviewWorkspace(
+            lease=lease,
+            run_dir=lexical_root,
+            binding=binding,
+            root=private_root,
+            prompt_path=private_root
+            / _bound_semantic_relative_path(lexical_root, prompt_path),
+            report_path=private_root / report_relative,
+            canonical_report_path=lexical_root / report_relative,
+            expected_input_digest=expected_input_digest,
+            canonical_input_sha256s=canonical_sha256s,
+            private_input_sha256s=private_sha256s,
+        )
+        _verify_bound_semantic_review_workspace(workspace)
+        return workspace
+    except BaseException:
+        lease.cleanup()
+        raise
+
+
+def _verify_bound_semantic_review_workspace(
+    workspace: _BoundSemanticReviewWorkspace,
+) -> None:
+    _assert_bound_run_root(workspace.run_dir)
+    for relative, expected in workspace.private_input_sha256s.items():
+        path = workspace.root / relative
+        actual = hashlib.sha256(
+            _read_private_semantic_workspace_file(
+                path,
+                label=f"semantic review private input {relative}",
+            )
+        ).hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"semantic review private input changed: {relative}"
+            )
+    for relative, expected in workspace.canonical_input_sha256s.items():
+        actual = hashlib.sha256(
+            _read_bound_semantic_artifact(workspace, relative)
+        ).hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"semantic review canonical input changed during provider turn: {relative}"
+            )
+
+
+def _bound_semantic_review_report_candidate(
+    workspace: _BoundSemanticReviewWorkspace,
+    *,
+    transcript: list[dict[str, Any]],
+    stage: str,
+) -> str | None:
+    report_text = _read_private_semantic_workspace_text(
+        workspace.report_path,
+        label="semantic review private report",
+    )
+    if report_text is not None and _semantic_review_report_text_completed(
+        report_text
+    ):
+        return report_text
+    return _semantic_report_text_from_transcript(transcript, stage)
+
+
+def _import_bound_semantic_review_report(
+    workspace: _BoundSemanticReviewWorkspace,
+    *,
+    transcript: list[dict[str, Any]],
+    stage: str,
+    source: str,
+) -> bool:
+    report_text = _bound_semantic_review_report_candidate(
+        workspace,
+        transcript=transcript,
+        stage=stage,
+    )
+    if report_text is None:
+        return False
+    report_text = _restore_semantic_workspace_text(
+        report_text,
+        private_root=workspace.root,
+        lexical_root=workspace.run_dir,
+    )
+    reported_digests = _semantic_report_list_values(
+        report_text,
+        "semantic_review_input_digest",
+    )
+    issues = list(
+        semantic_report_required_field_issues(
+            report_text,
+            require_digest=True,
+        )
+    )
+    if reported_digests != [workspace.expected_input_digest]:
+        issues.append(
+            "semantic review workspace output digest does not match its immutable input snapshot"
+        )
+    status_value = parse_judgment_report_status(report_text)
+    if status_value not in {"passed", "failed"}:
+        issues.append(
+            "semantic review workspace output status must be passed or failed"
+        )
+    if issues:
+        raise _semantic_review_output_contract_error(
+            stage=stage,
+            transcript=transcript,
+            issues=issues,
+        )
+    _verify_bound_semantic_review_workspace(workspace)
+    _write_semantic_artifact_text(
+        workspace.run_dir,
+        workspace.canonical_report_path,
+        report_text.rstrip() + "\n",
+    )
+    relative = _bound_semantic_relative_path(
+        workspace.run_dir,
+        workspace.canonical_report_path,
+    )
+    imported = _read_bound_semantic_artifact(workspace, relative)
+    expected_import = (report_text.rstrip() + "\n").encode("utf-8")
+    if hashlib.sha256(imported).digest() != hashlib.sha256(expected_import).digest():
+        raise RuntimeError(
+            "semantic review report import did not preserve validated output bytes"
+        )
+    append_state_snapshot(
+        workspace.run_dir / "state.txt",
+        {
+            f"review.semantic.{stage}.report.source": source,
+            f"review.semantic.{stage}.report.materialized_at": now_iso(),
+        },
+    )
+    return True
+
+
+@dataclass
+class _BoundSemanticRepairWorkspace:
+    lease: tempfile.TemporaryDirectory[str]
+    run_dir: Path
+    binding: RunRootBinding
+    root: Path
+    stage: str
+    round_number: int
+    prompt_path: Path
+    report_path: Path
+    canonical_report_path: Path
+    committed_prompt: str
+    submission_prompt: str
+    expected_input_digest: str
+    allowed_exact: set[Path]
+    allowed_prefixes: tuple[Path, ...]
+    canonical_baseline_sha256s: dict[Path, str | None]
+    private_mutable_sha256s: dict[Path, str]
+    private_immutable_sha256s: dict[Path, str]
+
+    def cleanup(self) -> None:
+        self.lease.cleanup()
+
+    def allows(self, relative: Path) -> bool:
+        if relative in self.allowed_exact:
+            return True
+        return any(
+            relative != prefix and relative.is_relative_to(prefix)
+            for prefix in self.allowed_prefixes
+        )
+
+
+def _semantic_repair_allowed_paths(
+    stage: str,
+) -> tuple[set[Path], tuple[Path, ...]]:
+    target = SEMANTIC_REVIEW_PRODUCER_TARGETS.get(stage)
+    raw_artifacts = target.get("artifacts") if isinstance(target, Mapping) else None
+    if not isinstance(raw_artifacts, list) or not raw_artifacts:
+        raise RuntimeError(
+            f"semantic repair stage has no approved mutable artifacts: {stage}"
+        )
+    exact: set[Path] = set()
+    prefixes: set[Path] = set()
+    for raw in raw_artifacts:
+        value = str(raw or "").strip().replace("\\", "/")
+        wildcard = value.endswith("/**")
+        normalized = value[:-3].rstrip("/") if wildcard else value
+        if any(character in normalized for character in "*?["):
+            raise RuntimeError(
+                f"semantic repair mutable artifact pattern is unsupported: {value}"
+            )
+        relative = _semantic_workspace_relpath(
+            normalized,
+            field="repair_mutable_artifact",
+        )
+        if relative is None:
+            raise RuntimeError(
+                f"semantic repair mutable artifact path is empty: {value}"
+            )
+        (prefixes if wildcard else exact).add(relative)
+    return exact, tuple(sorted(prefixes, key=lambda item: item.as_posix()))
+
+
+def _semantic_repair_scope_sources(
+    scope_bytes: bytes,
+) -> set[Path]:
+    try:
+        scope = json.loads(scope_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("semantic repair review scope is unreadable") from exc
+    raw_sources = scope.get("source_artifacts") if isinstance(scope, Mapping) else None
+    if not isinstance(raw_sources, list):
+        raise RuntimeError("semantic repair review scope lacks source_artifacts")
+    sources: set[Path] = set()
+    for index, raw in enumerate(raw_sources):
+        relative = _semantic_workspace_relpath(
+            raw,
+            field=f"repair_source_artifacts[{index}]",
+        )
+        if relative is None:
+            raise RuntimeError("semantic repair source artifact path is empty")
+        sources.add(relative)
+    return sources
+
+
+def _semantic_repair_workspace_digest(
+    *,
+    stage: str,
+    round_number: int,
+    canonical_sha256s: Mapping[Path, str | None],
+) -> str:
+    encoded = json.dumps(
+        {
+            "schema_version": "semantic_repair_workspace_v1",
+            "stage": stage,
+            "round_number": round_number,
+            "canonical_inputs": [
+                {
+                    "path": relative.as_posix(),
+                    "sha256": digest or "missing",
+                }
+                for relative, digest in sorted(
+                    canonical_sha256s.items(),
+                    key=lambda item: item[0].as_posix(),
+                )
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _prepare_bound_semantic_repair_workspace(
+    *,
+    run_dir: Path,
+    binding: RunRootBinding,
+    stage: str,
+    round_number: int,
+    committed_prompt: str,
+) -> _BoundSemanticRepairWorkspace:
+    _assert_bound_run_root(run_dir)
+    allowed_exact, allowed_prefixes = _semantic_repair_allowed_paths(stage)
+    review_relpaths = set(semantic_review_relpaths(stage).values())
+    repair_relpaths = semantic_repair_relpaths(stage, round_number)
+    prompt_relative = repair_relpaths["prompt"]
+    report_relative = repair_relpaths["report"]
+    commit_relative = repair_relpaths["commit"]
+    scope_relative = semantic_review_relpaths(stage)["scope"]
+    scope_bytes = read_regular_file_nofollow(
+        run_dir,
+        scope_relative,
+        expected_root_identity=binding.identity,
+    )
+    source_relpaths = _semantic_repair_scope_sources(scope_bytes)
+    existing_allowed: set[Path] = set()
+    for relative in allowed_exact:
+        if run_file_entry_exists(run_dir, relative):
+            existing_allowed.add(relative)
+    existing_allowed.update(
+        relative
+        for relative in source_relpaths
+        if any(
+            relative != prefix and relative.is_relative_to(prefix)
+            for prefix in allowed_prefixes
+        )
+    )
+    staged_relpaths = {
+        *review_relpaths,
+        prompt_relative,
+        report_relative,
+        commit_relative,
+        *source_relpaths,
+        *existing_allowed,
+    }
+    canonical_sha256s: dict[Path, str | None] = {}
+    canonical_bytes: dict[Path, bytes] = {}
+    for relative in sorted(staged_relpaths, key=lambda item: item.as_posix()):
+        data = read_regular_file_nofollow(
+            run_dir,
+            relative,
+            expected_root_identity=binding.identity,
+        )
+        canonical_bytes[relative] = data
+        canonical_sha256s[relative] = hashlib.sha256(data).hexdigest()
+    for relative in allowed_exact - existing_allowed:
+        canonical_sha256s[relative] = None
+    if canonical_bytes[prompt_relative].decode("utf-8") != committed_prompt:
+        raise RuntimeError(
+            "semantic repair committed prompt bytes changed before workspace staging"
+        )
+    expected_input_digest = _semantic_repair_workspace_digest(
+        stage=stage,
+        round_number=round_number,
+        canonical_sha256s=canonical_sha256s,
+    )
+    lease = tempfile.TemporaryDirectory(prefix="toc-semantic-repair-")
+    private_root = Path(lease.name)
+    immutable_sha256s: dict[Path, str] = {}
+    mutable_sha256s: dict[Path, str] = {}
+    try:
+        for relative, data in sorted(
+            canonical_bytes.items(), key=lambda item: item[0].as_posix()
+        ):
+            private = _rewrite_semantic_workspace_text(
+                data,
+                lexical_root=run_dir,
+                private_root=private_root,
+            )
+            destination = private_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(private)
+            writable = relative == report_relative or (
+                relative in allowed_exact
+                or any(
+                    relative != prefix and relative.is_relative_to(prefix)
+                    for prefix in allowed_prefixes
+                )
+            )
+            destination.chmod(0o600 if writable else 0o400)
+            digest = hashlib.sha256(private).hexdigest()
+            if relative == report_relative:
+                continue
+            if writable:
+                mutable_sha256s[relative] = digest
+            else:
+                immutable_sha256s[relative] = digest
+        for relative in allowed_exact:
+            (private_root / relative).parent.mkdir(parents=True, exist_ok=True)
+        for prefix in allowed_prefixes:
+            (private_root / prefix).mkdir(parents=True, exist_ok=True)
+        allowed_display = [
+            *[item.as_posix() for item in sorted(allowed_exact)],
+            *[f"{item.as_posix()}/**" for item in allowed_prefixes],
+        ]
+        submission_prompt = _rewrite_semantic_workspace_text(
+            committed_prompt.encode("utf-8"),
+            lexical_root=run_dir,
+            private_root=private_root,
+        ).decode("utf-8")
+        submission_prompt = submission_prompt.rstrip() + "\n\n" + "\n".join(
+            [
+                "## Trusted Immutable Repair Workspace Contract",
+                "",
+                f"- repair_input_digest: `{expected_input_digest}`",
+                "- The canonical run is not mounted as your working directory.",
+                "- Edit only these staged mutable paths: "
+                + json.dumps(allowed_display, ensure_ascii=False),
+                "- Do not create or modify any other workspace path.",
+                "- This isolated commit accepts UTF-8 text artifacts only; leave binary media regeneration to the orchestrator after repair.",
+                f"- Write `{report_relative.as_posix()}` with `status: done`, the exact `repair_input_digest`, and `changed_artifacts` exactly matching every file you changed.",
+                "",
+            ]
+        )
+        private_prompt_path = private_root / prompt_relative
+        private_prompt_path.chmod(0o600)
+        private_prompt_path.write_text(submission_prompt, encoding="utf-8")
+        private_prompt_path.chmod(0o400)
+        immutable_sha256s[prompt_relative] = hashlib.sha256(
+            submission_prompt.encode("utf-8")
+        ).hexdigest()
+        workspace = _BoundSemanticRepairWorkspace(
+            lease=lease,
+            run_dir=run_dir,
+            binding=binding,
+            root=private_root,
+            stage=stage,
+            round_number=round_number,
+            prompt_path=private_prompt_path,
+            report_path=private_root / report_relative,
+            canonical_report_path=run_dir / report_relative,
+            committed_prompt=committed_prompt,
+            submission_prompt=submission_prompt,
+            expected_input_digest=expected_input_digest,
+            allowed_exact=allowed_exact,
+            allowed_prefixes=allowed_prefixes,
+            canonical_baseline_sha256s=canonical_sha256s,
+            private_mutable_sha256s=mutable_sha256s,
+            private_immutable_sha256s=immutable_sha256s,
+        )
+        _assert_bound_run_root(run_dir)
+        return workspace
+    except BaseException:
+        lease.cleanup()
+        raise
+
+
+def _semantic_repair_report_text_from_transcript(
+    transcript: list[dict[str, Any]],
+) -> str | None:
+    finals: list[str] = []
+    for notification in transcript:
+        if notification.get("method") != "item/completed":
+            continue
+        params = notification.get("params")
+        item = params.get("item") if isinstance(params, Mapping) else None
+        if (
+            isinstance(item, Mapping)
+            and item.get("type") == "agentMessage"
+            and str(item.get("phase") or "").strip() == "final_answer"
+        ):
+            finals.append(str(item.get("text") or ""))
+    if not finals:
+        return None
+    candidate = finals[-1].strip()
+    if parse_judgment_report_status(candidate) != "done":
+        return None
+    return candidate.rstrip() + "\n"
+
+
+def _verify_bound_semantic_repair_canonical_baseline(
+    workspace: _BoundSemanticRepairWorkspace,
+) -> None:
+    _assert_bound_run_root(workspace.run_dir)
+    current_prompt = read_committed_semantic_repair_prompt(
+        workspace.run_dir,
+        workspace.stage,
+        round_number=workspace.round_number,
+        expected_root_identity=workspace.binding.identity,
+    )
+    if current_prompt != workspace.committed_prompt:
+        raise RuntimeError(
+            "semantic repair commit changed during private provider turn"
+        )
+    for relative, expected in workspace.canonical_baseline_sha256s.items():
+        if expected is None:
+            if run_file_entry_exists(workspace.run_dir, relative):
+                raise RuntimeError(
+                    f"semantic repair canonical artifact appeared during provider turn: {relative}"
+                )
+            continue
+        actual = hashlib.sha256(
+            read_regular_file_nofollow(
+                workspace.run_dir,
+                relative,
+                expected_root_identity=workspace.binding.identity,
+            )
+        ).hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"semantic repair canonical artifact changed during provider turn: {relative}"
+            )
+
+
+def _scan_bound_semantic_repair_workspace(
+    workspace: _BoundSemanticRepairWorkspace,
+) -> dict[Path, bytes]:
+    files: dict[Path, bytes] = {}
+    for path in workspace.root.rglob("*"):
+        opened = path.lstat()
+        if stat.S_ISDIR(opened.st_mode):
+            continue
+        relative = path.relative_to(workspace.root)
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise RuntimeError(
+                f"semantic repair workspace contains an unsafe output: {relative}"
+            )
+        files[relative] = _read_private_semantic_workspace_file(
+            path,
+            label=f"semantic repair workspace output {relative}",
+        )
+    return files
+
+
+def _import_bound_semantic_repair_outputs(
+    workspace: _BoundSemanticRepairWorkspace,
+    *,
+    transcript: list[dict[str, Any]],
+) -> list[str]:
+    report_from_agent: str | None = None
+    if not _private_semantic_repair_report_completed(workspace.report_path):
+        report_from_agent = _semantic_repair_report_text_from_transcript(
+            transcript
+        )
+    files = _scan_bound_semantic_repair_workspace(workspace)
+    for relative, expected in workspace.private_immutable_sha256s.items():
+        data = files.get(relative)
+        if data is None or hashlib.sha256(data).hexdigest() != expected:
+            raise RuntimeError(
+                f"semantic repair immutable workspace input changed: {relative}"
+            )
+    for relative in workspace.private_mutable_sha256s:
+        if relative not in files:
+            raise RuntimeError(
+                f"semantic repair deleted an approved artifact: {relative}"
+            )
+    report_relative = workspace.report_path.relative_to(workspace.root)
+    if report_from_agent is not None:
+        files[report_relative] = report_from_agent.encode("utf-8")
+    changed: list[Path] = []
+    for relative, data in files.items():
+        if relative == report_relative:
+            continue
+        if relative in workspace.private_immutable_sha256s:
+            continue
+        if not workspace.allows(relative):
+            raise RuntimeError(
+                f"semantic repair created an unapproved workspace artifact: {relative}"
+            )
+        if workspace.private_mutable_sha256s.get(relative) != hashlib.sha256(data).hexdigest():
+            changed.append(relative)
+    if not changed:
+        raise RuntimeError("semantic repair produced no approved artifact changes")
+    report_bytes = files.get(report_relative)
+    if report_bytes is None:
+        raise RuntimeError("semantic repair producer report is missing")
+    try:
+        report_text = report_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise RuntimeError("semantic repair producer report is not UTF-8") from exc
+    if parse_judgment_report_status(report_text) != "done":
+        raise RuntimeError("semantic repair producer report did not reach status: done")
+    reported_digests = _semantic_report_list_values_with_duplicates(
+        report_text,
+        "repair_input_digest",
+    )
+    if reported_digests != [workspace.expected_input_digest]:
+        raise RuntimeError(
+            "semantic repair producer report input digest is missing or stale"
+        )
+    reported_changes = _semantic_report_list_values_with_duplicates(
+        report_text,
+        "changed_artifacts",
+    )
+    changed_names = sorted(item.as_posix() for item in changed)
+    if sorted(reported_changes) != changed_names or len(reported_changes) != len(
+        changed_names
+    ):
+        raise RuntimeError(
+            "semantic repair producer report changed_artifacts does not match the validated diff"
+        )
+    _verify_bound_semantic_repair_canonical_baseline(workspace)
+    normalized_outputs: dict[Path, str] = {}
+    for relative in [*sorted(changed), report_relative]:
+        try:
+            text = files[relative].decode("utf-8")
+        except UnicodeError as exc:
+            raise RuntimeError(
+                f"semantic repair changed artifact is not UTF-8 text: {relative}"
+            ) from exc
+        normalized_outputs[relative] = _restore_semantic_workspace_text(
+            text,
+            private_root=workspace.root,
+            lexical_root=workspace.run_dir,
+        )
+    for relative in sorted(changed):
+        expected_before = workspace.canonical_baseline_sha256s.get(relative)
+        if expected_before is None:
+            if run_file_entry_exists(workspace.run_dir, relative):
+                raise RuntimeError(
+                    f"semantic repair import target appeared before publication: {relative}"
+                )
+        else:
+            current = hashlib.sha256(
+                read_regular_file_nofollow(
+                    workspace.run_dir,
+                    relative,
+                    expected_root_identity=workspace.binding.identity,
+                )
+            ).hexdigest()
+            if current != expected_before:
+                raise RuntimeError(
+                    f"semantic repair import target changed before publication: {relative}"
+                )
+        _write_semantic_artifact_text(
+            workspace.run_dir,
+            workspace.run_dir / relative,
+            normalized_outputs[relative],
+        )
+        imported = read_regular_file_nofollow(
+            workspace.run_dir,
+            relative,
+            expected_root_identity=workspace.binding.identity,
+        )
+        if imported != normalized_outputs[relative].encode("utf-8"):
+            raise RuntimeError(
+                f"semantic repair import bytes changed during publication: {relative}"
+            )
+    report_expected_before = workspace.canonical_baseline_sha256s[report_relative]
+    current_report = hashlib.sha256(
+        read_regular_file_nofollow(
+            workspace.run_dir,
+            report_relative,
+            expected_root_identity=workspace.binding.identity,
+        )
+    ).hexdigest()
+    if current_report != report_expected_before:
+        raise RuntimeError(
+            "semantic repair canonical report changed before publication"
+        )
+    _write_semantic_artifact_text(
+        workspace.run_dir,
+        workspace.canonical_report_path,
+        normalized_outputs[report_relative],
+    )
+    imported_report = read_regular_file_nofollow(
+        workspace.run_dir,
+        report_relative,
+        expected_root_identity=workspace.binding.identity,
+    )
+    if imported_report != normalized_outputs[report_relative].encode("utf-8"):
+        raise RuntimeError(
+            "semantic repair canonical report bytes changed during publication"
+        )
+    return changed_names
+
+
 async def _run_semantic_review_once(
     job_id: str,
     *,
@@ -17429,10 +19939,15 @@ async def _run_semantic_review_once(
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
+    binding = _assert_bound_run_root(run_dir)
     # API callers commonly hold output/<run_id> as a relative path.  App-server
     # cwd is process-relative, so resolve it once to avoid duplicating the run
     # path when the reviewer opens artifacts or writes its report.
-    run_dir = run_dir.resolve()
+    run_dir = (
+        Path(binding.lexical_root)
+        if binding is not None
+        else run_dir.resolve()
+    )
     if stage == "scene_detail":
         return await _run_scene_detail_sharded_semantic_review_once(
             job_id,
@@ -17450,7 +19965,8 @@ async def _run_semantic_review_once(
             final_attempt=final_attempt,
         )
 
-    subprocess.run(
+    _run_bound_subprocess(
+        run_dir,
         [
             sys.executable,
             str(ROOT / "scripts" / "build-semantic-review-pack.py"),
@@ -17482,16 +19998,43 @@ async def _run_semantic_review_once(
         prompt_path=prompt_path,
         report_path=report_path,
     )
-    client = create_codex_app_server_client(
-        cwd=run_dir,
-        scrub_sensitive_env=True,
+    review_workspace = _prepare_bound_semantic_review_workspace(
+        run_dir=run_dir,
+        collection_path=collection_path,
+        scope_path=scope_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
     )
+    provider_cwd = review_workspace.root if review_workspace else run_dir
+    provider_prompt = (
+        review_workspace.prompt_path.read_text(encoding="utf-8")
+        if review_workspace
+        else prompt
+    )
+    provider_report_path = (
+        review_workspace.report_path if review_workspace else report_path
+    )
+    provider_is_completed = (
+        _private_semantic_review_report_completed
+        if review_workspace is not None
+        else _semantic_review_report_completed
+    )
+    try:
+        client = create_codex_app_server_client(
+            cwd=provider_cwd,
+            scrub_sensitive_env=True,
+        )
+    except BaseException:
+        if review_workspace is not None:
+            review_workspace.cleanup()
+        raise
     transcript: list[dict[str, Any]] = []
     completed_from_report = False
     try:
+        _assert_bound_run_root(run_dir)
         thread_id = await asyncio.wait_for(
             client.start_thread(
-                cwd=run_dir,
+                cwd=provider_cwd,
                 approval_policy="never",
                 sandbox="read-only",
             ),
@@ -17500,20 +20043,33 @@ async def _run_semantic_review_once(
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
-            text=prompt,
-            cwd=run_dir,
+            text=provider_prompt,
+            cwd=provider_cwd,
             timeout_seconds=semantic_review_timeout_seconds(),
-            report_path=report_path,
-            is_completed=_semantic_review_report_completed,
+            report_path=provider_report_path,
+            is_completed=provider_is_completed,
         )
-        if not _semantic_review_report_completed(report_path):
-            _materialize_semantic_report_from_transcript(
+        _assert_bound_run_root(run_dir)
+        if review_workspace is not None or not _semantic_review_report_completed(
+            report_path
+        ):
+            materialized = _materialize_semantic_report_from_transcript(
                 run_dir=run_dir,
                 report_path=report_path,
                 transcript=transcript,
                 stage=stage,
-                source="agent_message_transport_fallback",
+                source=(
+                    "immutable_workspace_agent_output"
+                    if review_workspace is not None
+                    else "agent_message_transport_fallback"
+                ),
+                workspace=review_workspace,
             )
+            if review_workspace is not None and not materialized:
+                raise _semantic_review_output_contract_error(
+                    stage=stage,
+                    transcript=transcript,
+                )
         if not _semantic_review_report_completed(report_path):
             raise _semantic_review_output_contract_error(
                 stage=stage,
@@ -17539,19 +20095,26 @@ async def _run_semantic_review_once(
             )
     except Exception as exc:
         transport_kind = classify_codex_transport_error(str(exc))
-        if is_codex_transport_error(exc) and not _semantic_review_report_completed(
-            report_path
+        if is_codex_transport_error(exc) and (
+            review_workspace is not None
+            or not _semantic_review_report_completed(report_path)
         ):
             recovered_transcript = getattr(exc, "transcript", transcript)
             if isinstance(recovered_transcript, list):
                 transcript = recovered_transcript
-                _materialize_semantic_report_from_transcript(
+                materialized = _materialize_semantic_report_from_transcript(
                     run_dir=run_dir,
                     report_path=report_path,
                     transcript=transcript,
                     stage=stage,
                     source="agent_message_transport_exception_fallback",
+                    workspace=review_workspace,
                 )
+                if review_workspace is not None and not materialized:
+                    raise _semantic_review_output_contract_error(
+                        stage=stage,
+                        transcript=transcript,
+                    )
         if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
             transcript = getattr(exc, "transcript", transcript)
             write_app_server_debug_log(
@@ -17601,7 +20164,11 @@ async def _run_semantic_review_once(
             )
             raise
     finally:
-        await client.stop()
+        try:
+            await client.stop()
+        finally:
+            if review_workspace is not None:
+                review_workspace.cleanup()
     if report_path.exists() and _semantic_review_report_completed(report_path):
         report_text = report_path.read_text(encoding="utf-8", errors="replace")
         if not re.search(
@@ -17815,7 +20382,26 @@ def _semantic_scope_input_digest(scope_path: Path) -> str:
 
 
 def _write_semantic_artifact_text(run_dir: Path, path: Path, text: str) -> Path:
-    return safe_semantic_write_text(run_dir.resolve(), path, text)
+    binding = _assert_bound_run_root(run_dir)
+    run_root = (
+        Path(binding.lexical_root)
+        if binding is not None
+        else run_dir.resolve()
+    )
+    try:
+        relative = Path(os.path.abspath(os.fspath(path))).relative_to(
+            os.path.abspath(os.fspath(run_dir))
+        )
+    except ValueError:
+        relative = path
+    result = safe_semantic_write_text(
+        run_root,
+        run_root / relative,
+        text,
+        expected_root_identity=(binding.identity if binding else None),
+    )
+    _assert_bound_run_root(run_dir)
+    return result
 
 
 def _semantic_scope_artifact_path(
@@ -17831,6 +20417,21 @@ def _semantic_scope_artifact_path(
         part in {"", ".", ".."} for part in relative.parts
     ):
         raise RuntimeError(f"semantic shard artifact {key} is not a safe run-relative path")
+    binding = _assert_bound_run_root(run_dir)
+    if binding is not None:
+        run_root = Path(binding.lexical_root)
+        candidate = run_root / relative
+        try:
+            read_regular_file_nofollow(
+                run_root,
+                relative,
+                expected_root_identity=binding.identity,
+            )
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"semantic shard artifact {key} escapes or is missing"
+            ) from exc
+        return candidate
     run_root = run_dir.resolve(strict=True)
     candidate = run_root / relative
     try:
@@ -18372,8 +20973,10 @@ async def _run_image_prompt_sharded_semantic_review_once(
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
+    _assert_bound_run_root(run_dir)
     stage = "image_prompt"
-    subprocess.run(
+    _run_bound_subprocess(
+        run_dir,
         [
             sys.executable,
             str(ROOT / "scripts" / "build-semantic-review-pack.py"),
@@ -18987,41 +21590,69 @@ async def _run_image_prompt_scene_shard_review(
             canonical_report_path,
             message=f"image_prompt shard {shard_index}/{total_shards} started: {shard_id}",
         )
-        client = create_codex_app_server_client(
-            cwd=run_dir,
-            scrub_sensitive_env=True,
+        prompt = _semantic_review_prompt_for_attempt(
+            prompt_path.read_text(encoding="utf-8"),
+            stage="image_prompt",
+            final_attempt=final_attempt,
         )
+        _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
+        _refresh_semantic_review_input_digest(
+            run_dir=run_dir,
+            scope_path=scope_path,
+            collection_path=collection_path,
+            prompt_path=prompt_path,
+            report_path=report_path,
+        )
+        review_workspace = _prepare_bound_semantic_review_workspace(
+            run_dir=run_dir,
+            collection_path=collection_path,
+            scope_path=scope_path,
+            prompt_path=prompt_path,
+            report_path=report_path,
+        )
+        provider_cwd = review_workspace.root if review_workspace else run_dir
+        provider_prompt = (
+            review_workspace.prompt_path.read_text(encoding="utf-8")
+            if review_workspace
+            else prompt
+        )
+        provider_report_path = (
+            review_workspace.report_path if review_workspace else report_path
+        )
+        provider_is_completed = (
+            _private_semantic_review_report_completed
+            if review_workspace is not None
+            else _semantic_review_report_completed
+        )
+        try:
+            client = create_codex_app_server_client(
+                cwd=provider_cwd,
+                scrub_sensitive_env=True,
+            )
+        except BaseException:
+            if review_workspace is not None:
+                review_workspace.cleanup()
+            raise
         transcript: list[dict[str, Any]] = []
         try:
+            _assert_bound_run_root(run_dir)
             thread_id = await asyncio.wait_for(
                 client.start_thread(
-                    cwd=run_dir,
+                    cwd=provider_cwd,
                     approval_policy="never",
                     sandbox="read-only",
                 ),
                 timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
             )
-            prompt = _semantic_review_prompt_for_attempt(
-                prompt_path.read_text(encoding="utf-8"),
-                stage="image_prompt",
-                final_attempt=final_attempt,
-            )
-            _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
-            _refresh_semantic_review_input_digest(
-                run_dir=run_dir,
-                scope_path=scope_path,
-                collection_path=collection_path,
-                prompt_path=prompt_path,
-                report_path=report_path,
-            )
+            _assert_bound_run_root(run_dir)
             transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
                 client,
                 thread_id=thread_id,
-                text=prompt,
-                cwd=run_dir,
+                text=provider_prompt,
+                cwd=provider_cwd,
                 timeout_seconds=semantic_review_timeout_seconds(),
-                report_path=report_path,
-                is_completed=_semantic_review_report_completed,
+                report_path=provider_report_path,
+                is_completed=provider_is_completed,
                 progress_callback=lambda notification: _write_image_prompt_shard_activity(
                     run_dir=run_dir,
                     report_path=report_path,
@@ -19029,6 +21660,27 @@ async def _run_image_prompt_scene_shard_review(
                     notification=notification,
                 ),
             )
+            _assert_bound_run_root(run_dir)
+            if review_workspace is not None or not _semantic_review_report_completed(
+                report_path
+            ):
+                materialized = _materialize_semantic_report_from_transcript(
+                    run_dir=run_dir,
+                    report_path=report_path,
+                    transcript=transcript,
+                    stage="image_prompt",
+                    source=(
+                        "immutable_workspace_agent_output"
+                        if review_workspace is not None
+                        else "agent_message_transport_fallback"
+                    ),
+                    workspace=review_workspace,
+                )
+                if review_workspace is not None and not materialized:
+                    raise _semantic_review_output_contract_error(
+                        stage="image_prompt",
+                        transcript=transcript,
+                    )
             if completed_from_report:
                 write_app_server_debug_log(
                     run_dir=run_dir,
@@ -19049,13 +21701,14 @@ async def _run_image_prompt_scene_shard_review(
                     transcript=transcript,
                 )
         except Exception as exc:
-            if is_codex_transport_error(exc) and not _semantic_review_report_completed(
-                report_path
+            if is_codex_transport_error(exc) and (
+                review_workspace is not None
+                or not _semantic_review_report_completed(report_path)
             ):
                 recovered_transcript = getattr(exc, "transcript", transcript)
                 if isinstance(recovered_transcript, list):
                     transcript = recovered_transcript
-                    _materialize_semantic_report_from_transcript(
+                    materialized = _materialize_semantic_report_from_transcript(
                         run_dir=run_dir,
                         report_path=report_path,
                         transcript=transcript,
@@ -19063,7 +21716,13 @@ async def _run_image_prompt_scene_shard_review(
                         source=(
                             "agent_message_transport_exception_fallback"
                         ),
+                        workspace=review_workspace,
                     )
+                    if review_workspace is not None and not materialized:
+                        raise _semantic_review_output_contract_error(
+                            stage="image_prompt",
+                            transcript=transcript,
+                        )
             if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
                 transcript = getattr(exc, "transcript", transcript)
             elif is_codex_transport_error(exc):
@@ -19096,15 +21755,20 @@ async def _run_image_prompt_scene_shard_review(
             else:
                 raise
         finally:
-            await client.stop()
+            try:
+                await client.stop()
+            finally:
+                if review_workspace is not None:
+                    review_workspace.cleanup()
 
-        if not _semantic_review_report_completed(report_path):
-            report_from_agent = _semantic_report_text_from_transcript(
-                transcript if isinstance(transcript, list) else [],
-                "image_prompt",
+        if review_workspace is None and not _semantic_review_report_completed(report_path):
+            _materialize_semantic_report_from_transcript(
+                run_dir=run_dir,
+                report_path=report_path,
+                transcript=transcript if isinstance(transcript, list) else [],
+                stage="image_prompt",
+                source="agent_message_transport_fallback",
             )
-            if report_from_agent is not None:
-                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
         if not _semantic_review_report_completed(report_path):
             output_contract_error = _semantic_review_output_contract_error(
                 stage="image_prompt",
@@ -19287,8 +21951,10 @@ async def _run_scene_detail_sharded_semantic_review_once(
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
+    _assert_bound_run_root(run_dir)
     stage = "scene_detail"
-    subprocess.run(
+    _run_bound_subprocess(
+        run_dir,
         [
             sys.executable,
             str(ROOT / "scripts" / "build-semantic-review-pack.py"),
@@ -19761,42 +22427,69 @@ async def _run_scene_detail_shard_review(
             status="pending",
             message=f"scene_detail shard {entry_index}/{total_entries} started: {entry_id}",
         )
-        client = create_codex_app_server_client(
-            cwd=run_dir,
-            scrub_sensitive_env=True,
+        prompt = _semantic_review_prompt_for_attempt(
+            prompt_path.read_text(encoding="utf-8"),
+            stage="scene_detail",
+            final_attempt=final_attempt,
         )
+        _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
+        _refresh_semantic_review_input_digest(
+            run_dir=run_dir,
+            scope_path=scope_path,
+            collection_path=collection_path,
+            prompt_path=prompt_path,
+            report_path=report_path,
+        )
+        review_workspace = _prepare_bound_semantic_review_workspace(
+            run_dir=run_dir,
+            collection_path=collection_path,
+            scope_path=scope_path,
+            prompt_path=prompt_path,
+            report_path=report_path,
+        )
+        provider_cwd = review_workspace.root if review_workspace else run_dir
+        provider_prompt = (
+            review_workspace.prompt_path.read_text(encoding="utf-8")
+            if review_workspace
+            else prompt
+        )
+        provider_report_path = (
+            review_workspace.report_path if review_workspace else report_path
+        )
+        provider_is_completed = (
+            _private_semantic_review_report_completed
+            if review_workspace is not None
+            else _semantic_review_report_completed
+        )
+        try:
+            client = create_codex_app_server_client(
+                cwd=provider_cwd,
+                scrub_sensitive_env=True,
+            )
+        except BaseException:
+            if review_workspace is not None:
+                review_workspace.cleanup()
+            raise
         transcript: list[dict[str, Any]] = []
         try:
+            _assert_bound_run_root(run_dir)
             thread_id = await asyncio.wait_for(
                 client.start_thread(
-                    cwd=run_dir,
+                    cwd=provider_cwd,
                     approval_policy="never",
                     sandbox="read-only",
                 ),
                 timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
             )
-            prompt = prompt_path.read_text(encoding="utf-8")
-            prompt = _semantic_review_prompt_for_attempt(
-                prompt,
-                stage="scene_detail",
-                final_attempt=final_attempt,
-            )
-            _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
-            _refresh_semantic_review_input_digest(
-                run_dir=run_dir,
-                scope_path=scope_path,
-                collection_path=collection_path,
-                prompt_path=prompt_path,
-                report_path=report_path,
-            )
+            _assert_bound_run_root(run_dir)
             transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
                 client,
                 thread_id=thread_id,
-                text=prompt,
-                cwd=run_dir,
+                text=provider_prompt,
+                cwd=provider_cwd,
                 timeout_seconds=semantic_review_timeout_seconds(),
-                report_path=report_path,
-                is_completed=_semantic_review_report_completed,
+                report_path=provider_report_path,
+                is_completed=provider_is_completed,
                 progress_callback=lambda notification: _write_scene_detail_shard_activity(
                     run_dir=run_dir,
                     report_path=report_path,
@@ -19804,6 +22497,27 @@ async def _run_scene_detail_shard_review(
                     notification=notification,
                 ),
             )
+            _assert_bound_run_root(run_dir)
+            if review_workspace is not None or not _semantic_review_report_completed(
+                report_path
+            ):
+                materialized = _materialize_semantic_report_from_transcript(
+                    run_dir=run_dir,
+                    report_path=report_path,
+                    transcript=transcript,
+                    stage="scene_detail",
+                    source=(
+                        "immutable_workspace_agent_output"
+                        if review_workspace is not None
+                        else "agent_message_transport_fallback"
+                    ),
+                    workspace=review_workspace,
+                )
+                if review_workspace is not None and not materialized:
+                    raise _semantic_review_output_contract_error(
+                        stage="scene_detail",
+                        transcript=transcript,
+                    )
             if completed_from_report:
                 write_app_server_debug_log(
                     run_dir=run_dir,
@@ -19828,13 +22542,14 @@ async def _run_scene_detail_shard_review(
                 )
         except Exception as exc:
             transport_kind = classify_codex_transport_error(str(exc))
-            if is_codex_transport_error(exc) and not _semantic_review_report_completed(
-                report_path
+            if is_codex_transport_error(exc) and (
+                review_workspace is not None
+                or not _semantic_review_report_completed(report_path)
             ):
                 recovered_transcript = getattr(exc, "transcript", transcript)
                 if isinstance(recovered_transcript, list):
                     transcript = recovered_transcript
-                    _materialize_semantic_report_from_transcript(
+                    materialized = _materialize_semantic_report_from_transcript(
                         run_dir=run_dir,
                         report_path=report_path,
                         transcript=transcript,
@@ -19842,7 +22557,13 @@ async def _run_scene_detail_shard_review(
                         source=(
                             "agent_message_transport_exception_fallback"
                         ),
+                        workspace=review_workspace,
                     )
+                    if review_workspace is not None and not materialized:
+                        raise _semantic_review_output_contract_error(
+                            stage="scene_detail",
+                            transcript=transcript,
+                        )
             if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
                 transcript = getattr(exc, "transcript", transcript)
                 write_app_server_debug_log(
@@ -19916,14 +22637,19 @@ async def _run_scene_detail_shard_review(
                 )
                 raise
         finally:
-            await client.stop()
-        if not _semantic_review_report_completed(report_path):
-            report_from_agent = _semantic_report_text_from_transcript(
-                transcript if isinstance(transcript, list) else [],
-                "scene_detail",
+            try:
+                await client.stop()
+            finally:
+                if review_workspace is not None:
+                    review_workspace.cleanup()
+        if review_workspace is None and not _semantic_review_report_completed(report_path):
+            _materialize_semantic_report_from_transcript(
+                run_dir=run_dir,
+                report_path=report_path,
+                transcript=transcript if isinstance(transcript, list) else [],
+                stage="scene_detail",
+                source="agent_message_transport_fallback",
             )
-            if report_from_agent is not None:
-                _write_semantic_artifact_text(run_dir, report_path, report_from_agent)
         if not _semantic_review_report_completed(report_path):
             output_contract_error = _semantic_review_output_contract_error(
                 stage="scene_detail",
@@ -20429,24 +23155,35 @@ def _write_scene_detail_shard_aggregate_report(
     )
 
 
-def _semantic_repair_report_completed(report_path: Path) -> bool:
-    if not report_path.exists():
-        return False
-    for raw in report_path.read_text(encoding="utf-8", errors="replace").splitlines():
+def _semantic_repair_report_text_completed(report_text: str) -> bool:
+    for raw in report_text.splitlines():
         line = raw.strip().lower()
         if line.startswith("status:"):
             return line.split(":", 1)[1].strip(" `\"'") == "done"
     return False
 
 
-def _semantic_review_report_completed(report_path: Path) -> bool:
+def _semantic_repair_report_completed(report_path: Path) -> bool:
     if not report_path.exists():
         return False
-    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    return _semantic_repair_report_text_completed(
+        report_path.read_text(encoding="utf-8", errors="replace")
+    )
+
+
+def _semantic_review_report_text_completed(report_text: str) -> bool:
     if "`...`" in report_text or "- `...`" in report_text:
         return False
     status = parse_judgment_report_status(report_text)
     return bool(status and status != "pending")
+
+
+def _semantic_review_report_completed(report_path: Path) -> bool:
+    if not report_path.exists():
+        return False
+    return _semantic_review_report_text_completed(
+        report_path.read_text(encoding="utf-8", errors="replace")
+    )
 
 
 SEMANTIC_TURN_ARTIFACT_POLL_SECONDS = 2.0
@@ -20608,7 +23345,15 @@ def _materialize_semantic_report_from_transcript(
     transcript: list[dict[str, Any]],
     stage: str,
     source: str,
+    workspace: _BoundSemanticReviewWorkspace | None = None,
 ) -> bool:
+    if workspace is not None:
+        return _import_bound_semantic_review_report(
+            workspace,
+            transcript=transcript,
+            stage=stage,
+            source=source,
+        )
     if _semantic_review_report_completed(report_path):
         return True
     report_from_agent = _semantic_report_text_from_transcript(
@@ -20864,13 +23609,19 @@ async def _run_semantic_review_producer_repair(
     max_attempts: int,
     errors: tuple[str, ...],
 ) -> None:
-    run_dir = run_dir.resolve()
+    binding = _assert_bound_run_root(run_dir)
+    run_dir = (
+        Path(binding.lexical_root)
+        if binding is not None
+        else run_dir.resolve()
+    )
     paths = write_semantic_repair_prompt(
         run_dir,
         stage,
         round_number=round_number,
         max_attempts=max_attempts,
         errors=errors,
+        expected_root_identity=(binding.identity if binding else None),
     )
     source_fingerprint_before = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
     target_selectors = _semantic_repair_target_selectors(run_dir, stage)
@@ -20936,30 +23687,92 @@ async def _run_semantic_review_producer_repair(
 
     completion_log_status = "completed"
     completion_log_response: dict[str, Any] = {"errorCount": len(errors)}
-    prompt = paths["prompt"].read_text(encoding="utf-8")
-    client = create_codex_app_server_client(
-        cwd=run_dir,
-        scrub_sensitive_env=True,
+    prompt = read_committed_semantic_repair_prompt(
+        run_dir,
+        stage,
+        round_number=round_number,
+        expected_root_identity=(binding.identity if binding else None),
     )
+    repair_workspace = (
+        _prepare_bound_semantic_repair_workspace(
+            run_dir=run_dir,
+            binding=binding,
+            stage=stage,
+            round_number=round_number,
+            committed_prompt=prompt,
+        )
+        if binding is not None
+        else None
+    )
+    provider_cwd = repair_workspace.root if repair_workspace else run_dir
+    provider_report_path = (
+        repair_workspace.report_path if repair_workspace else paths["report"]
+    )
+    provider_is_completed = (
+        _private_semantic_repair_report_completed
+        if repair_workspace is not None
+        else _semantic_repair_report_completed
+    )
+    try:
+        client = create_codex_app_server_client(
+            cwd=provider_cwd,
+            scrub_sensitive_env=True,
+        )
+    except BaseException:
+        if repair_workspace is not None:
+            repair_workspace.cleanup()
+        raise
     transcript: list[dict[str, Any]] = []
+    workspace_changed_artifacts: list[str] | None = None
     try:
         thread_id = await asyncio.wait_for(
             client.start_thread(
-                cwd=run_dir,
+                cwd=provider_cwd,
                 approval_policy="never",
                 sandbox="workspace-write",
             ),
             timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
         )
+        submission_prompt = read_committed_semantic_repair_prompt(
+            run_dir,
+            stage,
+            round_number=round_number,
+            expected_root_identity=(binding.identity if binding else None),
+        )
+        if submission_prompt != prompt:
+            raise RuntimeError(
+                "semantic repair commit changed before provider turn submission"
+            )
+        if repair_workspace is not None:
+            _assert_bound_run_root(run_dir)
+            submission_prompt = repair_workspace.submission_prompt
         transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
-            text=prompt,
-            cwd=run_dir,
+            text=submission_prompt,
+            cwd=provider_cwd,
             timeout_seconds=semantic_repair_timeout_seconds(),
-            report_path=paths["report"],
-            is_completed=_semantic_repair_report_completed,
+            report_path=provider_report_path,
+            is_completed=provider_is_completed,
+            progress_callback=(
+                (
+                    lambda notification: _write_semantic_turn_activity_marker(
+                        run_dir,
+                        paths["report"],
+                        notification,
+                    )
+                )
+                if repair_workspace is not None
+                else None
+            ),
         )
+        if repair_workspace is not None:
+            _assert_bound_run_root(run_dir)
+            transcript = transcript if isinstance(transcript, list) else []
+            workspace_changed_artifacts = _import_bound_semantic_repair_outputs(
+                repair_workspace,
+                transcript=transcript,
+            )
         if completed_from_report:
             write_app_server_debug_log(
                 run_dir=run_dir,
@@ -20977,7 +23790,25 @@ async def _run_semantic_review_producer_repair(
                 transcript=transcript,
             )
     except Exception as exc:
-        if is_codex_transport_error(exc) and _semantic_repair_report_completed(paths["report"]):
+        if repair_workspace is not None and is_codex_transport_error(exc):
+            recovered_transcript = getattr(exc, "transcript", transcript)
+            if isinstance(recovered_transcript, list):
+                transcript = recovered_transcript
+                try:
+                    workspace_changed_artifacts = _import_bound_semantic_repair_outputs(
+                        repair_workspace,
+                        transcript=transcript,
+                    )
+                except RuntimeError:
+                    pass
+        if (
+            is_codex_transport_error(exc)
+            and _semantic_repair_report_completed(paths["report"])
+            and (
+                repair_workspace is None
+                or workspace_changed_artifacts is not None
+            )
+        ):
             transcript = getattr(exc, "transcript", transcript)
             write_app_server_debug_log(
                 run_dir=run_dir,
@@ -21006,7 +23837,7 @@ async def _run_semantic_review_producer_repair(
             if is_codex_transport_error(exc):
                 source_fingerprint_after = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
                 changed_artifacts = _changed_semantic_repair_artifacts(source_fingerprint_before, source_fingerprint_after)
-                if changed_artifacts:
+                if changed_artifacts and repair_workspace is None:
                     salvaged_transport = True
                     transcript = getattr(exc, "transcript", transcript)
                     completion_log_status = "completed_after_source_artifact_change_before_report"
@@ -21110,10 +23941,17 @@ async def _run_semantic_review_producer_repair(
                 )
                 raise
     finally:
-        await client.stop()
+        try:
+            await client.stop()
+        finally:
+            if repair_workspace is not None:
+                repair_workspace.cleanup()
 
     source_fingerprint_after = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
-    changed_artifacts = _changed_semantic_repair_artifacts(source_fingerprint_before, source_fingerprint_after)
+    changed_artifacts = workspace_changed_artifacts or _changed_semantic_repair_artifacts(
+        source_fingerprint_before,
+        source_fingerprint_after,
+    )
     report_status = _semantic_repair_report_status(paths["report"])
     done_updates = semantic_repair_state_updates(
         stage,
@@ -21230,6 +24068,101 @@ async def _run_create_job(
     create_mode: str = CREATE_MODE_NORMAL,
     stop_target: str = "p680",
     target_duration_seconds: int = 300,
+    expected_run_identity: tuple[int, int] | None = None,
+    reservation: _FrontendCreateRunReservation | None = None,
+) -> None:
+    """Keep every server-side create step bound to the reserved run inode."""
+
+    if reservation is not None:
+        if reservation.run_id != run_id:
+            raise FrontendCreateLockError(
+                "frontend-create reservation run id changed"
+            )
+        expected_run_identity = reservation.identity
+    if expected_run_identity is None:
+        await _run_create_job_bound(
+            job_id,
+            title=title,
+            source=source,
+            run_id=run_id,
+            generate_images=generate_images,
+            create_mode=create_mode,
+            stop_target=stop_target,
+            target_duration_seconds=target_duration_seconds,
+            expected_run_identity=None,
+        )
+        return
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    run_dir = output_root(ROOT) / run_id
+    try:
+        with bind_run_root(
+            run_dir,
+            expected_identity=expected_run_identity,
+            descriptor=(
+                reservation.descriptor
+                if reservation is not None
+                else None
+            ),
+        ):
+            await _run_create_job_bound(
+                job_id,
+                title=title,
+                source=source,
+                run_id=run_id,
+                generate_images=generate_images,
+                create_mode=create_mode,
+                stop_target=stop_target,
+                target_duration_seconds=target_duration_seconds,
+                expected_run_identity=expected_run_identity,
+                retained_reservation=reservation,
+            )
+    except asyncio.CancelledError:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": "ToC作成がキャンセルされました",
+                "errorCode": "CancelledError",
+                "message": "作成中断",
+            },
+            write_run_log=False,
+        )
+        raise
+    except Exception as exc:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": _create_run_error_message(exc),
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+            write_run_log=False,
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+        if reservation is not None:
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=reservation.identity,
+                reservation=reservation,
+            )
+            reservation.close()
+
+
+async def _run_create_job_bound(
+    job_id: str,
+    *,
+    title: str,
+    source: str,
+    run_id: str,
+    generate_images: bool = True,
+    create_mode: str = CREATE_MODE_NORMAL,
+    stop_target: str = "p680",
+    target_duration_seconds: int = 300,
+    expected_run_identity: tuple[int, int] | None = None,
+    retained_reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
     if stop_target not in CREATE_STOP_TARGETS:
         raise ValueError("stop_target must be p650 or p680")
@@ -21246,9 +24179,35 @@ async def _run_create_job(
     job_started = time.monotonic()
     try:
         async with _run_execution_leases_guard:
-            lease_already_reserved = job_id in _run_execution_leases
-        if not lease_already_reserved:
-            await _acquire_run_execution_lease(job_id, run_dir_for_log)
+            execution_lease = _run_execution_leases.get(job_id)
+        if execution_lease is None:
+            execution_lease = await _acquire_run_execution_lease(
+                job_id,
+                run_dir_for_log,
+                **(
+                    {
+                        "run_descriptor": retained_reservation.descriptor,
+                        "expected_run_identity": retained_reservation.identity,
+                    }
+                    if retained_reservation is not None
+                    else {
+                        "expected_run_identity": expected_run_identity,
+                    }
+                ),
+            )
+        helper_identity = (
+            execution_lease.identity
+            if isinstance(execution_lease, _RunExecutionLease)
+            else expected_run_identity
+        )
+        helper_binding = {
+            "expected_run_identity": helper_identity,
+            **(
+                {"run_descriptor": execution_lease.run_descriptor}
+                if isinstance(execution_lease, _RunExecutionLease)
+                else {}
+            ),
+        } if helper_identity is not None else {}
         write_app_server_debug_log(
             run_dir=run_dir_for_log,
             operation="create_job_step",
@@ -21272,6 +24231,7 @@ async def _run_create_job(
                 run_id=run_id,
                 stop_target=stop_target,
                 target_duration_seconds=target_duration_seconds,
+                **helper_binding,
             )
         else:
             await _set_create_job(job_id, {"message": f"本家ToC工程を画像生成なしで{stop_target}まで実行中", "stopTarget": stop_target, "currentProcess": "p000"})
@@ -21282,6 +24242,7 @@ async def _run_create_job(
                 stop_target=stop_target,
                 target_duration_seconds=target_duration_seconds,
                 materialize_only=True,
+                **helper_binding,
             )
         await _sync_process_current_process(job_id, run_id)
         if generate_images and create_mode == CREATE_MODE_SCENE_STORYBOARD:
@@ -21336,6 +24297,18 @@ async def _run_create_job(
             await _set_create_job(job_id, {"status": "paused", "message": "p650で中断しました", "currentProcess": "p650"})
         else:
             await _set_create_job(job_id, {"status": "completed", "message": "作成完了", "currentProcess": "p680"})
+    except FrontendCreateLockError as exc:
+        detail = _create_run_error_message(exc)
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+            write_run_log=False,
+        )
     except Exception as exc:
         with suppress(Exception):
             _invalidate_published_image_generation_review_handoff(
@@ -21345,7 +24318,11 @@ async def _run_create_job(
             )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
-        _cleanup_unscaffolded_run(run_id)
+        if retained_reservation is None:
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=expected_run_identity,
+            )
         detail = _create_run_error_message(exc)
         try:
             run_dir = safe_run_dir(run_id, ROOT)
@@ -21406,15 +24383,119 @@ async def _run_world_walk_create_job(
     source_run_id: str,
     run_id: str,
     target_duration_seconds: int = 300,
+    expected_run_identity: tuple[int, int] | None = None,
+    reservation: _FrontendCreateRunReservation | None = None,
+) -> None:
+    """Keep world-walk orchestration on its atomically reserved run inode."""
+
+    if reservation is not None:
+        if reservation.run_id != run_id:
+            raise FrontendCreateLockError(
+                "frontend-create reservation run id changed"
+            )
+        expected_run_identity = reservation.identity
+    if expected_run_identity is None:
+        await _run_world_walk_create_job_bound(
+            job_id,
+            title=title,
+            source_run_id=source_run_id,
+            run_id=run_id,
+            target_duration_seconds=target_duration_seconds,
+            expected_run_identity=None,
+        )
+        return
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    run_dir = output_root(ROOT) / run_id
+    try:
+        with bind_run_root(
+            run_dir,
+            expected_identity=expected_run_identity,
+            descriptor=(
+                reservation.descriptor
+                if reservation is not None
+                else None
+            ),
+        ):
+            await _run_world_walk_create_job_bound(
+                job_id,
+                title=title,
+                source_run_id=source_run_id,
+                run_id=run_id,
+                target_duration_seconds=target_duration_seconds,
+                expected_run_identity=expected_run_identity,
+                retained_reservation=reservation,
+            )
+    except asyncio.CancelledError:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": "ToC作成がキャンセルされました",
+                "errorCode": "CancelledError",
+                "message": "作成中断",
+            },
+            write_run_log=False,
+        )
+        raise
+    except Exception as exc:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": _create_run_error_message(exc),
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+            write_run_log=False,
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+        if reservation is not None:
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=reservation.identity,
+                reservation=reservation,
+            )
+            reservation.close()
+
+
+async def _run_world_walk_create_job_bound(
+    job_id: str,
+    *,
+    title: str,
+    source_run_id: str,
+    run_id: str,
+    target_duration_seconds: int = 300,
+    expected_run_identity: tuple[int, int] | None = None,
+    retained_reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
     try:
         _require_world_walk_source_run(source_run_id)
         async with _run_execution_leases_guard:
-            lease_already_reserved = job_id in _run_execution_leases
-        if not lease_already_reserved:
-            await _acquire_run_execution_lease(job_id, run_dir)
+            execution_lease = _run_execution_leases.get(job_id)
+        if execution_lease is None:
+            execution_lease = await _acquire_run_execution_lease(
+                job_id,
+                run_dir,
+                **(
+                    {
+                        "run_descriptor": retained_reservation.descriptor,
+                        "expected_run_identity": retained_reservation.identity,
+                    }
+                    if retained_reservation is not None
+                    else {
+                        "expected_run_identity": expected_run_identity,
+                    }
+                ),
+            )
+        helper_identity = (
+            execution_lease.identity
+            if isinstance(execution_lease, _RunExecutionLease)
+            else expected_run_identity
+        )
         await _set_create_job(
             job_id,
             {
@@ -21440,6 +24521,18 @@ async def _run_world_walk_create_job(
             experience=CREATE_MODE_WORLD_WALK,
             source_run_id=source_run_id,
             target_duration_seconds=target_duration_seconds,
+            **(
+                {
+                    "expected_run_identity": helper_identity,
+                    **(
+                        {"run_descriptor": execution_lease.run_descriptor}
+                        if isinstance(execution_lease, _RunExecutionLease)
+                        else {}
+                    ),
+                }
+                if helper_identity is not None
+                else {}
+            ),
         )
         await _sync_process_current_process(job_id, run_id)
         _validate_created_run(run_id)
@@ -21465,25 +24558,8 @@ async def _run_world_walk_create_job(
                 "elapsedMs": int((time.monotonic() - started) * 1000),
             },
         )
-    except Exception as exc:
-        with suppress(Exception):
-            await _sync_process_current_process(job_id, run_id)
-        _cleanup_unscaffolded_run(run_id)
+    except FrontendCreateLockError as exc:
         detail = _create_run_error_message(exc)
-        write_app_server_debug_log(
-            run_dir=run_dir,
-            operation="world_walk_create_job",
-            status="failed",
-            item_id=job_id,
-            request={
-                "runId": run_id,
-                "sourceRunId": source_run_id,
-            },
-            response={
-                "elapsedMs": int((time.monotonic() - started) * 1000),
-            },
-            error=f"{type(exc).__name__}: {exc}",
-        )
         await _set_create_job(
             job_id,
             {
@@ -21492,9 +24568,48 @@ async def _run_world_walk_create_job(
                 "errorCode": type(exc).__name__,
                 "message": "作成失敗",
             },
+            write_run_log=False,
+        )
+    except Exception as exc:
+        with suppress(Exception):
+            await _sync_process_current_process(job_id, run_id)
+        if retained_reservation is None:
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=expected_run_identity,
+            )
+        detail = _create_run_error_message(exc)
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": detail,
+                "errorCode": type(exc).__name__,
+                "message": "作成失敗",
+            },
+            write_run_log=False,
         )
     finally:
         await _release_run_execution_lease(job_id)
+
+
+def _track_create_task(job_id: str, coroutine: Any) -> asyncio.Task[None]:
+    try:
+        task = asyncio.create_task(coroutine)
+    except BaseException:
+        close = getattr(coroutine, "close", None)
+        if callable(close):
+            close()
+        raise
+    _create_tasks[job_id] = task
+    task.add_done_callback(
+        lambda completed, current_job_id=job_id: (
+            _create_tasks.pop(current_job_id, None)
+            if _create_tasks.get(current_job_id) is completed
+            else None
+        )
+    )
+    return task
 
 
 @router.get("/image_gen", response_class=HTMLResponse)
@@ -21540,7 +24655,9 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
                 _create_jobs.pop(terminal_job_id)
             else:
                 raise HTTPException(status_code=503, detail="too many create jobs are running")
-        run_id, _run_dir = reserve_run_dir(title, root=ROOT)
+        reservation = _reserve_frontend_create_run_dir(title)
+        run_id = reservation.run_id
+        _run_dir = reservation.run_dir
         job = {
             "jobId": job_id,
             "runId": run_id,
@@ -21559,42 +24676,58 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    lease_reserved = False
+    task_scheduled = False
     try:
-        await _acquire_run_execution_lease(job_id, _run_dir)
-    except FileLockUnavailable as exc:
-        async with _create_jobs_lock:
-            _create_jobs.pop(job_id, None)
-        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
-    process_store_result = await asyncio.to_thread(
-        _create_process_record_best_effort,
-        job=job,
-        title=title,
-        source=source,
-        stop_target=stop_target,
-        generate_images=bool(req.generate_images),
-    )
-    if process_store_result:
-        job["processStore"] = process_store_result
-    write_app_server_debug_log(
-        run_dir=_run_dir,
-        operation="create_job_start",
-        status="running",
-        item_id=job_id,
-        request={
-            "title": title,
-            "sourceLength": len(source),
-            "runId": run_id,
-            "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
-            "generateImages": bool(req.generate_images),
-            "createMode": CREATE_MODE_NORMAL,
-            "stopTarget": stop_target,
-            "targetDurationSeconds": target_duration_seconds,
-            "processStore": process_store_result,
-        },
-        response={"path": f"output/{run_id}"},
-    )
-    asyncio.create_task(
-        _run_create_job(
+        try:
+            with bind_run_root(
+                _run_dir,
+                expected_identity=reservation.identity,
+                descriptor=reservation.descriptor,
+            ):
+                await _acquire_run_execution_lease(
+                    job_id,
+                    _run_dir,
+                    run_descriptor=reservation.descriptor,
+                    expected_run_identity=reservation.identity,
+                )
+                lease_reserved = True
+                process_store_result = await asyncio.to_thread(
+                    _create_process_record_best_effort,
+                    job=job,
+                    title=title,
+                    source=source,
+                    stop_target=stop_target,
+                    generate_images=bool(req.generate_images),
+                )
+                if process_store_result:
+                    job["processStore"] = process_store_result
+                write_app_server_debug_log(
+                    run_dir=_run_dir,
+                    operation="create_job_start",
+                    status="running",
+                    item_id=job_id,
+                    request={
+                        "title": title,
+                        "sourceLength": len(source),
+                        "runId": run_id,
+                        "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
+                        "generateImages": bool(req.generate_images),
+                        "createMode": CREATE_MODE_NORMAL,
+                        "stopTarget": stop_target,
+                        "targetDurationSeconds": target_duration_seconds,
+                        "processStore": process_store_result,
+                    },
+                    response={"path": f"output/{run_id}"},
+                )
+        except FileLockUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="run create/resume is already active",
+            ) from exc
+        _track_create_task(
+            job_id,
+            _run_create_job(
             job_id,
             title=title,
             source=source,
@@ -21603,9 +24736,23 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             create_mode=CREATE_MODE_NORMAL,
             stop_target=stop_target,
             target_duration_seconds=target_duration_seconds,
+            reservation=reservation,
+            ),
         )
-    )
-    return job
+        task_scheduled = True
+        return job
+    except BaseException:
+        if not task_scheduled:
+            await _release_run_execution_lease(job_id)
+            async with _create_jobs_lock:
+                _create_jobs.pop(job_id, None)
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=reservation.identity,
+                reservation=reservation,
+            )
+            reservation.close()
+        raise
 
 
 @router.post("/api/image-gen/runs/create/storyboard")
@@ -21630,7 +24777,11 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
                 _create_jobs.pop(terminal_job_id)
             else:
                 raise HTTPException(status_code=503, detail="too many create jobs are running")
-        run_id, _run_dir = reserve_run_dir(f"{title}_{CREATE_MODE_SCENE_STORYBOARD_RUN_SUFFIX}", root=ROOT)
+        reservation = _reserve_frontend_create_run_dir(
+            f"{title}_{CREATE_MODE_SCENE_STORYBOARD_RUN_SUFFIX}"
+        )
+        run_id = reservation.run_id
+        _run_dir = reservation.run_dir
         job = {
             "jobId": job_id,
             "runId": run_id,
@@ -21649,42 +24800,58 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    lease_reserved = False
+    task_scheduled = False
     try:
-        await _acquire_run_execution_lease(job_id, _run_dir)
-    except FileLockUnavailable as exc:
-        async with _create_jobs_lock:
-            _create_jobs.pop(job_id, None)
-        raise HTTPException(status_code=409, detail="run create/resume is already active") from exc
-    process_store_result = await asyncio.to_thread(
-        _create_process_record_best_effort,
-        job=job,
-        title=title,
-        source=source,
-        stop_target=stop_target,
-        generate_images=True,
-    )
-    if process_store_result:
-        job["processStore"] = process_store_result
-    write_app_server_debug_log(
-        run_dir=_run_dir,
-        operation="create_job_start",
-        status="running",
-        item_id=job_id,
-        request={
-            "title": title,
-            "sourceLength": len(source),
-            "runId": run_id,
-            "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
-            "generateImages": True,
-            "createMode": CREATE_MODE_SCENE_STORYBOARD,
-            "stopTarget": stop_target,
-            "targetDurationSeconds": target_duration_seconds,
-            "processStore": process_store_result,
-        },
-        response={"path": f"output/{run_id}"},
-    )
-    asyncio.create_task(
-        _run_create_job(
+        try:
+            with bind_run_root(
+                _run_dir,
+                expected_identity=reservation.identity,
+                descriptor=reservation.descriptor,
+            ):
+                await _acquire_run_execution_lease(
+                    job_id,
+                    _run_dir,
+                    run_descriptor=reservation.descriptor,
+                    expected_run_identity=reservation.identity,
+                )
+                lease_reserved = True
+                process_store_result = await asyncio.to_thread(
+                    _create_process_record_best_effort,
+                    job=job,
+                    title=title,
+                    source=source,
+                    stop_target=stop_target,
+                    generate_images=True,
+                )
+                if process_store_result:
+                    job["processStore"] = process_store_result
+                write_app_server_debug_log(
+                    run_dir=_run_dir,
+                    operation="create_job_start",
+                    status="running",
+                    item_id=job_id,
+                    request={
+                        "title": title,
+                        "sourceLength": len(source),
+                        "runId": run_id,
+                        "maxRunningCreateJobs": MAX_RUNNING_CREATE_JOBS,
+                        "generateImages": True,
+                        "createMode": CREATE_MODE_SCENE_STORYBOARD,
+                        "stopTarget": stop_target,
+                        "targetDurationSeconds": target_duration_seconds,
+                        "processStore": process_store_result,
+                    },
+                    response={"path": f"output/{run_id}"},
+                )
+        except FileLockUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="run create/resume is already active",
+            ) from exc
+        _track_create_task(
+            job_id,
+            _run_create_job(
             job_id,
             title=title,
             source=source,
@@ -21693,9 +24860,23 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             create_mode=CREATE_MODE_SCENE_STORYBOARD,
             stop_target=stop_target,
             target_duration_seconds=target_duration_seconds,
+            reservation=reservation,
+            ),
         )
-    )
-    return job
+        task_scheduled = True
+        return job
+    except BaseException:
+        if not task_scheduled:
+            await _release_run_execution_lease(job_id)
+            async with _create_jobs_lock:
+                _create_jobs.pop(job_id, None)
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=reservation.identity,
+                reservation=reservation,
+            )
+            reservation.close()
+        raise
 
 
 @router.post("/api/image-gen/runs/create-world-walk")
@@ -21739,7 +24920,9 @@ async def api_create_world_walk_run(
                     status_code=503,
                     detail="too many create jobs are running",
                 )
-        run_id, run_dir = reserve_run_dir(title, root=ROOT)
+        reservation = _reserve_frontend_create_run_dir(title)
+        run_id = reservation.run_id
+        run_dir = reservation.run_dir
         job = {
             "jobId": job_id,
             "runId": run_id,
@@ -21760,51 +24943,78 @@ async def api_create_world_walk_run(
             "message": "フォルダを作成中",
         }
         _create_jobs[job_id] = job
+    lease_reserved = False
+    task_scheduled = False
     try:
-        await _acquire_run_execution_lease(job_id, run_dir)
-    except FileLockUnavailable as exc:
-        async with _create_jobs_lock:
-            _create_jobs.pop(job_id, None)
-        raise HTTPException(
-            status_code=409,
-            detail="run create/resume is already active",
-        ) from exc
-    process_store_result = await asyncio.to_thread(
-        _create_process_record_best_effort,
-        job=job,
-        title=title,
-        source=f"output/{source_run_id}",
-        stop_target="p680",
-        generate_images=True,
-    )
-    if process_store_result:
-        job["processStore"] = process_store_result
-    write_app_server_debug_log(
-        run_dir=run_dir,
-        operation="create_job_start",
-        status="running",
-        item_id=job_id,
-        request={
-            "title": title,
-            "runId": run_id,
-            "sourceRunId": source_run_id,
-            "createMode": CREATE_MODE_WORLD_WALK,
-            "stopTarget": "p680",
-            "targetDurationSeconds": target_duration_seconds,
-            "processStore": process_store_result,
-        },
-        response={"path": f"output/{run_id}"},
-    )
-    asyncio.create_task(
-        _run_world_walk_create_job(
+        try:
+            with bind_run_root(
+                run_dir,
+                expected_identity=reservation.identity,
+                descriptor=reservation.descriptor,
+            ):
+                await _acquire_run_execution_lease(
+                    job_id,
+                    run_dir,
+                    run_descriptor=reservation.descriptor,
+                    expected_run_identity=reservation.identity,
+                )
+                lease_reserved = True
+                process_store_result = await asyncio.to_thread(
+                    _create_process_record_best_effort,
+                    job=job,
+                    title=title,
+                    source=f"output/{source_run_id}",
+                    stop_target="p680",
+                    generate_images=True,
+                )
+                if process_store_result:
+                    job["processStore"] = process_store_result
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="create_job_start",
+                    status="running",
+                    item_id=job_id,
+                    request={
+                        "title": title,
+                        "runId": run_id,
+                        "sourceRunId": source_run_id,
+                        "createMode": CREATE_MODE_WORLD_WALK,
+                        "stopTarget": "p680",
+                        "targetDurationSeconds": target_duration_seconds,
+                        "processStore": process_store_result,
+                    },
+                    response={"path": f"output/{run_id}"},
+                )
+        except FileLockUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="run create/resume is already active",
+            ) from exc
+        _track_create_task(
+            job_id,
+            _run_world_walk_create_job(
             job_id,
             title=title,
             source_run_id=source_run_id,
             run_id=run_id,
             target_duration_seconds=target_duration_seconds,
+            reservation=reservation,
+            ),
         )
-    )
-    return job
+        task_scheduled = True
+        return job
+    except BaseException:
+        if not task_scheduled:
+            await _release_run_execution_lease(job_id)
+            async with _create_jobs_lock:
+                _create_jobs.pop(job_id, None)
+            _cleanup_unscaffolded_run(
+                run_id,
+                expected_run_identity=reservation.identity,
+                reservation=reservation,
+            )
+            reservation.close()
+        raise
 
 
 @router.get("/api/image-gen/runs/create/{job_id}")
@@ -21971,13 +25181,18 @@ async def _await_resume_process_cleanup(
     return result
 
 
-async def _run_resume_subprocess_command(command: list[str]) -> tuple[bytes, bytes]:
+async def _run_resume_subprocess_command(
+    command: list[str],
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> tuple[bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *command,
         cwd=str(ROOT),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        **({"pass_fds": pass_fds} if pass_fds else {}),
     )
     communicate_task = asyncio.create_task(proc.communicate())
     try:
@@ -22057,9 +25272,42 @@ async def _run_p500_resume_subprocess(
         "--checkpoint-id",
         checkpoint_id,
     ]
+    binding = _assert_bound_run_root(run_dir)
+    inherited_descriptors: tuple[int, ...] = ()
+    if binding is not None:
+        base_command.extend(
+            [
+                "--expected-run-device",
+                str(binding.identity[0]),
+                "--expected-run-inode",
+                str(binding.identity[1]),
+            ]
+        )
+        async with _run_execution_leases_guard:
+            execution_lease = _run_execution_leases.get(job_id)
+        if not isinstance(execution_lease, _RunExecutionLease):
+            raise RuntimeError(
+                "p500 resume is missing its retained execution lease"
+            )
+        base_command.extend(
+            [
+                "--inherited-run-fd",
+                str(execution_lease.run_descriptor),
+                "--inherited-runtime-lock-fd",
+                str(execution_lease.runtime_lease.file.fileno()),
+                "--lock-already-held",
+            ]
+        )
+        inherited_descriptors = (
+            execution_lease.run_descriptor,
+            execution_lease.runtime_lease.file.fileno(),
+        )
     if source is not None:
         base_command.extend(["--source", source])
-    dry_stdout, _dry_stderr = await _run_resume_subprocess_command(base_command)
+    dry_stdout, _dry_stderr = await _run_resume_subprocess_command(
+        base_command,
+        pass_fds=inherited_descriptors,
+    )
     plan_token = _p500_resume_plan_token(
         dry_stdout,
         checkpoint_id=checkpoint_id,
@@ -22076,7 +25324,8 @@ async def _run_p500_resume_subprocess(
         "p680",
     ]
     apply_stdout, _apply_stderr = await _run_resume_subprocess_command(
-        apply_command
+        apply_command,
+        pass_fds=inherited_descriptors,
     )
     return {
         "checkpointId": checkpoint_id,
@@ -22110,6 +25359,74 @@ async def _run_blocking_with_cancel_barrier(
 
 
 async def _run_image_only_resume_job(
+    job_id: str,
+    *,
+    run_id: str,
+    create_mode: str,
+    expected_run_identity: tuple[int, int] | None = None,
+    retained_run: _FrontendCreateRunReservation | None = None,
+) -> None:
+    if retained_run is not None:
+        if retained_run.run_id != run_id:
+            raise FrontendCreateLockError(
+                "resume retained run id changed"
+            )
+        expected_run_identity = retained_run.identity
+    if expected_run_identity is None:
+        await _run_image_only_resume_job_bound(
+            job_id,
+            run_id=run_id,
+            create_mode=create_mode,
+        )
+        return
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    run_dir = output_root(ROOT) / run_id
+    try:
+        with bind_run_root(
+            run_dir,
+            expected_identity=expected_run_identity,
+            descriptor=(
+                retained_run.descriptor
+                if retained_run is not None
+                else None
+            ),
+        ):
+            await _run_image_only_resume_job_bound(
+                job_id,
+                run_id=run_id,
+                create_mode=create_mode,
+            )
+    except asyncio.CancelledError:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": "ToC再開がキャンセルされました",
+                "errorCode": "CancelledError",
+                "message": "再開中断",
+            },
+            write_run_log=False,
+        )
+        raise
+    except Exception as exc:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": _create_run_error_message(exc),
+                "errorCode": type(exc).__name__,
+                "message": "再開失敗",
+            },
+            write_run_log=False,
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+        if retained_run is not None:
+            retained_run.close()
+
+
+async def _run_image_only_resume_job_bound(
     job_id: str,
     *,
     run_id: str,
@@ -22277,6 +25594,74 @@ async def _run_p500_resume_job(
     *,
     run_id: str,
     create_mode: str,
+    expected_run_identity: tuple[int, int] | None = None,
+    retained_run: _FrontendCreateRunReservation | None = None,
+) -> None:
+    if retained_run is not None:
+        if retained_run.run_id != run_id:
+            raise FrontendCreateLockError(
+                "resume retained run id changed"
+            )
+        expected_run_identity = retained_run.identity
+    if expected_run_identity is None:
+        await _run_p500_resume_job_bound(
+            job_id,
+            run_id=run_id,
+            create_mode=create_mode,
+        )
+        return
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    run_dir = output_root(ROOT) / run_id
+    try:
+        with bind_run_root(
+            run_dir,
+            expected_identity=expected_run_identity,
+            descriptor=(
+                retained_run.descriptor
+                if retained_run is not None
+                else None
+            ),
+        ):
+            await _run_p500_resume_job_bound(
+                job_id,
+                run_id=run_id,
+                create_mode=create_mode,
+            )
+    except asyncio.CancelledError:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": "ToC再開がキャンセルされました",
+                "errorCode": "CancelledError",
+                "message": "再開中断",
+            },
+            write_run_log=False,
+        )
+        raise
+    except Exception as exc:
+        await _set_create_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": _create_run_error_message(exc),
+                "errorCode": type(exc).__name__,
+                "message": "再開失敗",
+            },
+            write_run_log=False,
+        )
+    finally:
+        await _release_run_execution_lease(job_id)
+        if retained_run is not None:
+            retained_run.close()
+
+
+async def _run_p500_resume_job_bound(
+    job_id: str,
+    *,
+    run_id: str,
+    create_mode: str,
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
@@ -22410,200 +25795,212 @@ async def _run_p500_resume_job(
 
 @router.post("/api/image-gen/runs/{run_id}/resume")
 async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
-    run_dir = safe_run_dir(run_id, ROOT)
+    if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
+        raise ValueError("invalid run_id")
+    run_dir = output_root(ROOT) / run_id
+    retained_run = _retain_frontend_create_run(run_dir)
     job_id = uuid.uuid4().hex
-    async with _create_jobs_lock:
-        same_run_active = any(
-            str(existing.get("runId") or "") == run_id
-            and str(existing.get("status") or "")
-            not in {"completed", "failed", "paused"}
-            for existing in _create_jobs.values()
-        )
-        if same_run_active:
-            raise HTTPException(
-                status_code=409,
-                detail="run create/resume is already active",
-            )
-        # Reserve this run in memory while the strict validators inspect it.
-        # The subprocess branch intentionally does not own the file lease.
-        _create_jobs[job_id] = {
-            "jobId": job_id,
-            "runId": run_id,
-            "path": f"output/{run_id}",
-            "status": "inspecting",
-        }
-
-    lease_reserved = False
+    job_reserved = False
     task_scheduled = False
     try:
-        try:
-            record = await asyncio.to_thread(
-                process_store.get_process_run,
-                run_id=run_id,
+        async with _create_jobs_lock:
+            same_run_active = any(
+                str(existing.get("runId") or "") == run_id
+                and str(existing.get("status") or "")
+                not in {"completed", "failed", "paused"}
+                for existing in _create_jobs.values()
             )
-        except Exception:
-            record = None
-        create_mode = _resume_create_mode_for_run(run_dir, record)
-
-        try:
-            _validate_current_p680_run(
-                run_id,
-                create_mode=create_mode,
-            )
-        except Exception:
-            p680_complete = False
-        else:
-            p680_complete = True
-        if p680_complete:
-            raise HTTPException(
-                status_code=409,
-                detail="run already reached strict p680 completion",
-            )
-
-        try:
-            _validate_p650_run(run_id)
-        except Exception:
-            p650_complete = False
-        else:
-            p650_complete = True
-        if p650_complete:
-            regeneration_plan = _classify_p680_regeneration_plan(run_dir)
-            if regeneration_plan.errors:
+            if same_run_active:
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        "image-only resume preflight rejected unsafe "
-                        "regeneration targets: "
-                        + "; ".join(regeneration_plan.errors[:20])
-                    ),
+                    detail="run create/resume is already active",
                 )
-            resume_mode = (
-                "p500_subprocess"
-                if regeneration_plan.requires_canonical_p500
-                else "image_only"
-            )
-        else:
-            resume_mode = "p500_subprocess"
+            _create_jobs[job_id] = {
+                "jobId": job_id,
+                "runId": run_id,
+                "path": f"output/{run_id}",
+                "status": "inspecting",
+            }
+            job_reserved = True
 
-        current_process_number = _current_process_number_for_run(run_id)
-        if current_process_number == 0 and record is not None:
-            current_process_number = int(record.current_process_number)
-        if p650_complete:
-            current_process_number = max(650, current_process_number)
-        current_process = _process_label(current_process_number)
-        title = record.title if record else run_id
-        source = record.source if record and record.source else title
-        try:
-            target_duration_seconds = _target_duration_seconds_for_run(run_dir)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=f"run target duration is invalid: {exc}",
-            ) from exc
-
-        job = {
-            "jobId": job_id,
-            "runId": run_id,
-            "path": f"output/{run_id}",
-            "status": "running",
-            "title": title,
-            "createMode": create_mode,
-            "resumeMode": resume_mode,
-            "targetDurationSeconds": target_duration_seconds,
-            "stopTarget": req.stop_target,
-            "stopTargetNumber": _process_number(req.stop_target),
-            "currentProcess": current_process,
-            "currentProcessNumber": current_process_number,
-            "pid": os.getpid(),
-            "error": None,
-            "errorCode": None,
-            "message": f"{current_process}から{req.stop_target}へ再開中",
-        }
-        async with _create_jobs_lock:
-            running_count = sum(
-                1
-                for existing_id, existing in _create_jobs.items()
-                if existing_id != job_id
-                and existing.get("status") == "running"
-            )
-            if running_count >= MAX_RUNNING_CREATE_JOBS:
-                raise HTTPException(
-                    status_code=429,
-                    detail="too many create jobs are running",
-                )
-            if len(_create_jobs) > MAX_CREATE_JOBS:
-                terminal_job_id = next(
-                    (
-                        existing_id
-                        for existing_id, existing in _create_jobs.items()
-                        if existing_id != job_id
-                        and existing.get("status")
-                        in {"completed", "failed", "paused"}
-                    ),
-                    None,
-                )
-                if terminal_job_id:
-                    _create_jobs.pop(terminal_job_id)
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail="too many create jobs are running",
-                    )
-            _create_jobs[job_id] = job
-
-        if resume_mode == "image_only":
+        with bind_run_root(
+            run_dir,
+            expected_identity=retained_run.identity,
+            descriptor=retained_run.descriptor,
+        ):
             try:
-                await _acquire_run_execution_lease(job_id, run_dir)
+                await _acquire_run_execution_lease(
+                    job_id,
+                    run_dir,
+                    run_descriptor=retained_run.descriptor,
+                    expected_run_identity=retained_run.identity,
+                )
             except FileLockUnavailable as exc:
                 raise HTTPException(
                     status_code=409,
                     detail="run create/resume is already active",
                 ) from exc
-            lease_reserved = True
 
-        process_store_result = await asyncio.to_thread(
-            _create_process_record_best_effort,
-            job=job,
-            title=title,
-            source=source,
-            stop_target=req.stop_target,
-            generate_images=True,
-        )
-        if process_store_result:
-            job["processStore"] = process_store_result
-        write_app_server_debug_log(
-            run_dir=run_dir,
-            operation="create_job_resume",
-            status="running",
-            item_id=job_id,
-            request={
+            try:
+                record = await asyncio.to_thread(
+                    process_store.get_process_run,
+                    run_id=run_id,
+                )
+            except Exception:
+                record = None
+            create_mode = _resume_create_mode_for_run(run_dir, record)
+
+            try:
+                _validate_current_p680_run(
+                    run_id,
+                    create_mode=create_mode,
+                )
+            except Exception:
+                p680_complete = False
+            else:
+                p680_complete = True
+            if p680_complete:
+                raise HTTPException(
+                    status_code=409,
+                    detail="run already reached strict p680 completion",
+                )
+
+            try:
+                _validate_p650_run(run_id)
+            except Exception:
+                p650_complete = False
+            else:
+                p650_complete = True
+            if p650_complete:
+                regeneration_plan = _classify_p680_regeneration_plan(run_dir)
+                if regeneration_plan.errors:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "image-only resume preflight rejected unsafe "
+                            "regeneration targets: "
+                            + "; ".join(regeneration_plan.errors[:20])
+                        ),
+                    )
+                resume_mode = (
+                    "p500_subprocess"
+                    if regeneration_plan.requires_canonical_p500
+                    else "image_only"
+                )
+            else:
+                resume_mode = "p500_subprocess"
+
+            current_process_number = _current_process_number_for_run(run_id)
+            if current_process_number == 0 and record is not None:
+                current_process_number = int(record.current_process_number)
+            if p650_complete:
+                current_process_number = max(650, current_process_number)
+            current_process = _process_label(current_process_number)
+            title = record.title if record else run_id
+            source = record.source if record and record.source else title
+            try:
+                target_duration_seconds = _target_duration_seconds_for_run(run_dir)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"run target duration is invalid: {exc}",
+                ) from exc
+
+            job = {
+                "jobId": job_id,
                 "runId": run_id,
-                "fromProcess": current_process,
-                "fromProcessNumber": current_process_number,
-                "stopTarget": req.stop_target,
-                "targetDurationSeconds": target_duration_seconds,
+                "path": f"output/{run_id}",
+                "status": "running",
+                "title": title,
+                "createMode": create_mode,
                 "resumeMode": resume_mode,
-                "resumePolicy": (
-                    "hash_aware_partial"
-                    if resume_mode == "image_only"
-                    else "p500_checkpoint_plan_apply"
-                ),
-                "processStore": process_store_result,
-            },
-            response={"path": f"output/{run_id}"},
-        )
+                "targetDurationSeconds": target_duration_seconds,
+                "stopTarget": req.stop_target,
+                "stopTargetNumber": _process_number(req.stop_target),
+                "currentProcess": current_process,
+                "currentProcessNumber": current_process_number,
+                "pid": os.getpid(),
+                "error": None,
+                "errorCode": None,
+                "message": f"{current_process}から{req.stop_target}へ再開中",
+            }
+            async with _create_jobs_lock:
+                running_count = sum(
+                    1
+                    for existing_id, existing in _create_jobs.items()
+                    if existing_id != job_id
+                    and existing.get("status") == "running"
+                )
+                if running_count >= MAX_RUNNING_CREATE_JOBS:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="too many create jobs are running",
+                    )
+                if len(_create_jobs) > MAX_CREATE_JOBS:
+                    terminal_job_id = next(
+                        (
+                            existing_id
+                            for existing_id, existing in _create_jobs.items()
+                            if existing_id != job_id
+                            and existing.get("status")
+                            in {"completed", "failed", "paused"}
+                        ),
+                        None,
+                    )
+                    if terminal_job_id:
+                        _create_jobs.pop(terminal_job_id)
+                    else:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="too many create jobs are running",
+                        )
+                _create_jobs[job_id] = job
+
+            process_store_result = await asyncio.to_thread(
+                _create_process_record_best_effort,
+                job=job,
+                title=title,
+                source=source,
+                stop_target=req.stop_target,
+                generate_images=True,
+            )
+            if process_store_result:
+                job["processStore"] = process_store_result
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="create_job_resume",
+                status="running",
+                item_id=job_id,
+                request={
+                    "runId": run_id,
+                    "fromProcess": current_process,
+                    "fromProcessNumber": current_process_number,
+                    "stopTarget": req.stop_target,
+                    "targetDurationSeconds": target_duration_seconds,
+                    "resumeMode": resume_mode,
+                    "resumePolicy": (
+                        "hash_aware_partial"
+                        if resume_mode == "image_only"
+                        else "p500_checkpoint_plan_apply"
+                    ),
+                    "processStore": process_store_result,
+                },
+                response={"path": f"output/{run_id}"},
+            )
 
         if resume_mode == "image_only":
             resume_coro = _run_image_only_resume_job(
                 job_id,
                 run_id=run_id,
                 create_mode=create_mode,
+                retained_run=retained_run,
             )
         else:
             resume_coro = _run_p500_resume_job(
                 job_id,
                 run_id=run_id,
                 create_mode=create_mode,
+                retained_run=retained_run,
             )
         try:
             resume_task = asyncio.create_task(resume_coro)
@@ -22622,10 +26019,11 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
         return job
     except BaseException:
         if not task_scheduled:
-            if lease_reserved:
-                await _release_run_execution_lease(job_id)
-            async with _create_jobs_lock:
-                _create_jobs.pop(job_id, None)
+            await _release_run_execution_lease(job_id)
+            if job_reserved:
+                async with _create_jobs_lock:
+                    _create_jobs.pop(job_id, None)
+            retained_run.close()
         raise
 
 
@@ -24080,7 +27478,7 @@ def _bulk_generation_job_from_disk(job_id: str) -> dict[str, Any] | None:
     return None
 
 
-async def _run_bulk_generation_job(
+async def _run_bulk_generation_job_bound(
     *,
     job_id: str,
     run_dir: Path,
@@ -24292,6 +27690,31 @@ async def _run_bulk_generation_job(
                     f"{type(exc).__name__}: {exc}",
                 ),
             )
+
+
+async def _run_bulk_generation_job(
+    *,
+    job_id: str,
+    run_dir: Path,
+    groups: list[list[_BulkGenerationPlanItem]],
+    requested_concurrency: int,
+    run_descriptor: int,
+    expected_run_identity: tuple[int, int],
+) -> None:
+    """Keep every background provider call on the leased run inode."""
+
+    try:
+        with bind_run_root(
+            run_dir,
+            expected_identity=expected_run_identity,
+            descriptor=run_descriptor,
+        ):
+            await _run_bulk_generation_job_bound(
+                job_id=job_id,
+                run_dir=run_dir,
+                groups=groups,
+                requested_concurrency=requested_concurrency,
+            )
     finally:
         _bulk_generation_tasks.pop(job_id, None)
         await _release_run_execution_lease(job_id)
@@ -24356,33 +27779,51 @@ async def _create_bulk_generation_job(
             fingerprint=fingerprint,
         )
         try:
-            await _acquire_run_execution_lease(str(job["jobId"]), run_dir)
+            execution_lease = await _acquire_run_execution_lease(
+                str(job["jobId"]),
+                run_dir,
+            )
         except FileLockUnavailable as exc:
             raise HTTPException(
                 status_code=409,
                 detail="run create/resume is already active",
             ) from exc
-        _bulk_generation_jobs[str(job["jobId"])] = job
         try:
-            _persist_bulk_generation_job(job)
+            with bind_run_root(
+                run_dir,
+                expected_identity=execution_lease.identity,
+                descriptor=execution_lease.run_descriptor,
+            ):
+                _bulk_generation_jobs[str(job["jobId"])] = job
+                _persist_bulk_generation_job(job)
         except Exception:
             _bulk_generation_jobs.pop(str(job["jobId"]), None)
             await _release_run_execution_lease(str(job["jobId"]))
             raise
 
+    job_id = str(job["jobId"])
+    generation_coro = _run_bulk_generation_job(
+        job_id=job_id,
+        run_dir=run_dir,
+        groups=groups,
+        requested_concurrency=int(req.concurrency),
+        run_descriptor=execution_lease.run_descriptor,
+        expected_run_identity=execution_lease.identity,
+    )
     try:
-        task = asyncio.create_task(
-            _run_bulk_generation_job(
-                job_id=str(job["jobId"]),
-                run_dir=run_dir,
-                groups=groups,
-                requested_concurrency=int(req.concurrency),
-            )
-        )
-    except Exception:
-        await _release_run_execution_lease(str(job["jobId"]))
+        task = asyncio.create_task(generation_coro)
+    except BaseException:
+        generation_coro.close()
+        await _release_run_execution_lease(job_id)
         raise
-    _bulk_generation_tasks[str(job["jobId"])] = task
+    _bulk_generation_tasks[job_id] = task
+    task.add_done_callback(
+        lambda completed, current_job_id=job_id: (
+            _bulk_generation_tasks.pop(current_job_id, None)
+            if _bulk_generation_tasks.get(current_job_id) is completed
+            else None
+        )
+    )
     return deepcopy(job)
 
 
@@ -24709,20 +28150,28 @@ async def api_generate(req: GenerateRequest) -> dict[str, Any]:
     )
     lease_id = f"image-foreground-{uuid.uuid4().hex}"
     try:
-        await _acquire_run_execution_lease(lease_id, run_dir)
+        execution_lease = await _acquire_run_execution_lease(
+            lease_id,
+            run_dir,
+        )
     except FileLockUnavailable as exc:
         raise HTTPException(
             status_code=409,
             detail="run create/resume is already active",
         ) from exc
     try:
-        candidates = await asyncio.gather(
-            *(
-                _generate_one(run_dir, req, index)
-                for index in range(1, req.candidate_count + 1)
+        with bind_run_root(
+            run_dir,
+            expected_identity=execution_lease.identity,
+            descriptor=execution_lease.run_descriptor,
+        ):
+            candidates = await asyncio.gather(
+                *(
+                    _generate_one(run_dir, req, index)
+                    for index in range(1, req.candidate_count + 1)
+                )
             )
-        )
-        return {"itemId": req.item_id, "candidates": candidates}
+            return {"itemId": req.item_id, "candidates": candidates}
     finally:
         await _release_run_execution_lease(lease_id)
 
@@ -24809,18 +28258,26 @@ async def api_generate_bulk(req: BulkGenerateRequest) -> Any:
         return JSONResponse(status_code=202, content=job)
     lease_id = f"bulk-foreground-{uuid.uuid4().hex}"
     try:
-        await _acquire_run_execution_lease(lease_id, run_dir)
+        execution_lease = await _acquire_run_execution_lease(
+            lease_id,
+            run_dir,
+        )
     except FileLockUnavailable as exc:
         raise HTTPException(
             status_code=409,
             detail="run create/resume is already active",
         ) from exc
     try:
-        return await _run_foreground_bulk_generation(
-            run_dir=run_dir,
-            req=req,
-            total_candidates=total_candidates,
-        )
+        with bind_run_root(
+            run_dir,
+            expected_identity=execution_lease.identity,
+            descriptor=execution_lease.run_descriptor,
+        ):
+            return await _run_foreground_bulk_generation(
+                run_dir=run_dir,
+                req=req,
+                total_candidates=total_candidates,
+            )
     finally:
         await _release_run_execution_lease(lease_id)
 

@@ -1,11 +1,13 @@
 # ToC marketing site / LP content contract
 
-更新日: 2026-07-25
+更新日: 2026-08-08
 
 Persona、message、objection、proof の詳細契約は `marketing/LP/personas.md` を正本とする。このファイルでは page section と公開 copy の境界だけを定義する。
 
 ## 0. Positioning
 
+- purpose: `人の心を動かし、人生を豊かにする。`
+- customer-facing brand line: `あなたの想いを、映像に。`
 - category: 個人向け AI 動画制作システム
 - functional promise: `動画制作を、圧倒的に速く、簡単に。`
 - emotional promise: `作りたいと思った瞬間を、完成まで止めない。`
@@ -26,22 +28,34 @@ Eyebrow:
 Headline:
 
 ```text
-動画制作を、
-圧倒的に速く、簡単に。
+あなたの想いを、
+映像に。
 ```
 
-Fallback before evidence:
+Visitor outcome:
 
 ```text
-動画制作を、
-もっと速く、もっと簡単に。
+知識も、物語も、世界観も。
+人の心へ届く一本に。
 ```
 
-Subcopy:
+Mechanism:
 
 ```text
 企画、台本、映像、音声、編集を、ひとつの制作フローへ。
 ToC は、あなたが動画を作り続けるためのシステム一式を納品します。
+```
+
+Functional support:
+
+```text
+動画制作を、もっと速く、もっと簡単に。
+```
+
+Evidence-backed variant:
+
+```text
+動画制作を、圧倒的に速く、簡単に。
 ```
 
 Offer note:

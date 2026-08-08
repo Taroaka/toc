@@ -3172,6 +3172,100 @@ class TestVerifyPipeline(unittest.TestCase):
 
             self.assertFalse(stage["passed"])
 
+    def test_check_orchestration_rejects_old_p650_result_for_p680_target(
+        self,
+    ) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_orchestration_"
+        ) as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0681"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(
+                run_dir,
+                stage_target="p680",
+            )
+            result_path = (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "p600.supervisor_result.json"
+            )
+            payload = json.loads(
+                result_path.read_text(encoding="utf-8")
+            )
+            payload["completed_slots"] = ["p650"]
+            payload["state_keys"] = {
+                "orchestration.p600.supervisor.call_status": "returned",
+                "orchestration.p600.supervisor.status": "done",
+                "orchestration.p600.supervisor.result": (
+                    "logs/orchestration/p600.supervisor_result.json"
+                ),
+                "slot.p650.status": "done",
+            }
+            result_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {"slot.p650.status": "done"},
+            )
+
+            stage, _ = VERIFY_MODULE.check_orchestration(
+                run_dir,
+                stage_target="p680",
+            )
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertIn(
+                "p600:target_slot_missing:p680",
+                checks["orchestration.supervisor_results"]["message"],
+            )
+
+    def test_check_orchestration_requires_p680_state_key_in_p600_result(
+        self,
+    ) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(
+            prefix="toc_verify_orchestration_"
+        ) as td:
+            run_dir = Path(td) / "out" / "momotaro_20990101_0682"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _write_l2_orchestration_artifacts(
+                run_dir,
+                stage_target="p680",
+            )
+            result_path = (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "p600.supervisor_result.json"
+            )
+            payload = json.loads(
+                result_path.read_text(encoding="utf-8")
+            )
+            payload["state_keys"].pop("slot.p680.status")
+            result_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            stage, _ = VERIFY_MODULE.check_orchestration(
+                run_dir,
+                stage_target="p680",
+            )
+            checks = {check["id"]: check for check in stage["checks"]}
+
+            self.assertFalse(stage["passed"])
+            self.assertIn(
+                "p600:target_slot_state_key_missing:p680",
+                checks["orchestration.supervisor_results"]["message"],
+            )
+
     def test_check_orchestration_fails_without_l2_progress_memo(self) -> None:
         import tempfile
 

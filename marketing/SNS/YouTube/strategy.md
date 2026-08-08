@@ -1,12 +1,12 @@
 # ToC YouTube Strategy
 
-更新日: 2026-07-18
+更新日: 2026-08-08
 
 このファイルは ToC の YouTube 配信における北極星である。marketing 全体の positioning は `marketing/README.md` を正本とする。
 
 ## 1. Channel job
 
-YouTube は、ToC が動画制作を速く、簡単に、繰り返し可能にすることを、完成動画と制作証拠で示すチャネルである。
+YouTube は、`あなたの想いを、映像に。` という約束を、一行の想いと完成動画の対比で proof するチャネルである。速さ、簡単さ、繰り返し可能な制作フローは、その変化を信じる reason-to-believe とする。
 
 主目的:
 
@@ -14,6 +14,7 @@ YouTube は、ToC が動画制作を速く、簡単に、繰り返し可能に�
 2. 副業 / 個人ブランドの visitor に `自分にも作れそう` を渡す
 3. persona-specific LP へ送る
 4. 最初の1本と継続利用へ接続する
+5. qualified consultation、proposal、受注・失注につながる需要と反論を学ぶ
 
 チャンネルの既存運用名 `にわかのAI` と浦島太郎は初期実験資産として扱えるが、ToC の product positioning を神話・民話へ限定しない。公開ブランド名は site implementation 前に別途確定する。
 
@@ -38,7 +39,7 @@ YouTube は、ToC が動画制作を速く、簡単に、繰り返し可能に�
 | Pillar | Content | Job |
 |--------|---------|-----|
 | 完成 proof | diverse finished videos | ToC can finish videos across formats |
-| one-line-to-video | initial idea through completed timeline | speed and simplicity |
+| one-line-to-video | original intent through accepted completed output | 想いが映像になる変化と speed / simplicity |
 | 制作比較 | fragmented manual operation vs ToC flow | clarify mechanism and saved work |
 | 副業実験 | niche idea, first video, response, iteration | side-business relevance |
 | brand series | one expertise into a repeatable series | personal-brand relevance |
@@ -71,7 +72,7 @@ Provider names and agent architecture belong in secondary copy unless they are t
 ## 5. Video structure
 
 ```text
-0–5 sec: completed result or visible transformation
+0–5 sec: original idea and completed resultの対比、または visible transformation
 5–20 sec: whose problem this solves
 20–60 sec: input and constraint
 body: ToC flow, human decisions, output
@@ -101,6 +102,7 @@ Do not send both personas to one generic form. Preserve UTM source, video id, ca
 Claims about speed and simplicity require:
 
 - initial brief
+- intended audience / desired change
 - output duration and format
 - elapsed production time
 - human working time
@@ -109,6 +111,7 @@ Claims about speed and simplicity require:
 - provider or external waiting time when material
 - revision count
 - completed output
+- creator acceptance and what was preserved or revised
 
 Use `もっと速く、もっと簡単に` until a defensible comparison supports `圧倒的`.
 
@@ -126,13 +129,15 @@ Use `もっと速く、もっと簡単に` until a defensible comparison support
 
 - publish one completed proof and one making-of per core use case
 - test side-business and personal-brand packaging separately
+- run behavior-based interviews and record objections by persona
 - establish baseline CTR, view completion, LP click, idea input, and lead quality
 
 ### Phase 2: acquisition
 
 - expand winning organic hooks into persona-specific Meta creatives
 - create repeatable formats for each persona
-- optimize for qualified leads and first-video starts, not raw views
+- optimize for qualified consultation、proposal、closed won / lost、first-video starts, not raw views
+- do not scale paid acquisition until the offer is deliverable and end-to-end attribution / follow-up are ready
 
 ### Phase 3: retention
 

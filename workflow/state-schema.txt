@@ -30,7 +30,7 @@
 #   runtime.failure.phase=semantic_review|semantic_producer_repair|media_generation|validation
 #   runtime.failure.error_kind=timeout|network|runtime_setup|unknown
 #   runtime.failure.last_progress_at=ISO8601|unknown
-#   image_generation.status=not_started|in_progress|completed|failed
+#   image_generation.status=not_started|in_progress|partial|completed|failed
 #   image_generation.started=true|false
 #   image_generation.generated_count=non-negative integer
 #   image_generation.blocked_by=semantic stage and phase identifier
@@ -166,6 +166,9 @@
 #   review.semantic.partial_media.blocked_image_item_count=non-negative integer
 #   review.semantic.partial_media.synthetic_failed_candidates=comma-separated current request item ids
 #   review.semantic.partial_media.provider_submitted_image_items=comma-separated current request item ids
+#   review.semantic.partial_media.reused_image_items=comma-separated current request item ids
+#   review.semantic.partial_media.generated_image_items=comma-separated current request item ids
+#   review.semantic.partial_media.satisfied_image_items=comma-separated current request item ids
 #   review.semantic.partial_media.receipt=logs/review/semantic/partial_media_generation_receipt.json
 #   review.semantic.partial_media.receipt_sha256=sha256:<hex>
 #   review.semantic.<research|story>.status=pending|passed|failed

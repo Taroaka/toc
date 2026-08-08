@@ -1,6 +1,6 @@
 # ToC marketing analytics and KPIs
 
-更新日: 2026-07-18
+更新日: 2026-08-08
 
 ## 1. Measurement principle
 
@@ -8,7 +8,7 @@ Views and clicks are diagnostic metrics. The main question is whether the right 
 
 Keep side-business and personal-brand results separate at every step.
 
-## 2. Funnel events
+## 2. Web / product analytics events
 
 | Stage | Event | Required dimensions |
 |-------|-------|---------------------|
@@ -25,6 +25,33 @@ Keep side-business and personal-brand results separate at every step.
 | retention | `express_second_video_intent` | persona, first_video_type |
 
 Do not send raw email, name, or video idea to analytics platforms.
+
+商談、提案、受注、失注理由、金額のように個人や契約へ紐づく状態は CRM またはアクセス制御された営業記録で管理し、web analytics へ raw PII や契約情報を送らない。
+
+Attribution は form submit 時に persona、source、campaign、content、UTM、landing path を CRM record へ一方向で保存してつなぐ。CRM record ID、raw / hashed email、その他の hashed identifier、契約情報を analytics platform へ返さない。CRM から外部の分析面へ戻すのは persona / source / campaign / content 単位の集計値だけとする。
+
+### CRM / delivery states
+
+| Stage | State | Required dimensions |
+|-------|-------|---------------------|
+| sales | `lead_qualified` | persona, source, qualification_reason |
+| sales | `lead_disqualified` | persona, source, disqualification_reason |
+| sales | `consultation_booked` | persona, source |
+| sales | `consultation_completed` | persona, source, outcome |
+| sales | `proposal_sent` | persona, source, offer_version |
+| sales | `closed_won` | persona, source, offer_version |
+| sales | `closed_lost` | persona, source, lost_reason |
+| delivery | `delivery_started` | persona, offer_version |
+| delivery | `delivery_completed` | persona, offer_version |
+
+Initial qualified lead definition:
+
+- primary persona のどちらかに該当する
+- 具体的な動画テーマまたは継続発信の目的がある
+- ToC が解消できる制作障壁がある
+- 導入時期と有償導入を検討する意思を follow-up で確認できる
+
+この定義は persona 別の商談 evidence で更新する。単なる資料請求、raw click、動画視聴だけを qualified としない。
 
 ## 3. Primary KPIs
 
@@ -43,6 +70,23 @@ Do not send raw email, name, or video idea to analytics platforms.
 - time to first completed video
 - human working time per completed video
 - revision count
+
+### Sales
+
+- qualified consultation count by persona / source
+- consultation show rate
+- proposal rate
+- closed-won rate
+- decision time
+- closed-lost reason distribution
+
+### Revenue and delivery economics
+
+- contracted amount and received amount
+- acquisition cost when measurable
+- delivery cost and external API cost
+- gross margin by offer version
+- delivery completion rate
 
 ### Continuation
 
@@ -90,3 +134,6 @@ Initial operating questions:
 - which proof type causes first-video starts?
 - where does each persona abandon the funnel?
 - does the first completed video create demand for a second?
+- which persona, obstacle, proof, and source produce qualified consultations?
+- why do qualified leads accept, delay, or reject a proposal?
+- can the promised offer be delivered at a sustainable cost and quality?

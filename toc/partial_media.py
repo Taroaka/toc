@@ -12,7 +12,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
-    load_request_snapshot,
+    _snapshot_from_mapping,
+    validate_request_snapshot,
+)
+from toc.run_root_binding import (
+    current_run_root_binding,
+    read_run_file_bytes,
+    run_file_entry_exists,
 )
 from toc.semantic_review import (
     SEMANTIC_REVIEW_INPUT_SCHEMA,
@@ -498,6 +504,16 @@ def _read_run_relative_bytes(run_dir: Path, raw_path: Any) -> bytes:
     """Read one regular run-local file through no-follow directory FDs."""
 
     value = _normalized_run_relpath(raw_path)
+    if current_run_root_binding() is not None:
+        try:
+            return read_run_file_bytes(run_dir, Path(value))
+        except (OSError, ValueError) as exc:
+            raise PartialMediaProjectionError(
+                (
+                    "partial-media artifact must be a readable regular "
+                    f"non-symlink file: {value}",
+                )
+            ) from exc
     parts = Path(value).parts
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -570,6 +586,16 @@ def run_relative_entry_exists_no_follow(
     """Return whether an exact run-local directory entry exists, without following links."""
 
     value = _normalized_run_relpath(raw_path)
+    if current_run_root_binding() is not None:
+        try:
+            return run_file_entry_exists(run_dir, Path(value))
+        except (OSError, ValueError) as exc:
+            raise PartialMediaProjectionError(
+                (
+                    "partial-media destination ancestry must contain only "
+                    f"readable non-symlink directories: {value}",
+                )
+            ) from exc
     parts = Path(value).parts
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -1277,17 +1303,51 @@ def _request_snapshot_bundle(
 def _stable_scene_request_snapshot(
     run_dir: Path,
 ) -> tuple[Any, str]:
-    before_fingerprints, _before_bytes = _request_snapshot_bundle(
+    before_fingerprints, before_bytes = _request_snapshot_bundle(
         run_dir
     )
-    snapshot_path = run_dir / "image_generation_request_snapshot.json"
     try:
-        snapshot = load_request_snapshot(
-            snapshot_path,
-            run_dir=run_dir,
-            verify_references=True,
+        payload = json.loads(before_bytes.decode("utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ImageRequestSnapshotError(
+                "request snapshot root must be an object"
+            )
+        validation_root = Path(
+            os.path.abspath(os.fspath(run_dir))
         )
-    except ImageRequestSnapshotError as exc:
+        snapshot = _snapshot_from_mapping(
+            payload,
+            run_dir=validation_root,
+        )
+        validate_request_snapshot(
+            snapshot,
+            run_dir=validation_root,
+            verify_references=False,
+        )
+        if snapshot.source_artifact and (
+            before_fingerprints.get(snapshot.source_artifact)
+            != snapshot.source_artifact_sha256
+        ):
+            raise ImageRequestSnapshotError(
+                "source_artifact_sha256 mismatch"
+            )
+        for item in snapshot.items:
+            for reference in item.references:
+                if reference.deferred:
+                    continue
+                if (
+                    before_fingerprints.get(reference.path)
+                    != reference.sha256
+                ):
+                    raise ImageRequestSnapshotError(
+                        "reference sha256 mismatch for "
+                        f"{item.item_id}: {reference.path}"
+                    )
+    except (
+        ImageRequestSnapshotError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise PartialMediaProjectionError(
             (
                 "localized partial media requires a current immutable scene "

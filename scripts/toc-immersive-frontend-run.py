@@ -83,6 +83,11 @@ from toc.run_index import (
     build_run_index_markdown,
     write_run_index as _write_run_index,
 )
+from toc.run_root_binding import (
+    append_run_file_text,
+    bind_run_root,
+    current_run_root_binding,
+)
 from toc.semantic_review import check_semantic_review
 from toc.stage_evaluator import check_manifest_single, check_script_single, check_visual_value
 from toc.story_duration import build_duration_plan, normalize_target_duration
@@ -1094,7 +1099,7 @@ def _write_run_text_nofollow(
         raise ValueError(
             f"run artifact path escapes run directory: {path}"
         ) from exc
-    active_root = _ACTIVE_MATERIALIZATION_ROOT.get()
+    active_root = _active_materialization_root(run_dir)
     lexical_root = os.path.abspath(os.fspath(run_dir))
     identity = (
         active_root[1]
@@ -1114,9 +1119,20 @@ def _active_materialization_root(
 ) -> tuple[str, PathIdentity, int, bool] | None:
     active_root = _ACTIVE_MATERIALIZATION_ROOT.get()
     lexical_root = os.path.abspath(os.fspath(run_dir))
-    if active_root is None or active_root[0] != lexical_root:
-        return None
-    return active_root
+    if active_root is not None and active_root[0] == lexical_root:
+        return active_root
+    shared_binding = current_run_root_binding()
+    if (
+        shared_binding is not None
+        and shared_binding.lexical_root == lexical_root
+    ):
+        return (
+            shared_binding.lexical_root,
+            shared_binding.identity,
+            shared_binding.descriptor,
+            False,
+        )
+    return None
 
 
 def _verify_active_materialization_root(
@@ -1162,47 +1178,16 @@ def _append_active_root_regular_file(
             f"append target must be a direct run artifact: {relative}"
         )
     _verify_active_materialization_root(run_dir, active_root)
-    root_descriptor = os.dup(active_root[2])
-    descriptor: int | None = None
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(
-            relative.parts[0],
-            flags,
-            0o600,
-            dir_fd=root_descriptor,
-        )
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise ValueError(
-                f"append target must be a regular file: {relative}"
-            )
-        remaining = memoryview(data)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise OSError("state append made no progress")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-        current = os.stat(
-            relative.parts[0],
-            dir_fd=root_descriptor,
-            follow_symlinks=False,
-        )
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or (current.st_dev, current.st_ino)
-            != (opened.st_dev, opened.st_ino)
-        ):
-            raise ValueError(
-                f"append target identity changed: {relative}"
-            )
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        os.close(root_descriptor)
+        decoded = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("state append payload must be UTF-8") from exc
+    with bind_run_root(
+        run_dir,
+        expected_identity=active_root[1],
+        descriptor=active_root[2],
+    ):
+        append_run_file_text(run_dir, relative, decoded)
     _verify_active_materialization_root(run_dir, active_root)
 
 
@@ -1635,6 +1620,7 @@ def materialize_review_loop_round(
     run_dir: Path,
     stage: str,
     round_number: int,
+    source_fingerprint_cache: dict[tuple[object, ...], object] | None = None,
 ) -> dict[str, str]:
     active_root = _active_materialization_root(run_dir)
     if active_root is None:
@@ -1642,6 +1628,7 @@ def materialize_review_loop_round(
             run_dir=run_dir,
             stage=stage,
             round_number=round_number,
+            source_fingerprint_cache=source_fingerprint_cache,
         )
     if stage not in REVIEW_LOOP_SPECS:
         known = ", ".join(sorted(REVIEW_LOOP_SPECS))
@@ -1693,6 +1680,7 @@ def materialize_review_loop_round(
         run_dir=run_dir,
         stage=stage,
         round_number=round_number,
+        source_fingerprint_cache=source_fingerprint_cache,
     )
     input_digest = str(snapshot["input_digest"])
     updates = loop_state_updates(
@@ -1822,6 +1810,7 @@ def _run_materialization_subprocess(
 
         def enter_pinned_root() -> None:
             os.fchdir(root_descriptor)
+            os.close(root_descriptor)
 
         kwargs["preexec_fn"] = enter_pinned_root
     try:
@@ -1838,11 +1827,19 @@ def _run_id_from_dir(run_dir: Path) -> str:
         raise SystemExit(f"--run-dir must be under output/: {run_dir}") from exc
 
 
-def _validated_fresh_cli_run_dir(raw_run_dir: str) -> Path:
+def _validated_fresh_cli_run_dir(
+    raw_run_dir: str,
+    *,
+    expected_identity: PathIdentity | None = None,
+) -> Path:
     run_dir = Path(raw_run_dir)
     _run_id_from_dir(run_dir)
     if run_dir.is_symlink():
         raise SystemExit(f"--run-dir must not be a symlink: {run_dir}")
+    if expected_identity is not None and not run_dir.exists():
+        raise SystemExit(
+            f"--run-dir disappeared after server reservation: {run_dir}"
+        )
     if run_dir.exists() and not run_dir.is_dir():
         raise SystemExit(f"--run-dir must be a directory: {run_dir}")
     stale_entries: list[str] = []
@@ -1898,15 +1895,33 @@ def _run_materialization_lock(
     *,
     expected_identity: PathIdentity | None = None,
     protect_pathname: bool = False,
+    inherited_descriptor: int | None = None,
 ):
     # Kept for caller compatibility. Root safety is provided by an
     # owner-death-safe inode lock plus fd-relative writes; persistent
     # filesystem flags would survive SIGKILL and strand the run.
     _ = protect_pathname
-    root_descriptor = open_directory_nofollow(
-        run_dir,
-        expected_identity=expected_identity,
-    )
+    inherited_lock = inherited_descriptor is not None
+    if inherited_descriptor is None:
+        root_descriptor = open_directory_nofollow(
+            run_dir,
+            expected_identity=expected_identity,
+        )
+    else:
+        root_descriptor = inherited_descriptor
+        os.set_inheritable(root_descriptor, False)
+        opened = os.fstat(root_descriptor)
+        actual_identity = opened.st_dev, opened.st_ino
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or expected_identity is None
+            or actual_identity != expected_identity
+        ):
+            os.close(root_descriptor)
+            raise RuntimeError(
+                "inherited frontend-create run descriptor identity changed: "
+                f"{run_dir}"
+            )
     opened_root = os.fstat(root_descriptor)
     root_identity = opened_root.st_dev, opened_root.st_ino
     active_root_token = None
@@ -1924,24 +1939,30 @@ def _run_materialization_lock(
         os.close(root_descriptor)
         raise
     try:
-        active_root_token = _ACTIVE_MATERIALIZATION_ROOT.set(
-            (
-                os.path.abspath(os.fspath(run_dir)),
-                root_identity,
-                root_descriptor,
-                False,
-            )
-        )
-        yield
-        verified = open_directory_nofollow(
+        with bind_run_root(
             run_dir,
             expected_identity=root_identity,
-        )
-        os.close(verified)
+            descriptor=root_descriptor,
+        ):
+            active_root_token = _ACTIVE_MATERIALIZATION_ROOT.set(
+                (
+                    os.path.abspath(os.fspath(run_dir)),
+                    root_identity,
+                    root_descriptor,
+                    False,
+                )
+            )
+            yield
+            verified = open_directory_nofollow(
+                run_dir,
+                expected_identity=root_identity,
+            )
+            os.close(verified)
     finally:
         if active_root_token is not None:
             _ACTIVE_MATERIALIZATION_ROOT.reset(active_root_token)
-        fcntl.flock(root_descriptor, fcntl.LOCK_UN)
+        if not inherited_lock:
+            fcntl.flock(root_descriptor, fcntl.LOCK_UN)
         os.close(root_descriptor)
 
 
@@ -12381,22 +12402,22 @@ def _build_semantic_review_packs(
     run_dir: Path,
     stages: tuple[str, ...],
 ) -> None:
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
+        "--run-dir",
+        str(run_dir),
+    ]
     for semantic_stage in stages:
-        _run_materialization_subprocess(
-            run_dir,
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
-                "--run-dir",
-                str(run_dir),
-                "--stage",
-                semantic_stage,
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        command.extend(("--stage", semantic_stage))
+    _run_materialization_subprocess(
+        run_dir,
+        command,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _refresh_p400_review_artifacts(run_dir: Path) -> None:
@@ -12539,8 +12560,15 @@ def _refresh_review_loop_artifacts(
     stages: tuple[str, ...],
 ) -> None:
     state_updates: dict[str, str] = {}
+    blocking_findings_cache: dict[str, tuple[str, ...]] = {}
+    source_fingerprint_cache: dict[tuple[object, ...], object] = {}
     for stage in stages:
-        materialize_review_loop_round(run_dir=run_dir, stage=stage, round_number=1)
+        materialize_review_loop_round(
+            run_dir=run_dir,
+            stage=stage,
+            round_number=1,
+            source_fingerprint_cache=source_fingerprint_cache,
+        )
         if stage in {"scene_implementation_hard", "scene_implementation_judgment"}:
             aggregate_text = "\n".join(
                 [
@@ -12586,8 +12614,27 @@ def _refresh_review_loop_artifacts(
             run_dir=run_dir,
             stage=stage,
             round_number=1,
+            source_fingerprint_cache=source_fingerprint_cache,
         )
-        blocking_findings = tuple(snapshot_issues) + _authoring_review_blocking_findings(run_dir, stage)
+        preflight_cache_key = (
+            "p400_manifest"
+            if stage
+            in {
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "production_readiness",
+            }
+            else stage
+        )
+        if preflight_cache_key not in blocking_findings_cache:
+            blocking_findings_cache[preflight_cache_key] = (
+                _authoring_review_blocking_findings(run_dir, stage)
+            )
+        blocking_findings = (
+            tuple(snapshot_issues)
+            + blocking_findings_cache[preflight_cache_key]
+        )
         expected_digest = review_input_digest(run_dir=run_dir, stage=stage, round_number=1)
         critic_reports: list[str] = []
         for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
@@ -13503,6 +13550,24 @@ def main() -> None:
     parser.add_argument("--topic", required=True)
     parser.add_argument("--source", default="")
     parser.add_argument("--run-dir", required=True)
+    parser.add_argument(
+        "--expected-run-device",
+        type=int,
+        default=None,
+        help="Optional server-probed destination st_dev binding.",
+    )
+    parser.add_argument(
+        "--expected-run-inode",
+        type=int,
+        default=None,
+        help="Optional server-probed destination st_ino binding.",
+    )
+    parser.add_argument(
+        "--inherited-run-fd",
+        type=int,
+        default=None,
+        help="Server-owned run descriptor carrying the active directory lease.",
+    )
     parser.add_argument("--stop-target", choices=["p650", "p680"], default="p680")
     parser.add_argument(
         "--experience",
@@ -13519,6 +13584,22 @@ def main() -> None:
     parser.add_argument("--materialize-only", action="store_true", help="Write text artifacts only; do not generate images or validate media.")
     parser.add_argument("--skip-validation", action="store_true")
     args = parser.parse_args()
+
+    if (args.expected_run_device is None) != (
+        args.expected_run_inode is None
+    ):
+        parser.error(
+            "--expected-run-device and --expected-run-inode must be "
+            "provided together"
+        )
+    if (
+        args.expected_run_device is not None
+        and (
+            args.expected_run_device < 0
+            or args.expected_run_inode < 0
+        )
+    ):
+        parser.error("expected run identity values must be non-negative")
 
     try:
         target_duration_seconds = normalize_target_duration(args.target_duration_seconds)
@@ -13578,16 +13659,32 @@ def main() -> None:
         if args.source_run:
             parser.error("--source-run is only valid for --experience world_walk")
         source = args.source.strip() or args.topic
-    run_dir = _validated_fresh_cli_run_dir(args.run_dir)
+    expected_run_identity = (
+        (args.expected_run_device, args.expected_run_inode)
+        if args.expected_run_device is not None
+        else None
+    )
+    run_dir = _validated_fresh_cli_run_dir(
+        args.run_dir,
+        expected_identity=expected_run_identity,
+    )
     try:
         run_dir_identity = directory_identity_nofollow(run_dir)
     except (OSError, ValueError) as exc:
         parser.error(f"destination run could not be opened safely: {exc}")
+    if (
+        expected_run_identity is not None
+        and run_dir_identity != expected_run_identity
+    ):
+        parser.error(
+            "destination run identity changed after server reservation"
+        )
     materialize_stop_target = "p650" if args.materialize_only and args.stop_target == "p680" else args.stop_target
     with _run_materialization_lock(
         run_dir,
         expected_identity=run_dir_identity,
         protect_pathname=True,
+        inherited_descriptor=args.inherited_run_fd,
     ):
         materialize_run(
             args.topic,

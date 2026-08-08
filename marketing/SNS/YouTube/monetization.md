@@ -1,6 +1,6 @@
 # ToC acquisition and monetization design
 
-更新日: 2026-07-25
+更新日: 2026-08-08
 
 ## 1. Principle
 
@@ -10,7 +10,10 @@ ToC の収益化は、YouTube 広告収益や民話制作代行を中心に置�
 content / ad
   -> persona LP
   -> one-line idea
+  -> qualification
   -> introduction consultation
+  -> proposal
+  -> closed won / lost
   -> system delivery
   -> customer-owned continued production
 ```
@@ -87,13 +90,25 @@ Before selling brand value:
 
 ## 6. Acquisition sequence
 
-1. Build common site and persona LPs
-2. Publish diverse proof examples
-3. Validate native form and follow-up operation
-4. Test organic packaging for each persona
-5. Turn winning hooks into Meta creatives
-6. Optimize for qualified lead and first-video start
-7. Validate continued use before scaling ad spend
+1. Define a deliverable offer, qualification, follow-up, and won-lost record
+2. Interview matching people and start direct sales learning without waiting for paid ads
+3. Build common site and persona LPs
+4. Publish diverse proof examples
+5. Validate native form and end-to-end attribution
+6. Test organic packaging for each persona
+7. Turn winning hooks into persona-specific Meta creatives
+8. Optimize for qualified consultation, proposal, closed won, and first-video start
+9. Validate unit economics and continued use before scaling ad spend
+
+Paid acquisition is not ready to scale until:
+
+- end-to-end attribution works
+- qualified lead and disqualification rules are stable
+- the offer can actually be delivered under the stated boundary
+- at least one persona shows proposal or paid demand
+- delivery cost and gross margin can be estimated
+
+Thread 3 records price response and objections but does not independently set the offer price. Pricing and delivery decisions return to the Positioning and Offer owner.
 
 ## 7. Reply principles
 

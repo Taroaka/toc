@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from toc.semantic_pack_scene import collect_entries
 
@@ -229,6 +230,99 @@ scenes:
         self.assertEqual(entries[2]["semantic_contract"]["target_beat"], "ガラスの靴が証拠になる")
         self.assertFalse(entries[2]["semantic_contract_missing"])
 
+    def test_scene_pack_batch_parses_script_once_for_all_three_stages(self) -> None:
+        builder = load_pack_builder()
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_batch_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(
+                SCRIPT_FIXTURE,
+                encoding="utf-8",
+            )
+            (run_dir / "story.md").write_text(
+                "# Story\n",
+                encoding="utf-8",
+            )
+            (run_dir / "video_manifest.md").write_text(
+                MANIFEST_FIXTURE,
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(
+                    builder,
+                    "load_structured_document",
+                    wraps=builder.load_structured_document,
+                ) as loader,
+                patch.object(
+                    builder,
+                    "review_source_fingerprint",
+                    wraps=builder.review_source_fingerprint,
+                ) as fingerprint,
+            ):
+                results = builder.build_packs(
+                    run_dir,
+                    ("scene_set", "scene_detail", "cut_blueprint"),
+                )
+
+            self.assertEqual(len(results), 3)
+            self.assertEqual(loader.call_count, 1)
+            self.assertEqual(fingerprint.call_count, 3)
+            self.assertTrue(
+                (run_dir / "logs/review/semantic/scene_set.scope.json").exists()
+            )
+            self.assertTrue(
+                (run_dir / "logs/review/semantic/scene_detail.scope.json").exists()
+            )
+            self.assertTrue(
+                (run_dir / "logs/review/semantic/cut_blueprint.scope.json").exists()
+            )
+
+    def test_scene_pack_batch_preserves_manifest_fallback_source_label(self) -> None:
+        builder = load_pack_builder()
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_batch_manifest_") as td:
+            run_dir = Path(td)
+            (run_dir / "video_manifest.md").write_text(
+                MANIFEST_FIXTURE,
+                encoding="utf-8",
+            )
+
+            builder.build_packs(
+                run_dir,
+                ("scene_set", "scene_detail", "cut_blueprint"),
+            )
+
+            scene_collection = (
+                run_dir / "logs/review/semantic/scene_set.collection.md"
+            ).read_text(encoding="utf-8")
+            cut_collection = (
+                run_dir / "logs/review/semantic/cut_blueprint.collection.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn('"source_path": "manifest"', scene_collection)
+            self.assertIn('"source_path": "manifest"', cut_collection)
+
+    def test_non_scene_pack_batch_parses_shared_manifest_once(self) -> None:
+        builder = load_pack_builder()
+        with tempfile.TemporaryDirectory(prefix="toc_downstream_pack_batch_") as td:
+            run_dir = Path(td)
+            (run_dir / "story.md").write_text("# Story\n", encoding="utf-8")
+            (run_dir / "script.md").write_text("# Script\n", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                MANIFEST_FIXTURE,
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                builder,
+                "load_manifest",
+                wraps=builder.load_manifest,
+            ) as manifest_loader:
+                builder.build_packs(
+                    run_dir,
+                    ("asset_plan", "image_prompt"),
+                )
+
+            self.assertEqual(manifest_loader.call_count, 1)
+
     def test_declared_contract_exposes_missing_and_invalid_time_of_day_without_stringifying(self) -> None:
         fixture = """# Script
 
@@ -327,6 +421,28 @@ scenes:
         self.assertIn("Recommend more cuts only when a distinct authored beat or semantic obligation is uncovered", prompt)
         self.assertNotIn("event_sequence setup/pressure/turn/payoff beats", prompt)
 
+    def test_scene_pack_does_not_parse_unused_video_manifest(self) -> None:
+        builder = load_pack_builder()
+        with tempfile.TemporaryDirectory(prefix="toc_scene_pack_build_") as td:
+            run_dir = Path(td)
+            (run_dir / "script.md").write_text(SCRIPT_FIXTURE, encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\nvideo_metadata: {topic: test}\nscenes: []\n```\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                builder,
+                "load_manifest",
+                side_effect=AssertionError("unused manifest was parsed"),
+            ):
+                _collection, _scope, _prompt, _report, count = builder.build_pack(
+                    run_dir,
+                    "scene_set",
+                )
+
+        self.assertEqual(count, 2)
+
     def test_cut_blueprint_entry_uses_event_context_without_full_scene_event(self) -> None:
         fixture = """# Script
 
@@ -386,6 +502,8 @@ scenes:
             forbidden_info_ids: ["future_reveal"]
             must_not_explain_visible_action_as_caption: true
             narration_event_boundary: "same_event_only"
+          event_context_for_cut:
+            duplicate_marker: "review pack must not carry this nested duplicate"
 ```
 """
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
@@ -401,6 +519,16 @@ scenes:
         self.assertEqual([beat["beat_id"] for beat in context["neighboring_event_beats"]], ["scene10_event_setup", "scene10_event_turn"])
         self.assertEqual(context["forbidden_event_changes"], ["future_reveal"])
         self.assertEqual(context["reveal_constraints_for_this_cut"], ["future_reveal"])
+        self.assertNotIn("event_context_for_cut", entries[0]["cut_contract"])
+        self.assertNotIn("source_event_contract", entries[0]["semantic_contract"])
+        self.assertEqual(
+            entries[0]["semantic_contract"],
+            {
+                "target_beat": "圧力を見せる",
+                "must_show": ["圧力"],
+                "done_when": ["圧力が見える"],
+            },
+        )
         packet = entries[0]["cut_context_packet"]
         self.assertEqual(packet["schema_version"], "cut_context_packet_v1")
         self.assertFalse(packet["editable"])

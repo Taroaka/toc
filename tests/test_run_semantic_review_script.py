@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from toc.harness import parse_state_file
 from toc.semantic_review import SemanticReviewStatus
@@ -25,6 +25,57 @@ def load_run_semantic_review_module():
 
 
 class RunSemanticReviewScriptTests(unittest.TestCase):
+    def test_producer_repair_refuses_uncommitted_prompt_before_starting_provider(self) -> None:
+        module = load_run_semantic_review_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            paths = {
+                key: run_dir / relpath
+                for key, relpath in module.semantic_repair_relpaths(
+                    "scene_set", 1
+                ).items()
+            }
+            paths["prompt"].parent.mkdir(parents=True, exist_ok=True)
+            paths["prompt"].write_text("uncommitted prompt\n", encoding="utf-8")
+            paths["report"].write_text("status: pending\n", encoding="utf-8")
+            create_client = Mock()
+
+            with (
+                patch.object(
+                    module,
+                    "write_semantic_repair_prompt",
+                    return_value=paths,
+                ),
+                patch.object(
+                    module,
+                    "read_committed_semantic_repair_prompt",
+                    side_effect=RuntimeError("uncommitted repair pair"),
+                    create=True,
+                ),
+                patch.object(
+                    module,
+                    "create_codex_app_server_client",
+                    create_client,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "uncommitted repair pair",
+                ):
+                    asyncio.run(
+                        module._run_producer_repair(
+                            run_dir,
+                            "scene_set",
+                            round_number=1,
+                            max_attempts=2,
+                            errors=("scene semantics failed",),
+                            repair_timeout_seconds=30,
+                        )
+                    )
+
+        create_client.assert_not_called()
+
     def test_progress_resets_no_progress_watchdog(self) -> None:
         module = load_run_semantic_review_module()
         with tempfile.TemporaryDirectory() as tmp:

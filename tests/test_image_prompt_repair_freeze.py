@@ -355,6 +355,62 @@ def _write_passing_review_artifacts(run_dir: Path) -> None:
 
 
 class ImagePromptRepairFreezeTests(unittest.TestCase):
+    def test_server_repair_refuses_uncommitted_prompt_before_starting_provider(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td).resolve()
+            relpaths = image_gen_app.semantic_repair_relpaths("scene_set", 1)
+            paths = {key: run_dir / relpath for key, relpath in relpaths.items()}
+            paths["prompt"].parent.mkdir(parents=True, exist_ok=True)
+            paths["prompt"].write_text("uncommitted prompt\n", encoding="utf-8")
+            paths["report"].write_text("status: pending\n", encoding="utf-8")
+            create_client = Mock()
+
+            with (
+                patch(
+                    "server.image_gen_app._assert_bound_run_root",
+                    return_value=None,
+                ),
+                patch(
+                    "server.image_gen_app.write_semantic_repair_prompt",
+                    return_value=paths,
+                ),
+                patch(
+                    "server.image_gen_app.read_committed_semantic_repair_prompt",
+                    side_effect=RuntimeError("uncommitted repair pair"),
+                    create=True,
+                ),
+                patch(
+                    "server.image_gen_app._semantic_repair_source_artifact_fingerprint",
+                    return_value={},
+                ),
+                patch(
+                    "server.image_gen_app._semantic_repair_target_selectors",
+                    return_value=[],
+                ),
+                patch("server.image_gen_app.append_state_snapshot"),
+                patch("server.image_gen_app.write_app_server_debug_log"),
+                patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    create_client,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "uncommitted repair pair",
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_producer_repair(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            round_number=1,
+                            max_attempts=2,
+                            errors=("scene semantics failed",),
+                        )
+                    )
+
+        create_client.assert_not_called()
+
     def test_recompile_restores_missing_or_downgraded_v2_payload(self) -> None:
         for broken_payload in (None, {"policy_version": "image_api_prompt_v1", "prompt": "legacy"}):
             with self.subTest(broken_payload=broken_payload), tempfile.TemporaryDirectory(
@@ -912,8 +968,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 (run_dir / paths["scope"]).write_text(
                     json.dumps(
                         {
+                            "stage": "image_prompt",
                             "entry_count": 2,
                             "entry_ids": ["scene1_cut1", "scene1_cut2"],
+                            "review_scope": "per_scene_shards",
                             "source_artifacts": [
                                 "story.md",
                                 "script.md",
@@ -928,6 +986,10 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                                     "entry_ids": ["scene1_cut1", "scene1_cut2"],
                                 }
                             ],
+                            "artifacts": {
+                                key: value.as_posix()
+                                for key, value in paths.items()
+                            },
                         },
                         ensure_ascii=False,
                     )
@@ -936,6 +998,13 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 )
                 (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
+                image_gen_app._refresh_semantic_review_input_digest(
+                    run_dir=run_dir,
+                    scope_path=run_dir / paths["scope"],
+                    collection_path=run_dir / paths["collection"],
+                    prompt_path=run_dir / paths["prompt"],
+                    report_path=run_dir / paths["report"],
+                )
                 return Mock(returncode=0, stdout="", stderr="", args=command)
 
             passed_shard = {

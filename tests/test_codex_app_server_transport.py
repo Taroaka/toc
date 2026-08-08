@@ -6,6 +6,7 @@ import sys
 import tempfile
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +18,63 @@ from server.codex_app_server import (
     CodexAppServerError,
     CodexAppServerTransportError,
 )
+
+
+def test_submission_guard_runs_before_thread_and_turn_requests() -> None:
+    calls: list[str] = []
+
+    def guard() -> None:
+        calls.append("guard")
+        raise RuntimeError("bound run changed")
+
+    async def run_case() -> None:
+        client = CodexAppServerClient(
+            cwd=Path("/tmp"),
+            submission_guard=guard,
+        )
+
+        async def request_must_not_run(*_args, **_kwargs):
+            raise AssertionError("guard must run before app-server request")
+
+        client.request = request_must_not_run  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="bound run changed"):
+            await client.start_thread()
+        with pytest.raises(RuntimeError, match="bound run changed"):
+            await client.run_turn(thread_id="thread-1", text="hello")
+
+    asyncio.run(run_case())
+    assert calls == ["guard", "guard"]
+
+
+def test_submission_guard_rechecks_under_wire_write_lock() -> None:
+    calls: list[str] = []
+    writes: list[bytes] = []
+
+    def guard() -> None:
+        calls.append("guard")
+        if len(calls) == 2:
+            raise RuntimeError("bound run changed at wire boundary")
+
+    class FakeStdin:
+        def write(self, payload: bytes) -> None:
+            writes.append(payload)
+
+        async def drain(self) -> None:
+            return None
+
+    async def run_case() -> None:
+        client = CodexAppServerClient(
+            cwd=Path("/tmp"),
+            submission_guard=guard,
+        )
+        client.proc = SimpleNamespace(stdin=FakeStdin())  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="wire boundary"):
+            await client.start_thread()
+        assert not client._pending
+
+    asyncio.run(run_case())
+    assert calls == ["guard", "guard"]
+    assert writes == []
 
 
 def test_app_server_accepts_multi_megabyte_image_notification() -> None:

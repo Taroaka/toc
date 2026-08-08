@@ -10,17 +10,29 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import append_state_snapshot, now_iso  # noqa: E402
+from toc.harness import (  # noqa: E402
+    append_state_snapshot,
+    load_structured_document,
+    now_iso,
+)
 from toc.review_projection import (  # noqa: E402
+    RAW_REVIEW_SOURCE_FINGERPRINT_POLICY,
     REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    SEMANTIC_MANIFEST_PROJECTION_STAGES,
+    VIDEO_MANIFEST_RELPATH,
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
     review_source_fingerprint,
 )
 from toc.semantic_pack import collect_entries, load_manifest  # noqa: E402
+from toc.semantic_pack_scene import (  # noqa: E402
+    SUPPORTED_STAGES as SCENE_PACK_STAGES,
+)
 from toc.semantic_review import (  # noqa: E402
     FOUNDATION_SEMANTIC_CRITERIA,
     IMAGE_PROMPT_JUDGMENT_COLLECTION,
@@ -49,6 +61,9 @@ STAGE_LABELS = {
     "narration": "narration text and audio handoff",
     "video_motion": "video motion prompt",
 }
+
+
+_MANIFEST_DOCUMENT_UNSET = object()
 
 
 def write_text(run_dir: Path, path: Path, text: str) -> Path:
@@ -93,6 +108,7 @@ def render_scope_json(
     prompt_path: Path,
     report_path: Path,
     shard_plan: dict[str, object] | None = None,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
 ) -> str:
     diagnostics = entry_diagnostics(entries)
     entry_ids = [str(entry.get("id") or entry.get("selector") or "") for entry in entries]
@@ -101,6 +117,7 @@ def render_scope_json(
         run_dir,
         source_artifacts,
         stage=stage,
+        source_fingerprint_cache=source_fingerprint_cache,
     )
     collection_sha256 = semantic_review_file_sha256(collection_path)
     prompt_sha256 = semantic_review_file_sha256(prompt_path)
@@ -251,6 +268,7 @@ def materialize_image_prompt_scene_shards(
     entries: list[dict[str, object]],
     canonical_scope_path: Path,
     canonical_report_path: Path,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
 ) -> dict[str, object]:
     """Write stable scene-local review packs and return their scope manifest."""
 
@@ -294,6 +312,7 @@ def materialize_image_prompt_scene_shards(
             run_dir,
             source_artifacts,
             stage="image_prompt",
+            source_fingerprint_cache=source_fingerprint_cache,
         )
         collection_sha256 = semantic_review_file_sha256(collection_path)
         prompt_sha256 = semantic_review_file_sha256(prompt_path)
@@ -493,6 +512,7 @@ def _source_artifact_digest_records(
     source_artifacts: list[str],
     *,
     stage: str,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
 ) -> list[dict[str, str]]:
     run_root = run_dir.resolve(strict=True)
     records: list[dict[str, str]] = []
@@ -511,12 +531,36 @@ def _source_artifact_digest_records(
         if rel in seen:
             raise ValueError(f"semantic review source artifact is duplicated: {rel}")
         seen.add(rel)
-        fingerprint = review_source_fingerprint(
-            source_path,
-            artifact_relpath=rel,
-            review_kind="semantic",
-            stage=stage,
+        source_stat = source_path.stat()
+        fingerprint_policy = (
+            VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA
+            if rel == VIDEO_MANIFEST_RELPATH
+            and stage in SEMANTIC_MANIFEST_PROJECTION_STAGES
+            else RAW_REVIEW_SOURCE_FINGERPRINT_POLICY
         )
+        cache_key = (
+            str(source_path),
+            source_stat.st_dev,
+            source_stat.st_ino,
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+            source_stat.st_ctime_ns,
+            fingerprint_policy,
+        )
+        fingerprint = (
+            source_fingerprint_cache.get(cache_key)
+            if source_fingerprint_cache is not None
+            else None
+        )
+        if fingerprint is None:
+            fingerprint = review_source_fingerprint(
+                source_path,
+                artifact_relpath=rel,
+                review_kind="semantic",
+                stage=stage,
+            )
+            if source_fingerprint_cache is not None:
+                source_fingerprint_cache[cache_key] = fingerprint
         records.append(
             {
                 "path": rel,
@@ -799,9 +843,37 @@ def write_legacy_image_prompt_aliases(run_dir: Path, paths: dict[str, Path], *, 
     )
 
 
-def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
-    manifest = load_manifest(run_dir)
-    entries = collect_entries(stage, run_dir, manifest=manifest)
+def build_pack(
+    run_dir: Path,
+    stage: str,
+    *,
+    scene_source_document: tuple[str, dict[str, Any]] | None = None,
+    manifest_document: dict[str, Any] | object = _MANIFEST_DOCUMENT_UNSET,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
+) -> tuple[Path, Path, Path, Path, int]:
+    if manifest_document is not _MANIFEST_DOCUMENT_UNSET:
+        manifest = manifest_document
+    else:
+        manifest = (
+            scene_source_document[1]
+            if stage in SCENE_PACK_STAGES
+            and scene_source_document is not None
+            and scene_source_document[0] == "manifest"
+            else (
+                None
+                if stage in SCENE_PACK_STAGES
+                and (run_dir / "script.md").is_file()
+                else load_manifest(run_dir)
+            )
+        )
+    entries = collect_entries(
+        stage,
+        run_dir,
+        manifest=manifest,
+        scene_source_document=(
+            scene_source_document if stage in SCENE_PACK_STAGES else None
+        ),
+    )
     paths = semantic_review_relpaths(stage)
     collection_path = run_dir / paths["collection"]
     scope_path = run_dir / paths["scope"]
@@ -816,6 +888,7 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
                 entries=entries,
                 canonical_scope_path=scope_path,
                 canonical_report_path=report_path,
+                source_fingerprint_cache=source_fingerprint_cache,
             )
         except ValueError as exc:
             # Keep a canonical, inspectable fail-closed scope so the server can
@@ -834,6 +907,7 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
         prompt_path=prompt_path,
         report_path=report_path,
         shard_plan=shard_plan,
+        source_fingerprint_cache=source_fingerprint_cache,
     )
     write_text(
         run_dir,
@@ -862,18 +936,65 @@ def build_pack(run_dir: Path, stage: str) -> tuple[Path, Path, Path, Path, int]:
     return collection_path, scope_path, prompt_path, report_path, len(entries)
 
 
+def build_packs(
+    run_dir: Path,
+    stages: tuple[str, ...],
+) -> list[tuple[Path, Path, Path, Path, int]]:
+    scene_source_document: tuple[str, dict[str, Any]] | None = None
+    if any(stage in SCENE_PACK_STAGES for stage in stages):
+        script_path = run_dir / "script.md"
+        manifest_path = run_dir / "video_manifest.md"
+        if script_path.is_file():
+            _, data = load_structured_document(script_path)
+            scene_source_document = ("script.md", data)
+        elif manifest_path.is_file():
+            _, data = load_structured_document(manifest_path)
+            scene_source_document = ("manifest", data)
+    manifest_document: dict[str, Any] | object = _MANIFEST_DOCUMENT_UNSET
+    if any(stage not in SCENE_PACK_STAGES for stage in stages):
+        manifest_document = load_manifest(run_dir)
+    source_fingerprint_cache: dict[tuple[object, ...], Any] = {}
+    return [
+        build_pack(
+            run_dir,
+            stage,
+            scene_source_document=(
+                scene_source_document if stage in SCENE_PACK_STAGES else None
+            ),
+            manifest_document=(
+                manifest_document
+                if stage not in SCENE_PACK_STAGES
+                else _MANIFEST_DOCUMENT_UNSET
+            ),
+            source_fingerprint_cache=source_fingerprint_cache,
+        )
+        for stage in stages
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a deterministic contextless semantic review pack.")
     parser.add_argument("--run-dir", required=True, help="Path to output/<topic>_<timestamp> or a scene run directory.")
-    parser.add_argument("--stage", required=True, choices=sorted(SEMANTIC_REVIEW_STAGES))
+    parser.add_argument(
+        "--stage",
+        required=True,
+        action="append",
+        choices=sorted(SEMANTIC_REVIEW_STAGES),
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
     if not run_dir.exists():
         raise SystemExit(f"Run directory not found: {run_dir}")
-    _, _, prompt_path, _, entry_count = build_pack(run_dir, args.stage)
-    print((prompt_path).read_text(encoding="utf-8"))
-    print(f"\n[semantic-review-pack] stage={args.stage} entries={entry_count}", file=sys.stderr)
+    for stage, (_, _, prompt_path, _, entry_count) in zip(
+        args.stage,
+        build_packs(run_dir, tuple(args.stage)),
+    ):
+        print((prompt_path).read_text(encoding="utf-8"))
+        print(
+            f"\n[semantic-review-pack] stage={stage} entries={entry_count}",
+            file=sys.stderr,
+        )
     return 0
 
 

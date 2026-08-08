@@ -1,12 +1,22 @@
 # ToC Public Site / LP Guide
 
-更新日: 2026-07-25
+更新日: 2026-08-08
 
 `marketing/LP/` は、既存 ToC 制作フロントとは分離して公開する marketing site と persona-specific LP の正本を置く。
 
 ## Site job
 
-訪問者に ToC の内部実装を説明することではなく、動画を速く簡単に作れる変化を見せ、次のどちらかへ進んでもらう。
+訪問者に ToC の内部実装を説明することではなく、次の順に理解と行動を進めてもらう。
+
+```text
+自分の想いが映像になると直感する
+  -> 実際の完成物で信じる
+  -> 副業 / 個人ブランドの目的を選ぶ
+  -> 一行の動画案を入力する
+  -> 提供形態と費用を理解して相談する
+```
+
+common site の customer-facing brand line は `あなたの想いを、映像に。` とする。persona-specific LP は広告との message match を優先し、次の persona 固有 CTA へ進める。
 
 - 副業の最初の1本を作る
 - 自分のブランド動画を設計する
@@ -40,6 +50,9 @@
 ## Design rules
 
 - Hero is the promise, not a company introduction
+- common home は `0 秒: brand line -> 3 秒: visitor outcome -> 10 秒: mechanism` の順に見せる
+- `0 秒` は内部設計用語とし、外向けの脳科学的主張には使わない
+- persona-specific LP は共通 brand line だけで Hero を置き換えず、persona 固有の問題、未来、CTA を維持する
 - Show `one-line idea -> completed video timeline` before the detailed workflow
 - Lead with visitor outcome, then product value, then mechanism
 - Keep side-business and personal-brand copy separate

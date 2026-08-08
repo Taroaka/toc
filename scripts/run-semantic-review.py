@@ -32,6 +32,7 @@ from toc.semantic_review import (  # noqa: E402
 )
 from toc.semantic_review_loop import (  # noqa: E402
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
+    read_committed_semantic_repair_prompt,
     semantic_loop_state_updates,
     semantic_repair_state_updates,
     semantic_repair_relpaths,
@@ -393,13 +394,27 @@ async def _run_producer_repair(
         updates[f"slot.{slot}.note"] = f"contextless semantic {stage} repair round {round_number} in progress"
     append_state_snapshot(run_dir / "state.txt", updates)
 
+    prompt = read_committed_semantic_repair_prompt(
+        run_dir,
+        stage,
+        round_number=round_number,
+    )
     client = create_codex_app_server_client(cwd=REPO_ROOT)
     try:
         thread_id = await client.start_thread(cwd=REPO_ROOT, approval_policy="never")
+        submission_prompt = read_committed_semantic_repair_prompt(
+            run_dir,
+            stage,
+            round_number=round_number,
+        )
+        if submission_prompt != prompt:
+            raise RuntimeError(
+                "semantic repair commit changed before provider turn submission"
+            )
         await _run_turn_until_semantic_artifact_completed(
             client,
             thread_id=thread_id,
-            text=paths["prompt"].read_text(encoding="utf-8"),
+            text=submission_prompt,
             cwd=REPO_ROOT,
             timeout_seconds=repair_timeout_seconds,
             report_path=paths["report"],

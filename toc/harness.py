@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,103 @@ try:
 except Exception:  # pragma: no cover - optional import fallback
     yaml = None
 
-from toc.run_index import write_run_index
+from toc.run_index import build_run_index_markdown
+from toc.run_root_binding import (
+    RunRootBinding,
+    RunRootBindingError,
+    append_run_file_text,
+    current_run_root_binding,
+    read_run_file_bytes,
+    require_bound_run_root,
+    write_run_file_text,
+)
+from scripts.world_walk_source import (
+    read_regular_file_nofollow,
+    write_regular_file_nofollow,
+)
+
+
+def _bound_artifact(
+    path: Path,
+    *,
+    require_within_binding: bool = False,
+) -> tuple[RunRootBinding, Path] | None:
+    binding = current_run_root_binding()
+    if binding is None:
+        return None
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = lexical.relative_to(binding.lexical_root)
+    except ValueError:
+        if require_within_binding:
+            raise RunRootBindingError(
+                "write escaped the active bound run root: "
+                f"{lexical} != {binding.lexical_root}"
+            )
+        return None
+    require_bound_run_root(Path(binding.lexical_root))
+    if not relative.parts:
+        raise ValueError("run artifact path must name a file")
+    return binding, relative
+
+
+def _read_bound_text(path: Path, *, missing_ok: bool = False) -> str:
+    bound = _bound_artifact(path)
+    if bound is None:
+        if missing_ok:
+            try:
+                os.stat(path.parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return ""
+        try:
+            return read_run_file_bytes(path.parent, path.name).decode(
+                "utf-8"
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return ""
+            raise
+    binding, relative = bound
+    try:
+        data = read_regular_file_nofollow(
+            Path(binding.lexical_root),
+            relative,
+            expected_root_identity=binding.identity,
+        )
+    except FileNotFoundError:
+        if missing_ok:
+            return ""
+        raise
+    return data.decode("utf-8")
+
+
+def _write_bound_text(path: Path, text: str) -> None:
+    bound = _bound_artifact(path, require_within_binding=True)
+    if bound is None:
+        write_run_file_text(path.parent, path.name, text)
+        return
+    binding, relative = bound
+    write_regular_file_nofollow(
+        destination_root=Path(binding.lexical_root),
+        destination_relative=relative,
+        data=text.encode("utf-8"),
+        expected_destination_root_identity=binding.identity,
+    )
+
+
+def _append_bound_state(path: Path, block: str) -> None:
+    bound = _bound_artifact(path, require_within_binding=True)
+    if bound is None:
+        append_run_file_text(path.parent, path.name, block)
+        return
+    binding, relative = bound
+    if len(relative.parts) != 1:
+        raise ValueError("state file must be a direct run artifact")
+    append_run_file_text(
+        Path(binding.lexical_root),
+        relative,
+        block,
+    )
 
 
 def now_iso() -> str:
@@ -43,7 +140,7 @@ def safe_load_yaml(text: str) -> dict[str, Any]:
 
 
 def load_structured_document(path: Path) -> tuple[str, dict[str, Any]]:
-    text = path.read_text(encoding="utf-8")
+    text = _read_bound_text(path)
     candidates = [text]
     try:
         candidates.insert(0, extract_yaml_block(text))
@@ -58,10 +155,11 @@ def load_structured_document(path: Path) -> tuple[str, dict[str, Any]]:
 
 
 def parse_state_file(state_path: Path) -> dict[str, str]:
-    if not state_path.exists():
+    text = _read_bound_text(state_path, missing_ok=True)
+    if not text:
         return {}
     merged: dict[str, str] = {}
-    for raw in state_path.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line == "---" or line.startswith("#") or "=" not in line:
             continue
@@ -241,10 +339,18 @@ def run_report_path(run_dir: Path) -> Path:
 def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
     state_path = run_dir / "state.txt"
     merged = state or parse_state_file(state_path)
-    write_run_index(run_dir, state=merged)
+    index_path = run_dir / "p000_index.md"
+    index_text = build_run_index_markdown(run_dir, state=merged)
+    _write_bound_text(index_path, index_text)
+    binding = current_run_root_binding()
     payload = {
         "generated_at": now_iso(),
-        "run_dir": str(run_dir.resolve()),
+        "run_dir": (
+            binding.lexical_root
+            if binding is not None
+            and os.path.abspath(os.fspath(run_dir)) == binding.lexical_root
+            else str(run_dir.resolve())
+        ),
         "state_file": str(state_path.resolve()),
         "state_flat": merged,
         "state": nested_state(merged),
@@ -253,23 +359,23 @@ def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
     }
 
     eval_path = eval_report_path(run_dir)
-    if eval_path.exists():
+    eval_text = _read_bound_text(eval_path, missing_ok=True)
+    if eval_text:
         try:
-            payload["eval_report"] = json.loads(eval_path.read_text(encoding="utf-8"))
+            payload["eval_report"] = json.loads(eval_text)
         except json.JSONDecodeError:
             payload["eval_report"] = {"error": f"Failed to parse {eval_path.name}"}
 
     output_path = run_status_path(run_dir)
-    output_path.write_text(
+    _write_bound_text(
+        output_path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    write_run_index(run_dir, state=merged)
+    _write_bound_text(index_path, index_text)
     return output_path
 
 
 def append_state_snapshot(state_path: Path, updates: dict[str, str]) -> dict[str, str]:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     merged = parse_state_file(state_path)
 
     if "job_id" not in merged or not merged["job_id"].strip():
@@ -284,13 +390,15 @@ def append_state_snapshot(state_path: Path, updates: dict[str, str]) -> dict[str
 
     lines = [f"{key}={merged[key]}" for key in _order_keys(merged)]
     block = "\n".join(lines) + "\n---\n"
-    with state_path.open("a", encoding="utf-8") as handle:
-        handle.write(block)
+    _append_bound_state(state_path, block)
 
     sync_run_status(state_path.parent, merged)
     return merged
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_bound_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+    )

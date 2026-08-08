@@ -447,6 +447,10 @@ class P500ResumeTests(unittest.TestCase):
                 (run_dir / "assets/characters/hero.png").read_bytes(),
                 b"old image bytes\n",
             )
+            self.assertFalse(
+                (run_dir / ".locks").exists(),
+                "identity rejection must happen before lock metadata creation",
+            )
             self.assertFalse(Path(plan.checkpoint_dir).exists())
 
     @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
@@ -3035,6 +3039,122 @@ class P500ResumeTests(unittest.TestCase):
                 events.index("generate_images"),
             )
 
+    def test_continue_run_rejects_reserved_root_replacement_before_work(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "state.txt").write_text(
+                "topic=sample\n---\n",
+                encoding="utf-8",
+            )
+            module = self._resume_cli_module()
+            frontend = module._load_frontend_runner()
+            expected_identity = module.directory_identity_nofollow(run_dir)
+            displaced = root / "displaced"
+            run_dir.rename(displaced)
+            run_dir.mkdir()
+            (run_dir / "sentinel.txt").write_text(
+                "replacement\n",
+                encoding="utf-8",
+            )
+            materialize = Mock()
+
+            with (
+                patch.object(
+                    module,
+                    "_load_frontend_runner",
+                    return_value=frontend,
+                ),
+                patch.object(
+                    module,
+                    "materialize_from_p500",
+                    materialize,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "directory identity changed",
+                ),
+            ):
+                module._continue_run(
+                    run_dir=run_dir,
+                    topic="sample",
+                    source="sample",
+                    stop_target="p680",
+                    materialize_only=False,
+                    skip_validation=True,
+                    expected_run_identity=expected_identity,
+                )
+
+            materialize.assert_not_called()
+            self.assertEqual(
+                sorted(path.name for path in run_dir.iterdir()),
+                ["sentinel.txt"],
+            )
+
+    def test_continue_run_root_swap_cannot_publish_orchestration_to_replacement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "state.txt").write_text(
+                "topic=sample\n---\n",
+                encoding="utf-8",
+            )
+            module = self._resume_cli_module()
+            frontend = module._load_frontend_runner()
+            expected_identity = module.directory_identity_nofollow(run_dir)
+            displaced = root / "displaced"
+
+            def swap_then_write(*_args, **_kwargs) -> None:
+                run_dir.rename(displaced)
+                run_dir.mkdir()
+                (run_dir / "sentinel.txt").write_text(
+                    "replacement\n",
+                    encoding="utf-8",
+                )
+                module._write_resume_orchestration(
+                    run_dir=run_dir,
+                    stop_target="p680",
+                    now="2026-07-30T00:00:00+09:00",
+                )
+
+            with (
+                patch.object(
+                    module,
+                    "_load_frontend_runner",
+                    return_value=frontend,
+                ),
+                patch.object(
+                    module,
+                    "materialize_from_p500",
+                    side_effect=swap_then_write,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "directory identity changed",
+                ),
+            ):
+                module._continue_run(
+                    run_dir=run_dir,
+                    topic="sample",
+                    source="sample",
+                    stop_target="p680",
+                    materialize_only=False,
+                    skip_validation=True,
+                    expected_run_identity=expected_identity,
+                )
+
+            self.assertEqual(
+                sorted(path.name for path in run_dir.iterdir()),
+                ["sentinel.txt"],
+            )
+            self.assertFalse((run_dir / "logs").exists())
+
     def test_scene_storyboard_p680_continuation_finalizes_after_images_before_validation(
         self,
     ) -> None:
@@ -3634,6 +3754,8 @@ class P500ResumeTests(unittest.TestCase):
             stop_target="p680",
             materialize_only=False,
             skip_validation=False,
+            expected_run_identity=None,
+            inherited_run_descriptor=None,
         )
 
     @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))

@@ -22,7 +22,13 @@ from toc.review_loop import (
 )
 
 
-def materialize_review_loop_round(*, run_dir: Path, stage: str, round_number: int) -> dict[str, str]:
+def materialize_review_loop_round(
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+    source_fingerprint_cache: dict[tuple[object, ...], object] | None = None,
+) -> dict[str, str]:
     resolved_run_dir = run_dir.resolve()
     if stage not in REVIEW_LOOP_SPECS:
         known = ", ".join(sorted(REVIEW_LOOP_SPECS))
@@ -53,6 +59,7 @@ def materialize_review_loop_round(*, run_dir: Path, stage: str, round_number: in
         run_dir=resolved_run_dir,
         stage=stage,
         round_number=round_number,
+        source_fingerprint_cache=source_fingerprint_cache,
     )
     input_digest = str(snapshot["input_digest"])
 

@@ -1,6 +1,6 @@
 # ToC marketing personas and message contract
 
-更新日: 2026-07-19
+更新日: 2026-08-08
 
 用途: ToC public site、persona-specific LP、広告、フォーム、proof 制作で使う audience / message の正本。
 
@@ -16,6 +16,12 @@ ToC の persona は年齢、性別、居住地のような demographic ではな
 - ToC の機能より visitor の未来を先に見せる
 - 収益、再生数、ブランド成長を保証しない
 - 神話・民話は persona ではなく proof category
+
+Shared brand layer:
+
+- Purpose: `人の心を動かし、人生を豊かにする。`
+- common brand line: `あなたの想いを、映像に。`
+- common brand line はブランド共通の 0 秒入口であり、persona-specific Hero、subcopy、CTA を置き換えない
 
 検証が必要な仮説:
 

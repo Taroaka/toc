@@ -5,6 +5,7 @@ import unittest
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.harness import append_state_snapshot, parse_state_file
 from toc import stage_evaluator as STAGE_EVALUATOR
+from toc.stage_evaluation import manifest as MANIFEST_EVALUATION
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
     REVIEW_LOOP_SPECS,
@@ -3998,6 +4000,47 @@ class TestStageEvaluatorScripts(unittest.TestCase):
 
             self.assertTrue(stage["passed"], stage["reason_keys"])
             self.assertEqual(updates["eval.p400_readiness.status"], "approved")
+
+    def test_manifest_evaluator_parses_script_once_per_p400_check(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_parse_once_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0016_parse_once"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\n"
+                "job_id=JOB_2026-04-04_000016_PARSE_ONCE\n"
+                "topic=桃太郎\n"
+                "status=MANIFEST\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(
+                run_dir,
+                target_duration=300,
+                cut_duration=15,
+                scene_count=10,
+            )
+            _resolve_ready_grounding(run_dir, "manifest", flow="immersive")
+
+            original_loader = MANIFEST_EVALUATION.load_structured_document
+            with patch.object(
+                MANIFEST_EVALUATION,
+                "load_structured_document",
+                wraps=original_loader,
+            ) as loader:
+                stage, updates = STAGE_EVALUATOR.check_manifest_single(
+                    run_dir,
+                    "standard",
+                    "immersive",
+                )
+
+            script_calls = [
+                call
+                for call in loader.call_args_list
+                if Path(call.args[0]).name == "script.md"
+            ]
+            self.assertTrue(stage["passed"], stage["reason_keys"])
+            self.assertEqual(updates["eval.p400_readiness.status"], "approved")
+            self.assertEqual(len(script_calls), 1)
 
     def test_manifest_evaluator_approves_p400_readiness_for_skeleton_manifest(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_skeleton_") as td:

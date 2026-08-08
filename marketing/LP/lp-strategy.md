@@ -1,6 +1,6 @@
 # ToC LP strategy
 
-更新日: 2026-07-25
+更新日: 2026-08-08
 
 用途: ToC の LP 部門における、調査、情報設計、copy、proof、conversion、法務、accessibility、performance、検証の正本。
 
@@ -86,7 +86,7 @@ Cambridge の multimedia learning research は、内容に対応する words と
 
 共通 LP prototype の基本順序:
 
-1. Hero: `動画制作を、もっと速く、もっと簡単に。`
+1. Hero: `あなたの想いを、映像に。` を入口に、visitor outcome と mechanism を順に見せる
 2. Problem: 分断された tool と制作工程で、企画が完成しない
 3. Informational value: 説明だけでは伝わりにくいものを、見れば分かる形へ
 4. Mechanism: one-line idea から完成動画までの Idea-to-Video Line
@@ -103,14 +103,18 @@ mobile では各 section を `結論 -> 1 visual -> 根拠 -> 1 CTA` の順に�
 ### Hero
 
 ```text
-動画制作を、
-もっと速く、もっと簡単に。
+あなたの想いを、映像に。
+
+知識も、物語も、世界観も。
+人の心へ届く一本に。
 
 企画・台本・映像・音声・編集を、ひとつの制作フローへ。
 ToC は、あなたが動画を作り続けるためのシステム一式を納品します。
 
 [自分の用途で導入できるか相談する]
 ```
+
+Hero は `0 秒: brand line -> 3 秒: visitor outcome -> 10 秒: mechanism` の順に progressive disclosure する。`0 秒` は内部設計用語であり、外向けの脳科学的主張には使わない。速度は reason-to-believe とし、比較可能な実測が揃うまでは `動画制作を、もっと速く、もっと簡単に。` を使う。
 
 Hero の offer note:
 

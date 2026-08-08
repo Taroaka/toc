@@ -1,0 +1,61 @@
+{
+  "engine": "sys.monitoring target-local line events + trace._find_executable_linenos",
+  "pytest_exit_code": 0,
+  "covered": 3966,
+  "executable": 4895,
+  "percent": 81.02,
+  "minimum_percent": 80.0,
+  "passed": true,
+  "modules": {
+    "toc/stage_evaluation/__init__.py": {
+      "covered": 0,
+      "executable": 1,
+      "percent": 0.0
+    },
+    "toc/stage_evaluation/common.py": {
+      "covered": 465,
+      "executable": 521,
+      "percent": 89.25
+    },
+    "toc/stage_evaluation/manifest.py": {
+      "covered": 724,
+      "executable": 992,
+      "percent": 72.98
+    },
+    "toc/stage_evaluation/manifest_nodes.py": {
+      "covered": 53,
+      "executable": 74,
+      "percent": 71.62
+    },
+    "toc/stage_evaluation/pipeline.py": {
+      "covered": 363,
+      "executable": 519,
+      "percent": 69.94
+    },
+    "toc/stage_evaluation/research_story.py": {
+      "covered": 762,
+      "executable": 853,
+      "percent": 89.33
+    },
+    "toc/stage_evaluation/runner.py": {
+      "covered": 28,
+      "executable": 97,
+      "percent": 28.87
+    },
+    "toc/stage_evaluation/script.py": {
+      "covered": 1496,
+      "executable": 1703,
+      "percent": 87.84
+    },
+    "toc/stage_evaluation/video.py": {
+      "covered": 29,
+      "executable": 88,
+      "percent": 32.95
+    },
+    "toc/stage_review_cli.py": {
+      "covered": 46,
+      "executable": 47,
+      "percent": 97.87
+    }
+  }
+}

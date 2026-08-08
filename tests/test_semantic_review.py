@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import toc.semantic_review_loop as semantic_review_loop
+
 from toc.semantic_review import (
     FOUNDATION_SEMANTIC_CRITERIA,
     LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
@@ -28,6 +30,7 @@ from toc.semantic_review_loop import (
     semantic_repair_timeout_seconds,
     scene_detail_review_concurrency,
     scene_detail_transport_retry_attempts,
+    read_committed_semantic_repair_prompt,
     semantic_review_max_attempts,
     semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
@@ -201,6 +204,77 @@ def write_digest_bound_pack(run_dir: Path, stage: str = "asset_plan") -> tuple[P
         encoding="utf-8",
     )
     return source_path, report_path
+
+
+def rebind_generic_pack(
+    run_dir: Path,
+    stage: str,
+    *,
+    entry_ids: list[str] | None = None,
+) -> str:
+    paths = semantic_review_relpaths(stage)
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    scope_path = run_dir / paths["scope"]
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    if entry_ids is not None:
+        scope["entry_ids"] = entry_ids
+        scope["entry_count"] = len(entry_ids)
+    scope["collection_sha256"] = hashlib.sha256(collection_path.read_bytes()).hexdigest()
+    scope["prompt_sha256"] = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+    scope_binding_sha256 = semantic_review_scope_binding_sha256(scope)
+    scope["scope_binding_sha256"] = scope_binding_sha256
+    digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=scope["entry_ids"],
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=scope["source_artifact_digests"],
+        request_revision=scope.get("request_revision"),
+        scope_binding_sha256=scope_binding_sha256,
+    )
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(json.dumps(scope, ensure_ascii=False) + "\n", encoding="utf-8")
+    return digest
+
+
+def rewrite_generic_pack_revision(
+    run_dir: Path,
+    stage: str,
+    *,
+    revision: str,
+    failed_selector: str = "",
+) -> None:
+    """Rewrite one test review pack as a complete, digest-bound revision."""
+
+    paths = semantic_review_relpaths(stage)
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    report_path = run_dir / paths["report"]
+    collection_path.write_text(
+        f"# {stage} collection\n\n## {stage}:entry:1\n\n{revision} collection meaning\n",
+        encoding="utf-8",
+    )
+    prompt_path.write_text(
+        f"review {revision} meaning\n",
+        encoding="utf-8",
+    )
+    digest = rebind_generic_pack(run_dir, stage)
+    selectors = f"[{failed_selector}]" if failed_selector else "[]"
+    report_path.write_text(
+        "\n".join(
+            [
+                "status: failed",
+                f"semantic_review_input_digest: {digest}",
+                f"reviewed_entries: [{stage}:entry:1]",
+                f"blocked_entries: {selectors}",
+                f"failed_selectors: {selectors}",
+                f"findings: [{revision} finding]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 class TestSemanticReview(unittest.TestCase):
@@ -578,6 +652,211 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("narration producer", paths["prompt"].read_text(encoding="utf-8"))
             self.assertIn("status: pending", paths["report"].read_text(encoding="utf-8"))
 
+    def test_semantic_repair_commit_binds_exact_review_snapshot_and_output_pair(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "asset_plan", status="failed")
+            scope_path = run_dir / semantic_review_relpaths("asset_plan")["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                "asset_plan",
+                round_number=1,
+                max_attempts=2,
+                errors=("asset semantics failed",),
+            )
+
+            commit = json.loads(paths["commit"].read_text(encoding="utf-8"))
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+            committed_prompt = read_committed_semantic_repair_prompt(
+                run_dir,
+                "asset_plan",
+                round_number=1,
+            )
+
+        self.assertEqual(commit["schema_version"], "semantic_repair_commit_v1")
+        self.assertEqual(commit["status"], "committed")
+        self.assertEqual(
+            commit["review_snapshot"]["semantic_review_input_digest"],
+            scope["semantic_review_input_digest"],
+        )
+        self.assertEqual(
+            commit["review_snapshot"]["source_artifact_digests"],
+            scope["source_artifact_digests"],
+        )
+        self.assertEqual(
+            commit["artifacts"]["prompt"]["sha256"],
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(committed_prompt, prompt)
+        self.assertIn(scope["semantic_review_input_digest"], prompt)
+        self.assertIn(scope["source_artifact_digests"][0]["sha256"], prompt)
+
+    def test_semantic_repair_rejects_report_from_another_review_revision(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "scene_set", status="failed")
+            report_path = run_dir / semantic_review_relpaths("scene_set")["report"]
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8").replace(
+                    "semantic_review_input_digest: sha256:",
+                    "semantic_review_input_digest: sha256:" + "0" * 64 + "\nstale_digest: sha256:",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            repair_paths = semantic_repair_relpaths("scene_set", 1)
+
+            with self.assertRaisesRegex(RuntimeError, "consistent semantic review snapshot"):
+                write_semantic_repair_prompt(
+                    run_dir,
+                    "scene_set",
+                    round_number=1,
+                    max_attempts=2,
+                    errors=("scene semantics failed",),
+                )
+
+            self.assertFalse((run_dir / repair_paths["prompt"]).exists())
+            self.assertFalse((run_dir / repair_paths["report"]).exists())
+            self.assertFalse((run_dir / repair_paths["commit"]).exists())
+
+    def test_semantic_repair_retries_when_review_revision_changes_during_read(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            stage = "scene_set"
+            write_generic_pack(run_dir, stage, status="failed")
+            rewrite_generic_pack_revision(
+                run_dir,
+                stage,
+                revision="revision A",
+                failed_selector=f"{stage}:entry:1",
+            )
+            review_paths = semantic_review_relpaths(stage)
+            original_read = semantic_review_loop.read_regular_file_nofollow
+            switched = False
+
+            def read_then_switch(root, relative, *, expected_root_identity=None):
+                nonlocal switched
+                content = original_read(
+                    root,
+                    relative,
+                    expected_root_identity=expected_root_identity,
+                )
+                if not switched and Path(relative) == review_paths["collection"]:
+                    switched = True
+                    rewrite_generic_pack_revision(
+                        run_dir,
+                        stage,
+                        revision="revision B",
+                        failed_selector=f"{stage}:entry:1",
+                    )
+                return content
+
+            with patch(
+                "toc.semantic_review_loop.read_regular_file_nofollow",
+                side_effect=read_then_switch,
+            ):
+                paths = write_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                    max_attempts=2,
+                    errors=("scene semantics failed",),
+                )
+
+            prompt = paths["prompt"].read_text(encoding="utf-8")
+
+        self.assertTrue(switched)
+        self.assertIn("revision B finding", prompt)
+        self.assertIn("revision B collection meaning", prompt)
+        self.assertNotIn("revision A finding", prompt)
+        self.assertNotIn("revision A collection meaning", prompt)
+
+    def test_semantic_repair_consumer_rejects_tampered_pair_and_changed_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            stage = "asset_plan"
+            write_generic_pack(run_dir, stage, status="failed")
+            paths = write_semantic_repair_prompt(
+                run_dir,
+                stage,
+                round_number=1,
+                max_attempts=2,
+                errors=("asset semantics failed",),
+            )
+            paths["prompt"].write_text("tampered prompt\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "committed semantic repair"):
+                read_committed_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                )
+
+            write_semantic_repair_prompt(
+                run_dir,
+                stage,
+                round_number=1,
+                max_attempts=2,
+                errors=("asset semantics failed",),
+            )
+            (run_dir / f"{stage}_semantic_source.md").write_text(
+                "changed after review\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "committed semantic repair"):
+                read_committed_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                )
+
+    def test_semantic_repair_partial_write_never_publishes_committed_pair(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            stage = "narration"
+            write_generic_pack(run_dir, stage, status="failed")
+            repair_paths = semantic_repair_relpaths(stage, 1)
+            original_write = semantic_review_loop.safe_semantic_write_text
+
+            def fail_report(root, path, text, *, expected_root_identity=None):
+                if Path(path) == run_dir / repair_paths["report"]:
+                    raise OSError("simulated report write failure")
+                return original_write(
+                    root,
+                    path,
+                    text,
+                    expected_root_identity=expected_root_identity,
+                )
+
+            with (
+                patch(
+                    "toc.semantic_review_loop.safe_semantic_write_text",
+                    side_effect=fail_report,
+                ),
+                self.assertRaisesRegex(OSError, "simulated report write failure"),
+            ):
+                write_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                    max_attempts=2,
+                    errors=("narration semantics failed",),
+                )
+
+            commit = json.loads(
+                (run_dir / repair_paths["commit"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(commit["status"], "preparing")
+            with self.assertRaisesRegex(RuntimeError, "committed semantic repair"):
+                read_committed_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                )
+
     def test_image_prompt_repair_edits_visual_plan_then_recompiles_derived_requests(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)
@@ -841,16 +1120,24 @@ reason_keys: [semantic_contract_missing]
     def test_write_semantic_repair_prompt_lists_inline_failed_selectors(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
             run_dir = Path(td)
+            write_generic_pack(run_dir, "scene_set", status="failed", entry_count=2)
             paths = semantic_review_relpaths("scene_set")
-            (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
             (run_dir / paths["collection"]).write_text(
                 "# Semantic Review Collection: scene_set\n\n## scene:10\n\nfailed ten\n\n## scene:40\n\npassed forty\n",
                 encoding="utf-8",
             )
-            (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 2}, ensure_ascii=False) + "\n", encoding="utf-8")
-            (run_dir / paths["prompt"]).write_text("# prompt\n", encoding="utf-8")
+            digest = rebind_generic_pack(
+                run_dir,
+                "scene_set",
+                entry_ids=["scene:10", "scene:40"],
+            )
             (run_dir / paths["report"]).write_text(
-                "status: failed\nblocked_entries: [scene:10]\nfailed_selectors: [scene10]\n",
+                "status: failed\n"
+                f"semantic_review_input_digest: {digest}\n"
+                "reviewed_entries: [scene:10, scene:40]\n"
+                "blocked_entries: [scene:10]\n"
+                "failed_selectors: [scene10]\n"
+                "findings: [scene:10 failed]\n",
                 encoding="utf-8",
             )
 

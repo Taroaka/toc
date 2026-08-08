@@ -11,7 +11,11 @@ from textwrap import dedent
 from typing import Any
 
 from toc.review_projection import (
+    RAW_REVIEW_SOURCE_FINGERPRINT_POLICY,
     REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
+    REVIEW_LOOP_MANIFEST_PROJECTION_STAGES,
+    VIDEO_MANIFEST_RELPATH,
+    VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
     ReviewProjectionError,
     review_source_fingerprint,
 )
@@ -449,7 +453,37 @@ def _contained_review_source(run_dir: Path, raw_relpath: str) -> tuple[Path | No
     return resolved, None
 
 
-def build_review_input_snapshot(*, run_dir: Path, stage: str, round_number: int) -> dict[str, Any]:
+def _review_source_fingerprint_cache_key(
+    *,
+    source_path: Path,
+    artifact_relpath: str,
+    stage: str,
+) -> tuple[object, ...]:
+    source_stat = source_path.stat()
+    fingerprint_policy = (
+        VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA
+        if artifact_relpath == VIDEO_MANIFEST_RELPATH
+        and stage in REVIEW_LOOP_MANIFEST_PROJECTION_STAGES
+        else RAW_REVIEW_SOURCE_FINGERPRINT_POLICY
+    )
+    return (
+        str(source_path),
+        source_stat.st_dev,
+        source_stat.st_ino,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+        source_stat.st_ctime_ns,
+        fingerprint_policy,
+    )
+
+
+def build_review_input_snapshot(
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
+) -> dict[str, Any]:
     """Capture the exact source revision that one review round is allowed to approve."""
 
     normalize_round(round_number)
@@ -461,12 +495,25 @@ def build_review_input_snapshot(*, run_dir: Path, stage: str, round_number: int)
         source_path, issue = _contained_review_source(resolved_run_dir, raw_relpath)
         if issue or source_path is None:
             raise FileNotFoundError(issue or raw_relpath)
-        fingerprint = review_source_fingerprint(
-            source_path,
-            artifact_relpath=Path(raw_relpath).as_posix(),
-            review_kind="review_loop",
+        cache_key = _review_source_fingerprint_cache_key(
+            source_path=source_path,
+            artifact_relpath=raw_relpath,
             stage=stage,
         )
+        fingerprint = (
+            source_fingerprint_cache.get(cache_key)
+            if source_fingerprint_cache is not None
+            else None
+        )
+        if fingerprint is None:
+            fingerprint = review_source_fingerprint(
+                source_path,
+                artifact_relpath=Path(raw_relpath).as_posix(),
+                review_kind="review_loop",
+                stage=stage,
+            )
+            if source_fingerprint_cache is not None:
+                source_fingerprint_cache[cache_key] = fingerprint
         sources.append(
             {
                 "path": Path(raw_relpath).as_posix(),
@@ -524,7 +571,13 @@ def write_review_input_snapshot(
     return path
 
 
-def review_input_snapshot_issues(*, run_dir: Path, stage: str, round_number: int) -> list[str]:
+def review_input_snapshot_issues(
+    *,
+    run_dir: Path,
+    stage: str,
+    round_number: int,
+    source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
+) -> list[str]:
     """Return currentness/provenance errors for a materialized review round."""
 
     relpath = review_input_snapshot_relpath(stage, round_number)
@@ -564,13 +617,26 @@ def review_input_snapshot_issues(*, run_dir: Path, stage: str, round_number: int
                     REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD
                 )
                 try:
-                    fingerprint = review_source_fingerprint(
-                        source_path,
+                    cache_key = _review_source_fingerprint_cache_key(
+                        source_path=source_path,
                         artifact_relpath=Path(raw_relpath).as_posix(),
-                        review_kind="review_loop",
                         stage=stage,
                     )
-                except ReviewProjectionError as exc:
+                    fingerprint = (
+                        source_fingerprint_cache.get(cache_key)
+                        if source_fingerprint_cache is not None
+                        else None
+                    )
+                    if fingerprint is None:
+                        fingerprint = review_source_fingerprint(
+                            source_path,
+                            artifact_relpath=Path(raw_relpath).as_posix(),
+                            review_kind="review_loop",
+                            stage=stage,
+                        )
+                        if source_fingerprint_cache is not None:
+                            source_fingerprint_cache[cache_key] = fingerprint
+                except (OSError, ReviewProjectionError) as exc:
                     issues.append(
                         f"invalid review source projection: {raw_relpath}: {exc}"
                     )

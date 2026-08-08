@@ -175,6 +175,10 @@ class CreateResumeDurationTests(unittest.TestCase):
         self.assertEqual(payload["targetDurationSeconds"], 1200)
         self.assertEqual(payload["resumeMode"], "image_only")
         self.assertEqual(scheduled[0]["run_id"], run_id)
+        self.assertIsInstance(
+            scheduled[0]["retained_run"],
+            image_gen_app._FrontendCreateRunReservation,
+        )
         fresh_create.assert_not_called()
 
     def test_resume_with_strict_p650_and_asset_repair_plan_schedules_canonical_p500_job(
@@ -254,7 +258,14 @@ class CreateResumeDurationTests(unittest.TestCase):
 
         self.assertEqual(payload["resumeMode"], "p500_subprocess")
         self.assertEqual(scheduled[0]["run_id"], run_id)
-        acquire_lease.assert_not_awaited()
+        self.assertIsInstance(
+            scheduled[0]["retained_run"],
+            image_gen_app._FrontendCreateRunReservation,
+        )
+        acquire_lease.assert_awaited_once()
+        self.assertIsNotNone(
+            acquire_lease.await_args.kwargs["run_descriptor"]
+        )
         run_image_only.assert_not_called()
 
     def test_resume_with_strict_p650_rejects_malformed_asset_plan_before_scheduling(
@@ -327,7 +338,7 @@ class CreateResumeDurationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("p500 reference targets", str(raised.exception.detail))
-        acquire_lease.assert_not_awaited()
+        acquire_lease.assert_awaited_once()
         create_task.assert_not_called()
         run_image_only.assert_not_called()
         run_p500.assert_not_called()
@@ -340,12 +351,17 @@ class CreateResumeDurationTests(unittest.TestCase):
             run_dir.mkdir(parents=True)
             _write_manifest(run_dir, 300)
             (run_dir / "state.txt").write_text("slot.p110.status=done\n---\n", encoding="utf-8")
+            acquire_lease = AsyncMock()
             with (
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app._current_process_number_for_run", return_value=110),
                 patch("server.image_gen_app.process_store.get_process_run", return_value=None),
                 patch("server.image_gen_app._validate_frontend_create_run") as validate_p680,
                 patch("server.image_gen_app._validate_p650_run") as validate_p650,
+                patch(
+                    "server.image_gen_app._acquire_run_execution_lease",
+                    acquire_lease,
+                ),
                 patch("server.image_gen_app.asyncio.create_task") as create_task,
                 patch.dict(image_gen_app._create_jobs, {}, clear=True),
             ):
@@ -359,11 +375,12 @@ class CreateResumeDurationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("p680", str(raised.exception.detail))
+        acquire_lease.assert_awaited_once()
         validate_p680.assert_called_once_with(run_id, strict_visual_quality=True)
         validate_p650.assert_not_called()
         create_task.assert_not_called()
 
-    def test_resume_before_p650_schedules_subprocess_job_without_parent_lease(self) -> None:
+    def test_resume_before_p650_schedules_subprocess_job_with_retained_parent_lease(self) -> None:
         scheduled: list[dict[str, object]] = []
 
         async def noop_job():
@@ -415,7 +432,8 @@ class CreateResumeDurationTests(unittest.TestCase):
 
         self.assertEqual(payload["resumeMode"], "p500_subprocess")
         self.assertEqual(scheduled[0]["run_id"], run_id)
-        acquire_lease.assert_not_awaited()
+        acquire_lease.assert_awaited_once()
+        self.assertIsNotNone(scheduled[0]["retained_run"])
         fresh_create.assert_not_called()
 
     def test_resume_rejects_an_existing_running_job_for_the_same_run(self) -> None:
@@ -459,7 +477,7 @@ class CreateResumeDurationTests(unittest.TestCase):
                         )
                     )
 
-        self.assertEqual(raised.exception.status_code, 409)
+                self.assertEqual(raised.exception.status_code, 409)
         self.assertIn("already active", str(raised.exception.detail))
         create_task.assert_not_called()
 

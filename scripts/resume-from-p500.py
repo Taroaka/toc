@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import nullcontext
+from contextvars import ContextVar
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
-import shutil
+import stat
 import subprocess
 import sys
 from types import ModuleType
@@ -21,7 +24,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
+from toc.harness import (
+    append_state_snapshot,
+    extract_yaml_block,
+    load_structured_document,
+    parse_state_file,
+    safe_load_yaml,
+)
 from toc.p500_resume import (
     P500ResumeError,
     RESUME_INPUT_IDENTITY_SCHEMA_VERSION,
@@ -38,16 +47,305 @@ from scripts.world_walk_source import (
     copy_regular_file_atomic_nofollow,
     directory_identity_nofollow,
     directory_identity_relative_nofollow,
+    ensure_directory_relative_nofollow,
+    open_directory_nofollow,
     read_regular_file_nofollow,
     sha256_regular_file_nofollow,
     unlink_regular_file_verified_nofollow,
     validate_world_walk_source_contract_path,
     validate_world_walk_source_path,
+    write_regular_file_nofollow,
 )
 
 
 CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
 CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
+_ACTIVE_RESUME_ROOT: ContextVar[
+    tuple[str, PathIdentity, ModuleType] | None
+] = ContextVar("active_p500_resume_root", default=None)
+
+
+def _safe_resume_relative_path(relative_path: str | Path) -> Path:
+    relative = Path(relative_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise P500ResumeError(
+            f"unsafe p500 resume artifact path: {relative_path}"
+        )
+    return relative
+
+
+def _active_resume_root(
+    run_dir: Path,
+) -> tuple[str, PathIdentity, ModuleType] | None:
+    active = _ACTIVE_RESUME_ROOT.get()
+    lexical_root = os.path.abspath(os.fspath(run_dir))
+    if active is None or active[0] != lexical_root:
+        return None
+    return active
+
+
+def _resume_root_identity(run_dir: Path) -> PathIdentity:
+    active = _active_resume_root(run_dir)
+    expected_identity = active[1] if active is not None else None
+    descriptor = open_directory_nofollow(
+        run_dir,
+        expected_identity=expected_identity,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        return opened.st_dev, opened.st_ino
+    finally:
+        os.close(descriptor)
+
+
+def _read_resume_bytes(
+    run_dir: Path,
+    relative_path: str | Path,
+    *,
+    missing_ok: bool = False,
+) -> bytes:
+    relative = _safe_resume_relative_path(relative_path)
+    active = _active_resume_root(run_dir)
+    try:
+        if active is not None:
+            return read_regular_file_nofollow(
+                run_dir,
+                relative,
+                expected_root_identity=active[1],
+            )
+        return (run_dir / relative).read_bytes()
+    except FileNotFoundError:
+        if missing_ok:
+            return b""
+        raise
+
+
+def _read_resume_text(
+    run_dir: Path,
+    relative_path: str | Path,
+    *,
+    missing_ok: bool = False,
+) -> str:
+    try:
+        return _read_resume_bytes(
+            run_dir,
+            relative_path,
+            missing_ok=missing_ok,
+        ).decode("utf-8")
+    except UnicodeError as exc:
+        raise P500ResumeError(
+            f"p500 resume artifact is not UTF-8: {relative_path}"
+        ) from exc
+
+
+def _write_resume_bytes(
+    run_dir: Path,
+    relative_path: str | Path,
+    data: bytes,
+) -> None:
+    relative = _safe_resume_relative_path(relative_path)
+    active = _active_resume_root(run_dir)
+    if active is not None:
+        writer = getattr(active[2], "_write_run_text_nofollow", None)
+        if callable(writer) and isinstance(data, bytes):
+            try:
+                text = data.decode("utf-8")
+            except UnicodeError:
+                text = None
+            if text is not None:
+                writer(run_dir, run_dir / relative, text)
+                return
+        write_regular_file_nofollow(
+            destination_root=run_dir,
+            destination_relative=relative,
+            data=data,
+            expected_destination_root_identity=active[1],
+        )
+        return
+    destination = run_dir / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+
+
+def _write_resume_text(
+    run_dir: Path,
+    relative_path: str | Path,
+    text: str,
+) -> None:
+    _write_resume_bytes(
+        run_dir,
+        relative_path,
+        text.encode("utf-8"),
+    )
+
+
+def _ensure_resume_directory(
+    run_dir: Path,
+    relative_path: str | Path,
+) -> None:
+    relative = _safe_resume_relative_path(relative_path)
+    active = _active_resume_root(run_dir)
+    if active is not None:
+        ensure_directory_relative_nofollow(
+            run_dir,
+            relative,
+            expected_root_identity=active[1],
+        )
+        return
+    (run_dir / relative).mkdir(parents=True, exist_ok=True)
+
+
+def _append_resume_state(
+    run_dir: Path,
+    updates: dict[str, str],
+) -> dict[str, str]:
+    active = _active_resume_root(run_dir)
+    if active is not None:
+        writer = getattr(active[2], "append_state_snapshot", None)
+        if not callable(writer):
+            raise P500ResumeError(
+                "frontend runner does not expose bound state writes"
+            )
+        return writer(run_dir / "state.txt", updates)
+    return append_state_snapshot(run_dir / "state.txt", updates)
+
+
+def _parse_resume_state(run_dir: Path) -> dict[str, str]:
+    active = _active_resume_root(run_dir)
+    if active is None:
+        return parse_state_file(run_dir / "state.txt")
+    parser = getattr(active[2], "_parse_state_text", None)
+    if not callable(parser):
+        raise P500ResumeError(
+            "frontend runner does not expose bound state parsing"
+        )
+    return parser(
+        _read_resume_text(run_dir, "state.txt", missing_ok=True)
+    )
+
+
+def _load_resume_structured_document(
+    run_dir: Path,
+    relative_path: str | Path,
+) -> tuple[str, dict[str, Any]]:
+    active = _active_resume_root(run_dir)
+    if active is None:
+        return load_structured_document(run_dir / relative_path)
+    text = _read_resume_text(run_dir, relative_path)
+    candidates = [text]
+    try:
+        candidates.insert(0, extract_yaml_block(text))
+    except ValueError:
+        pass
+    for candidate in candidates:
+        data = safe_load_yaml(candidate)
+        if data:
+            return text, data
+    return text, {}
+
+
+def _resume_regular_file_exists(
+    run_dir: Path,
+    relative_path: str | Path,
+) -> bool:
+    try:
+        _read_resume_bytes(run_dir, relative_path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _append_resume_text(
+    run_dir: Path,
+    relative_path: str | Path,
+    text: str,
+) -> None:
+    existing = _read_resume_text(
+        run_dir,
+        relative_path,
+        missing_ok=True,
+    )
+    _write_resume_text(run_dir, relative_path, existing + text)
+
+
+def _run_resume_subprocess(
+    run_dir: Path,
+    command: list[str | os.PathLike[str]],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    active = _active_resume_root(run_dir)
+    if active is not None:
+        runner = getattr(active[2], "_run_materialization_subprocess", None)
+        if not callable(runner):
+            raise P500ResumeError(
+                "frontend runner does not expose bound subprocess execution"
+            )
+        return runner(run_dir, command, **kwargs)
+    return subprocess.run(command, **kwargs)
+
+
+def _iter_resume_regular_files(run_dir: Path) -> tuple[Path, ...]:
+    active = _active_resume_root(run_dir)
+    if active is None:
+        return tuple(
+            path.relative_to(run_dir)
+            for path in run_dir.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+
+    root_descriptor = open_directory_nofollow(
+        run_dir,
+        expected_identity=active[1],
+    )
+    selected: list[Path] = []
+
+    def scan(descriptor: int, parent: Path) -> None:
+        for name in sorted(os.listdir(descriptor)):
+            if name in {"", ".", ".."} or "/" in name:
+                raise P500ResumeError(
+                    f"unsafe p500 resume directory entry: {name!r}"
+                )
+            entry = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            relative = parent / name
+            if stat.S_ISDIR(entry.st_mode):
+                child = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptor,
+                )
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (
+                        entry.st_dev,
+                        entry.st_ino,
+                    ):
+                        raise P500ResumeError(
+                            "p500 resume directory identity changed: "
+                            f"{relative.as_posix()}"
+                        )
+                    scan(child, relative)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(entry.st_mode):
+                selected.append(relative)
+
+    try:
+        scan(root_descriptor, Path())
+    finally:
+        os.close(root_descriptor)
+    _resume_root_identity(run_dir)
+    return tuple(selected)
 
 
 def _load_frontend_runner() -> ModuleType:
@@ -61,10 +359,13 @@ def _load_frontend_runner() -> ModuleType:
 
 
 def _topic_for_run(run_dir: Path, explicit_topic: str) -> str:
-    state_topic = str(parse_state_file(run_dir / "state.txt").get("topic") or "").strip()
+    state_topic = str(_parse_resume_state(run_dir).get("topic") or "").strip()
     topic = explicit_topic.strip() or state_topic
     if not topic:
-        _text, manifest = load_structured_document(run_dir / "video_manifest.md")
+        _text, manifest = _load_resume_structured_document(
+            run_dir,
+            "video_manifest.md",
+        )
         metadata = manifest.get("video_metadata")
         if isinstance(metadata, dict):
             topic = str(metadata.get("topic") or "").strip()
@@ -84,7 +385,10 @@ def _resume_profile(
     topic: str,
     source: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    _manifest_text, manifest = load_structured_document(run_dir / "video_manifest.md")
+    _manifest_text, manifest = _load_resume_structured_document(
+        run_dir,
+        "video_manifest.md",
+    )
     if not manifest:
         raise P500ResumeError("video_manifest.md is not a structured document")
     metadata = manifest.get("video_metadata")
@@ -104,10 +408,16 @@ def _resume_profile(
         frontend._story_profile(topic, source, variant_seed=run_dir.name),
         target_duration_seconds=target_duration_seconds,
     )
-    _research_text, research = load_structured_document(run_dir / "research.md")
+    _research_text, research = _load_resume_structured_document(
+        run_dir,
+        "research.md",
+    )
     if research:
         profile = frontend._profile_from_reviewed_research(profile, research)
-    _story_text, story = load_structured_document(run_dir / "story.md")
+    _story_text, story = _load_resume_structured_document(
+        run_dir,
+        "story.md",
+    )
     if story:
         profile = frontend._profile_from_reviewed_story(profile, story)
     return profile, manifest
@@ -116,7 +426,7 @@ def _resume_profile(
 def _resume_checkpoint_metadata(
     run_dir: Path,
 ) -> tuple[Path, dict[str, Any]] | None:
-    state = parse_state_file(run_dir / "state.txt")
+    state = _parse_resume_state(run_dir)
     checkpoint_rel = str(state.get("runtime.resume.p500.checkpoint") or "").strip()
     if not checkpoint_rel:
         return None
@@ -132,7 +442,7 @@ def _resume_checkpoint_metadata(
         )
     checkpoint = run_dir / checkpoint_path
     try:
-        run_identity = directory_identity_nofollow(run_dir)
+        run_identity = _resume_root_identity(run_dir)
         raw_metadata = read_regular_file_nofollow(
             run_dir,
             checkpoint_path / "checkpoint.json",
@@ -179,6 +489,30 @@ def _resume_checkpoint_metadata(
         raise P500ResumeError(
             f"p500 resume checkpoint identity does not match: {checkpoint}"
         )
+    raw_plan_run_identity = payload.get("run_dir_identity")
+    plan_run_identity: tuple[int, int] | None = None
+    if raw_plan_run_identity is not None:
+        if (
+            not isinstance(raw_plan_run_identity, (list, tuple))
+            or len(raw_plan_run_identity) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in raw_plan_run_identity
+            )
+        ):
+            raise P500ResumeError(
+                f"p500 resume checkpoint run identity is invalid: "
+                f"{checkpoint}"
+            )
+        plan_run_identity = (
+            int(raw_plan_run_identity[0]),
+            int(raw_plan_run_identity[1]),
+        )
+        if plan_run_identity != run_identity:
+            raise P500ResumeError(
+                f"p500 resume checkpoint run identity does not match: "
+                f"{checkpoint}"
+            )
     if not isinstance(payload.get("downstream_fingerprints"), dict):
         raise P500ResumeError(
             f"p500 resume checkpoint fingerprints are missing: {checkpoint}"
@@ -237,6 +571,7 @@ def _resume_checkpoint_metadata(
             )
     actual_plan_token = _compute_resume_plan_token(
         run_dir=metadata_run_dir,
+        run_dir_identity=plan_run_identity,
         checkpoint_id=metadata_checkpoint_id,
         upstream_sha256=payload["upstream_sha256"],
         state_fingerprint=payload["state_fingerprint"],
@@ -284,19 +619,20 @@ def _resolve_resume_mode_contract(
     run_dir: Path,
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    current_state = parse_state_file(run_dir / "state.txt")
+    current_state = _parse_resume_state(run_dir)
     checkpoint_present = _resume_checkpoint_dir(run_dir) is not None
     checkpoint_state = _checkpoint_state_before(run_dir)
     contract_state = (
         checkpoint_state if checkpoint_present else current_state
     )
     if manifest is None:
-        manifest_path = run_dir / "video_manifest.md"
-        manifest = (
-            load_structured_document(manifest_path)[1]
-            if manifest_path.is_file()
-            else {}
-        )
+        try:
+            manifest = _load_resume_structured_document(
+                run_dir,
+                "video_manifest.md",
+            )[1]
+        except FileNotFoundError:
+            manifest = {}
     metadata = (
         manifest.get("video_metadata")
         if isinstance(manifest, dict)
@@ -386,6 +722,11 @@ def _read_canonical_create_input(run_dir: Path) -> dict[str, Any] | None:
         raw_payload = read_regular_file_nofollow(
             run_dir,
             CREATE_INPUT_REL_PATH,
+            expected_root_identity=(
+                _active_resume_root(run_dir)[1]
+                if _active_resume_root(run_dir) is not None
+                else None
+            ),
         )
     except FileNotFoundError:
         return None
@@ -496,8 +837,9 @@ def _resolve_exact_resume_source(
         raise P500ResumeError(
             "canonical create input target duration is invalid"
         )
-    _manifest_text, manifest = load_structured_document(
-        run_dir / "video_manifest.md"
+    _manifest_text, manifest = _load_resume_structured_document(
+        run_dir,
+        "video_manifest.md",
     )
     metadata = (
         manifest.get("video_metadata")
@@ -529,7 +871,7 @@ def _resolve_exact_resume_source(
             "video_manifest.md"
         )
     state_target = str(
-        parse_state_file(run_dir / "state.txt").get(
+        _parse_resume_state(run_dir).get(
             "runtime.target_video_seconds"
         )
         or ""
@@ -648,7 +990,7 @@ def _verified_checkpoint_world_walk_references(
     downstream_files = set(payload["downstream_files"])
     checkpoint_relative = checkpoint.relative_to(run_dir)
     try:
-        run_identity = directory_identity_nofollow(run_dir)
+        run_identity = _resume_root_identity(run_dir)
     except (OSError, ValueError) as exc:
         raise P500ResumeError(
             f"world_walk checkpoint run directory is unsafe: {run_dir}"
@@ -839,7 +1181,10 @@ def _preflight_world_walk_before_reset(
 ) -> None:
     if mode_contract.get("experience") != "world_walk":
         return
-    _text, manifest = load_structured_document(run_dir / "video_manifest.md")
+    _text, manifest = _load_resume_structured_document(
+        run_dir,
+        "video_manifest.md",
+    )
     references = _world_walk_reference_paths(manifest)
     for rel in references:
         _world_walk_reference_destination(run_dir, rel)
@@ -868,7 +1213,7 @@ def _restore_world_walk_source_references(
         )
     )
     try:
-        destination_root_identity = directory_identity_nofollow(run_dir)
+        destination_root_identity = _resume_root_identity(run_dir)
     except (OSError, ValueError) as exc:
         raise P500ResumeError(
             f"world_walk destination run is unsafe: {run_dir}"
@@ -1100,14 +1445,15 @@ def _write_resume_orchestration(
     stop_target: str,
     now: str,
 ) -> dict[str, str]:
-    orchestration_dir = run_dir / "logs" / "orchestration"
-    orchestration_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = orchestration_dir / "l2_supervisor_progress.md"
-    if not progress_path.exists():
-        progress_path.write_text(
+    orchestration_relative = Path("logs/orchestration")
+    _ensure_resume_directory(run_dir, orchestration_relative)
+    progress_relative = orchestration_relative / "l2_supervisor_progress.md"
+    if not _resume_regular_file_exists(run_dir, progress_relative):
+        _write_resume_text(
+            run_dir,
+            progress_relative,
             "| timestamp | bucket | supervisor | event | stop_slot | result | note |\n"
             "|---|---|---|---|---|---|---|\n",
-            encoding="utf-8",
         )
     progress_rows: list[str] = []
     state_updates: dict[str, str] = {}
@@ -1162,7 +1508,10 @@ def _write_resume_orchestration(
                 else ["p620"]
             ),
             "required_artifacts": [
-                {"path": path, "exists": (run_dir / path).is_file()}
+                {
+                    "path": path,
+                    "exists": _resume_regular_file_exists(run_dir, path),
+                }
                 for path in artifacts
             ],
             "state_keys": {
@@ -1173,12 +1522,16 @@ def _write_resume_orchestration(
             "review_outputs": [],
             "next_bucket": next_bucket,
         }
-        (orchestration_dir / f"{bucket}.supervisor_result.json").write_text(
+        _write_resume_text(
+            run_dir,
+            orchestration_relative / f"{bucket}.supervisor_result.json",
             json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )
-    with progress_path.open("a", encoding="utf-8") as handle:
-        handle.write("\n".join(progress_rows) + "\n")
+    _append_resume_text(
+        run_dir,
+        progress_relative,
+        "\n".join(progress_rows) + "\n",
+    )
     return state_updates
 
 
@@ -1215,11 +1568,11 @@ def materialize_from_p500(
         "assets/audio",
         "logs/grounding",
     ):
-        (run_dir / rel).mkdir(parents=True, exist_ok=True)
+        _ensure_resume_directory(run_dir, rel)
 
     now = frontend._now_iso()
-    append_state_snapshot(
-        run_dir / "state.txt",
+    _append_resume_state(
+        run_dir,
         {
             "runtime.stage": "p500_resume_materializing",
             "runtime.resume.p500.status": "materializing",
@@ -1247,13 +1600,15 @@ def materialize_from_p500(
             asset_plan=asset_plan,
             source_references=source_references,
         )
-    (run_dir / "asset_inventory.md").write_text(
+    _write_resume_text(
+        run_dir,
+        "asset_inventory.md",
         frontend._md_yaml("Asset Inventory", asset_inventory),
-        encoding="utf-8",
     )
-    (run_dir / "asset_plan.md").write_text(
+    _write_resume_text(
+        run_dir,
+        "asset_plan.md",
         frontend._md_yaml("Asset Plan", asset_plan),
-        encoding="utf-8",
     )
     frontend._prepare_authoring_grounding(run_dir)
     frontend._refresh_p400_review_artifacts(run_dir)
@@ -1265,8 +1620,8 @@ def materialize_from_p500(
     frontend._prepare_authoring_grounding(run_dir)
     frontend._refresh_p400_review_artifacts(run_dir)
     frontend._require_fresh_p400_readiness(run_dir)
-    append_state_snapshot(
-        run_dir / "state.txt",
+    _append_resume_state(
+        run_dir,
         _resume_state_updates(
             run_dir=run_dir,
             topic=topic,
@@ -1302,10 +1657,8 @@ def _archive_p400_review_evidence(run_dir: Path) -> Path:
     )
     semantic_stages = ("scene_set", "scene_detail", "cut_blueprint")
     selected: list[str] = []
-    for path in run_dir.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        rel = path.relative_to(run_dir).as_posix()
+    for relative in _iter_resume_regular_files(run_dir):
+        rel = relative.as_posix()
         if rel in root_files:
             selected.append(rel)
             continue
@@ -1321,13 +1674,22 @@ def _archive_p400_review_evidence(run_dir: Path) -> Path:
         if rel.startswith(("logs/grounding/script.", "logs/grounding/manifest.")):
             selected.append(rel)
 
-    evidence_root = checkpoint / "p400_evidence"
+    checkpoint_relative = checkpoint.relative_to(run_dir)
+    evidence_relative = checkpoint_relative / "p400_evidence"
+    _ensure_resume_directory(run_dir, evidence_relative)
     for rel in sorted(set(selected)):
-        source = run_dir / rel
-        destination = evidence_root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-    (checkpoint / "p400_evidence_manifest.json").write_text(
+        destination_relative = evidence_relative / rel
+        _ensure_resume_directory(run_dir, destination_relative.parent)
+        try:
+            source_bytes = _read_resume_bytes(run_dir, rel)
+        except (OSError, ValueError) as exc:
+            raise P500ResumeError(
+                f"could not archive p400 evidence safely: {rel}"
+            ) from exc
+        _write_resume_bytes(run_dir, destination_relative, source_bytes)
+    _write_resume_text(
+        run_dir,
+        checkpoint_relative / "p400_evidence_manifest.json",
         json.dumps(
             {
                 "schema_version": "toc.p500_resume.p400_evidence.v1",
@@ -1337,13 +1699,13 @@ def _archive_p400_review_evidence(run_dir: Path) -> Path:
             indent=2,
         )
         + "\n",
-        encoding="utf-8",
     )
-    return evidence_root
+    return run_dir / evidence_relative
 
 
 def _prepare_stage_context(run_dir: Path, stage: str) -> None:
-    subprocess.run(
+    _run_resume_subprocess(
+        run_dir,
         [
             sys.executable,
             str(REPO_ROOT / "scripts" / "prepare-stage-context.py"),
@@ -1364,8 +1726,8 @@ def _prepare_stage_context(run_dir: Path, stage: str) -> None:
 def _prepare_resume_grounding(run_dir: Path) -> None:
     for stage in ("asset", "scene_implementation"):
         _prepare_stage_context(run_dir, stage)
-    append_state_snapshot(
-        run_dir / "state.txt",
+    _append_resume_state(
+        run_dir,
         {
             "slot.p510.status": "done",
             "slot.p510.note": "asset grounding refreshed for p500 resume",
@@ -1378,8 +1740,8 @@ def _prepare_resume_grounding(run_dir: Path) -> None:
 def _mark_materialized_asset_requests(run_dir: Path) -> None:
     """Keep non-executed media pending while recording the p550 handoff."""
 
-    append_state_snapshot(
-        run_dir / "state.txt",
+    _append_resume_state(
+        run_dir,
         {
             "slot.p550.status": "done",
             "slot.p550.note": "asset requests rematerialized after semantic review; media generation not requested",
@@ -1397,7 +1759,7 @@ def _finalize_resume_orchestration(
     run_dir: Path,
     stop_target: str,
 ) -> dict[str, str]:
-    state = parse_state_file(run_dir / "state.txt")
+    state = _parse_resume_state(run_dir)
     bucket_slots = {
         "p500": ("p510", "p520", "p530", "p540", "p550", "p560", "p570"),
         "p600": (
@@ -1406,14 +1768,15 @@ def _finalize_resume_orchestration(
             else ("p610", "p620", "p630", "p640", "p650")
         ),
     }
-    orchestration_dir = run_dir / "logs" / "orchestration"
+    orchestration_relative = Path("logs/orchestration")
     for bucket, slots in bucket_slots.items():
-        path = orchestration_dir / f"{bucket}.supervisor_result.json"
+        relative = orchestration_relative / f"{bucket}.supervisor_result.json"
         try:
-            result = json.loads(path.read_text(encoding="utf-8"))
+            result = json.loads(_read_resume_text(run_dir, relative))
         except (OSError, json.JSONDecodeError) as exc:
             raise P500ResumeError(
-                f"resume supervisor result is missing or invalid: {path}"
+                "resume supervisor result is missing or invalid: "
+                f"{run_dir / relative}"
             ) from exc
         result["status"] = "done"
         result["completed_slots"] = [
@@ -1422,18 +1785,22 @@ def _finalize_resume_orchestration(
             if state.get(f"slot.{slot}.status")
             in {"done", "skipped", "awaiting_approval"}
         ]
-        path.write_text(
+        _write_resume_text(
+            run_dir,
+            relative,
             json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )
-    progress_path = orchestration_dir / "l2_supervisor_progress.md"
-    with progress_path.open("a", encoding="utf-8") as handle:
-        for bucket in ("p500", "p600"):
-            handle.write(
-                f"| {state.get('timestamp', '')} | {bucket} | "
-                f"{bucket} P-Bucket Supervisor | completed | {stop_target} | "
-                f"logs/orchestration/{bucket}.supervisor_result.json | validated p500 resume |\n"
-            )
+    progress_rows = "".join(
+        f"| {state.get('timestamp', '')} | {bucket} | "
+        f"{bucket} P-Bucket Supervisor | completed | {stop_target} | "
+        f"logs/orchestration/{bucket}.supervisor_result.json | validated p500 resume |\n"
+        for bucket in ("p500", "p600")
+    )
+    _append_resume_text(
+        run_dir,
+        orchestration_relative / "l2_supervisor_progress.md",
+        progress_rows,
+    )
     return {
         "orchestration.p500.supervisor.status": "done",
         "orchestration.p600.supervisor.status": "done",
@@ -1448,79 +1815,119 @@ def _continue_run(
     stop_target: str,
     materialize_only: bool,
     skip_validation: bool,
+    expected_run_identity: PathIdentity | None = None,
+    inherited_run_descriptor: int | None = None,
 ) -> None:
     frontend = _load_frontend_runner()
     materialize_stop_target = (
         "p650" if materialize_only and stop_target == "p680" else stop_target
     )
-    with frontend._run_materialization_lock(run_dir):
-        materialize_from_p500(
+    lock_kwargs: dict[str, Any] = {}
+    if expected_run_identity is not None:
+        lock_kwargs["expected_identity"] = expected_run_identity
+    if inherited_run_descriptor is not None:
+        lock_kwargs["inherited_descriptor"] = inherited_run_descriptor
+    with frontend._run_materialization_lock(run_dir, **lock_kwargs):
+        active_token = None
+        active_getter = getattr(
             frontend,
-            run_dir=run_dir,
-            topic=topic,
-            source=source,
-            stop_target=materialize_stop_target,
+            "_active_materialization_root",
+            None,
         )
-        _prepare_resume_grounding(run_dir)
-        frontend._refresh_downstream_review_artifacts(run_dir)
-        if materialize_only:
-            asyncio.run(
-                frontend.run_pre_media_semantic_pipeline(
-                    run_dir,
-                    image_prompt_provider_ready=False,
+        if callable(active_getter):
+            active_materialization = active_getter(run_dir)
+            if active_materialization is None:
+                raise P500ResumeError(
+                    "frontend run lock did not expose its pinned root"
                 )
-            )
-            _mark_materialized_asset_requests(run_dir)
-        else:
-            asyncio.run(frontend.generate_images(run_dir, stop_target))
-            mode_contract = _resolve_resume_mode_contract(
-                run_dir=run_dir,
-            )
+            active_identity = active_materialization[1]
             if (
-                stop_target == "p680"
-                and mode_contract.get("create_mode")
-                == "scene_storyboard"
+                expected_run_identity is not None
+                and active_identity != expected_run_identity
             ):
-                from server import image_gen_app
-
-                image_gen_app._finalize_scene_storyboard_p680(
-                    run_dir.name
+                raise P500ResumeError(
+                    "run directory identity changed before p500 continuation"
                 )
-            if stop_target == "p650":
-                from server import image_gen_app
-
-                image_gen_app._mark_asset_generation_handoff(
-                    run_dir,
-                    asset_quality_passed=False,
+            active_token = _ACTIVE_RESUME_ROOT.set(
+                (
+                    os.path.abspath(os.fspath(run_dir)),
+                    active_identity,
+                    frontend,
                 )
-        frontend.write_run_index(run_dir)
-        if not skip_validation:
-            if materialize_only:
-                from server import image_gen_app
-
-                image_gen_app._validate_materialized_p650_run(
-                    frontend._run_id_from_dir(run_dir)
-                )
-            else:
-                frontend.validate(run_dir, stop_target)
-        final_updates = (
-            {}
-            if materialize_only
-            else _finalize_resume_orchestration(
-                run_dir=run_dir,
-                stop_target=stop_target,
             )
-        )
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                **final_updates,
-                "runtime.resume.p500.status": (
-                    "semantic_materialized" if materialize_only else "completed"
-                ),
-                "runtime.resume.p500.stop_target": stop_target,
-            },
-        )
+        try:
+            materialize_from_p500(
+                frontend,
+                run_dir=run_dir,
+                topic=topic,
+                source=source,
+                stop_target=materialize_stop_target,
+            )
+            _prepare_resume_grounding(run_dir)
+            frontend._refresh_downstream_review_artifacts(run_dir)
+            if materialize_only:
+                asyncio.run(
+                    frontend.run_pre_media_semantic_pipeline(
+                        run_dir,
+                        image_prompt_provider_ready=False,
+                    )
+                )
+                _mark_materialized_asset_requests(run_dir)
+            else:
+                asyncio.run(frontend.generate_images(run_dir, stop_target))
+                mode_contract = _resolve_resume_mode_contract(
+                    run_dir=run_dir,
+                )
+                if (
+                    stop_target == "p680"
+                    and mode_contract.get("create_mode")
+                    == "scene_storyboard"
+                ):
+                    from server import image_gen_app
+
+                    image_gen_app._finalize_scene_storyboard_p680(
+                        run_dir.name
+                    )
+                if stop_target == "p650":
+                    from server import image_gen_app
+
+                    image_gen_app._mark_asset_generation_handoff(
+                        run_dir,
+                        asset_quality_passed=False,
+                    )
+            frontend.write_run_index(run_dir)
+            if not skip_validation:
+                if materialize_only:
+                    from server import image_gen_app
+
+                    image_gen_app._validate_materialized_p650_run(
+                        frontend._run_id_from_dir(run_dir)
+                    )
+                else:
+                    frontend.validate(run_dir, stop_target)
+            final_updates = (
+                {}
+                if materialize_only
+                else _finalize_resume_orchestration(
+                    run_dir=run_dir,
+                    stop_target=stop_target,
+                )
+            )
+            _append_resume_state(
+                run_dir,
+                {
+                    **final_updates,
+                    "runtime.resume.p500.status": (
+                        "semantic_materialized"
+                        if materialize_only
+                        else "completed"
+                    ),
+                    "runtime.resume.p500.stop_target": stop_target,
+                },
+            )
+        finally:
+            if active_token is not None:
+                _ACTIVE_RESUME_ROOT.reset(active_token)
 
 
 def main() -> None:
@@ -1531,6 +1938,11 @@ def main() -> None:
     parser.add_argument("--topic", default="")
     parser.add_argument("--source", default="")
     parser.add_argument("--checkpoint-id", default="")
+    parser.add_argument("--expected-run-device", type=int)
+    parser.add_argument("--expected-run-inode", type=int)
+    parser.add_argument("--inherited-run-fd", type=int)
+    parser.add_argument("--inherited-runtime-lock-fd", type=int)
+    parser.add_argument("--lock-already-held", action="store_true")
     parser.add_argument(
         "--plan-token",
         default="",
@@ -1562,9 +1974,65 @@ def main() -> None:
         parser.error(
             "--apply requires the --checkpoint-id and --plan-token returned by dry-run"
         )
+    if (args.expected_run_device is None) != (
+        args.expected_run_inode is None
+    ):
+        parser.error(
+            "--expected-run-device and --expected-run-inode must be supplied together"
+        )
+    inherited_values = (
+        args.inherited_run_fd,
+        args.inherited_runtime_lock_fd,
+    )
+    if args.lock_already_held:
+        if (
+            any(value is None for value in inherited_values)
+            or args.expected_run_device is None
+        ):
+            parser.error(
+                "--lock-already-held requires inherited run/runtime descriptors "
+                "and expected run identity"
+            )
+    elif any(value is not None for value in inherited_values):
+        parser.error(
+            "inherited descriptors require --lock-already-held"
+        )
 
     try:
         resolved = resolve_run_dir(REPO_ROOT, args.run_dir)
+        expected_run_identity = (
+            (args.expected_run_device, args.expected_run_inode)
+            if args.expected_run_device is not None
+            and args.expected_run_inode is not None
+            else None
+        )
+        if args.lock_already_held:
+            assert args.inherited_run_fd is not None
+            assert args.inherited_runtime_lock_fd is not None
+            opened_inherited_run = os.fstat(args.inherited_run_fd)
+            if (
+                not stat.S_ISDIR(opened_inherited_run.st_mode)
+                or expected_run_identity is None
+                or (
+                    opened_inherited_run.st_dev,
+                    opened_inherited_run.st_ino,
+                )
+                != expected_run_identity
+            ):
+                raise P500ResumeError(
+                    "inherited run descriptor identity changed"
+                )
+            os.fstat(args.inherited_runtime_lock_fd)
+            os.set_inheritable(args.inherited_run_fd, False)
+            os.set_inheritable(args.inherited_runtime_lock_fd, False)
+        if (
+            expected_run_identity is not None
+            and directory_identity_nofollow(resolved)
+            != expected_run_identity
+        ):
+            raise P500ResumeError(
+                "run directory identity changed after server reservation"
+            )
         checkpoint_id = args.checkpoint_id.strip() or None
         if not args.apply:
             topic = _topic_for_run(resolved, args.topic)
@@ -1590,14 +2058,39 @@ def main() -> None:
                 checkpoint_id=checkpoint_id,
                 resume_input_identity=resume_input_identity,
             )
+            if (
+                expected_run_identity is not None
+                and plan.run_dir_identity != expected_run_identity
+            ):
+                raise P500ResumeError(
+                    "run directory identity changed while preparing resume plan"
+                )
             print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
             return
 
+        pinned_run_descriptor = (
+            args.inherited_run_fd
+            if args.lock_already_held
+            else open_directory_nofollow(
+                resolved,
+                expected_identity=expected_run_identity,
+            )
+        )
         try:
-            with sync_file_lock(
-                resolved / ".locks" / "create_resume.lock",
-                wait=False,
-            ):
+            lock_scope = (
+                nullcontext()
+                if args.lock_already_held
+                else sync_file_lock(
+                    resolved / ".locks" / "create_resume.lock",
+                    wait=False,
+                    run_root_descriptor=pinned_run_descriptor,
+                    expected_run_root_identity=(
+                        expected_run_identity
+                        or directory_identity_nofollow(resolved)
+                    ),
+                )
+            )
+            with lock_scope:
                 topic = _topic_for_run(resolved, args.topic)
                 mode_contract = _resolve_resume_mode_contract(
                     run_dir=resolved
@@ -1622,6 +2115,13 @@ def main() -> None:
                     checkpoint_id=checkpoint_id,
                     resume_input_identity=resume_input_identity,
                 )
+                if (
+                    expected_run_identity is not None
+                    and plan.run_dir_identity != expected_run_identity
+                ):
+                    raise P500ResumeError(
+                        "run directory identity changed while applying resume plan"
+                    )
                 if args.plan_token.strip() != plan.plan_token:
                     raise P500ResumeError(
                         "dry-run plan token is stale; inspect a new dry-run before apply"
@@ -1629,6 +2129,10 @@ def main() -> None:
                 checkpoint = apply_resume_plan(
                     plan,
                     lock_already_held=True,
+                    run_descriptor=pinned_run_descriptor,
+                    run_directory_lock_already_held=(
+                        args.lock_already_held
+                    ),
                 )
                 if args.continue_to:
                     _continue_run(
@@ -1638,11 +2142,24 @@ def main() -> None:
                         stop_target=args.continue_to,
                         materialize_only=args.materialize_only,
                         skip_validation=args.skip_validation,
+                        expected_run_identity=getattr(
+                            plan,
+                            "run_dir_identity",
+                            None,
+                        ),
+                        inherited_run_descriptor=(
+                            os.dup(pinned_run_descriptor)
+                            if args.lock_already_held
+                            else None
+                        ),
                     )
         except FileLockUnavailable as exc:
             raise P500ResumeError(
                 f"another create/resume process owns this run: {resolved}"
             ) from exc
+        finally:
+            if not args.lock_already_held:
+                os.close(pinned_run_descriptor)
         print(f"Run dir: {resolved}")
         print(f"Checkpoint: {checkpoint}")
         print(f"Moved downstream files: {len(plan.downstream_files)}")
@@ -1652,6 +2169,17 @@ def main() -> None:
         parser.exit(1, f"p500 resume failed: {detail}\n")
     except (P500ResumeError, RuntimeError) as exc:
         parser.exit(1, f"p500 resume failed: {exc}\n")
+    finally:
+        if args.lock_already_held:
+            for descriptor in (
+                args.inherited_run_fd,
+                args.inherited_runtime_lock_fd,
+            ):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
 
 
 if __name__ == "__main__":

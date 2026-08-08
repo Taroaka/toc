@@ -17,6 +17,8 @@ def collect_entries(
     stage: str,
     run_dir: Path,
     manifest: dict[str, Any] | None = None,
+    *,
+    source_document: tuple[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Collect semantic-review-ready scene or cut entries for a run.
 
@@ -30,7 +32,11 @@ def collect_entries(
         raise ValueError(f"Unsupported scene semantic stage: {stage}")
 
     resolved_run_dir = Path(run_dir)
-    source_path, data = _load_scene_source(resolved_run_dir, manifest)
+    source_path, data = (
+        source_document
+        if source_document is not None
+        else _load_scene_source(resolved_run_dir, manifest)
+    )
     scenes = _extract_scenes(data)
     time_of_day_contract_declared = _time_of_day_contract_declared(data, scenes)
 
@@ -166,8 +172,33 @@ def _cut_entry(
     blueprint = _dict_value(cut.get("cut_blueprint"))
     scene_contract = _dict_value(cut.get("scene_contract"))
     cut_contract = _dict_value(cut.get("cut_contract"))
-    semantic_contract = cut.get("semantic_contract") or cut_contract or scene_contract or _contract_from_blueprint(blueprint)
-    normalized_contract = _normalize_cut_contract(cut, semantic_contract, blueprint, scene_contract)
+    semantic_contract_source = (
+        cut.get("semantic_contract")
+        or cut_contract
+        or scene_contract
+        or _contract_from_blueprint(blueprint)
+    )
+    normalized_contract = _normalize_cut_contract(
+        cut,
+        semantic_contract_source,
+        blueprint,
+        scene_contract,
+    )
+    semantic_contract = cut.get("semantic_contract") or {
+        key: normalized_contract[key]
+        for key in ("target_beat", "must_show", "must_avoid", "done_when")
+        if key in normalized_contract
+    }
+    review_cut_contract = {
+        key: value
+        for key, value in cut_contract.items()
+        if key
+        not in {
+            "event_context_for_cut",
+            "cut_context_packet",
+            "cut_context_packet_diagnostics",
+        }
+    }
     missing_fields = _missing_required_fields(
         normalized_contract,
         ("target_beat", "must_show", "must_avoid", "done_when"),
@@ -201,14 +232,14 @@ def _cut_entry(
                 or cut.get("visual_beat")
             ),
             "semantic_contract": semantic_contract,
-            "cut_contract": cut_contract or None,
+            "cut_contract": review_cut_contract or None,
             "source_event_contract": _dict_value(cut_contract.get("source_event_contract")) or None,
             "cut_character_emotion_transition": _dict_value(cut_contract.get("cut_character_emotion_transition")) or None,
             "cut_film_grammar_contract": _dict_value(cut_contract.get("cut_film_grammar_contract")) or None,
             "event_context_for_cut": _event_context_for_cut(scene, cut),
             "cut_context_packet": cut_context_packet,
             "cut_context_packet_diagnostics": cut_context_packet_diagnostics,
-            "semantic_contract_present": bool(semantic_contract),
+            "semantic_contract_present": bool(semantic_contract_source),
             "semantic_contract_missing": bool(missing_fields),
             "normalized_semantic_contract": normalized_contract,
             "contract_required_fields_missing": missing_fields,

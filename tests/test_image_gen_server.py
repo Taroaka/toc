@@ -72,6 +72,7 @@ from toc.review_loop import (
     write_review_input_snapshot,
 )
 from toc.runtime_locks import FileLockUnavailable, sync_file_lock
+from toc.run_root_binding import bind_run_root, RunRootBindingError
 from toc.image_request_snapshot import (
     ImageRequestSnapshotError,
     load_request_snapshot,
@@ -397,6 +398,42 @@ def semantic_agent_report_transcript(
     ]
 
 
+def terminal_semantic_report_text(
+    status: str,
+    *,
+    entry_id: str = "scene_1",
+    finding: str = "scene meaning does not match the source",
+    reason_key: str = "semantic_subject_mismatch",
+) -> str:
+    """Build a complete fake verdict for normal review/repair tests."""
+
+    failed = status in {"failed", "changes_requested"}
+    return "\n".join(
+        [
+            f"status: {status}",
+            f"reviewed_entries: [{entry_id}]",
+            (
+                f"blocked_entries: [{entry_id}]"
+                if failed
+                else "blocked_entries: []"
+            ),
+            f"findings: [{finding}]" if failed else "findings: []",
+            (
+                f"failed_selectors: [{entry_id}]"
+                if failed
+                else "failed_selectors: []"
+            ),
+            (
+                f"reason_keys: [{reason_key}]"
+                if failed
+                else "reason_keys: []"
+            ),
+            "notes: []",
+            "",
+        ]
+    )
+
+
 def write_valid_p650_artifacts(root: Path, run_id: str) -> Path:
     run_dir = root / "output" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -439,6 +476,27 @@ def write_valid_p650_artifacts(root: Path, run_id: str) -> Path:
                 "",
             ]
         ),
+        encoding="utf-8",
+    )
+    supervisor_result_path = (
+        run_dir / "logs" / "orchestration" / "p600.supervisor_result.json"
+    )
+    supervisor_result_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_result_path.write_text(
+        json.dumps(
+            {
+                "bucket": "p600",
+                "status": "pending",
+                "stop_slot": "p680",
+                "completed_slots": ["p610", "p620", "p630", "p640", "p650"],
+                "state_keys": {"slot.p680.status": "pending"},
+                "review_outputs": [],
+                "next_bucket": None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (run_dir / "research.md").write_text(
@@ -5887,7 +5945,12 @@ cinematic character portrait
         self.assertEqual(offenders, [])
 
     def test_frontend_create_job_does_not_use_nested_app_server_skill(self) -> None:
-        source = inspect.getsource(image_gen_app._run_create_job)
+        source = "\n".join(
+            (
+                inspect.getsource(image_gen_app._run_create_job),
+                inspect.getsource(image_gen_app._run_create_job_bound),
+            )
+        )
         self.assertIn("_run_toc_immersive_frontend_cli_helper", source)
         self.assertNotIn("_run_toc_skill_helper_until_stop_target", source)
 
@@ -6412,6 +6475,28 @@ cinematic character portrait
 
         self.assertEqual(failures, [])
 
+    def test_storyboard_staging_copy_never_shares_canonical_inode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "canonical" / "state.txt"
+            destination = root / "staging" / "state.txt"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_text("status=P650\n", encoding="utf-8")
+
+            image_gen_app._copy_storyboard_stage_file(
+                str(source),
+                str(destination),
+            )
+
+            self.assertFalse(source.samefile(destination))
+            self.assertEqual(source.stat().st_nlink, 1)
+            destination.write_text("status=STAGED\n", encoding="utf-8")
+            self.assertEqual(
+                source.read_text(encoding="utf-8"),
+                "status=P650\n",
+            )
+
     def test_headless_cut_contract_check_ignores_motion_terms_in_debug_only(self) -> None:
         module = load_headless_create_module()
         with tempfile.TemporaryDirectory(prefix="headless_prompt_boundary_") as tmp:
@@ -6898,6 +6983,266 @@ legacy prompt must not be used for v1
         self.assertEqual(payload["apiPromptPolicyVersion"], "image_api_prompt_v1")
         self.assertEqual(payload["debugPromptSource"]["send_to_api"], False)
         self.assertNotIn("first_frame_visual_plan", payload["prompt"])
+
+    def test_bound_image_debug_log_inspects_pinned_root_during_swap_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            run_dir = parent / "run"
+            original_slot = parent / "original"
+            replacement_slot = parent / "replacement"
+            destination = run_dir / "assets" / "scenes" / "cut.png"
+            reference = run_dir / "assets" / "characters" / "hero.png"
+            destination.parent.mkdir(parents=True)
+            reference.parent.mkdir(parents=True)
+            trusted_destination = b"trusted-destination"
+            trusted_reference = b"trusted-reference"
+            destination.write_bytes(trusted_destination)
+            reference.write_bytes(trusted_reference)
+            malicious_destination = (
+                replacement_slot / "assets" / "scenes" / "cut.png"
+            )
+            malicious_reference = (
+                replacement_slot / "assets" / "characters" / "hero.png"
+            )
+            malicious_destination.parent.mkdir(parents=True)
+            malicious_reference.parent.mkdir(parents=True)
+            malicious_destination.write_bytes(b"replacement-destination")
+            malicious_reference.write_bytes(b"replacement-reference")
+            opened = os.stat(run_dir, follow_symlinks=False)
+            identity = opened.st_dev, opened.st_ino
+            attack_count = 0
+            restore_count = 0
+            real_inspect = image_gen._inspect_run_file_for_debug
+
+            def inspect_during_swap(
+                inspected_run_dir: Path,
+                inspected_path: Path,
+                *,
+                include_sha256: bool,
+            ) -> dict[str, Any]:
+                nonlocal attack_count, restore_count
+                attack_count += 1
+                run_dir.rename(original_slot)
+                replacement_slot.rename(run_dir)
+                try:
+                    return real_inspect(
+                        inspected_run_dir,
+                        inspected_path,
+                        include_sha256=include_sha256,
+                    )
+                finally:
+                    run_dir.rename(replacement_slot)
+                    original_slot.rename(run_dir)
+                    restore_count += 1
+
+            try:
+                with bind_run_root(run_dir, expected_identity=identity):
+                    with patch(
+                        "server.image_gen._inspect_run_file_for_debug",
+                        side_effect=inspect_during_swap,
+                    ):
+                        log_path = image_gen_app.write_app_server_image_debug_log(
+                            run_dir=run_dir,
+                            item_id="scene10_cut1",
+                            index=1,
+                            destination=destination,
+                            references=[reference],
+                            prompt="cinematic scene",
+                            kind="scene",
+                        )
+            finally:
+                if original_slot.exists() and run_dir.exists():
+                    interrupted_replacement = parent / "interrupted-replacement"
+                    run_dir.rename(interrupted_replacement)
+                    original_slot.rename(run_dir)
+
+            self.assertEqual(attack_count, 2)
+            self.assertEqual(restore_count, 2)
+            self.assertIsNotNone(log_path)
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+            destination_details = payload["destinationDetails"]
+            reference_details = payload["referenceDetails"][0]
+
+            self.assertEqual(
+                payload["outputSha256"],
+                hashlib.sha256(trusted_destination).hexdigest(),
+            )
+            self.assertEqual(
+                destination_details["sizeBytes"],
+                len(trusted_destination),
+            )
+            self.assertEqual(
+                destination_details["sha256"],
+                hashlib.sha256(trusted_destination).hexdigest(),
+            )
+            self.assertEqual(
+                reference_details["sizeBytes"],
+                len(trusted_reference),
+            )
+            self.assertEqual(
+                reference_details["sha256"],
+                hashlib.sha256(trusted_reference).hexdigest(),
+            )
+            self.assertEqual(
+                (replacement_slot / "assets" / "scenes" / "cut.png").read_bytes(),
+                b"replacement-destination",
+            )
+            self.assertEqual(
+                (
+                    replacement_slot
+                    / "assets"
+                    / "characters"
+                    / "hero.png"
+                ).read_bytes(),
+                b"replacement-reference",
+            )
+
+    def test_bound_debug_inspection_drops_hash_when_leaf_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets" / "scenes" / "cut.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"transient-output")
+            opened = os.stat(run_dir, follow_symlinks=False)
+            identity = opened.st_dev, opened.st_ino
+            real_read = os.read
+            removed = False
+
+            def remove_after_eof(descriptor: int, size: int) -> bytes:
+                nonlocal removed
+                chunk = real_read(descriptor, size)
+                if chunk == b"" and not removed:
+                    destination.unlink()
+                    removed = True
+                return chunk
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with patch(
+                    "server.image_gen.os.read",
+                    side_effect=remove_after_eof,
+                ):
+                    details = image_gen._inspect_run_file_for_debug(
+                        run_dir,
+                        destination,
+                        include_sha256=True,
+                    )
+
+            self.assertTrue(removed)
+            self.assertFalse(details["exists"])
+            self.assertFalse(details["isFile"])
+            self.assertNotIn("sha256", details)
+            self.assertEqual(
+                details["inspectionError"],
+                "target disappeared while debug inspection was in progress",
+            )
+
+    def test_bound_debug_inspection_rejects_nested_directory_swap_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            scenes = run_dir / "assets" / "scenes"
+            original_scenes = run_dir / "assets" / "original-scenes"
+            malicious_scenes = run_dir / "assets" / "malicious-scenes"
+            destination = scenes / "cut.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"trusted-output")
+            malicious_destination = malicious_scenes / "cut.png"
+            malicious_destination.parent.mkdir(parents=True)
+            malicious_destination.write_bytes(b"replacement-output")
+            opened = os.stat(run_dir, follow_symlinks=False)
+            identity = opened.st_dev, opened.st_ino
+            real_open = os.open
+            real_read = os.read
+            swapped = False
+            restored = False
+
+            def swap_before_nested_open(
+                path: str | bytes | os.PathLike[str],
+                flags: int,
+                *args: object,
+                **kwargs: object,
+            ) -> int:
+                nonlocal swapped
+                if (
+                    not swapped
+                    and os.fsdecode(os.fspath(path)) == "scenes"
+                    and kwargs.get("dir_fd") is not None
+                ):
+                    scenes.rename(original_scenes)
+                    malicious_scenes.rename(scenes)
+                    swapped = True
+                return real_open(path, flags, *args, **kwargs)
+
+            def restore_after_eof(descriptor: int, size: int) -> bytes:
+                nonlocal restored
+                chunk = real_read(descriptor, size)
+                if chunk == b"" and swapped and not restored:
+                    scenes.rename(malicious_scenes)
+                    original_scenes.rename(scenes)
+                    restored = True
+                return chunk
+
+            try:
+                with bind_run_root(run_dir, expected_identity=identity):
+                    with (
+                        patch(
+                            "server.image_gen.os.open",
+                            side_effect=swap_before_nested_open,
+                        ),
+                        patch(
+                            "server.image_gen.os.read",
+                            side_effect=restore_after_eof,
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            RunRootBindingError,
+                            "ancestry",
+                        ):
+                            image_gen._inspect_run_file_for_debug(
+                                run_dir,
+                                destination,
+                                include_sha256=True,
+                            )
+            finally:
+                if swapped and not restored and scenes.exists():
+                    interrupted = run_dir / "assets" / "interrupted-scenes"
+                    scenes.rename(interrupted)
+                    original_scenes.rename(scenes)
+
+            self.assertTrue(swapped)
+            self.assertTrue(restored)
+            self.assertEqual(destination.read_bytes(), b"trusted-output")
+            self.assertEqual(
+                malicious_destination.read_bytes(),
+                b"replacement-output",
+            )
+
+    def test_unbound_image_debug_log_does_not_follow_reference_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            reference = run_dir / "assets" / "characters" / "hero.png"
+            outside = root / "outside.png"
+            reference.parent.mkdir(parents=True)
+            outside.write_bytes(b"outside-reference")
+            reference.symlink_to(outside)
+
+            log_path = image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="scene10_cut1",
+                index=1,
+                destination=run_dir / "assets" / "scenes" / "cut.png",
+                references=[reference],
+                prompt="cinematic scene",
+                kind="scene",
+            )
+
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+            details = payload["referenceDetails"][0]
+
+            self.assertTrue(details["exists"])
+            self.assertFalse(details["isFile"])
+            self.assertNotIn("sha256", details)
+            self.assertEqual(outside.read_bytes(), b"outside-reference")
 
     def test_parse_request_markdown_extracts_inline_prompt_metadata(self) -> None:
         request_text = """# Image Generation Requests
@@ -8563,6 +8908,11 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["targetDurationSeconds"], 300)
         self.assertNotIn("source", create_payload)
         self.assertEqual(final_payload["status"], "completed")
+        expected_run_identity = calls[0].pop("expected_run_identity")
+        run_descriptor = calls[0].pop("run_descriptor")
+        self.assertEqual(len(expected_run_identity), 2)
+        self.assertTrue(all(isinstance(value, int) for value in expected_run_identity))
+        self.assertIsInstance(run_descriptor, int)
         self.assertEqual(
             calls,
             [
@@ -8612,6 +8962,13 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_response.status_code, 200)
         self.assertEqual(final_payload["status"], "completed")
         skill_helper.assert_not_awaited()
+        self.assertEqual(len(cli_calls), 1)
+        expected_run_identity = cli_calls[0].pop("expected_run_identity")
+        self.assertIsInstance(expected_run_identity, tuple)
+        self.assertEqual(len(expected_run_identity), 2)
+        self.assertTrue(all(isinstance(value, int) for value in expected_run_identity))
+        run_descriptor = cli_calls[0].pop("run_descriptor")
+        self.assertIsInstance(run_descriptor, int)
         self.assertEqual(
             cli_calls,
             [
@@ -8640,6 +8997,12 @@ class ImageGenApiTests(unittest.TestCase):
             run_id = run_dir.name
             helper_calls: list[dict[str, object]] = []
             helper_errors: list[str] = []
+            run_stat = os.stat(run_dir, follow_symlinks=False)
+            reserved_identity = (run_stat.st_dev, run_stat.st_ino)
+            reservation = image_gen_app._retain_frontend_create_run(
+                run_dir,
+                expected_identity=reserved_identity,
+            )
 
             async def write_passing_semantic_review(
                 _job_id: str,
@@ -8650,13 +9013,26 @@ class ImageGenApiTests(unittest.TestCase):
             ) -> None:
                 write_passing_foundation_review(run_dir, stage)
                 if stage == "image_prompt":
+                    snapshot = load_request_snapshot(
+                        run_dir / "image_generation_request_snapshot.json",
+                        run_dir=run_dir,
+                        verify_references=image_prompt_provider_ready,
+                    )
+                    freeze_updates = {
+                        "review.image_prompt.request_freeze.status": (
+                            "frozen" if image_prompt_provider_ready else "reviewed_draft"
+                        ),
+                        "review.image_prompt.request_freeze.reviewed_request_revision": (
+                            snapshot.request_revision
+                        ),
+                    }
+                    if image_prompt_provider_ready:
+                        freeze_updates[
+                            "review.image_prompt.request_freeze.request_revision"
+                        ] = snapshot.request_revision
                     image_gen_app.append_state_snapshot(
                         run_dir / "state.txt",
-                        {
-                            "review.image_prompt.request_freeze.status": (
-                                "frozen" if image_prompt_provider_ready else "reviewed_draft"
-                            )
-                        },
+                        freeze_updates,
                     )
 
             async def write_passing_pre_asset_fixed_point(
@@ -8683,6 +9059,11 @@ class ImageGenApiTests(unittest.TestCase):
 
                 try:
                     await asyncio.to_thread(materialize)
+                    await asyncio.to_thread(runner.prepare_grounding, run_dir)
+                    await asyncio.to_thread(
+                        runner._refresh_downstream_review_artifacts,
+                        run_dir,
+                    )
                     await runner.run_pre_media_semantic_pipeline(
                         run_dir,
                         image_prompt_provider_ready=False,
@@ -8697,7 +9078,10 @@ class ImageGenApiTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
                 with (
-                    patch("server.image_gen_app.reserve_run_dir", return_value=(run_id, run_dir)),
+                    patch(
+                        "server.image_gen_app._reserve_frontend_create_run_dir",
+                        return_value=reservation,
+                    ),
                     patch(
                         "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
                         materializing_frontend_helper,
@@ -8995,6 +9379,11 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(create_payload["runId"], "桃太郎_20260509_1200")
         self.assertEqual(create_payload["targetDurationSeconds"], 900)
         self.assertEqual(final_payload["status"], "completed")
+        expected_run_identity = calls[0].pop("expected_run_identity")
+        run_descriptor = calls[0].pop("run_descriptor")
+        self.assertEqual(len(expected_run_identity), 2)
+        self.assertTrue(all(isinstance(value, int) for value in expected_run_identity))
+        self.assertIsInstance(run_descriptor, int)
         self.assertEqual(
             calls,
             [
@@ -10849,6 +11238,99 @@ base b prompt
                     terminal_status,
                 )
 
+    def test_p600_finalizer_fails_closed_for_missing_or_malformed_result(
+        self,
+    ) -> None:
+        for fixture in ("missing", "malformed"):
+            with (
+                self.subTest(fixture=fixture),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                run_dir = Path(tmp)
+                image_gen_app.append_state_snapshot(
+                    run_dir / "state.txt",
+                    {"slot.p650.status": "done"},
+                )
+                if fixture == "malformed":
+                    result_path = (
+                        run_dir
+                        / "logs"
+                        / "orchestration"
+                        / "p600.supervisor_result.json"
+                    )
+                    result_path.parent.mkdir(parents=True)
+                    result_path.write_text(
+                        "{malformed\n",
+                        encoding="utf-8",
+                    )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "p600 supervisor result",
+                ):
+                    image_gen_app._finalize_p600_supervisor_result(
+                        run_dir,
+                        completed_slots=("p650",),
+                        terminal_slot="p650",
+                        terminal_status="done",
+                    )
+
+                state = image_gen_app.parse_state_file(
+                    run_dir / "state.txt"
+                )
+                self.assertNotEqual(
+                    state.get("orchestration.p600.supervisor.status"),
+                    "done",
+                )
+
+    def test_p680_publication_failure_demotes_and_invalidates_malformed_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260509_1200"
+            run_dir = write_valid_p650_artifacts(root, run_id)
+            scene_dir = run_dir / "assets" / "scenes"
+            scene_dir.mkdir(parents=True, exist_ok=True)
+            for index in (1, 2, 3):
+                (scene_dir / f"scene10_cut{index}.png").write_bytes(
+                    PNG_BYTES
+                )
+            result_path = (
+                run_dir
+                / "logs"
+                / "orchestration"
+                / "p600.supervisor_result.json"
+            )
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text("{malformed\n", encoding="utf-8")
+
+            with patch("server.image_gen_app.ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "p600 supervisor result",
+                ):
+                    image_gen_app._mark_image_generation_review_ready(
+                        run_id
+                    )
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(state["status"], "P650")
+        self.assertEqual(state["slot.p680.status"], "pending")
+        self.assertEqual(
+            state["review.semantic.create_media_generated"],
+            "false",
+        )
+        self.assertEqual(
+            state["review.semantic.create_scene_media_generated"],
+            "false",
+        )
+        self.assertEqual(state["image_generation.generated_count"], "3")
+        self.assertEqual(result["bucket"], "p600")
+        self.assertEqual(result["status"], "invalidated")
+
     def test_p680_visual_gate_reads_fresh_image_stage_before_handoff(self) -> None:
         cases = {
             "orchestration_pending_image_passed": (
@@ -11562,15 +12044,15 @@ base b prompt
                 + "\n",
                 encoding="utf-8",
             )
-            original_sha256 = image_gen_app._file_sha256
-            hash_calls = 0
+            original_read = image_gen_app.read_run_file_bytes
+            read_calls = 0
 
-            def flaky_sha256(path: Path) -> str:
-                nonlocal hash_calls
-                hash_calls += 1
-                if hash_calls == 1:
+            def flaky_read(run: Path, relative: str) -> bytes:
+                nonlocal read_calls
+                read_calls += 1
+                if read_calls == 1:
                     raise OSError("baseline read failed")
-                return original_sha256(path)
+                return original_read(run, relative)
 
             with (
                 patch(
@@ -11583,15 +12065,213 @@ base b prompt
                     ),
                 ),
                 patch(
-                    "server.image_gen_app._file_sha256",
-                    side_effect=flaky_sha256,
+                    "server.image_gen_app.read_run_file_bytes",
+                    side_effect=flaky_read,
                 ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "p680 visual quality gate failed",
+                    "baseline could not be read",
                 ):
                     image_gen_app._validate_p680_visual_quality(run_dir)
+
+    def test_p680_baseline_uses_bound_snapshot_during_root_swap_aba(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            decoy_dir = root / "decoy"
+            parked_dir = root / "parked"
+            run_dir.mkdir()
+            decoy_dir.mkdir()
+            report_payload = {
+                "run_dir": str(run_dir.resolve()),
+                "stage_target": "p680",
+                "stages": {
+                    "asset": {
+                        "passed": True,
+                        "checks": [{"id": "asset.contract", "passed": True}],
+                    },
+                    "image": {
+                        "passed": True,
+                        "checks": [{"id": "image.contract", "passed": True}],
+                    },
+                },
+            }
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(report_payload) + "\n",
+                encoding="utf-8",
+            )
+            (decoy_dir / "eval_report.json").write_text(
+                "decoy baseline\n",
+                encoding="utf-8",
+            )
+            run_stat = os.stat(run_dir, follow_symlinks=False)
+            original_read = image_gen_app.read_run_file_bytes
+            original_sha256 = image_gen_app._file_sha256
+            read_calls = 0
+
+            def bound_read_during_swap(
+                bound_run_dir: Path,
+                relative_path: str,
+            ) -> bytes:
+                nonlocal read_calls
+                read_calls += 1
+                if read_calls != 1:
+                    return original_read(bound_run_dir, relative_path)
+                binding = image_gen_app.current_run_root_binding()
+                self.assertIsNotNone(binding)
+                os.rename(run_dir, parked_dir)
+                os.rename(decoy_dir, run_dir)
+                descriptor = -1
+                try:
+                    descriptor = os.open(
+                        relative_path,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=binding.descriptor,
+                    )
+                    chunks: list[bytes] = []
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    os.rename(run_dir, decoy_dir)
+                    os.rename(parked_dir, run_dir)
+
+            def lexical_hash_during_swap(path: Path) -> str:
+                os.rename(run_dir, parked_dir)
+                os.rename(decoy_dir, run_dir)
+                try:
+                    return original_sha256(path)
+                finally:
+                    os.rename(run_dir, decoy_dir)
+                    os.rename(parked_dir, run_dir)
+
+            with bind_run_root(
+                run_dir,
+                expected_identity=(run_stat.st_dev, run_stat.st_ino),
+            ):
+                with (
+                    patch(
+                        "server.image_gen_app.read_run_file_bytes",
+                        side_effect=bound_read_during_swap,
+                    ),
+                    patch(
+                        "server.image_gen_app._file_sha256",
+                        side_effect=lexical_hash_during_swap,
+                    ) as lexical_hash,
+                    patch(
+                        "server.image_gen_app.subprocess.run",
+                        return_value=subprocess.CompletedProcess(
+                            [],
+                            1,
+                            "",
+                            "verifier did not refresh the report",
+                        ),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "was not refreshed",
+                    ):
+                        image_gen_app._validate_p680_visual_quality(run_dir)
+
+            self.assertEqual(read_calls, 2)
+            lexical_hash.assert_not_called()
+            self.assertEqual(
+                json.loads(
+                    (run_dir / "eval_report.json").read_text(encoding="utf-8")
+                ),
+                report_payload,
+            )
+            self.assertEqual(
+                (decoy_dir / "eval_report.json").read_text(encoding="utf-8"),
+                "decoy baseline\n",
+            )
+
+    def test_p680_report_hash_and_validation_use_one_bound_byte_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            report_path = run_dir / "eval_report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir),
+                        "stage_target": "p680",
+                        "stages": {
+                            "asset": {
+                                "passed": True,
+                                "checks": [
+                                    {
+                                        "id": "asset.generation_provenance_app_server",
+                                        "passed": True,
+                                    }
+                                ],
+                            },
+                            "image": {
+                                "passed": True,
+                                "checks": [
+                                    {
+                                        "id": "image.generation_provenance_app_server",
+                                        "passed": True,
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            run_stat = os.stat(run_dir, follow_symlinks=False)
+            original_read = image_gen_app.read_run_file_bytes
+
+            def capture_then_replace(
+                bound_run_dir: Path,
+                relative_path: str,
+            ) -> bytes:
+                captured = original_read(bound_run_dir, relative_path)
+                report_path.write_text("{malformed after capture", encoding="utf-8")
+                return captured
+
+            with bind_run_root(
+                run_dir,
+                expected_identity=(run_stat.st_dev, run_stat.st_ino),
+            ):
+                with (
+                    patch(
+                        "server.image_gen_app.read_run_file_bytes",
+                        side_effect=capture_then_replace,
+                    ) as read_report,
+                    patch(
+                        "server.image_gen_app._file_sha256",
+                        side_effect=AssertionError(
+                            "p680 report validation must hash captured bytes"
+                        ),
+                    ),
+                ):
+                    issues = image_gen_app._p680_image_stage_report_issues(
+                        run_dir,
+                        report_was_absent=True,
+                        previous_report_mtime_ns=None,
+                        previous_report_sha256=None,
+                        mode="pre_handoff",
+                    )
+
+            self.assertEqual(issues, [])
+            read_report.assert_called_once_with(run_dir, "eval_report.json")
+            self.assertEqual(
+                report_path.read_text(encoding="utf-8"),
+                "{malformed after capture",
+            )
 
     def test_validate_p560_asset_quality_classifies_only_visual_check_failures_as_retryable(self) -> None:
         cases = {
@@ -12114,7 +12794,13 @@ base b prompt
                             "review.semantic.scene_set.repair.pending.updated_at": "2026-07-12T20:00:00+09:00",
                         },
                     )
-                    raise CodexAppServerTransportError("turn timed out")
+                    raise CodexAppServerTransportError(
+                        "turn timed out",
+                        diagnostics={
+                            "semanticFailurePhase": "semantic_producer_repair",
+                            "stage": stage,
+                        },
+                    )
                 slot = image_gen_app.SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
                 if slot:
                     image_gen_app.append_state_snapshot(
@@ -12193,7 +12879,15 @@ base b prompt
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
                 (run_dir / paths["scope"]).write_text(
-                    json.dumps({"entry_count": 1, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
@@ -12218,9 +12912,8 @@ base b prompt
                     review_turns += 1
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
-                    failed_selectors = "[scene_1]" if status == "failed" else "[]"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: {failed_selectors}\nfindings: []\nfailed_selectors: {failed_selectors}\n",
+                        terminal_semantic_report_text(status),
                         encoding="utf-8",
                     )
                     return None
@@ -12514,6 +13207,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_turns = 0
             repair_rounds: list[int] = []
             review_prompts: list[str] = []
@@ -12522,7 +13219,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -12539,6 +13247,10 @@ base b prompt
                     if "Semantic QA Producer Repair" in text:
                         round_number = 1 if "Repair round: `1`" in text else 2
                         repair_rounds.append(round_number)
+                        (run_dir / "script.md").write_text(
+                            f"# Script\n\nrepaired scene meaning round {round_number}\n",
+                            encoding="utf-8",
+                        )
                         repair_paths = semantic_repair_relpaths(stage, round_number)
                         (run_dir / repair_paths["report"]).write_text(
                             "status: done\nchanged_artifacts: [script.md, video_manifest.md]\nreviewer_findings_addressed: [remaining semantic drift]\n",
@@ -12549,10 +13261,11 @@ base b prompt
                     review_prompts.append(text)
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "passed" if review_turns == 3 else "failed"
-                    findings = "[]" if status == "passed" else "[remaining semantic drift]"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\n"
-                        f"failed_selectors: []\nfindings: {findings}\n",
+                        terminal_semantic_report_text(
+                            status,
+                            finding="remaining semantic drift",
+                        ),
                         encoding="utf-8",
                     )
                     return None
@@ -12584,6 +13297,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_prompts: list[str] = []
             repair_turns = 0
 
@@ -12591,7 +13308,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -12611,8 +13339,10 @@ base b prompt
                     review_prompts.append(text)
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     (run_dir / paths["report"]).write_text(
-                        "status: failed\nreviewed_entries: [scene_1]\nblocked_entries: [scene_1]\n"
-                        "failed_selectors: [scene_1]\nfindings: [remaining semantic drift]\n",
+                        terminal_semantic_report_text(
+                            "failed",
+                            finding="remaining semantic drift",
+                        ),
                         encoding="utf-8",
                     )
                     return None
@@ -12734,7 +13464,14 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {"entry_count": 1, "entry_ids": ["scene_1"]},
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -14040,7 +14777,11 @@ base b prompt
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n", encoding="utf-8")
                 (run_dir / paths["scope"]).write_text(
-                    json.dumps({"entry_count": 1, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                    json.dumps(
+                        {"entry_count": 1, "source_artifacts": ["script.md"]},
+                        ensure_ascii=False,
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
@@ -14080,6 +14821,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_turns = 0
             repair_turns = 0
 
@@ -14087,7 +14832,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -14107,8 +14863,10 @@ base b prompt
                     review_turns += 1
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     (run_dir / paths["report"]).write_text(
-                        "status: failed\nreviewed_entries: [scene_1]\nblocked_entries: [scene_1]\n"
-                        "failed_selectors: [scene_1]\nfindings:\n  - wrong meaning\n",
+                        terminal_semantic_report_text(
+                            "failed",
+                            finding="wrong meaning",
+                        ),
                         encoding="utf-8",
                     )
                     return None
@@ -14148,7 +14906,15 @@ base b prompt
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
                 (run_dir / paths["scope"]).write_text(
-                    json.dumps({"entry_count": 1, "source_artifacts": ["script.md"]}, ensure_ascii=False) + "\n",
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
@@ -14172,8 +14938,7 @@ base b prompt
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "passed" if "repaired scene meaning" in (run_dir / "script.md").read_text(encoding="utf-8") else "failed"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\n"
-                        "failed_selectors: []\nfindings: []\n",
+                        terminal_semantic_report_text(status),
                         encoding="utf-8",
                     )
                     return None
@@ -14294,6 +15059,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_turns = 0
             repair_turns = 0
 
@@ -14301,7 +15070,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -14317,6 +15097,10 @@ base b prompt
                     nonlocal review_turns, repair_turns
                     if "Semantic QA Producer Repair" in text:
                         repair_turns += 1
+                        (run_dir / "script.md").write_text(
+                            "# Script\n\nrepaired scene meaning\n",
+                            encoding="utf-8",
+                        )
                         repair_paths = semantic_repair_relpaths(stage, 1)
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         raise CodexAppServerTransportError("turn timed out")
@@ -14324,8 +15108,7 @@ base b prompt
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\n"
-                        "failed_selectors: []\nfindings: []\n",
+                        terminal_semantic_report_text(status),
                         encoding="utf-8",
                     )
                     return None
@@ -14355,6 +15138,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_turns = 0
             repair_turns = 0
 
@@ -14362,7 +15149,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -14378,6 +15176,10 @@ base b prompt
                     nonlocal review_turns, repair_turns
                     if "Semantic QA Producer Repair" in text:
                         repair_turns += 1
+                        (run_dir / "script.md").write_text(
+                            "# Script\n\nrepaired scene meaning\n",
+                            encoding="utf-8",
+                        )
                         repair_paths = semantic_repair_relpaths(stage, 1)
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         return None
@@ -14385,8 +15187,10 @@ base b prompt
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\n"
-                        "failed_selectors: []\nfindings: [semantic drift]\n",
+                        terminal_semantic_report_text(
+                            status,
+                            finding="semantic drift",
+                        ),
                         encoding="utf-8",
                     )
                     if review_turns == 1:
@@ -14417,6 +15221,10 @@ base b prompt
             run_dir = root / "output" / "sample_run"
             run_dir.mkdir(parents=True)
             stage = "scene_set"
+            (run_dir / "script.md").write_text(
+                "# Script\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
             review_turns = 0
             repair_turns = 0
 
@@ -14424,7 +15232,18 @@ base b prompt
                 paths = image_gen_app.semantic_review_relpaths(stage)
                 (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
                 (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(json.dumps({"entry_count": 1}, ensure_ascii=False) + "\n", encoding="utf-8")
+                (run_dir / paths["scope"]).write_text(
+                    json.dumps(
+                        {
+                            "entry_count": 1,
+                            "entry_ids": ["scene_1"],
+                            "source_artifacts": ["script.md"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
                 (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -14440,6 +15259,10 @@ base b prompt
                     nonlocal review_turns, repair_turns
                     if "Semantic QA Producer Repair" in text:
                         repair_turns += 1
+                        (run_dir / "script.md").write_text(
+                            "# Script\n\nrepaired scene meaning\n",
+                            encoding="utf-8",
+                        )
                         repair_paths = semantic_repair_relpaths(stage, 1)
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         await asyncio.Event().wait()
@@ -14447,8 +15270,10 @@ base b prompt
                     paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
                     (run_dir / paths["report"]).write_text(
-                        f"status: {status}\nreviewed_entries: [scene_1]\nblocked_entries: []\n"
-                        "failed_selectors: []\nfindings: [semantic drift]\n",
+                        terminal_semantic_report_text(
+                            status,
+                            finding="semantic drift",
+                        ),
                         encoding="utf-8",
                     )
                     if review_turns == 1:
@@ -14543,9 +15368,12 @@ base b prompt
             self.assertIn("Run dir:", output)
             self.assertTrue((run_dir / "video_manifest.md").exists())
             self.assertTrue((run_dir / "logs/scene_design/scene_event_input.json").exists())
+            self.assertTrue((run_dir / "logs/grounding/research.readset.json").exists())
             self.assertIn("Run dir:", (run_dir / "logs/toc_run_cli/stdout.log").read_text(encoding="utf-8"))
             self.assertEqual((run_dir / "logs/toc_run_cli/stderr.log").read_text(encoding="utf-8"), "")
             self.assertIn("runtime.review_policy=drafts", state)
+            self.assertFalse((run_dir / "output" / run_id / "state.txt").exists())
+            self.assertFalse((run_dir / "output" / run_id / "logs").exists())
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -15047,13 +15875,13 @@ base b prompt
             client_constructor_kwargs,
             [
                 {
-                    "cwd": run_dir.resolve(),
+                    "cwd": Path(os.path.abspath(os.fspath(run_dir))),
                     "scrub_sensitive_env": True,
                     "require_chatgpt_account": True,
                     "require_chatgpt_pro": True,
                 },
                 {
-                    "cwd": run_dir.resolve(),
+                    "cwd": Path(os.path.abspath(os.fspath(run_dir))),
                     "scrub_sensitive_env": True,
                     "require_chatgpt_account": True,
                     "require_chatgpt_pro": True,
@@ -15191,7 +16019,9 @@ base b prompt
             await image_gen_app._release_run_execution_lease("job-two")
 
         with tempfile.TemporaryDirectory() as tmp:
-            asyncio.run(run_case(Path(tmp) / "sample_run"))
+            run_dir = Path(tmp) / "sample_run"
+            run_dir.mkdir()
+            asyncio.run(run_case(run_dir))
 
     def test_image_resume_preserves_existing_images_for_hash_aware_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -15281,6 +16111,106 @@ base b prompt
                         for error in classification.errors
                     )
                 )
+
+    def test_p680_regeneration_plan_reads_bound_report_during_root_swap_aba(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            decoy_dir = root / "decoy"
+            parked_dir = root / "parked"
+            run_dir.mkdir()
+            decoy_dir.mkdir()
+            original_output = "assets/scenes/original.png"
+            decoy_output = "assets/scenes/decoy.png"
+            for directory, output in (
+                (run_dir, original_output),
+                (decoy_dir, decoy_output),
+            ):
+                (directory / "eval_report.json").write_text(
+                    json.dumps(
+                        {
+                            "run_dir": str(run_dir.resolve()),
+                            "stage_target": "p680",
+                            "stages": {
+                                "image": {
+                                    "passed": False,
+                                    "details": {
+                                        "image_regeneration_plan": [
+                                            {
+                                                "output": output,
+                                                "action": "regenerate_p600_scene",
+                                                "vector_like_references": [],
+                                            }
+                                        ]
+                                    },
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            current_request_paths = {
+                "asset": {},
+                "scene": {
+                    original_output: run_dir / original_output,
+                    decoy_output: run_dir / decoy_output,
+                },
+            }
+            run_stat = os.stat(run_dir, follow_symlinks=False)
+            read_calls = 0
+
+            def read_bound_report_during_swap(
+                _bound_run_dir: Path,
+                relative_path: str,
+            ) -> bytes:
+                nonlocal read_calls
+                read_calls += 1
+                binding = image_gen_app.current_run_root_binding()
+                self.assertIsNotNone(binding)
+                os.rename(run_dir, parked_dir)
+                os.rename(decoy_dir, run_dir)
+                descriptor = -1
+                try:
+                    descriptor = os.open(
+                        relative_path,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=binding.descriptor,
+                    )
+                    chunks: list[bytes] = []
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    os.rename(run_dir, decoy_dir)
+                    os.rename(parked_dir, run_dir)
+
+            with bind_run_root(
+                run_dir,
+                expected_identity=(run_stat.st_dev, run_stat.st_ino),
+            ):
+                with patch(
+                    "server.image_gen_app.read_run_file_bytes",
+                    side_effect=read_bound_report_during_swap,
+                ) as read_report:
+                    classification = image_gen_app._inspect_p680_regeneration_plan(
+                        run_dir,
+                        current_request_paths=current_request_paths,
+                    )
+
+            self.assertEqual(read_calls, 1)
+            read_report.assert_called_once_with(run_dir, "eval_report.json")
+            self.assertEqual(
+                set(classification.targets),
+                {original_output},
+            )
+            self.assertEqual(classification.errors, ())
 
     def test_image_resume_refuses_asset_repair_plan_before_deleting_any_outputs(
         self,
@@ -15479,6 +16409,186 @@ good scene
             self.assertTrue(good_scene.exists())
         self.assertEqual(result["deleted"], ["assets/scenes/bad_scene.png"])
         self.assertEqual(result["errors"], [])
+
+    def test_image_resume_preserves_leaf_replacement_after_identity_check(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            output = run_dir / "assets/scenes/bad_scene.png"
+            parked_output = run_dir / "assets/scenes/bad_scene.original"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(PNG_BYTES)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                            "vector_like_references": [],
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            original_unlink = (
+                image_gen_app._unlink_regeneration_output_nofollow
+            )
+            replacement_bytes = b"replacement must survive"
+            replacement_installed = False
+
+            def replace_then_unlink(
+                bound_run_dir: Path,
+                relative: str,
+                *,
+                expected_identity: tuple[int, int, int] | None,
+            ) -> tuple[bool, str | None]:
+                nonlocal replacement_installed
+                os.rename(output, parked_output)
+                output.write_bytes(replacement_bytes)
+                replacement_installed = True
+                return original_unlink(
+                    bound_run_dir,
+                    relative,
+                    expected_identity=expected_identity,
+                )
+
+            with patch(
+                "server.image_gen_app._unlink_regeneration_output_nofollow",
+                side_effect=replace_then_unlink,
+            ):
+                result = image_gen_app._delete_existing_images_for_image_resume(
+                    run_dir
+                )
+
+            self.assertTrue(replacement_installed)
+            self.assertEqual(output.read_bytes(), replacement_bytes)
+            self.assertEqual(parked_output.read_bytes(), PNG_BYTES)
+            self.assertEqual(result["deletedCount"], 0)
+            self.assertTrue(
+                any("verified identity" in error for error in result["errors"])
+            )
+
+    def test_image_resume_deletes_from_retained_run_during_root_swap_aba(
+        self,
+    ) -> None:
+        from toc import run_root_binding
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            decoy_dir = root / "decoy"
+            parked_dir = root / "parked"
+            original_output = run_dir / "assets/scenes/bad_scene.png"
+            decoy_output = decoy_dir / "assets/scenes/bad_scene.png"
+            original_output.parent.mkdir(parents=True)
+            decoy_output.parent.mkdir(parents=True)
+            original_output.write_bytes(PNG_BYTES)
+            decoy_bytes = b"decoy must survive"
+            decoy_output.write_bytes(decoy_bytes)
+            (run_dir / "image_generation_requests.md").write_text(
+                """# Image Generation Requests
+
+## bad_scene
+
+- output: `assets/scenes/bad_scene.png`
+- references: `[]`
+
+```text
+bad scene
+```
+""",
+                encoding="utf-8",
+            )
+            (run_dir / "eval_report.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir.resolve()),
+                        "stage_target": "p680",
+                        "stages": {
+                            "image": {
+                                "passed": False,
+                                "details": {
+                                    "image_regeneration_plan": [
+                                        {
+                                            "output": "assets/scenes/bad_scene.png",
+                                            "action": "regenerate_p600_scene",
+                                            "vector_like_references": [],
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            original_remove = run_root_binding._remove_name_if_identity
+            swap_calls = 0
+
+            def remove_from_retained_parent_during_swap(
+                parent_descriptor: int,
+                name: str,
+                *,
+                expected_identity: tuple[int, int, int],
+            ) -> bool:
+                nonlocal swap_calls
+                swap_calls += 1
+                os.rename(run_dir, parked_dir)
+                os.rename(decoy_dir, run_dir)
+                try:
+                    return original_remove(
+                        parent_descriptor,
+                        name,
+                        expected_identity=expected_identity,
+                    )
+                finally:
+                    os.rename(run_dir, decoy_dir)
+                    os.rename(parked_dir, run_dir)
+
+            with patch(
+                "toc.run_root_binding._remove_name_if_identity",
+                side_effect=remove_from_retained_parent_during_swap,
+            ):
+                result = image_gen_app._delete_existing_images_for_image_resume(
+                    run_dir
+                )
+
+            self.assertEqual(swap_calls, 1)
+            self.assertFalse(original_output.exists())
+            self.assertEqual(decoy_output.read_bytes(), decoy_bytes)
+            self.assertEqual(
+                result["deleted"],
+                ["assets/scenes/bad_scene.png"],
+            )
+            self.assertEqual(result["errors"], [])
 
     def test_image_resume_does_not_follow_scene_output_symlink_to_user_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -15936,6 +17046,91 @@ dependent scene
                 failure_log["destinationDetails"]["inspectionSkipped"],
                 "unsafe_destination",
             )
+
+    def test_bound_request_generation_rejects_run_swap_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            original_run = root / "run-original"
+            replacement_marker = "replacement-must-remain-untouched"
+            (run_dir / "assets" / "scenes").mkdir(parents=True)
+            run_identity_stat = run_dir.stat()
+            run_identity = (
+                run_identity_stat.st_dev,
+                run_identity_stat.st_ino,
+            )
+            generated = root / "generated.png"
+            generated.write_bytes(PNG_BYTES)
+
+            class SwappingClient:
+                provider_calls = 0
+
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start(self):
+                    run_dir.rename(original_run)
+                    run_dir.mkdir()
+                    (run_dir / "replacement.txt").write_text(
+                        replacement_marker,
+                        encoding="utf-8",
+                    )
+
+                async def stop(self):
+                    return None
+
+                async def generate_image(self, **_kwargs):
+                    type(self).provider_calls += 1
+                    raise AssertionError(
+                        "a replaced run root must not reach the provider"
+                    )
+
+            item = image_gen.ImageRequestItem(
+                id="cut",
+                kind="scene",
+                asset_type="scene_still",
+                tool="codex_builtin_image",
+                output="assets/scenes/cut.png",
+                prompt="cinematic scene",
+                references=[],
+                reference_count=0,
+                execution_lane="bootstrap_builtin",
+                generation_status=None,
+                existing_image=None,
+            )
+
+            with patch(
+                "server.image_gen_app.create_codex_app_server_client",
+                SwappingClient,
+            ):
+                with bind_run_root(
+                    run_dir,
+                    expected_identity=run_identity,
+                ):
+                    try:
+                        with self.assertRaises(RunRootBindingError):
+                            asyncio.run(
+                                image_gen_app
+                                ._generate_request_item_output_with_slot(
+                                    run_dir=run_dir,
+                                    kind="scene",
+                                    item=item,
+                                )
+                            )
+                    finally:
+                        replacement = root / "replacement"
+                        run_dir.rename(replacement)
+                        original_run.rename(run_dir)
+
+            self.assertEqual(SwappingClient.provider_calls, 0)
+            self.assertEqual(
+                (replacement / "replacement.txt").read_text(
+                    encoding="utf-8"
+                ),
+                replacement_marker,
+            )
+            self.assertFalse((replacement / "assets/scenes/cut.png").exists())
+            self.assertFalse((run_dir / "assets/scenes/cut.png").exists())
 
     def test_provider_failure_after_parent_swap_does_not_inspect_destination(
         self,

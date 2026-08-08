@@ -315,14 +315,30 @@ def _video_entries(stage: str, run_dir: Path, manifest: dict[str, Any]) -> list[
     return entries
 
 
-def collect_entries(stage: str, run_dir: Path, manifest: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def collect_entries(
+    stage: str,
+    run_dir: Path,
+    manifest: dict[str, Any] | None = None,
+    *,
+    scene_source_document: tuple[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     if stage not in SEMANTIC_REVIEW_STAGES:
         raise ValueError(f"unknown semantic review stage: {stage}")
     module_name = SPECIALIZED_COLLECTORS.get(stage)
     if module_name:
         try:
             module = __import__(module_name, fromlist=["collect_entries"])
-            entries = module.collect_entries(stage, run_dir, manifest=manifest)
+            entries = (
+                module.collect_entries(
+                    stage,
+                    run_dir,
+                    manifest=manifest,
+                    source_document=scene_source_document,
+                )
+                if stage in {"scene_set", "scene_detail", "cut_blueprint"}
+                and scene_source_document is not None
+                else module.collect_entries(stage, run_dir, manifest=manifest)
+            )
             if isinstance(entries, list) and (entries or stage != "cut_blueprint"):
                 return entries
         except Exception:

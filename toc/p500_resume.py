@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from contextvars import ContextVar
 import fcntl
 import fnmatch
 import hashlib
@@ -14,13 +15,32 @@ import stat
 from pathlib import Path
 from typing import Any, Iterable
 
-from toc.harness import append_state_snapshot, parse_state_file
-from toc.run_index import classify_run_file
+from toc.harness import (
+    _order_keys,
+    append_state_snapshot as _harness_append_state_snapshot,
+    artifact_inventory,
+    nested_state,
+    new_job_id,
+    now_iso,
+    parse_state_file,
+    pending_gates,
+)
+from toc.run_index import build_run_index_markdown, classify_run_file
+from toc.runtime_locks import FileLockUnavailable, sync_file_lock
 from toc.stage_evaluator import check_manifest_single
+from scripts.world_walk_source import (
+    read_regular_file_nofollow,
+    write_regular_file_nofollow,
+)
 
 
 class P500ResumeError(RuntimeError):
     """Raised when an existing run cannot be safely prepared for p500."""
+
+
+_ACTIVE_P500_RUN: ContextVar[
+    tuple[str, tuple[int, int]] | None
+] = ContextVar("toc_p500_active_run", default=None)
 
 
 PRESERVED_CANONICAL_FILES = (
@@ -732,62 +752,176 @@ def _descriptor_root_path(descriptor: int) -> Path:
     )
 
 
-def _acquire_resume_file_lock_at(run_descriptor: int) -> tuple[int, int]:
-    """Acquire the legacy create/resume lock without resolving the run path."""
-
-    namespace_descriptor = _open_relative_directory(
-        run_descriptor,
-        (".locks",),
-        create=True,
-        label="create/resume lock namespace",
-    )
-    lock_descriptor = -1
-    try:
-        flags = os.O_RDWR | os.O_CREAT
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        lexical = None
-        try:
-            lexical = os.stat(
-                "create_resume.lock",
-                dir_fd=namespace_descriptor,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            pass
-        lock_descriptor = os.open(
-            "create_resume.lock",
-            flags,
-            0o600,
-            dir_fd=namespace_descriptor,
-        )
-        opened = os.fstat(lock_descriptor)
+def _parse_state_text(text: str) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
         if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or (
-                lexical is not None
-                and _entry_identity(opened) != _entry_identity(lexical)
-            )
+            not line
+            or line == "---"
+            or line.startswith("#")
+            or "=" not in line
         ):
-            raise P500ResumeError(
-                "create/resume lock must be a private regular file"
-            )
-        try:
-            fcntl.flock(
-                lock_descriptor,
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-        except BlockingIOError as exc:
-            raise P500ResumeError(
-                "another create/resume process owns this run"
-            ) from exc
-        return namespace_descriptor, lock_descriptor
-    except Exception:
-        if lock_descriptor >= 0:
-            os.close(lock_descriptor)
-        os.close(namespace_descriptor)
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            merged[key] = value.strip().replace("\n", " ")
+    return merged
+
+
+def _read_bound_run_bytes(
+    run_dir: Path,
+    relative_path: str | Path,
+    *,
+    identity: tuple[int, int],
+    missing_ok: bool = False,
+) -> bytes:
+    try:
+        return read_regular_file_nofollow(
+            run_dir,
+            relative_path,
+            expected_root_identity=identity,
+        )
+    except FileNotFoundError:
+        if missing_ok:
+            return b""
         raise
+
+
+def _parse_bound_state(
+    run_dir: Path,
+    *,
+    identity: tuple[int, int],
+) -> dict[str, str]:
+    return _parse_state_text(
+        _read_bound_run_bytes(
+            run_dir,
+            "state.txt",
+            identity=identity,
+            missing_ok=True,
+        ).decode("utf-8")
+    )
+
+
+def _write_bound_run_bytes(
+    run_dir: Path,
+    relative_path: str | Path,
+    data: bytes,
+    *,
+    identity: tuple[int, int],
+) -> None:
+    write_regular_file_nofollow(
+        destination_root=run_dir,
+        destination_relative=relative_path,
+        data=data,
+        expected_destination_root_identity=identity,
+    )
+
+
+def append_state_snapshot(
+    state_path: Path,
+    updates: dict[str, str],
+) -> dict[str, str]:
+    """Append state without ever writing through a replaced run pathname."""
+
+    active = _ACTIVE_P500_RUN.get()
+    lexical_run = os.path.abspath(os.fspath(state_path.parent))
+    if active is None or active[0] != lexical_run:
+        return _harness_append_state_snapshot(state_path, updates)
+    if state_path.name != "state.txt":
+        raise P500ResumeError(
+            f"p500 state snapshot must target state.txt: {state_path}"
+        )
+
+    run_dir = Path(lexical_run)
+    identity = active[1]
+    current_bytes = _read_bound_run_bytes(
+        run_dir,
+        "state.txt",
+        identity=identity,
+        missing_ok=True,
+    )
+    try:
+        current_text = current_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise P500ResumeError("state.txt is not valid UTF-8") from exc
+    merged = _parse_state_text(current_text)
+    if "job_id" not in merged or not merged["job_id"].strip():
+        merged["job_id"] = new_job_id()
+    if "status" not in merged or not merged["status"].strip():
+        merged["status"] = "INIT"
+    merged.setdefault(
+        "artifact.run_index",
+        os.fspath(run_dir / "p000_index.md"),
+    )
+    merged.update(
+        {
+            key: value.replace("\n", " ").strip()
+            for key, value in updates.items()
+        }
+    )
+    merged["timestamp"] = now_iso()
+    block = (
+        "\n".join(
+            f"{key}={merged[key]}" for key in _order_keys(merged)
+        )
+        + "\n---\n"
+    )
+    _write_bound_run_bytes(
+        run_dir,
+        "state.txt",
+        current_bytes + block.encode("utf-8"),
+        identity=identity,
+    )
+
+    _verify_real_directory_identity(run_dir, identity)
+    index_text = build_run_index_markdown(run_dir, state=merged)
+    _write_bound_run_bytes(
+        run_dir,
+        "p000_index.md",
+        index_text.encode("utf-8"),
+        identity=identity,
+    )
+    payload: dict[str, Any] = {
+        "generated_at": now_iso(),
+        "run_dir": os.fspath(run_dir),
+        "state_file": os.fspath(run_dir / "state.txt"),
+        "state_flat": merged,
+        "state": nested_state(merged),
+        "artifacts": artifact_inventory(run_dir, merged),
+        "pending_gates": pending_gates(merged),
+    }
+    eval_bytes = _read_bound_run_bytes(
+        run_dir,
+        "eval_report.json",
+        identity=identity,
+        missing_ok=True,
+    )
+    if eval_bytes:
+        try:
+            payload["eval_report"] = json.loads(
+                eval_bytes.decode("utf-8")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload["eval_report"] = {
+                "error": "Failed to parse eval_report.json"
+            }
+    _write_bound_run_bytes(
+        run_dir,
+        "run_status.json",
+        (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+        identity=identity,
+    )
+    return merged
 
 
 def _lexical_path_fingerprint(path: Path) -> dict[str, Any]:
@@ -1479,9 +1613,10 @@ def _apply_resume_plan_locked(
             moved.append(rel)
             _verify_real_directory_identity(run_dir, plan.run_dir_identity)
 
-        pinned_run_dir = _descriptor_root_path(run_descriptor)
-        pinned_state_path = pinned_run_dir / "state.txt"
-        state = parse_state_file(pinned_state_path)
+        state = _parse_bound_state(
+            run_dir,
+            identity=plan.run_dir_identity,
+        )
         if canonical_state_before_sha256(state) != plan.state_before_sha256:
             raise P500ResumeError(
                 "state_before changed before checkpoint metadata was written; "
@@ -1508,12 +1643,15 @@ def _apply_resume_plan_locked(
         )
         try:
             append_state_snapshot(
-                pinned_state_path,
+                run_dir / "state.txt",
                 _state_updates_for_reset(run_dir=run_dir, plan=plan, state=state),
             )
             state_committed = True
         except Exception:
-            committed_state = parse_state_file(pinned_state_path)
+            committed_state = _parse_bound_state(
+                run_dir,
+                identity=plan.run_dir_identity,
+            )
             state_committed = (
                 committed_state.get("runtime.resume.p500.checkpoint")
                 == str(checkpoint_dir.relative_to(run_dir))
@@ -1569,44 +1707,77 @@ def apply_resume_plan(
     plan: ResumePlan,
     *,
     lock_already_held: bool = False,
+    run_descriptor: int | None = None,
+    run_directory_lock_already_held: bool = False,
 ) -> Path:
     run_dir = Path(plan.run_dir)
-    run_descriptor = _open_real_directory(
-        run_dir,
-        expected_identity=plan.run_dir_identity,
-    )
-    root_lock_acquired = False
-    namespace_descriptor = -1
-    lock_descriptor = -1
-    try:
+    if not lock_already_held:
+        pinned_descriptor = _open_real_directory(
+            run_dir,
+            expected_identity=plan.run_dir_identity,
+        )
         try:
-            fcntl.flock(
-                run_descriptor,
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-            root_lock_acquired = True
-        except BlockingIOError as exc:
+            with sync_file_lock(
+                run_dir / ".locks" / "create_resume.lock",
+                wait=False,
+                run_root_descriptor=pinned_descriptor,
+                expected_run_root_identity=plan.run_dir_identity,
+            ):
+                return apply_resume_plan(
+                    plan,
+                    lock_already_held=True,
+                    run_descriptor=pinned_descriptor,
+                    run_directory_lock_already_held=False,
+                )
+        except FileLockUnavailable as exc:
             raise P500ResumeError(
-                f"frontend create is active for this run: {run_dir}"
+                "another create/resume process owns this run"
             ) from exc
-        if not lock_already_held:
-            namespace_descriptor, lock_descriptor = (
-                _acquire_resume_file_lock_at(run_descriptor)
-            )
+        finally:
+            os.close(pinned_descriptor)
+
+    owns_run_descriptor = run_descriptor is None
+    if run_descriptor is None:
+        run_descriptor = _open_real_directory(
+            run_dir,
+            expected_identity=plan.run_dir_identity,
+        )
+    elif _descriptor_identity(run_descriptor) != plan.run_dir_identity:
+        raise P500ResumeError(
+            f"run directory identity changed: {run_dir}"
+        )
+    root_lock_acquired = False
+    active_token = None
+    try:
+        if not run_directory_lock_already_held:
+            try:
+                fcntl.flock(
+                    run_descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                root_lock_acquired = True
+            except BlockingIOError as exc:
+                raise P500ResumeError(
+                    f"frontend create is active for this run: {run_dir}"
+                ) from exc
         _verify_real_directory_identity(run_dir, plan.run_dir_identity)
+        active_token = _ACTIVE_P500_RUN.set(
+            (
+                os.path.abspath(os.fspath(run_dir)),
+                plan.run_dir_identity,
+            )
+        )
         return _apply_resume_plan_locked(
             plan,
             run_descriptor=run_descriptor,
         )
     finally:
-        if lock_descriptor >= 0:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-            os.close(lock_descriptor)
-        if namespace_descriptor >= 0:
-            os.close(namespace_descriptor)
+        if active_token is not None:
+            _ACTIVE_P500_RUN.reset(active_token)
         if root_lock_acquired:
             fcntl.flock(run_descriptor, fcntl.LOCK_UN)
-        os.close(run_descriptor)
+        if owns_run_descriptor:
+            os.close(run_descriptor)
 
 
 def prepare_p500_resume(

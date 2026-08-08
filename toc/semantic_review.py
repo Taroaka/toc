@@ -10,10 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from toc.atomic_exchange import atomic_exchange_names
 from toc.review_projection import (
     REVIEW_SOURCE_FINGERPRINT_POLICY_FIELD,
     ReviewProjectionError,
     review_source_fingerprint,
+)
+from toc.run_root_binding import (
+    current_run_root_binding,
+    require_bound_run_root,
 )
 
 
@@ -34,6 +39,7 @@ _SEMANTIC_REVIEW_DIGEST_FIELDS = {
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SEMANTIC_CLEANUP_DIRECTORY_NONCE = uuid.uuid4().hex
 SEMANTIC_REVIEW_STAGES = {
     "research",
     "story",
@@ -65,6 +71,10 @@ FOUNDATION_SEMANTIC_CRITERIA = {
         "duration_scene_readiness",
     ),
 }
+
+
+class SemanticWriteIndeterminateError(ValueError):
+    """The writer could not prove that a failed publication rolled back."""
 
 
 def semantic_review_file_sha256(path: Path) -> str:
@@ -243,18 +253,178 @@ def _semantic_named_stat(
         return None
 
 
-def _semantic_unlink_if_identity(
+def _semantic_open_cleanup_directory(parent_fd: int) -> int:
+    """Open an owner-only-by-mode cleanup namespace.
+
+    Mode 0700 excludes other UIDs. Portable POSIX operations cannot isolate
+    this namespace from a hostile peer running under the same UID.
+    """
+
+    directory_name = (
+        f".semantic-cleanup-{os.getpid()}-"
+        f"{_SEMANTIC_CLEANUP_DIRECTORY_NONCE}"
+    )
+    created = False
+    try:
+        os.mkdir(directory_name, 0o700, dir_fd=parent_fd)
+        created = True
+    except FileExistsError:
+        pass
+    except OSError:
+        return -1
+
+    try:
+        directory_fd = os.open(
+            directory_name,
+            _semantic_directory_open_flags(),
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return -1
+
+    try:
+        opened = os.fstat(directory_fd)
+        named = _semantic_named_stat(parent_fd, directory_name)
+        if (
+            named is None
+            or not stat.S_ISDIR(opened.st_mode)
+            or _semantic_entry_identity(named)
+            != _semantic_entry_identity(opened)
+            or opened.st_uid != os.geteuid()
+        ):
+            raise OSError("semantic cleanup directory is unsafe")
+        if created:
+            os.fchmod(directory_fd, 0o700)
+            opened = os.fstat(directory_fd)
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            raise OSError("semantic cleanup directory is writable by peers")
+    except OSError:
+        os.close(directory_fd)
+        return -1
+    return directory_fd
+
+
+def _semantic_cleanup_if_identity(
     parent_fd: int,
     name: str,
     expected_identity: tuple[int, int, int],
+    *,
+    dispose: bool,
+    cleanup_fd: int | None = None,
 ) -> bool:
+    """Detach a matching name through a protected cleanup directory.
+
+    The shared parent is never the namespace used for physical deletion.
+    A source-name replacement moved during the rename is restored with a
+    no-clobber link and its protected alias is then safely removed.  If that
+    restoration cannot be proven, the ambiguous entry remains quarantined.
+    """
+
     current = _semantic_named_stat(parent_fd, name)
     if (
         current is None
         or _semantic_entry_identity(current) != expected_identity
     ):
         return current is None
-    os.unlink(name, dir_fd=parent_fd)
+    retained_cleanup_fd = cleanup_fd
+    close_cleanup_fd = retained_cleanup_fd is None
+    if retained_cleanup_fd is None:
+        retained_cleanup_fd = _semantic_open_cleanup_directory(parent_fd)
+    if retained_cleanup_fd < 0:
+        return False
+    quarantine_name = f"entry-{uuid.uuid4().hex}"
+    try:
+        try:
+            os.rename(
+                name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=retained_cleanup_fd,
+            )
+        except FileNotFoundError:
+            return False
+        quarantined = _semantic_named_stat(
+            retained_cleanup_fd,
+            quarantine_name,
+        )
+        if quarantined is None:
+            return False
+        if _semantic_entry_identity(quarantined) != expected_identity:
+            if _semantic_named_stat(parent_fd, name) is not None:
+                return False
+            try:
+                os.link(
+                    quarantine_name,
+                    name,
+                    src_dir_fd=retained_cleanup_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                os.unlink(quarantine_name, dir_fd=retained_cleanup_fd)
+            except OSError:
+                return False
+            return False
+        if not dispose:
+            return True
+        try:
+            os.unlink(quarantine_name, dir_fd=retained_cleanup_fd)
+        except OSError:
+            return False
+        return True
+    finally:
+        if close_cleanup_fd:
+            os.close(retained_cleanup_fd)
+
+
+def _semantic_unlink_if_identity(
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+    *,
+    cleanup_fd: int | None = None,
+) -> bool:
+    return _semantic_cleanup_if_identity(
+        parent_fd,
+        name,
+        expected_identity,
+        dispose=True,
+        cleanup_fd=cleanup_fd,
+    )
+
+
+def _semantic_quarantine_if_identity(
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+    *,
+    cleanup_fd: int | None = None,
+) -> bool:
+    return _semantic_cleanup_if_identity(
+        parent_fd,
+        name,
+        expected_identity,
+        dispose=False,
+        cleanup_fd=cleanup_fd,
+    )
+
+
+def _semantic_unlink_protected_if_identity(
+    directory_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    """Unlink a known entry inside the writer-only cleanup namespace."""
+
+    current = _semantic_named_stat(directory_fd, name)
+    if (
+        current is None
+        or _semantic_entry_identity(current) != expected_identity
+    ):
+        return current is None
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except OSError:
+        return False
     return True
 
 
@@ -272,13 +442,43 @@ def _semantic_link_without_clobber(
     )
 
 
-def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
+def safe_semantic_write_text(
+    run_dir: Path,
+    path: Path,
+    text: str,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> Path:
     """Atomically write a run-local artifact through retained directory FDs."""
 
-    run_root = run_dir.resolve(strict=True)
+    binding = current_run_root_binding()
+    if binding is not None:
+        if os.path.abspath(os.fspath(run_dir)) != binding.lexical_root:
+            raise ValueError(
+                "semantic artifact escaped the active bound run root"
+            )
+        require_bound_run_root(Path(binding.lexical_root))
+        if (
+            expected_root_identity is not None
+            and expected_root_identity != binding.identity
+        ):
+            raise ValueError(
+                "semantic artifact root identity conflicts with active binding"
+            )
+        expected_root_identity = binding.identity
+
+    run_root = (
+        Path(os.path.abspath(os.fspath(run_dir)))
+        if expected_root_identity is not None
+        else run_dir.resolve(strict=True)
+    )
     raw_candidate = path if path.is_absolute() else run_root / path
     raw_candidate = Path(os.path.abspath(raw_candidate))
-    candidate = raw_candidate.resolve(strict=False)
+    candidate = (
+        raw_candidate
+        if expected_root_identity is not None
+        else raw_candidate.resolve(strict=False)
+    )
     try:
         relative = candidate.relative_to(run_root)
     except ValueError as exc:
@@ -290,7 +490,11 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
     # rejects run-local symlinks while allowing platform aliases such as
     # macOS's /var -> /private/var before the run root.
     raw_cursor = raw_candidate
-    while raw_cursor.resolve(strict=False) != run_root:
+    while (
+        Path(os.path.abspath(os.fspath(raw_cursor)))
+        if expected_root_identity is not None
+        else raw_cursor.resolve(strict=False)
+    ) != run_root:
         if raw_cursor.is_symlink():
             raise ValueError(f"semantic artifact path traverses a symlink: {raw_cursor}")
         parent = raw_cursor.parent
@@ -308,7 +512,7 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
     parent_fd = -1
     target_fd = -1
     temporary_fd = -1
-    backup_reserve_fd = -1
+    backup_cleanup_fd = -1
     temporary_name = (
         f".semantic-write-{candidate.name}-{uuid.uuid4().hex}.tmp"
     )
@@ -318,54 +522,69 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
         f".semantic-write-backup-{candidate.name}-{uuid.uuid4().hex}.tmp"
     )
     backup_identity: tuple[int, int, int] | None = None
+    rollback_cleanup_identity: tuple[int, int, int] | None = None
     backup_role = ""
     backup_present = False
     published = False
+    exchange_pending = False
     committed = False
+    unexpected_published_identity: tuple[int, int, int] | None = None
+    unexpected_temporary_identity: tuple[int, int, int] | None = None
     target_initial_snapshot: tuple[int, int, int, int, int, int, int] | None = (
         None
     )
 
-    def restore_backup_without_clobber(*, keep_backup: bool) -> None:
+    def restore_backup_without_clobber(*, keep_backup: bool = False) -> bool:
         nonlocal backup_present
         if (
             not backup_present
             or backup_identity is None
             or parent_fd < 0
+            or backup_cleanup_fd < 0
         ):
-            return
-        current_backup = _semantic_named_stat(parent_fd, backup_name)
+            return False
+        current_backup = _semantic_named_stat(
+            backup_cleanup_fd,
+            backup_name,
+        )
         if (
             current_backup is None
             or _semantic_entry_identity(current_backup) != backup_identity
             or not stat.S_ISREG(current_backup.st_mode)
         ):
-            return
+            return False
         current_target = _semantic_named_stat(parent_fd, relative.parts[-1])
         if current_target is None:
             try:
-                _semantic_link_without_clobber(
-                    parent_fd,
+                os.link(
                     backup_name,
                     relative.parts[-1],
+                    src_dir_fd=backup_cleanup_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
                 )
             except FileExistsError:
-                return
+                return False
             current_target = _semantic_named_stat(
                 parent_fd,
                 relative.parts[-1],
             )
-        if (
-            not keep_backup
-            and current_target is not None
+        restored = (
+            current_target is not None
+            and stat.S_ISREG(current_target.st_mode)
             and _semantic_entry_identity(current_target) == backup_identity
-            and _semantic_unlink_if_identity(
-                parent_fd,
-                backup_name,
-                backup_identity,
+        )
+        if (
+            restored
+            and not keep_backup
+            and _semantic_unlink_protected_if_identity(
+            backup_cleanup_fd,
+            backup_name,
+            backup_identity,
             )
         ):
             backup_present = False
+        return restored
 
     try:
         try:
@@ -381,6 +600,11 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
             not stat.S_ISDIR(root_entry.st_mode)
             or _semantic_entry_identity(root_entry)
             != _semantic_entry_identity(opened_root)
+            or (
+                expected_root_identity is not None
+                and (opened_root.st_dev, opened_root.st_ino)
+                != expected_root_identity
+            )
         ):
             raise ValueError(
                 "semantic artifact run directory identity changed"
@@ -546,59 +770,210 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
                     "semantic artifact target identity changed during write"
                 )
 
-            backup_reserve_fd = os.open(
-                backup_name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | file_nofollow
-                | cloexec,
-                0o600,
-                dir_fd=parent_fd,
+            backup_cleanup_fd = _semantic_open_cleanup_directory(
+                parent_fd
             )
-            reserve_stat = os.fstat(backup_reserve_fd)
-            backup_identity = _semantic_entry_identity(reserve_stat)
-            backup_role = "reserve"
-            backup_present = True
-            # Move whichever entry owns the target name onto a reserved name
-            # before inspecting it. Unlike replacing target with the new temp,
-            # this rename never destroys a leaf inserted after our precheck.
-            os.replace(
-                target_name,
-                backup_name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-            )
-
-            moved_target = _semantic_named_stat(parent_fd, backup_name)
-            opened_target_after_move = os.fstat(target_fd)
-            if moved_target is None:
-                backup_role = "unknown"
+            if backup_cleanup_fd < 0:
                 raise ValueError(
-                    "semantic artifact target disappeared during rename"
+                    "semantic artifact cleanup directory is unsafe"
                 )
-            backup_identity = _semantic_entry_identity(moved_target)
+            backup_name = f"backup-{uuid.uuid4().hex}"
+            opened_target_before_exchange = os.fstat(target_fd)
+            backup_identity = _semantic_entry_identity(
+                opened_target_before_exchange
+            )
+            # Swap the two existing names in one kernel operation. Concurrent
+            # readers therefore observe either the complete old artifact or
+            # the complete new artifact, never a missing canonical leaf.
+            try:
+                atomic_exchange_names(
+                    parent_fd,
+                    temporary_name,
+                    parent_fd,
+                    target_name,
+                )
+            except BaseException:
+                reconciled_target = _semantic_named_stat(
+                    parent_fd,
+                    target_name,
+                )
+                reconciled_backup = _semantic_named_stat(
+                    parent_fd,
+                    temporary_name,
+                )
+                if (
+                    reconciled_target is not None
+                    and reconciled_backup is not None
+                    and _semantic_entry_identity(reconciled_target)
+                    == temporary_identity
+                    and _semantic_entry_identity(reconciled_backup)
+                    == backup_identity
+                ):
+                    published = True
+                    exchange_pending = True
+                raise
+            published = True
+            exchange_pending = True
+            exchanged_target = _semantic_named_stat(parent_fd, target_name)
+            exchanged_backup = _semantic_named_stat(
+                parent_fd,
+                temporary_name,
+            )
             if (
-                not stat.S_ISREG(moved_target.st_mode)
-                or _semantic_entry_identity(opened_target_after_move)
+                exchanged_target is None
+                or exchanged_backup is None
+                or not stat.S_ISREG(exchanged_target.st_mode)
+                or not stat.S_ISREG(exchanged_backup.st_mode)
+                or exchanged_target.st_nlink != 1
+                or exchanged_backup.st_nlink != 1
+                or _semantic_entry_identity(exchanged_target)
+                != temporary_identity
+                or _semantic_entry_identity(exchanged_backup)
                 != backup_identity
             ):
-                backup_role = "unrelated"
-                restore_backup_without_clobber(keep_backup=True)
+                if (
+                    exchanged_target is not None
+                    and exchanged_backup is not None
+                    and _semantic_entry_identity(exchanged_target)
+                    == temporary_identity
+                ):
+                    raced_identity = _semantic_entry_identity(
+                        exchanged_backup
+                    )
+                    try:
+                        atomic_exchange_names(
+                            parent_fd,
+                            target_name,
+                            parent_fd,
+                            temporary_name,
+                        )
+                    except OSError:
+                        pass
+                    else:
+                        restored_raced_target = _semantic_named_stat(
+                            parent_fd,
+                            target_name,
+                        )
+                        restored_new_temporary = _semantic_named_stat(
+                            parent_fd,
+                            temporary_name,
+                        )
+                        if (
+                            restored_raced_target is not None
+                            and restored_new_temporary is not None
+                            and _semantic_entry_identity(
+                                restored_raced_target
+                            )
+                            == raced_identity
+                            and _semantic_entry_identity(
+                                restored_new_temporary
+                            )
+                            == temporary_identity
+                        ):
+                            published = False
+                            exchange_pending = False
+                            temporary_present = True
                 raise ValueError(
-                    "semantic artifact target identity changed during rename"
+                    "semantic artifact identity changed during atomic exchange"
                 )
+
+            try:
+                os.rename(
+                    temporary_name,
+                    backup_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=backup_cleanup_fd,
+                )
+            except BaseException:
+                reconciled_backup = _semantic_named_stat(
+                    backup_cleanup_fd,
+                    backup_name,
+                )
+                reconciled_temporary = _semantic_named_stat(
+                    parent_fd,
+                    temporary_name,
+                )
+                if (
+                    reconciled_backup is not None
+                    and _semantic_entry_identity(reconciled_backup)
+                    == backup_identity
+                ):
+                    backup_present = True
+                    backup_role = "expected"
+                    exchange_pending = False
+                    temporary_present = False
+                elif (
+                    reconciled_temporary is None
+                    or _semantic_entry_identity(reconciled_temporary)
+                    != backup_identity
+                ):
+                    backup_role = "unknown"
+                raise
+
+            try:
+                moved_target = _semantic_named_stat(
+                    backup_cleanup_fd,
+                    backup_name,
+                )
+            except BaseException:
+                # The rename may already be complete even when a following
+                # inspection fails. Reconcile ownership so the common
+                # rollback path can restore the old canonical inode.
+                reconciled_backup = _semantic_named_stat(
+                    backup_cleanup_fd,
+                    backup_name,
+                )
+                if (
+                    reconciled_backup is not None
+                    and _semantic_entry_identity(reconciled_backup)
+                    == backup_identity
+                ):
+                    backup_present = True
+                    backup_role = "expected"
+                    exchange_pending = False
+                    temporary_present = False
+                else:
+                    backup_role = "unknown"
+                raise
             if (
-                moved_target.st_nlink != 1
-                or opened_target_after_move.st_nlink != 1
+                moved_target is None
+                or not stat.S_ISREG(moved_target.st_mode)
+                or moved_target.st_nlink != 1
+                or _semantic_entry_identity(moved_target) != backup_identity
+                or _semantic_entry_identity(os.fstat(target_fd))
+                != backup_identity
             ):
-                backup_role = "unrelated"
-                restore_backup_without_clobber(keep_backup=True)
+                backup_role = "unknown"
                 raise ValueError(
-                    "semantic artifact target has multiple hard links "
-                    "during rename"
+                    "semantic artifact backup identity changed after exchange"
                 )
+            backup_present = True
             backup_role = "expected"
+            exchange_pending = False
+            temporary_present = False
+
+            # Preserve the existing post-publication invariant: the new inode
+            # remains held by its fd and by both canonical and temporary names
+            # until the parent-directory commit fsync succeeds.
+            try:
+                _semantic_link_without_clobber(
+                    parent_fd,
+                    target_name,
+                    temporary_name,
+                )
+            except BaseException:
+                reconciled_temporary = _semantic_named_stat(
+                    parent_fd,
+                    temporary_name,
+                )
+                if (
+                    reconciled_temporary is not None
+                    and _semantic_entry_identity(reconciled_temporary)
+                    == temporary_identity
+                ):
+                    temporary_present = True
+                raise
+            temporary_present = True
             _verify_semantic_directory_chain(
                 run_root=run_root,
                 root_fd=root_fd,
@@ -609,20 +984,32 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
                 "semantic artifact target appeared during write"
             )
 
-        try:
-            # Link publication is the portable no-clobber equivalent of
-            # renameat2(RENAME_NOREPLACE). A leaf that reappears after the
-            # checks wins; it is never unlinked or overwritten here.
-            _semantic_link_without_clobber(
-                parent_fd,
-                temporary_name,
-                target_name,
-            )
-        except FileExistsError as exc:
-            raise ValueError(
-                "semantic artifact target appeared during publish"
-            ) from exc
-        published = True
+        if target_fd < 0:
+            try:
+                # The absent-target path remains no-clobber: a leaf that
+                # appears after the checks wins and is never overwritten.
+                _semantic_link_without_clobber(
+                    parent_fd,
+                    temporary_name,
+                    target_name,
+                )
+            except BaseException as exc:
+                reconciled_publication = _semantic_named_stat(
+                    parent_fd,
+                    target_name,
+                )
+                if (
+                    reconciled_publication is not None
+                    and _semantic_entry_identity(reconciled_publication)
+                    == temporary_identity
+                ):
+                    published = True
+                if isinstance(exc, FileExistsError):
+                    raise ValueError(
+                        "semantic artifact target appeared during publish"
+                    ) from exc
+                raise
+            published = True
 
         published_stat = _semantic_named_stat(parent_fd, target_name)
         if (
@@ -631,6 +1018,24 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
             or _semantic_entry_identity(published_stat)
             != temporary_identity
         ):
+            named_after_publish = _semantic_named_stat(
+                parent_fd,
+                temporary_name,
+            )
+            if (
+                published_stat is not None
+                and named_after_publish is not None
+                and stat.S_ISREG(published_stat.st_mode)
+                and stat.S_ISREG(named_after_publish.st_mode)
+                and _semantic_entry_identity(published_stat)
+                == _semantic_entry_identity(named_after_publish)
+            ):
+                unexpected_published_identity = (
+                    _semantic_entry_identity(published_stat)
+                )
+                unexpected_temporary_identity = (
+                    _semantic_entry_identity(named_after_publish)
+                )
             raise ValueError(
                 "semantic artifact target identity changed after publish"
             )
@@ -640,25 +1045,9 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
             links=directory_links,
         )
 
-        if not _semantic_unlink_if_identity(
-            parent_fd,
-            temporary_name,
-            temporary_identity,
-        ):
-            raise ValueError(
-                "semantic artifact temporary name changed before cleanup"
-            )
-        temporary_present = False
-        if backup_role == "expected" and backup_identity is not None:
-            if not _semantic_unlink_if_identity(
-                parent_fd,
-                backup_name,
-                backup_identity,
-            ):
-                raise ValueError(
-                    "semantic artifact backup identity changed before cleanup"
-                )
-            backup_present = False
+        # Keep both the temporary link and previous-version backup until the
+        # new canonical name has been durably recorded. If this fsync fails,
+        # the rollback path can still restore the exact previous artifact.
         os.fsync(parent_fd)
 
         _verify_semantic_directory_chain(
@@ -671,7 +1060,7 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
         if (
             final_target is None
             or not stat.S_ISREG(final_target.st_mode)
-            or final_target.st_nlink != 1
+            or final_target.st_nlink != 2
             or _semantic_entry_identity(final_target)
             != temporary_identity
             or _semantic_entry_identity(final_temporary)
@@ -681,54 +1070,351 @@ def safe_semantic_write_text(run_dir: Path, path: Path, text: str) -> Path:
                 "semantic artifact target identity changed after commit"
             )
         committed = True
-    except ValueError:
-        raise
-    except OSError as exc:
-        raise ValueError(
-            f"semantic artifact write became unsafe: {candidate}"
-        ) from exc
-    finally:
-        if not committed and parent_fd >= 0:
-            if published and temporary_identity is not None:
-                _semantic_unlink_if_identity(
-                    parent_fd,
-                    relative.parts[-1],
-                    temporary_identity,
-                )
-                published = False
-            if backup_role == "expected":
-                restore_backup_without_clobber(keep_backup=False)
-            elif backup_role == "unrelated":
-                restore_backup_without_clobber(keep_backup=True)
-            elif (
-                backup_role == "reserve"
-                and backup_present
-                and backup_identity is not None
-                and _semantic_unlink_if_identity(
-                    parent_fd,
-                    backup_name,
-                    backup_identity,
-                )
+        try:
+            removed_temporary = _semantic_unlink_if_identity(
+                parent_fd,
+                temporary_name,
+                temporary_identity,
+                cleanup_fd=(
+                    backup_cleanup_fd if backup_cleanup_fd >= 0 else None
+                ),
+            )
+        except OSError:
+            removed_temporary = False
+        if removed_temporary:
+            temporary_present = False
+        if backup_role == "expected" and backup_identity is not None:
+            if _semantic_unlink_protected_if_identity(
+                backup_cleanup_fd,
+                backup_name,
+                backup_identity,
             ):
                 backup_present = False
+        # Publication is already durable. Cleanup is hygiene only: a caller
+        # must not receive failure while the committed bytes remain canonical.
+        for cleanup_descriptor in (backup_cleanup_fd, parent_fd):
+            if cleanup_descriptor < 0:
+                continue
+            try:
+                os.fsync(cleanup_descriptor)
+            except OSError:
+                pass
+    except ValueError:
+        if not committed:
+            raise
+    except OSError as exc:
+        if not committed:
+            raise ValueError(
+                f"semantic artifact write became unsafe: {candidate}"
+            ) from exc
+    finally:
+        rollback_required = (
+            not committed
+            and parent_fd >= 0
+            and (published or backup_role == "expected")
+        )
+        rollback_canonical_proven = True
+        rollback_durability_proven = True
+        if rollback_required and backup_cleanup_fd < 0:
+            backup_cleanup_fd = _semantic_open_cleanup_directory(parent_fd)
+            if backup_cleanup_fd < 0:
+                rollback_durability_proven = False
+        if not committed and parent_fd >= 0:
+            if exchange_pending and temporary_identity is not None:
+                exchanged_target = _semantic_named_stat(
+                    parent_fd,
+                    relative.parts[-1],
+                )
+                exchanged_backup = _semantic_named_stat(
+                    parent_fd,
+                    temporary_name,
+                )
+                if (
+                    exchanged_target is not None
+                    and exchanged_backup is not None
+                    and _semantic_entry_identity(exchanged_target)
+                    == temporary_identity
+                    and backup_identity is not None
+                    and _semantic_entry_identity(exchanged_backup)
+                    == backup_identity
+                ):
+                    try:
+                        atomic_exchange_names(
+                            parent_fd,
+                            relative.parts[-1],
+                            parent_fd,
+                            temporary_name,
+                        )
+                    except OSError:
+                        rollback_canonical_proven = False
+                    else:
+                        restored_target = _semantic_named_stat(
+                            parent_fd,
+                            relative.parts[-1],
+                        )
+                        restored_temporary = _semantic_named_stat(
+                            parent_fd,
+                            temporary_name,
+                        )
+                        rollback_canonical_proven = (
+                            restored_target is not None
+                            and restored_temporary is not None
+                            and _semantic_entry_identity(restored_target)
+                            == backup_identity
+                            and _semantic_entry_identity(restored_temporary)
+                            == temporary_identity
+                        )
+                        if rollback_canonical_proven:
+                            exchange_pending = False
+                            published = False
+                            temporary_present = True
+                            backup_role = "restored_exchange"
+                else:
+                    rollback_canonical_proven = False
+            if (
+                published
+                and backup_role == "expected"
+                and backup_present
+                and backup_identity is not None
+                and temporary_identity is not None
+                and backup_cleanup_fd >= 0
+            ):
+                # Restore an overwritten canonical name with one native
+                # exchange.  Unlinking the new name before relinking the old
+                # backup would expose a transient ENOENT to concurrent
+                # readers on every failed write after publication.
+                try:
+                    atomic_exchange_names(
+                        parent_fd,
+                        relative.parts[-1],
+                        backup_cleanup_fd,
+                        backup_name,
+                    )
+                except OSError:
+                    restored_target = _semantic_named_stat(
+                        parent_fd,
+                        relative.parts[-1],
+                    )
+                    relocated_new = _semantic_named_stat(
+                        backup_cleanup_fd,
+                        backup_name,
+                    )
+                    if (
+                        restored_target is None
+                        or relocated_new is None
+                        or _semantic_entry_identity(restored_target)
+                        != backup_identity
+                        or _semantic_entry_identity(relocated_new)
+                        != temporary_identity
+                    ):
+                        rollback_canonical_proven = False
+                    else:
+                        published = False
+                        backup_role = "restored_atomic"
+                        rollback_cleanup_identity = temporary_identity
+                else:
+                    restored_target = _semantic_named_stat(
+                        parent_fd,
+                        relative.parts[-1],
+                    )
+                    relocated_new = _semantic_named_stat(
+                        backup_cleanup_fd,
+                        backup_name,
+                    )
+                    rollback_canonical_proven = (
+                        restored_target is not None
+                        and relocated_new is not None
+                        and _semantic_entry_identity(restored_target)
+                        == backup_identity
+                        and _semantic_entry_identity(relocated_new)
+                        == temporary_identity
+                    )
+                    if rollback_canonical_proven:
+                        published = False
+                        backup_role = "restored_atomic"
+                        rollback_cleanup_identity = temporary_identity
+            if (
+                published
+                and temporary_identity is not None
+                and target_fd < 0
+            ):
+                try:
+                    removed_publication = _semantic_unlink_if_identity(
+                        parent_fd,
+                        relative.parts[-1],
+                        temporary_identity,
+                        cleanup_fd=(
+                            backup_cleanup_fd
+                            if backup_cleanup_fd >= 0
+                            else None
+                        ),
+                    )
+                except OSError:
+                    removed_publication = False
+                if (
+                    not removed_publication
+                    and unexpected_published_identity is not None
+                ):
+                    try:
+                        removed_publication = (
+                            _semantic_quarantine_if_identity(
+                                parent_fd,
+                                relative.parts[-1],
+                                unexpected_published_identity,
+                                cleanup_fd=(
+                                    backup_cleanup_fd
+                                    if backup_cleanup_fd >= 0
+                                    else None
+                                ),
+                            )
+                        )
+                    except OSError:
+                        removed_publication = False
+                published = not removed_publication
+            if backup_role == "expected" and not published:
+                try:
+                    rollback_canonical_proven = (
+                        restore_backup_without_clobber(keep_backup=True)
+                    )
+                except OSError:
+                    rollback_canonical_proven = False
+            elif backup_role == "unrelated":
+                try:
+                    restore_backup_without_clobber()
+                except OSError:
+                    pass
         if (
             temporary_present
             and temporary_identity is not None
             and parent_fd >= 0
         ):
-            _semantic_unlink_if_identity(
-                parent_fd,
-                temporary_name,
-                temporary_identity,
-            )
-        if backup_reserve_fd >= 0:
-            os.close(backup_reserve_fd)
+            try:
+                removed_temporary = _semantic_unlink_if_identity(
+                    parent_fd,
+                    temporary_name,
+                    temporary_identity,
+                    cleanup_fd=(
+                        backup_cleanup_fd
+                        if backup_cleanup_fd >= 0
+                        else None
+                    ),
+                )
+            except OSError:
+                removed_temporary = False
+            if (
+                not removed_temporary
+                and unexpected_temporary_identity is not None
+            ):
+                try:
+                    _semantic_quarantine_if_identity(
+                        parent_fd,
+                        temporary_name,
+                        unexpected_temporary_identity,
+                        cleanup_fd=(
+                            backup_cleanup_fd
+                            if backup_cleanup_fd >= 0
+                            else None
+                        ),
+                    )
+                except OSError:
+                    pass
+        if rollback_required:
+            rollback_target_inspected = True
+            try:
+                rolled_back_target = _semantic_named_stat(
+                    parent_fd,
+                    relative.parts[-1],
+                )
+            except OSError:
+                rolled_back_target = None
+                rollback_target_inspected = False
+                rollback_canonical_proven = False
+            if backup_role in {
+                "expected",
+                "restored_exchange",
+                "restored_atomic",
+            } and backup_identity is not None:
+                rollback_canonical_proven = (
+                    rollback_canonical_proven
+                    and rolled_back_target is not None
+                    and stat.S_ISREG(rolled_back_target.st_mode)
+                    and _semantic_entry_identity(rolled_back_target)
+                    == backup_identity
+                )
+            else:
+                rollback_canonical_proven = (
+                    rollback_canonical_proven
+                    and rollback_target_inspected
+                    and rolled_back_target is None
+                )
+            parent_rollback_synced = False
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                rollback_durability_proven = False
+            else:
+                parent_rollback_synced = True
+            if (
+                parent_rollback_synced
+                and backup_role == "expected"
+                and rollback_canonical_proven
+                and backup_present
+                and backup_identity is not None
+                and _semantic_unlink_protected_if_identity(
+                    backup_cleanup_fd,
+                    backup_name,
+                    backup_identity,
+                )
+            ):
+                backup_present = False
+            if (
+                parent_rollback_synced
+                and backup_role == "restored_atomic"
+                and rollback_canonical_proven
+                and backup_present
+                and rollback_cleanup_identity is not None
+                and _semantic_unlink_protected_if_identity(
+                    backup_cleanup_fd,
+                    backup_name,
+                    rollback_cleanup_identity,
+                )
+            ):
+                backup_present = False
+            if backup_cleanup_fd < 0:
+                rollback_durability_proven = False
+            else:
+                try:
+                    os.fsync(backup_cleanup_fd)
+                except OSError:
+                    rollback_durability_proven = False
+        if backup_cleanup_fd >= 0:
+            try:
+                os.close(backup_cleanup_fd)
+            except OSError:
+                pass
         if temporary_fd >= 0:
-            os.close(temporary_fd)
+            try:
+                os.close(temporary_fd)
+            except OSError:
+                pass
         if target_fd >= 0:
-            os.close(target_fd)
+            try:
+                os.close(target_fd)
+            except OSError:
+                pass
         for directory_fd in reversed(opened_directories):
-            os.close(directory_fd)
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        if rollback_required and (
+            not rollback_canonical_proven
+            or not rollback_durability_proven
+        ):
+            raise SemanticWriteIndeterminateError(
+                "semantic artifact rollback durability is indeterminate: "
+                f"{candidate}"
+            )
     return candidate
 
 

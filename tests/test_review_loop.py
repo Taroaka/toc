@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from toc.harness import parse_state_file
 from toc.review_loop import (
@@ -14,6 +15,7 @@ from toc.review_loop import (
     REVIEW_LOOP_SPECS,
     aggregator_prompt_relpath,
     aggregated_review_relpath,
+    build_review_input_snapshot,
     critic_prompt_relpath,
     critic_relpath,
     loop_state_updates,
@@ -217,6 +219,92 @@ class TestReviewLoop(unittest.TestCase):
             REVIEW_LOOP_SPECS["scene_intent"].source_artifacts,
             ("story.md", "visual_value.md", "script.md"),
         )
+
+    def test_p400_snapshots_reuse_unchanged_source_fingerprints(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_review_fingerprint_cache_") as td:
+            run_dir = Path(td)
+            for relpath in ("story.md", "visual_value.md", "script.md"):
+                (run_dir / relpath).write_text(f"# {relpath}\n", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                _review_manifest_text(),
+                encoding="utf-8",
+            )
+            fingerprint_cache: dict[tuple[object, ...], object] = {}
+
+            with patch(
+                "toc.review_loop.review_source_fingerprint",
+                wraps=review_source_fingerprint,
+            ) as fingerprint:
+                build_review_input_snapshot(
+                    run_dir=run_dir,
+                    stage="scene_set",
+                    round_number=1,
+                    source_fingerprint_cache=fingerprint_cache,
+                )
+                build_review_input_snapshot(
+                    run_dir=run_dir,
+                    stage="scene_detail",
+                    round_number=1,
+                    source_fingerprint_cache=fingerprint_cache,
+                )
+
+        self.assertEqual(fingerprint.call_count, 4)
+
+    def test_p400_snapshot_validation_reuses_only_unchanged_source_fingerprints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="toc_review_validation_fingerprint_cache_"
+        ) as td:
+            run_dir = Path(td)
+            for relpath in ("story.md", "visual_value.md", "script.md"):
+                (run_dir / relpath).write_text(
+                    f"# {relpath}\n",
+                    encoding="utf-8",
+                )
+            manifest_path = run_dir / "video_manifest.md"
+            manifest_path.write_text(
+                _review_manifest_text("one"),
+                encoding="utf-8",
+            )
+            for stage in ("scene_set", "scene_detail"):
+                MODULE.write_review_loop_round(
+                    run_dir=run_dir,
+                    stage=stage,
+                    round_number=1,
+                )
+
+            fingerprint_cache: dict[tuple[object, ...], object] = {}
+            with patch(
+                "toc.review_loop.review_source_fingerprint",
+                wraps=review_source_fingerprint,
+            ) as fingerprint:
+                for stage in ("scene_set", "scene_detail"):
+                    self.assertEqual(
+                        review_input_snapshot_issues(
+                            run_dir=run_dir,
+                            stage=stage,
+                            round_number=1,
+                            source_fingerprint_cache=fingerprint_cache,
+                        ),
+                        [],
+                    )
+
+                self.assertEqual(fingerprint.call_count, 4)
+                manifest_path.write_text(
+                    _review_manifest_text("changed-and-longer"),
+                    encoding="utf-8",
+                )
+                self.assertIn(
+                    "stale review source sha256: video_manifest.md",
+                    review_input_snapshot_issues(
+                        run_dir=run_dir,
+                        stage="scene_detail",
+                        round_number=1,
+                        source_fingerprint_cache=fingerprint_cache,
+                    ),
+                )
+                self.assertEqual(fingerprint.call_count, 5)
 
     def test_manifest_mutation_stales_passing_p400_snapshots_until_rematerialized(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_review_loop_p400_manifest_stale_") as td:

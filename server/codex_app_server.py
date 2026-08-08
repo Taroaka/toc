@@ -194,6 +194,7 @@ class CodexAppServerClient:
         scrub_sensitive_env: bool = False,
         require_chatgpt_account: bool = False,
         require_chatgpt_pro: bool = False,
+        submission_guard: Callable[[], None] | None = None,
     ) -> None:
         self.cwd = cwd
         self.codex_bin = os.environ.get("TOC_CODEX_BIN", "").strip() or codex_bin
@@ -222,6 +223,11 @@ class CodexAppServerClient:
         self._jsonl_limit_bytes = app_server_jsonl_limit_bytes()
         self._transport_error: CodexAppServerTransportError | None = None
         self._stopping = False
+        self._submission_guard = submission_guard
+
+    def _guard_submission(self) -> None:
+        if self._submission_guard is not None:
+            self._submission_guard()
 
     def _resolve_codex_home(self, env: dict[str, str] | None = None) -> Path:
         if self._codex_home is not None:
@@ -568,7 +574,11 @@ class CodexAppServerClient:
             details.append(f"stderr:\n{stderr}")
         return "; ".join(details)
 
-    async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         await self.start() if self.proc is None else None
         if self._transport_error is not None:
             raise self._transport_error
@@ -583,6 +593,8 @@ class CodexAppServerClient:
         self._pending[request_id] = future
         async with self._write_lock:
             try:
+                if method in {"thread/start", "turn/start"}:
+                    self._guard_submission()
                 self.proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
                 await self.proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError) as exc:
@@ -590,6 +602,10 @@ class CodexAppServerClient:
                 message = self._format_process_error(f"Codex app-server pipe closed during {method}")
                 error_cls = CodexAppServerTransportError if classify_codex_transport_error(message) else CodexAppServerError
                 raise error_cls(message, diagnostics=self.diagnostics()) from exc
+            except BaseException:
+                self._pending.pop(request_id, None)
+                future.cancel()
+                raise
         try:
             response = await asyncio.wait_for(future, timeout=120)
         except asyncio.TimeoutError as exc:
@@ -640,6 +656,7 @@ class CodexAppServerClient:
             params["developerInstructions"] = developer_instructions
         if config is not None:
             params["config"] = json.loads(json.dumps(config))
+        self._guard_submission()
         result = await self.request("thread/start", params)
         thread = result.get("thread") or {}
         thread_id = thread.get("id")
@@ -673,6 +690,7 @@ class CodexAppServerClient:
         }
         if output_schema is not None:
             params["outputSchema"] = json.loads(json.dumps(output_schema))
+        self._guard_submission()
         result = await self.request("turn/start", params)
         turn_id = str((result.get("turn") or {}).get("id") or "")
         transcript: list[dict[str, Any]] = []
@@ -1031,7 +1049,14 @@ Rules:
         setting_content: str,
         run_dir: Path,
     ) -> str:
-        thread_id = await self.start_thread(cwd=run_dir)
+        # The full rewrite input is carried in the RPC payload.  Keep this
+        # payload-only reviewer out of the mutable run directory so a lexical
+        # run-root replacement cannot redirect provider reads or writes.
+        provider_cwd = self.cwd
+        thread_id = await self.start_thread(
+            cwd=provider_cwd,
+            sandbox="read-only",
+        )
         text = f"""Rewrite one ToC image-generation prompt.
 
 Target tab: {target}
@@ -1052,7 +1077,12 @@ Rules:
 - Keep metadata, output path, references, and item id unchanged.
 - The rewritten prompt must be self-contained and ready for image generation.
 """
-        transcript = await self.run_turn(thread_id=thread_id, text=text, cwd=run_dir, timeout_seconds=900)
+        transcript = await self.run_turn(
+            thread_id=thread_id,
+            text=text,
+            cwd=provider_cwd,
+            timeout_seconds=900,
+        )
         messages: list[str] = []
         for event in transcript:
             messages.extend(find_agent_message_texts(event))
@@ -1068,7 +1098,11 @@ Rules:
         setting_content: str,
         run_dir: Path,
     ) -> dict[str, Any]:
-        thread_id = await self.start_thread(cwd=run_dir)
+        provider_cwd = self.cwd
+        thread_id = await self.start_thread(
+            cwd=provider_cwd,
+            sandbox="read-only",
+        )
         patch_properties: dict[str, Any] = {
             key: {"type": "string"}
             for key in (
@@ -1122,7 +1156,7 @@ Rules:
         transcript = await self.run_turn(
             thread_id=thread_id,
             text=text,
-            cwd=run_dir,
+            cwd=provider_cwd,
             timeout_seconds=900,
             output_schema=output_schema,
         )
@@ -1150,6 +1184,7 @@ def create_codex_app_server_client(
     scrub_sensitive_env: bool = False,
     require_chatgpt_account: bool = False,
     require_chatgpt_pro: bool = False,
+    submission_guard: Callable[[], None] | None = None,
 ) -> CodexAppServerClient:
     return CodexAppServerClient(
         cwd=cwd,
@@ -1157,6 +1192,7 @@ def create_codex_app_server_client(
         scrub_sensitive_env=scrub_sensitive_env,
         require_chatgpt_account=require_chatgpt_account,
         require_chatgpt_pro=require_chatgpt_pro,
+        submission_guard=submission_guard,
     )
 
 

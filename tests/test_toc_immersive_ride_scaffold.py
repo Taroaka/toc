@@ -791,7 +791,10 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             )
 
             derived_title = f"{source_run.name}の世界観を散歩してみた"
-            run_dir = base / f"{derived_title}_20990101_0000"
+            run_dir = base / (
+                f"{TOC_IMMERSIVE_RIDE.sanitize_topic(derived_title)}"
+                "_20990101_0000"
+            )
             manifest = (run_dir / "video_manifest.md").read_text(encoding="utf-8")
             self.assertIn(f'topic: "{derived_title}"', manifest)
             self.assertIn('experience: "world_walk"', manifest)

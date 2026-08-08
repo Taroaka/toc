@@ -10,17 +10,33 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
+import secrets
+import stat
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from scripts.world_walk_source import (
+    directory_identity_nofollow,
+    open_directory_nofollow,
+    read_regular_file_nofollow,
+    sha256_regular_file_nofollow,
+)
+from toc.atomic_exchange import atomic_exchange_names
+from toc.run_root_binding import (
+    PathIdentity,
+    RunRootBindingError,
+    current_run_root_binding,
+    require_bound_run_root,
+)
 
 
 SNAPSHOT_SCHEMA_VERSION = "toc.image_generation_request_snapshot.v1"
 DEFAULT_SNAPSHOT_FILENAME = "image_generation_request_snapshot.json"
 _SHA256_LENGTH = 64
 _SUCCESS_STATUSES = {"completed", "success", "succeeded"}
+_SNAPSHOT_CLEANUP_DIRECTORY_NONCE = secrets.token_hex(16)
 
 
 class ImageRequestSnapshotError(ValueError):
@@ -120,11 +136,81 @@ def sha256_text(value: str) -> str:
 
 
 def sha256_file(path: Path) -> str:
+    binding = current_run_root_binding()
+    if binding is not None:
+        lexical_path = Path(os.path.abspath(os.fspath(path)))
+        try:
+            relative = lexical_path.relative_to(binding.lexical_root)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            require_bound_run_root(Path(binding.lexical_root))
+            return sha256_regular_file_nofollow(
+                Path(binding.lexical_root),
+                relative,
+                expected_root_identity=binding.identity,
+            )
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _snapshot_root(
+    run_dir: Path,
+    *,
+    expected_root_identity: PathIdentity | None = None,
+) -> tuple[Path, PathIdentity]:
+    """Return a lexical real-directory root and its pinned identity.
+
+    An ambient binding is authoritative.  Unbound callers are still pinned to
+    the directory inode observed at entry so later reads and publication never
+    fall back to a replacement pathname.
+    """
+
+    lexical = Path(os.path.abspath(os.fspath(run_dir)))
+    binding = current_run_root_binding()
+    if binding is not None:
+        if os.fspath(lexical) != binding.lexical_root:
+            raise RunRootBindingError(
+                "snapshot operation escaped the active bound run root: "
+                f"{lexical} != {binding.lexical_root}"
+            )
+        if (
+            expected_root_identity is not None
+            and expected_root_identity != binding.identity
+        ):
+            raise RunRootBindingError(
+                "snapshot root identity conflicts with the active binding"
+            )
+        require_bound_run_root(lexical)
+        return lexical, binding.identity
+
+    try:
+        identity = directory_identity_nofollow(lexical)
+    except (OSError, ValueError) as exc:
+        raise ImageRequestSnapshotError(
+            f"snapshot run directory is unsafe: {lexical}"
+        ) from exc
+    if expected_root_identity is not None and identity != expected_root_identity:
+        raise ImageRequestSnapshotError(
+            f"snapshot run directory identity changed: {lexical}"
+        )
+    return lexical, identity
+
+
+def _snapshot_file_sha256(
+    run_dir: Path,
+    relative_path: str | Path,
+    *,
+    expected_root_identity: PathIdentity,
+) -> str:
+    return sha256_regular_file_nofollow(
+        run_dir,
+        relative_path,
+        expected_root_identity=expected_root_identity,
+    )
 
 
 def materialize_request_snapshot(
@@ -136,6 +222,7 @@ def materialize_request_snapshot(
     source_artifact: str | None = None,
     created_at: str | None = None,
     defer_missing_references: bool = False,
+    expected_root_identity: PathIdentity | None = None,
 ) -> ImageRequestSnapshot:
     """Freeze normalized generic request dictionaries into a v1 snapshot.
 
@@ -145,7 +232,10 @@ def materialize_request_snapshot(
     resolved before provider submission.
     """
 
-    base = run_dir.resolve()
+    base, root_identity = _snapshot_root(
+        run_dir,
+        expected_root_identity=expected_root_identity,
+    )
     normalized_kind = _required_text(kind, field="kind")
     raw_items = list(items)
     if not raw_items:
@@ -237,12 +327,16 @@ def materialize_request_snapshot(
             producer_item_id = producer_by_destination.get(reference_path)
             if producer_item_id is not None:
                 if producer_item_id == item_id:
-                    resolved_reference = base / reference_path
-                    if not resolved_reference.is_file():
+                    try:
+                        actual_sha256 = _snapshot_file_sha256(
+                            base,
+                            reference_path,
+                            expected_root_identity=root_identity,
+                        )
+                    except (OSError, ValueError) as exc:
                         raise ImageRequestSnapshotError(
                             f"self-reference does not exist for {item_id}: {reference_path}"
-                        )
-                    actual_sha256 = sha256_file(resolved_reference)
+                        ) from exc
                     if declared_reference_sha256 and declared_reference_sha256 != actual_sha256:
                         raise ImageRequestSnapshotError(
                             f"reference sha256 mismatch for {item_id}: {reference_path}"
@@ -267,9 +361,19 @@ def materialize_request_snapshot(
                     )
                 )
                 continue
-            resolved_reference = base / reference_path
-            if resolved_reference.is_file():
-                actual_sha256 = sha256_file(resolved_reference)
+            try:
+                actual_sha256 = _snapshot_file_sha256(
+                    base,
+                    reference_path,
+                    expected_root_identity=root_identity,
+                )
+            except FileNotFoundError:
+                actual_sha256 = None
+            except (OSError, ValueError) as exc:
+                raise ImageRequestSnapshotError(
+                    f"reference is unsafe for {item_id}: {reference_path}"
+                ) from exc
+            if actual_sha256 is not None:
                 if declared_reference_sha256 and declared_reference_sha256 != actual_sha256:
                     raise ImageRequestSnapshotError(
                         f"reference sha256 mismatch for {item_id}: {reference_path}"
@@ -319,10 +423,16 @@ def materialize_request_snapshot(
     source_sha256: str | None = None
     if source_artifact:
         source_path = _normalize_run_relative_path(base, source_artifact, field="source_artifact")
-        resolved_source = base / source_path
-        if not resolved_source.is_file():
-            raise ImageRequestSnapshotError(f"source_artifact does not exist: {source_path}")
-        source_sha256 = sha256_file(resolved_source)
+        try:
+            source_sha256 = _snapshot_file_sha256(
+                base,
+                source_path,
+                expected_root_identity=root_identity,
+            )
+        except (OSError, ValueError) as exc:
+            raise ImageRequestSnapshotError(
+                f"source_artifact does not exist: {source_path}"
+            ) from exc
 
     snapshot_without_revision = ImageRequestSnapshot(
         schema_version=SNAPSHOT_SCHEMA_VERSION,
@@ -339,44 +449,983 @@ def materialize_request_snapshot(
     )
 
 
+def _snapshot_entry_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _snapshot_file_state(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _snapshot_directory_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise ImageRequestSnapshotError(
+            "snapshot publication requires no-follow directory operations"
+        )
+    return (
+        os.O_RDONLY
+        | nofollow
+        | directory
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _snapshot_named_stat(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _snapshot_verify_directory_chain(
+    *,
+    run_root: Path,
+    root_fd: int,
+    root_identity: PathIdentity,
+    links: list[tuple[int, str, int]],
+) -> None:
+    try:
+        named_root = os.stat(run_root, follow_symlinks=False)
+        opened_root = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(named_root.st_mode)
+            or not stat.S_ISDIR(opened_root.st_mode)
+            or (opened_root.st_dev, opened_root.st_ino) != root_identity
+            or _snapshot_entry_identity(named_root)
+            != _snapshot_entry_identity(opened_root)
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication root identity changed"
+            )
+        for parent_fd, name, child_fd in links:
+            named_child = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            opened_child = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(named_child.st_mode)
+                or not stat.S_ISDIR(opened_child.st_mode)
+                or _snapshot_entry_identity(named_child)
+                != _snapshot_entry_identity(opened_child)
+            ):
+                raise ImageRequestSnapshotError(
+                    f"snapshot publication ancestor identity changed: {name}"
+                )
+    except ImageRequestSnapshotError:
+        raise
+    except OSError as exc:
+        raise ImageRequestSnapshotError(
+            "snapshot publication ancestry became unsafe"
+        ) from exc
+
+
+def _snapshot_open_parent_chain(
+    *,
+    root_fd: int,
+    parent_parts: tuple[str, ...],
+) -> tuple[int, list[int], list[tuple[int, str, int]]]:
+    current = root_fd
+    opened: list[int] = []
+    links: list[tuple[int, str, int]] = []
+    flags = _snapshot_directory_flags()
+    try:
+        for part in parent_parts:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=current)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=current)
+                os.fsync(current)
+            named = os.stat(part, dir_fd=current, follow_symlinks=False)
+            opened_child = os.fstat(child)
+            if (
+                not stat.S_ISDIR(named.st_mode)
+                or _snapshot_entry_identity(named)
+                != _snapshot_entry_identity(opened_child)
+            ):
+                os.close(child)
+                raise ImageRequestSnapshotError(
+                    f"snapshot publication ancestor is unsafe: {part}"
+                )
+            links.append((current, part, child))
+            opened.append(child)
+            current = child
+    except Exception:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+        raise
+    return current, opened, links
+
+
+def _snapshot_open_cleanup_directory(parent_fd: int) -> int:
+    name = (
+        f".toc-snapshot-cleanup-{os.getpid()}-"
+        f"{_SNAPSHOT_CLEANUP_DIRECTORY_NONCE}"
+    )
+    created = False
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        created = True
+    except FileExistsError:
+        pass
+    try:
+        descriptor = os.open(
+            name,
+            _snapshot_directory_flags(),
+            dir_fd=parent_fd,
+        )
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or _snapshot_entry_identity(named)
+            != _snapshot_entry_identity(opened)
+            or opened.st_uid != os.geteuid()
+        ):
+            raise OSError("snapshot cleanup directory identity is unsafe")
+        if created:
+            os.fchmod(descriptor, 0o700)
+            opened = os.fstat(descriptor)
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            raise OSError("snapshot cleanup directory is not owner-only")
+        return descriptor
+    except Exception:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise
+
+
+def _snapshot_restore_protected_entry(
+    *,
+    cleanup_fd: int,
+    cleanup_name: str,
+    parent_fd: int,
+    destination_name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    protected = _snapshot_named_stat(cleanup_fd, cleanup_name)
+    if (
+        protected is None
+        or _snapshot_entry_identity(protected) != expected_identity
+        or not stat.S_ISREG(protected.st_mode)
+    ):
+        return False
+    if _snapshot_named_stat(parent_fd, destination_name) is not None:
+        return False
+    try:
+        os.link(
+            cleanup_name,
+            destination_name,
+            src_dir_fd=cleanup_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False
+    restored = _snapshot_named_stat(parent_fd, destination_name)
+    if (
+        restored is None
+        or _snapshot_entry_identity(restored) != expected_identity
+    ):
+        return False
+    try:
+        os.unlink(cleanup_name, dir_fd=cleanup_fd)
+    except OSError:
+        return False
+    final = _snapshot_named_stat(parent_fd, destination_name)
+    return (
+        final is not None
+        and stat.S_ISREG(final.st_mode)
+        and final.st_nlink == 1
+        and _snapshot_entry_identity(final) == expected_identity
+    )
+
+
+def _snapshot_cleanup_public_name(
+    *,
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+    cleanup_fd: int,
+    dispose: bool,
+) -> bool:
+    current = _snapshot_named_stat(parent_fd, name)
+    if current is None:
+        return True
+    if _snapshot_entry_identity(current) != expected_identity:
+        return False
+    quarantine_name = f"entry-{secrets.token_hex(16)}"
+    try:
+        os.rename(
+            name,
+            quarantine_name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=cleanup_fd,
+        )
+    except OSError:
+        return False
+    quarantined = _snapshot_named_stat(cleanup_fd, quarantine_name)
+    if (
+        quarantined is None
+        or _snapshot_entry_identity(quarantined) != expected_identity
+    ):
+        _snapshot_restore_protected_entry(
+            cleanup_fd=cleanup_fd,
+            cleanup_name=quarantine_name,
+            parent_fd=parent_fd,
+            destination_name=name,
+            expected_identity=(
+                _snapshot_entry_identity(quarantined)
+                if quarantined is not None
+                else expected_identity
+            ),
+        )
+        return False
+    if not dispose:
+        return True
+    try:
+        os.unlink(quarantine_name, dir_fd=cleanup_fd)
+    except OSError:
+        return False
+    return True
+
+
+def _snapshot_unlink_protected(
+    cleanup_fd: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    current = _snapshot_named_stat(cleanup_fd, name)
+    if current is None:
+        return True
+    if _snapshot_entry_identity(current) != expected_identity:
+        return False
+    try:
+        os.unlink(name, dir_fd=cleanup_fd)
+    except OSError:
+        return False
+    return True
+
+
+def write_run_file_atomic_nofollow(
+    path: Path,
+    data: bytes,
+    *,
+    run_dir: Path | None = None,
+    expected_root_identity: PathIdentity | None = None,
+) -> Path:
+    """Publish one run-local private regular file through retained dirfds.
+
+    The old leaf remains available for rollback until both the new file and
+    its parent-directory entry have been fsynced.  Publication is no-clobber:
+    a leaf that races into place wins and is never overwritten.
+    """
+
+    base, root_identity = _snapshot_root(
+        run_dir or path.parent,
+        expected_root_identity=expected_root_identity,
+    )
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError as exc:
+        raise ImageRequestSnapshotError(
+            f"snapshot publication path escapes run directory: {path}"
+        ) from exc
+    if (
+        not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ImageRequestSnapshotError(
+            f"snapshot publication path is unsafe: {path}"
+        )
+
+    root_fd = -1
+    parent_fd = -1
+    target_fd = -1
+    temporary_fd = -1
+    cleanup_fd = -1
+    opened_directories: list[int] = []
+    directory_links: list[tuple[int, str, int]] = []
+    temporary_name = (
+        f".{relative.name}.snapshot-{os.getpid()}-{secrets.token_hex(16)}.tmp"
+    )
+    temporary_identity: tuple[int, int, int] | None = None
+    temporary_present = False
+    target_initial_state: tuple[int, int, int, int, int, int, int] | None = None
+    backup_identity: tuple[int, int, int] | None = None
+    published = False
+    exchange_attempted = False
+    exchange_pending = False
+    exchange_resolved = False
+    committed = False
+    rollback_failure = ""
+    rollback_fsync_failure = ""
+
+    try:
+        binding = current_run_root_binding()
+        if binding is not None:
+            require_bound_run_root(base)
+            root_fd = os.dup(binding.descriptor)
+        else:
+            root_fd = open_directory_nofollow(
+                base,
+                expected_identity=root_identity,
+            )
+        opened_root = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(opened_root.st_mode)
+            or (opened_root.st_dev, opened_root.st_ino) != root_identity
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication root descriptor is unsafe"
+            )
+        parent_fd, opened_directories, directory_links = (
+            _snapshot_open_parent_chain(
+                root_fd=root_fd,
+                parent_parts=relative.parts[:-1],
+            )
+        )
+        _snapshot_verify_directory_chain(
+            run_root=base,
+            root_fd=root_fd,
+            root_identity=root_identity,
+            links=directory_links,
+        )
+        destination_name = relative.parts[-1]
+        target_entry = _snapshot_named_stat(parent_fd, destination_name)
+        if target_entry is not None:
+            if not stat.S_ISREG(target_entry.st_mode):
+                raise ImageRequestSnapshotError(
+                    "snapshot publication target is not a safe regular file"
+                )
+            if target_entry.st_nlink != 1:
+                raise ImageRequestSnapshotError(
+                    "snapshot publication target has multiple hard links"
+                )
+            target_fd = os.open(
+                destination_name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_fd,
+            )
+            opened_target = os.fstat(target_fd)
+            current_target = _snapshot_named_stat(parent_fd, destination_name)
+            if (
+                current_target is None
+                or not stat.S_ISREG(opened_target.st_mode)
+                or _snapshot_file_state(opened_target)
+                != _snapshot_file_state(current_target)
+            ):
+                raise ImageRequestSnapshotError(
+                    "snapshot publication target identity changed before write"
+                )
+            target_initial_state = _snapshot_file_state(opened_target)
+
+        cleanup_fd = _snapshot_open_cleanup_directory(parent_fd)
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        temporary_stat = os.fstat(temporary_fd)
+        if (
+            not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication temporary is not a private regular file"
+            )
+        temporary_identity = _snapshot_entry_identity(temporary_stat)
+        temporary_present = True
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(temporary_fd, remaining)
+            if written <= 0:
+                raise OSError("snapshot publication write made no progress")
+            remaining = remaining[written:]
+        os.fsync(temporary_fd)
+        os.lseek(temporary_fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(temporary_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        held_temporary = os.fstat(temporary_fd)
+        named_temporary = _snapshot_named_stat(parent_fd, temporary_name)
+        if (
+            digest.digest() != hashlib.sha256(data).digest()
+            or named_temporary is None
+            or not stat.S_ISREG(named_temporary.st_mode)
+            or held_temporary.st_nlink != 1
+            or named_temporary.st_nlink != 1
+            or _snapshot_entry_identity(held_temporary) != temporary_identity
+            or _snapshot_entry_identity(named_temporary) != temporary_identity
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication temporary identity changed"
+            )
+
+        _snapshot_verify_directory_chain(
+            run_root=base,
+            root_fd=root_fd,
+            root_identity=root_identity,
+            links=directory_links,
+        )
+        if target_fd >= 0:
+            current_opened_target = os.fstat(target_fd)
+            current_named_target = _snapshot_named_stat(
+                parent_fd,
+                destination_name,
+            )
+            if (
+                current_named_target is None
+                or current_named_target.st_nlink != 1
+                or current_opened_target.st_nlink != 1
+                or _snapshot_file_state(current_opened_target)
+                != target_initial_state
+                or _snapshot_file_state(current_named_target)
+                != target_initial_state
+            ):
+                raise ImageRequestSnapshotError(
+                    "snapshot publication target identity changed during write"
+                )
+            backup_identity = _snapshot_entry_identity(current_opened_target)
+            # Existing canonical leaves are replaced with one native exchange.
+            # The old inode remains under ``temporary_name`` until the new
+            # canonical entry is durably committed, so readers can observe old
+            # or new bytes but never a transient missing name.
+            exchange_attempted = True
+            try:
+                atomic_exchange_names(
+                    parent_fd,
+                    temporary_name,
+                    parent_fd,
+                    destination_name,
+                )
+            except BaseException:
+                reconciled_target = _snapshot_named_stat(
+                    parent_fd,
+                    destination_name,
+                )
+                reconciled_old = _snapshot_named_stat(
+                    parent_fd,
+                    temporary_name,
+                )
+                if (
+                    reconciled_target is not None
+                    and reconciled_old is not None
+                    and _snapshot_entry_identity(reconciled_target)
+                    == temporary_identity
+                    and _snapshot_entry_identity(reconciled_old)
+                    == backup_identity
+                ):
+                    published = True
+                    exchange_pending = True
+                    temporary_present = False
+                elif (
+                    reconciled_target is not None
+                    and reconciled_old is not None
+                    and _snapshot_entry_identity(reconciled_target)
+                    == backup_identity
+                    and _snapshot_entry_identity(reconciled_old)
+                    == temporary_identity
+                ):
+                    exchange_resolved = True
+                raise
+            published = True
+            exchange_pending = True
+            temporary_present = False
+
+            exchanged_target = _snapshot_named_stat(
+                parent_fd,
+                destination_name,
+            )
+            exchanged_old = _snapshot_named_stat(
+                parent_fd,
+                temporary_name,
+            )
+            if (
+                exchanged_target is None
+                or exchanged_old is None
+                or not stat.S_ISREG(exchanged_target.st_mode)
+                or not stat.S_ISREG(exchanged_old.st_mode)
+                or exchanged_target.st_nlink != 1
+                or exchanged_old.st_nlink != 1
+                or _snapshot_entry_identity(exchanged_target)
+                != temporary_identity
+                or _snapshot_entry_identity(exchanged_old)
+                != backup_identity
+                or _snapshot_entry_identity(os.fstat(target_fd))
+                != backup_identity
+            ):
+                # A name may have raced between validation and exchange. If
+                # the new inode is still canonical, exchange it back without
+                # clobbering the racing leaf, then fail closed.
+                if (
+                    exchanged_target is not None
+                    and exchanged_old is not None
+                    and _snapshot_entry_identity(exchanged_target)
+                    == temporary_identity
+                ):
+                    raced_identity = _snapshot_entry_identity(exchanged_old)
+                    try:
+                        atomic_exchange_names(
+                            parent_fd,
+                            destination_name,
+                            parent_fd,
+                            temporary_name,
+                        )
+                    except OSError:
+                        pass
+                    else:
+                        restored_target = _snapshot_named_stat(
+                            parent_fd,
+                            destination_name,
+                        )
+                        restored_temporary = _snapshot_named_stat(
+                            parent_fd,
+                            temporary_name,
+                        )
+                        if (
+                            restored_target is not None
+                            and restored_temporary is not None
+                            and _snapshot_entry_identity(restored_target)
+                            == raced_identity
+                            and _snapshot_entry_identity(restored_temporary)
+                            == temporary_identity
+                        ):
+                            published = False
+                            exchange_pending = False
+                            exchange_resolved = True
+                            temporary_present = True
+                raise ImageRequestSnapshotError(
+                    "snapshot publication identity changed during atomic exchange"
+                )
+        elif _snapshot_named_stat(parent_fd, destination_name) is not None:
+            raise ImageRequestSnapshotError(
+                "snapshot publication target appeared during write"
+            )
+
+        if target_fd < 0:
+            try:
+                os.link(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise ImageRequestSnapshotError(
+                    "snapshot publication target appeared during publish"
+                ) from exc
+            published = True
+        published_stat = _snapshot_named_stat(parent_fd, destination_name)
+        held_temporary = os.fstat(temporary_fd)
+        expected_link_count = 1 if exchange_pending else 2
+        if (
+            published_stat is None
+            or not stat.S_ISREG(published_stat.st_mode)
+            or _snapshot_entry_identity(published_stat) != temporary_identity
+            or held_temporary.st_nlink != expected_link_count
+            or published_stat.st_nlink != expected_link_count
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication target identity changed after publish"
+            )
+        _snapshot_verify_directory_chain(
+            run_root=base,
+            root_fd=root_fd,
+            root_identity=root_identity,
+            links=directory_links,
+        )
+        os.fsync(parent_fd)
+
+        _snapshot_verify_directory_chain(
+            run_root=base,
+            root_fd=root_fd,
+            root_identity=root_identity,
+            links=directory_links,
+        )
+        if exchange_pending:
+            final_target = _snapshot_named_stat(parent_fd, destination_name)
+            retained_old = _snapshot_named_stat(parent_fd, temporary_name)
+            final_opened = os.fstat(temporary_fd)
+            if (
+                final_target is None
+                or retained_old is None
+                or backup_identity is None
+                or not stat.S_ISREG(final_target.st_mode)
+                or not stat.S_ISREG(retained_old.st_mode)
+                or final_target.st_nlink != 1
+                or retained_old.st_nlink != 1
+                or final_opened.st_nlink != 1
+                or _snapshot_entry_identity(final_target)
+                != temporary_identity
+                or _snapshot_entry_identity(final_opened)
+                != temporary_identity
+                or _snapshot_entry_identity(retained_old)
+                != backup_identity
+                or _snapshot_entry_identity(os.fstat(target_fd))
+                != backup_identity
+            ):
+                raise ImageRequestSnapshotError(
+                    "snapshot publication final exchange identities changed"
+                )
+
+            # The exchange is now durable. Removing the retained old name is
+            # hygiene only; cleanup failure must not report failure while the
+            # committed new bytes remain canonical.
+            committed = True
+            exchange_pending = False
+            exchange_resolved = True
+            try:
+                _snapshot_cleanup_public_name(
+                    parent_fd=parent_fd,
+                    name=temporary_name,
+                    expected_identity=backup_identity,
+                    cleanup_fd=cleanup_fd,
+                    dispose=True,
+                )
+            except OSError:
+                pass
+            for descriptor in (parent_fd, cleanup_fd):
+                try:
+                    os.fsync(descriptor)
+                except OSError:
+                    pass
+            return path
+
+        if not _snapshot_cleanup_public_name(
+            parent_fd=parent_fd,
+            name=temporary_name,
+            expected_identity=temporary_identity,
+            cleanup_fd=cleanup_fd,
+            dispose=True,
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication temporary changed before cleanup"
+            )
+        temporary_present = False
+        final_target = _snapshot_named_stat(parent_fd, destination_name)
+        final_opened = os.fstat(temporary_fd)
+        if (
+            final_target is None
+            or not stat.S_ISREG(final_target.st_mode)
+            or final_target.st_nlink != 1
+            or final_opened.st_nlink != 1
+            or _snapshot_entry_identity(final_target) != temporary_identity
+            or _snapshot_entry_identity(final_opened) != temporary_identity
+        ):
+            raise ImageRequestSnapshotError(
+                "snapshot publication final leaf is not private"
+            )
+        os.fsync(parent_fd)
+        committed = True
+        return path
+    except BaseException as exc:
+        if not committed and parent_fd >= 0 and cleanup_fd >= 0:
+            destination_removed = not published
+            if (
+                target_fd >= 0
+                and exchange_attempted
+                and not exchange_pending
+                and not exchange_resolved
+                and temporary_identity is not None
+                and backup_identity is not None
+            ):
+                try:
+                    reconciled_target = _snapshot_named_stat(
+                        parent_fd,
+                        relative.parts[-1],
+                    )
+                    reconciled_temporary = _snapshot_named_stat(
+                        parent_fd,
+                        temporary_name,
+                    )
+                except OSError as reconciliation_exc:
+                    temporary_present = False
+                    rollback_failure = (
+                        "atomic exchange state could not be reconciled "
+                        f"({reconciliation_exc})"
+                    )
+                else:
+                    if (
+                        reconciled_target is not None
+                        and reconciled_temporary is not None
+                        and _snapshot_entry_identity(reconciled_target)
+                        == temporary_identity
+                        and _snapshot_entry_identity(reconciled_temporary)
+                        == backup_identity
+                    ):
+                        published = True
+                        exchange_pending = True
+                        temporary_present = False
+                        destination_removed = False
+                    elif (
+                        reconciled_target is not None
+                        and reconciled_temporary is not None
+                        and _snapshot_entry_identity(reconciled_target)
+                        == backup_identity
+                        and _snapshot_entry_identity(reconciled_temporary)
+                        == temporary_identity
+                    ):
+                        published = False
+                        exchange_resolved = True
+                        temporary_present = True
+                        destination_removed = True
+                    else:
+                        temporary_present = False
+                        rollback_failure = (
+                            "atomic exchange state could not be reconciled"
+                        )
+            if exchange_pending and temporary_identity is not None:
+                try:
+                    current_target = _snapshot_named_stat(
+                        parent_fd,
+                        relative.parts[-1],
+                    )
+                    current_old = _snapshot_named_stat(
+                        parent_fd,
+                        temporary_name,
+                    )
+                    if (
+                        current_target is not None
+                        and current_old is not None
+                        and backup_identity is not None
+                        and _snapshot_entry_identity(current_target)
+                        == temporary_identity
+                        and _snapshot_entry_identity(current_old)
+                        == backup_identity
+                    ):
+                        rollback_exchange_error: BaseException | None = None
+                        try:
+                            atomic_exchange_names(
+                                parent_fd,
+                                relative.parts[-1],
+                                parent_fd,
+                                temporary_name,
+                            )
+                        except BaseException as exchange_exc:
+                            rollback_exchange_error = exchange_exc
+                        restored_target = _snapshot_named_stat(
+                            parent_fd,
+                            relative.parts[-1],
+                        )
+                        restored_temporary = _snapshot_named_stat(
+                            parent_fd,
+                            temporary_name,
+                        )
+                        if (
+                            restored_target is not None
+                            and restored_temporary is not None
+                            and _snapshot_entry_identity(restored_target)
+                            == backup_identity
+                            and _snapshot_entry_identity(restored_temporary)
+                            == temporary_identity
+                        ):
+                            published = False
+                            exchange_pending = False
+                            exchange_resolved = True
+                            temporary_present = True
+                            destination_removed = True
+                        else:
+                            detail = (
+                                "previous snapshot could not be restored atomically"
+                            )
+                            if rollback_exchange_error is not None:
+                                detail += f" ({rollback_exchange_error})"
+                            rollback_failure = detail
+                    else:
+                        rollback_failure = (
+                            "previous snapshot could not be restored atomically"
+                        )
+                except BaseException as rollback_exc:
+                    # Namespace state is indeterminate. Do not unlink either
+                    # name; preserve both candidates and make best-effort
+                    # durability checks below.
+                    temporary_present = False
+                    detail = (
+                        "rollback inspection or atomic exchange failed "
+                        f"({rollback_exc})"
+                    )
+                    rollback_failure = (
+                        f"{rollback_failure}; {detail}"
+                        if rollback_failure
+                        else detail
+                    )
+            elif published and temporary_identity is not None:
+                try:
+                    destination_removed = _snapshot_cleanup_public_name(
+                        parent_fd=parent_fd,
+                        name=relative.parts[-1],
+                        expected_identity=temporary_identity,
+                        cleanup_fd=cleanup_fd,
+                        dispose=True,
+                    )
+                    if not destination_removed:
+                        # A different leaf that raced into the canonical name
+                        # is not owned by this invocation. Leave that winner
+                        # exactly where it is; our publication link is gone.
+                        racing_winner = _snapshot_named_stat(
+                            parent_fd,
+                            relative.parts[-1],
+                        )
+                        destination_removed = (
+                            racing_winner is not None
+                            and _snapshot_entry_identity(racing_winner)
+                            != temporary_identity
+                        )
+                except BaseException as rollback_exc:
+                    detail = (
+                        "new-file rollback inspection failed "
+                        f"({rollback_exc})"
+                    )
+                    rollback_failure = (
+                        f"{rollback_failure}; {detail}"
+                        if rollback_failure
+                        else detail
+                    )
+            if published and not destination_removed and not rollback_failure:
+                rollback_failure = (
+                    "published snapshot could not be removed without clobbering"
+                )
+            if temporary_present and temporary_identity is not None:
+                try:
+                    if _snapshot_cleanup_public_name(
+                        parent_fd=parent_fd,
+                        name=temporary_name,
+                        expected_identity=temporary_identity,
+                        cleanup_fd=cleanup_fd,
+                        dispose=True,
+                    ):
+                        temporary_present = False
+                except BaseException as rollback_exc:
+                    temporary_present = False
+                    detail = (
+                        "rollback temporary cleanup failed "
+                        f"({rollback_exc})"
+                    )
+                    rollback_failure = (
+                        f"{rollback_failure}; {detail}"
+                        if rollback_failure
+                        else detail
+                    )
+            rollback_fsync_errors: list[str] = []
+            for label, descriptor in (
+                ("parent", parent_fd),
+                ("cleanup", cleanup_fd),
+            ):
+                try:
+                    os.fsync(descriptor)
+                except BaseException as rollback_exc:
+                    rollback_fsync_errors.append(
+                        f"{label}: {rollback_exc}"
+                    )
+            rollback_fsync_failure = "; ".join(rollback_fsync_errors)
+        message = f"snapshot publication became unsafe: {exc}"
+        if rollback_failure:
+            message += f"; {rollback_failure}"
+        if rollback_fsync_failure:
+            message += (
+                "; rollback durability could not be proved: "
+                f"{rollback_fsync_failure}"
+            )
+        if not isinstance(exc, Exception) and not (
+            rollback_failure or rollback_fsync_failure
+        ):
+            raise
+        raise ImageRequestSnapshotError(message) from exc
+    finally:
+        if (
+            temporary_present
+            and temporary_identity is not None
+            and parent_fd >= 0
+            and cleanup_fd >= 0
+        ):
+            _snapshot_cleanup_public_name(
+                parent_fd=parent_fd,
+                name=temporary_name,
+                expected_identity=temporary_identity,
+                cleanup_fd=cleanup_fd,
+                dispose=True,
+            )
+        if cleanup_fd >= 0:
+            os.close(cleanup_fd)
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if target_fd >= 0:
+            os.close(target_fd)
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
 def write_request_snapshot_atomic(
     path: Path,
     snapshot: ImageRequestSnapshot,
     *,
     run_dir: Path | None = None,
+    expected_root_identity: PathIdentity | None = None,
 ) -> Path:
-    """Durably replace a snapshot without exposing a partially written file."""
+    """Durably replace a snapshot through its pinned run-root descriptor."""
 
-    base = (run_dir or path.parent).resolve()
-    validate_request_snapshot(snapshot, run_dir=base, verify_references=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(
-        snapshot.to_dict(),
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-    ) + "\n"
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            temporary.write(serialized)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-        _fsync_directory(path.parent)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-    return path
+    base, root_identity = _snapshot_root(
+        run_dir or path.parent,
+        expected_root_identity=expected_root_identity,
+    )
+    validate_request_snapshot(
+        snapshot,
+        run_dir=base,
+        verify_references=True,
+        expected_root_identity=root_identity,
+    )
+    serialized = (
+        json.dumps(
+            snapshot.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return write_run_file_atomic_nofollow(
+        path,
+        serialized,
+        run_dir=base,
+        expected_root_identity=root_identity,
+    )
 
 
 def bind_request_snapshot_references(
@@ -384,6 +1433,7 @@ def bind_request_snapshot_references(
     *,
     run_dir: Path,
     allow_existing_hash_changes: bool = False,
+    expected_root_identity: PathIdentity | None = None,
 ) -> ImageRequestSnapshot:
     """Replace every deferred reference with a hash-bound reference.
 
@@ -392,26 +1442,35 @@ def bind_request_snapshot_references(
     present on disk so later mutations invalidate that revision.
     """
 
-    base = run_dir.resolve()
+    base, root_identity = _snapshot_root(
+        run_dir,
+        expected_root_identity=expected_root_identity,
+    )
     validate_request_snapshot(
         snapshot,
         run_dir=base,
         verify_references=not allow_existing_hash_changes,
+        expected_root_identity=root_identity,
     )
     bound_items: list[ImageRequestSnapshotItem] = []
     for item in snapshot.items:
         bound_references: list[ImageRequestReference] = []
         for reference in item.references:
-            reference_path = base / _normalize_run_relative_path(
+            reference_path = _normalize_run_relative_path(
                 base,
                 reference.path,
                 field="reference",
             )
-            if not reference_path.is_file():
+            try:
+                actual_sha256 = _snapshot_file_sha256(
+                    base,
+                    reference_path,
+                    expected_root_identity=root_identity,
+                )
+            except (OSError, ValueError) as exc:
                 raise ImageRequestSnapshotError(
                     f"reference does not exist for {item.item_id}: {reference.path}"
-                )
-            actual_sha256 = sha256_file(reference_path)
+                ) from exc
             if (
                 reference.sha256 is not None
                 and reference.sha256 != actual_sha256
@@ -444,7 +1503,12 @@ def bind_request_snapshot_references(
         rebound_snapshot,
         request_revision=_expected_request_revision(rebound_snapshot),
     )
-    validate_request_snapshot(rebound_snapshot, run_dir=base, verify_references=True)
+    validate_request_snapshot(
+        rebound_snapshot,
+        run_dir=base,
+        verify_references=True,
+        expected_root_identity=root_identity,
+    )
     return rebound_snapshot
 
 
@@ -453,18 +1517,37 @@ def load_request_snapshot(
     *,
     run_dir: Path | None = None,
     verify_references: bool = True,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> ImageRequestSnapshot:
+    base = run_dir or path.parent
+    lexical_base, root_identity = _snapshot_root(
+        base,
+        expected_root_identity=expected_root_identity,
+    )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        lexical_path = Path(os.path.abspath(os.fspath(path)))
+        try:
+            relative = lexical_path.relative_to(lexical_base)
+        except ValueError as exc:
+            raise ImageRequestSnapshotError(
+                "request snapshot path escapes its bound run root"
+            ) from exc
+        raw = read_regular_file_nofollow(
+            lexical_base,
+            relative,
+            expected_root_identity=root_identity,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise ImageRequestSnapshotError(f"could not load request snapshot: {exc}") from exc
     if not isinstance(payload, Mapping):
         raise ImageRequestSnapshotError("request snapshot root must be an object")
-    snapshot = _snapshot_from_mapping(payload, run_dir=(run_dir or path.parent).resolve())
+    snapshot = _snapshot_from_mapping(payload, run_dir=lexical_base)
     validate_request_snapshot(
         snapshot,
-        run_dir=(run_dir or path.parent).resolve(),
+        run_dir=lexical_base,
         verify_references=verify_references,
+        expected_root_identity=root_identity,
     )
     return snapshot
 
@@ -474,8 +1557,12 @@ def validate_request_snapshot(
     *,
     run_dir: Path,
     verify_references: bool = True,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> None:
-    base = run_dir.resolve()
+    base, root_identity = _snapshot_root(
+        run_dir,
+        expected_root_identity=expected_root_identity,
+    )
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION:
         raise ImageRequestSnapshotError(
             f"unsupported snapshot schema_version: {snapshot.schema_version}"
@@ -491,11 +1578,19 @@ def validate_request_snapshot(
         if normalized_source != snapshot.source_artifact:
             raise ImageRequestSnapshotError("source_artifact is not normalized")
         _require_sha256(snapshot.source_artifact_sha256, field="source_artifact_sha256")
-        source_path = base / normalized_source
-        if not source_path.is_file():
-            raise ImageRequestSnapshotError(f"source_artifact does not exist: {normalized_source}")
-        if verify_references and sha256_file(source_path) != snapshot.source_artifact_sha256:
-            raise ImageRequestSnapshotError("source_artifact_sha256 mismatch")
+        if verify_references:
+            try:
+                source_sha256 = _snapshot_file_sha256(
+                    base,
+                    normalized_source,
+                    expected_root_identity=root_identity,
+                )
+            except (OSError, ValueError) as exc:
+                raise ImageRequestSnapshotError(
+                    f"source_artifact does not exist: {normalized_source}"
+                ) from exc
+            if source_sha256 != snapshot.source_artifact_sha256:
+                raise ImageRequestSnapshotError("source_artifact_sha256 mismatch")
     elif snapshot.source_artifact_sha256 is not None:
         raise ImageRequestSnapshotError("source_artifact_sha256 requires source_artifact")
     seen_ids: set[str] = set()
@@ -555,7 +1650,12 @@ def validate_request_snapshot(
                     field=f"reference sha256 for {item.item_id}: {reference.path}",
                 )
         if verify_references:
-            current_reference_sha256s(base, item, allow_deferred=True)
+            current_reference_sha256s(
+                base,
+                item,
+                allow_deferred=True,
+                expected_root_identity=root_identity,
+            )
     expected_revision = _expected_request_revision(snapshot)
     if snapshot.request_revision != expected_revision:
         raise ImageRequestSnapshotError("request_revision mismatch")
@@ -566,6 +1666,7 @@ def current_reference_sha256s(
     item: ImageRequestSnapshotItem,
     *,
     allow_deferred: bool = False,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[str | None, ...]:
     """Hash current reference bytes in provider attachment order.
 
@@ -574,22 +1675,30 @@ def current_reference_sha256s(
     every producer dependency exists.
     """
 
-    base = run_dir.resolve()
+    base, root_identity = _snapshot_root(
+        run_dir,
+        expected_root_identity=expected_root_identity,
+    )
     hashes: list[str | None] = []
     for reference in item.references:
-        reference_path = base / _normalize_run_relative_path(
+        reference_path = _normalize_run_relative_path(
             base,
             reference.path,
             field="reference",
         )
-        if not reference_path.is_file():
+        try:
+            actual_sha256 = _snapshot_file_sha256(
+                base,
+                reference_path,
+                expected_root_identity=root_identity,
+            )
+        except (FileNotFoundError, OSError, ValueError):
             if reference.deferred and allow_deferred:
                 hashes.append(None)
                 continue
             raise ImageRequestSnapshotError(
                 f"reference does not exist for {item.item_id}: {reference.path}"
             )
-        actual_sha256 = sha256_file(reference_path)
         if reference.sha256 is not None and reference.sha256 != actual_sha256:
             raise ImageRequestSnapshotError(
                 f"reference sha256 mismatch for {item.item_id}: {reference.path}"
@@ -854,13 +1963,9 @@ def _normalize_run_relative_path(run_dir: Path, raw: Any, *, field: str) -> str:
     candidate = Path(value)
     if candidate.is_absolute():
         raise ImageRequestSnapshotError(f"{field} must be run-relative")
-    base = run_dir.resolve()
-    resolved = (base / candidate).resolve()
-    try:
-        relative = resolved.relative_to(base)
-    except ValueError as exc:
-        raise ImageRequestSnapshotError(f"{field} escapes run directory: {value}") from exc
-    normalized = relative.as_posix()
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ImageRequestSnapshotError(f"{field} escapes run directory: {value}")
+    normalized = candidate.as_posix()
     if normalized in {"", "."}:
         raise ImageRequestSnapshotError(f"{field} must identify a file")
     return normalized

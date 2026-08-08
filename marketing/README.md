@@ -1,10 +1,34 @@
 # ToC Marketing Guide
 
-更新日: 2026-07-25
+更新日: 2026-08-08
 
 `marketing/` は、ToC を必要な個人へ届け、利用開始、継続、収益化またはブランド構築へ接続するための正本を置く。
 
 ## Marketing North Star
+
+### Purpose
+
+`人の心を動かし、人生を豊かにする。`
+
+Purpose は ToC が存在する理由であり、生成本数、速度、売上より上位に置く。収益は、人へ届けた価値を継続可能にする対価として扱う。
+
+### Customer-facing brand line
+
+`あなたの想いを、映像に。`
+
+この一文は、common site や brand surface で visitor が 0 秒で受け取る入口である。`世界に増やす` のような ToC 側の願望を先に置かず、visitor の知識、物語、経験、世界観が映像になる未来を主語にする。
+
+詳細は次の順で progressive disclosure する。
+
+| 理解の目安 | 役割 | Message |
+|------------|------|---------|
+| 0 秒 | 直感的な入口 | `あなたの想いを、映像に。` |
+| 3 秒 | 得られる変化 | `知識も、物語も、世界観も。人の心へ届く一本に。` |
+| 10 秒 | 実現方法 | `企画、台本、映像、音声、編集を、ひとつの制作フローへ。` |
+
+`0 秒` は内部の設計概念であり、外部向けの脳科学的主張には使わない。理解テストを行う場合は 1 秒 / 3 秒 / 10 秒で確認する。
+
+### Positioning
 
 ToC は、個人の動画制作を圧倒的に速く、簡単にする AI 動画制作システムである。
 
@@ -97,6 +121,7 @@ Meta / YouTube / SNS / search
 ## Source of truth
 
 - Marketing North Star: this file
+- Go-to-market workstreams / coordination: `marketing/go-to-market.md`
 - Public site / LP: `marketing/LP/`
 - LP research / strategy: `marketing/LP/lp-strategy.md`
 - Persona / message contract: `marketing/LP/personas.md`
@@ -115,6 +140,7 @@ marketing guidance は public site、LP、広告導線、SNS配信、リード�
 ```text
 marketing/
 ├── README.md
+├── go-to-market.md
 ├── browser-use.md
 ├── LP/
 └── SNS/
@@ -122,4 +148,5 @@ marketing/
 
 - `LP/`: 独立した公開サイト、共通LP、ペルソナ別LP、native form の正本
 - `SNS/`: public site へ送客し、ToC の価値を proof する各チャネルの正本
+- `go-to-market.md`: 複数スレッドで販売準備・転換・獲得を並行するための責務と同期契約
 - `browser-use.md`: 管理画面操作が必要な marketing task の共通ガイド

@@ -20,6 +20,7 @@ from server import image_gen_app  # noqa: E402
 from server.codex_app_server import CodexAppServerTransportError  # noqa: E402
 from toc.review_projection import (  # noqa: E402
     VIDEO_MANIFEST_REVIEW_PROJECTION_SCHEMA,
+    review_source_fingerprint,
     video_manifest_review_projection_sha256,
 )
 
@@ -165,6 +166,45 @@ class ImagePromptSemanticPackShardTests(unittest.TestCase):
             f"semantic_review_input_digest: `{first_scope['semantic_review_input_digest']}`",
             first_report,
         )
+
+    def test_materialization_reuses_source_fingerprints_across_scene_shards(
+        self,
+    ) -> None:
+        builder = _load_pack_builder()
+        entries = [
+            {"selector": "scene10_cut01", "scene_id": 10},
+            {"selector": "scene20_cut01", "scene_id": 20},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "story.md").write_text("# story\n", encoding="utf-8")
+            (run_dir / "script.md").write_text("# script\n", encoding="utf-8")
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\nvideo_metadata: {topic: shard-cache}\nscenes: []\n```\n",
+                encoding="utf-8",
+            )
+            fingerprint_cache: dict[tuple[object, ...], object] = {}
+            with patch.object(
+                builder,
+                "review_source_fingerprint",
+                wraps=review_source_fingerprint,
+            ) as fingerprint:
+                builder.materialize_image_prompt_scene_shards(
+                    run_dir=run_dir,
+                    entries=entries,
+                    canonical_scope_path=(
+                        run_dir
+                        / "logs/review/semantic/image_prompt.scope.json"
+                    ),
+                    canonical_report_path=(
+                        run_dir
+                        / "logs/review/semantic/image_prompt.report.md"
+                    ),
+                    source_fingerprint_cache=fingerprint_cache,
+                )
+
+            self.assertEqual(fingerprint.call_count, 3)
 
 
 class ImagePromptSemanticServerShardTests(unittest.TestCase):

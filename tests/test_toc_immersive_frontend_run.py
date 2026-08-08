@@ -22,6 +22,7 @@ from toc.semantic_review import (
     semantic_review_scope_binding_sha256,
 )
 from toc.review_loop import review_input_snapshot_issues
+from toc.review_projection import review_source_fingerprint
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -534,7 +535,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 )
                 injected_research = run_dir / "research.md"
                 injected_research.symlink_to(outside_research)
-                with self.assertRaises(OSError):
+                with self.assertRaises((OSError, ValueError)):
                     module._write_run_text_nofollow(
                         run_dir,
                         injected_research,
@@ -738,6 +739,43 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "replacement=untouched\n---\n",
             )
 
+    def test_state_writer_rejects_hardlinked_state_file(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_state_hardlink_",
+            dir=output_root,
+        ) as td:
+            parent = Path(td)
+            run_dir = parent / "run"
+            run_dir.mkdir()
+            outside = parent / "outside-state.txt"
+            outside.write_text(
+                "runtime.stage=outside\n---\n",
+                encoding="utf-8",
+            )
+            os.link(outside, run_dir / "state.txt")
+            run_identity = module.directory_identity_nofollow(run_dir)
+
+            with module._run_materialization_lock(
+                run_dir,
+                expected_identity=run_identity,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "identity changed|singly-linked regular file",
+                ):
+                    module.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {"runtime.stage": "must_not_append"},
+                    )
+
+            self.assertEqual(
+                outside.read_text(encoding="utf-8"),
+                "runtime.stage=outside\n---\n",
+            )
+
     def test_subprocess_uses_pinned_run_root_without_chflags(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
@@ -805,6 +843,49 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertEqual(
                 (original_run / "child.txt").read_text(encoding="utf-8"),
                 "written-via-pinned-root",
+            )
+
+    def test_pinned_subprocess_closes_root_descriptor_before_exec(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_subprocess_fd_close_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td) / "run"
+            run_dir.mkdir()
+            identity = module.directory_identity_nofollow(run_dir)
+
+            with module._run_materialization_lock(
+                run_dir,
+                expected_identity=identity,
+            ):
+                active = module._active_materialization_root(run_dir)
+                self.assertIsNotNone(active)
+                root_descriptor = active[2]
+                completed = module._run_materialization_subprocess(
+                    run_dir,
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,sys; fd=int(sys.argv[1]); "
+                            "\ntry: os.fstat(fd)"
+                            "\nexcept OSError: raise SystemExit(0)"
+                            "\nraise SystemExit(7)"
+                        ),
+                        str(root_descriptor),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(
+                completed.returncode,
+                0,
+                msg=f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
             )
 
     def test_prepare_grounding_preserves_frozen_authoring_readsets(self) -> None:
@@ -973,7 +1054,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             readset_path = run_dir / "logs" / "grounding" / "script.readset.json"
             readset_sha_before = hashlib.sha256(readset_path.read_bytes()).hexdigest()
             manifest_path = run_dir / "video_manifest.md"
-            manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
             module.prepare_grounding(run_dir)
 
@@ -1032,7 +1112,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                     )
                     self.assertEqual(
                         manifest_source["sha256"],
-                        manifest_sha,
+                        review_source_fingerprint(
+                            manifest_path,
+                            artifact_relpath="video_manifest.md",
+                            review_kind="review_loop",
+                            stage=stage,
+                        ).sha256,
                         stage,
                     )
             self.assertEqual(state["eval.p400_readiness.status"], "approved")
@@ -1176,11 +1261,13 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 module._refresh_downstream_review_artifacts(run_dir)
 
             semantic_pack_stages = [
-                command[command.index("--stage") + 1]
+                command[index + 1]
                 for command in (
                     call.args[0] for call in subprocess_run.call_args_list
                 )
                 if "build-semantic-review-pack.py" in str(command[1])
+                for index, argument in enumerate(command[:-1])
+                if argument == "--stage"
             ]
             self.assertEqual(
                 semantic_pack_stages,
@@ -1260,6 +1347,48 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 ),
                 "approved asset review must not be rebound without rerunning its critics",
             )
+
+    def test_p400_review_refresh_reuses_identical_manifest_preflight(self) -> None:
+        module = load_frontend_run_module()
+        stages = (
+            "scene_set",
+            "scene_detail",
+            "cut_blueprint",
+            "production_readiness",
+        )
+        with tempfile.TemporaryDirectory(prefix="frontend_review_cache_") as tmp:
+            run_dir = Path(tmp)
+            for stage in stages:
+                for critic_number in range(1, module.REVIEW_LOOP_CRITIC_COUNT + 1):
+                    prompt_path = run_dir / module.critic_prompt_relpath(
+                        stage,
+                        1,
+                        critic_number,
+                    )
+                    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                    prompt_path.write_text(
+                        "critic_focus: contract\n"
+                        f"Review input digest: `{'a' * 64}`\n",
+                        encoding="utf-8",
+                    )
+
+            preflight = Mock(return_value=())
+            with (
+                patch.object(module, "materialize_review_loop_round"),
+                patch.object(module, "review_input_snapshot_issues", return_value=()),
+                patch.object(module, "review_input_digest", return_value="a" * 64),
+                patch.object(module, "_authoring_review_blocking_findings", preflight),
+                patch.object(
+                    module,
+                    "render_aggregated_review",
+                    return_value="- status: passed\n",
+                ),
+                patch.object(module, "_write_run_text_nofollow"),
+                patch.object(module, "append_state_snapshot"),
+            ):
+                module._refresh_review_loop_artifacts(run_dir, stages)
+
+        self.assertEqual(preflight.call_count, 1)
 
     def test_materialize_only_main_runs_semantic_pipeline_but_not_media_generation(self) -> None:
         module = load_frontend_run_module()

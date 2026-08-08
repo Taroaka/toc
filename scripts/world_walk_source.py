@@ -6,8 +6,11 @@ import secrets
 import stat
 from pathlib import Path
 
+from toc.atomic_exchange import atomic_exchange_names
+
 
 PathIdentity = tuple[int, int]
+_CLEANUP_DIRECTORY_NONCE = secrets.token_hex(16)
 
 
 def _directory_open_flags() -> int:
@@ -406,24 +409,80 @@ def _entry_identity(value: os.stat_result) -> tuple[int, int, int]:
     )
 
 
-def _unlink_private_name_if_identity_matches(
-    *,
-    parent_descriptor: int,
-    name: str,
-    expected_identity: tuple[int, int, int],
-) -> bool:
+def _open_cleanup_directory_nofollow(parent_descriptor: int) -> int | None:
+    """Open an owner-only-by-mode cleanup namespace.
+
+    Mode 0700 excludes other UIDs. Portable POSIX operations cannot isolate
+    this namespace from a hostile peer running under the same UID.
+    """
+
+    directory_name = (
+        f".toc-cleanup-{os.getpid()}-{_CLEANUP_DIRECTORY_NONCE}"
+    )
+    created = False
     try:
-        current = os.stat(
-            name,
+        os.mkdir(directory_name, 0o700, dir_fd=parent_descriptor)
+        created = True
+    except FileExistsError:
+        pass
+    except OSError:
+        return None
+
+    try:
+        descriptor = os.open(
+            directory_name,
+            _directory_open_flags(),
+            dir_fd=parent_descriptor,
+        )
+    except OSError:
+        return None
+
+    try:
+        opened = os.fstat(descriptor)
+        named = os.stat(
+            directory_name,
             dir_fd=parent_descriptor,
             follow_symlinks=False,
         )
-    except FileNotFoundError:
-        return True
-    if _entry_identity(current) != expected_identity:
-        return False
-    os.unlink(name, dir_fd=parent_descriptor)
-    return True
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or _entry_identity(named) != _entry_identity(opened)
+            or opened.st_uid != os.geteuid()
+        ):
+            raise OSError("cleanup directory is unsafe")
+        if created:
+            os.fchmod(descriptor, 0o700)
+            opened = os.fstat(descriptor)
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            raise OSError("cleanup directory is writable by peers")
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def _link_protected_entry_without_clobber(
+    *,
+    cleanup_descriptor: int,
+    cleanup_name: str,
+    parent_descriptor: int,
+    destination_name: str,
+) -> tuple[bool, bool]:
+    try:
+        os.link(
+            cleanup_name,
+            destination_name,
+            src_dir_fd=cleanup_descriptor,
+            dst_dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False, False
+    try:
+        os.unlink(cleanup_name, dir_fd=cleanup_descriptor)
+    except OSError:
+        return True, False
+    return True, True
 
 
 def _restore_quarantined_entry_nofollow(
@@ -434,35 +493,79 @@ def _restore_quarantined_entry_nofollow(
     quarantined_identity: tuple[int, int, int],
 ) -> bool:
     try:
-        os.link(
+        current = os.stat(
             quarantine_name,
-            original_name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
+            dir_fd=parent_descriptor,
             follow_symlinks=False,
         )
-    except OSError:
+    except FileNotFoundError:
         return False
-    return _unlink_private_name_if_identity_matches(
-        parent_descriptor=parent_descriptor,
-        name=quarantine_name,
-        expected_identity=quarantined_identity,
+    if _entry_identity(current) != quarantined_identity:
+        return False
+
+    cleanup_descriptor = _open_cleanup_directory_nofollow(
+        parent_descriptor
     )
+    if cleanup_descriptor is None:
+        return False
+    cleanup_name = f"entry-{secrets.token_hex(16)}"
+    try:
+        try:
+            os.rename(
+                quarantine_name,
+                cleanup_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=cleanup_descriptor,
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            staged = os.stat(
+                cleanup_name,
+                dir_fd=cleanup_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        if _entry_identity(staged) != quarantined_identity:
+            _link_protected_entry_without_clobber(
+                cleanup_descriptor=cleanup_descriptor,
+                cleanup_name=cleanup_name,
+                parent_descriptor=parent_descriptor,
+                destination_name=quarantine_name,
+            )
+            return False
+        restored, alias_cleaned = _link_protected_entry_without_clobber(
+            cleanup_descriptor=cleanup_descriptor,
+            cleanup_name=cleanup_name,
+            parent_descriptor=parent_descriptor,
+            destination_name=original_name,
+        )
+        if restored:
+            return alias_cleaned
+        _link_protected_entry_without_clobber(
+            cleanup_descriptor=cleanup_descriptor,
+            cleanup_name=cleanup_name,
+            parent_descriptor=parent_descriptor,
+            destination_name=quarantine_name,
+        )
+        return False
+    finally:
+        os.close(cleanup_descriptor)
 
 
-def _remove_owned_name_nofollow(
+def _cleanup_name_nofollow(
     *,
     parent_descriptor: int,
     name: str,
     expected_identity: tuple[int, int, int],
+    dispose: bool,
 ) -> bool:
-    """Remove only the directory entry that still names the owned inode.
+    """Detach a matching entry through a protected cleanup directory.
 
-    A plain lstat/unlink pair can delete a replacement installed between the
-    two syscalls. Moving the entry to an unpredictable quarantine name first
-    makes the identity check happen before any unlink. If the moved entry is
-    not ours, restore a regular/symlink entry with a no-clobber hard link and
-    leave it in quarantine when restoration cannot be proven safe.
+    A source-name replacement is restored without clobbering, and its
+    protected alias is removed only after the public link succeeds. Entries
+    explicitly classified as ambiguous can instead remain quarantined.
     """
 
     try:
@@ -476,41 +579,110 @@ def _remove_owned_name_nofollow(
     if _entry_identity(current) != expected_identity:
         return False
 
-    quarantine_name = (
-        f".{name}.cleanup-{os.getpid()}-{secrets.token_hex(16)}"
+    cleanup_descriptor = _open_cleanup_directory_nofollow(
+        parent_descriptor
     )
-    try:
-        os.rename(
-            name,
-            quarantine_name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-    except FileNotFoundError:
+    if cleanup_descriptor is None:
         return False
+    cleanup_name = f"entry-{secrets.token_hex(16)}"
+    try:
+        try:
+            os.rename(
+                name,
+                cleanup_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=cleanup_descriptor,
+            )
+        except FileNotFoundError:
+            return False
 
-    try:
-        quarantined = os.stat(
-            quarantine_name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
-        return False
-    quarantined_identity = _entry_identity(quarantined)
-    if quarantined_identity != expected_identity:
-        _restore_quarantined_entry_nofollow(
-            parent_descriptor=parent_descriptor,
-            quarantine_name=quarantine_name,
-            original_name=name,
-            quarantined_identity=quarantined_identity,
-        )
-        return False
-    return _unlink_private_name_if_identity_matches(
+        try:
+            quarantined = os.stat(
+                cleanup_name,
+                dir_fd=cleanup_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        if _entry_identity(quarantined) != expected_identity:
+            _link_protected_entry_without_clobber(
+                cleanup_descriptor=cleanup_descriptor,
+                cleanup_name=cleanup_name,
+                parent_descriptor=parent_descriptor,
+                destination_name=name,
+            )
+            return False
+        if not dispose:
+            return True
+        try:
+            os.unlink(cleanup_name, dir_fd=cleanup_descriptor)
+        except OSError:
+            _link_protected_entry_without_clobber(
+                cleanup_descriptor=cleanup_descriptor,
+                cleanup_name=cleanup_name,
+                parent_descriptor=parent_descriptor,
+                destination_name=name,
+            )
+            return False
+        return True
+    finally:
+        os.close(cleanup_descriptor)
+
+
+def _remove_owned_name_nofollow(
+    *,
+    parent_descriptor: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    return _cleanup_name_nofollow(
         parent_descriptor=parent_descriptor,
-        name=quarantine_name,
+        name=name,
         expected_identity=expected_identity,
+        dispose=True,
     )
+
+
+def _quarantine_ambiguous_name_nofollow(
+    *,
+    parent_descriptor: int,
+    name: str,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    return _cleanup_name_nofollow(
+        parent_descriptor=parent_descriptor,
+        name=name,
+        expected_identity=expected_identity,
+        dispose=False,
+    )
+
+
+def _fsync_rollback_namespaces(parent_descriptor: int) -> str:
+    """Persist both sides of rollback namespace mutations.
+
+    The cleanup directory participates in cross-directory renames, while the
+    caller's parent directory contains the canonical destination.  Both must
+    be synced before a rollback can be reported as durable.
+    """
+
+    failures: list[str] = []
+    cleanup_descriptor = _open_cleanup_directory_nofollow(
+        parent_descriptor
+    )
+    if cleanup_descriptor is None:
+        failures.append("protected cleanup namespace is unavailable")
+    try:
+        os.fsync(parent_descriptor)
+    except OSError as exc:
+        failures.append(f"destination parent fsync failed: {exc}")
+    if cleanup_descriptor is not None:
+        try:
+            os.fsync(cleanup_descriptor)
+        except OSError as exc:
+            failures.append(f"protected cleanup namespace fsync failed: {exc}")
+        finally:
+            os.close(cleanup_descriptor)
+    return "; ".join(failures)
 
 
 def write_regular_file_nofollow(
@@ -533,12 +705,15 @@ def write_regular_file_nofollow(
     verification_file: int | None = None
     temporary_name = ""
     temporary_identity: tuple[int, int, int] | None = None
-    backup_name = ""
-    backup_identity: tuple[int, int, int] | None = None
+    temporary_named_identity: tuple[int, int, int] | None = None
     previous_identity: tuple[int, int, int] | None = None
     destination_published = False
+    exchange_completed = False
     publication_committed = False
-    preserve_backup = False
+    preserve_temporary = False
+    rollback_attempted = False
+    unexpected_published_identity: tuple[int, int, int] | None = None
+    unexpected_temporary_identity: tuple[int, int, int] | None = None
     try:
         root_descriptor = _open_root_directory(
             destination_root,
@@ -589,6 +764,7 @@ def write_regular_file_nofollow(
         )
         opened_temporary = os.fstat(temporary_descriptor)
         temporary_identity = _entry_identity(opened_temporary)
+        temporary_named_identity = temporary_identity
         if (
             not stat.S_ISREG(opened_temporary.st_mode)
             or opened_temporary.st_nlink != 1
@@ -691,54 +867,58 @@ def write_regular_file_nofollow(
                 f"{destination_rel.as_posix()}"
             )
         if previous_identity is not None:
-            backup_name = (
-                f".{destination_name}.backup-{os.getpid()}-"
-                f"{secrets.token_hex(16)}"
-            )
-            os.link(
-                destination_name,
-                backup_name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-            backup_identity = previous_identity
-            backup_stat = os.stat(
-                backup_name,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-            current_destination = os.stat(
-                destination_name,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-            if (
-                _entry_identity(backup_stat) != previous_identity
-                or _entry_identity(current_destination) != previous_identity
-            ):
-                raise ValueError(
-                    f"destination changed while preserving rollback state: "
-                    f"{destination_rel.as_posix()}"
+            try:
+                atomic_exchange_names(
+                    parent_descriptor,
+                    temporary_name,
+                    parent_descriptor,
+                    destination_name,
                 )
-
-        if previous_identity is None:
-            os.link(
-                temporary_name,
-                destination_name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
+            except BaseException:
+                try:
+                    exchanged_destination = os.stat(
+                        destination_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                    exchanged_temporary = os.stat(
+                        temporary_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    exchanged_destination = None
+                    exchanged_temporary = None
+                if (
+                    exchanged_destination is not None
+                    and exchanged_temporary is not None
+                    and _entry_identity(exchanged_destination)
+                    == temporary_identity
+                    and _entry_identity(exchanged_temporary)
+                    == previous_identity
+                ):
+                    exchange_completed = True
+                    destination_published = True
+                    temporary_named_identity = previous_identity
+                raise
+            exchange_completed = True
+            destination_published = True
+            temporary_named_identity = previous_identity
         else:
-            os.replace(
-                temporary_name,
-                destination_name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
-            temporary_name = ""
-        destination_published = True
+            try:
+                os.link(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise ValueError(
+                    f"destination appeared while publishing: "
+                    f"{destination_rel.as_posix()}"
+                ) from exc
+            destination_published = True
 
         published = os.stat(
             destination_name,
@@ -746,11 +926,46 @@ def write_regular_file_nofollow(
             follow_symlinks=False,
         )
         if _entry_identity(published) != temporary_identity:
+            held_temporary = os.fstat(temporary_descriptor)
+            named_temporary = None
+            if temporary_name:
+                try:
+                    named_temporary = os.stat(
+                        temporary_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    named_temporary = None
+            if held_temporary.st_nlink == 0:
+                unexpected_published_identity = _entry_identity(published)
+                if (
+                    named_temporary is not None
+                    and _entry_identity(named_temporary)
+                    == unexpected_published_identity
+                ):
+                    unexpected_temporary_identity = _entry_identity(
+                        named_temporary
+                    )
             raise ValueError(
                 f"destination identity changed while publishing: "
                 f"{destination_rel.as_posix()}"
             )
-        if previous_identity is None:
+        if previous_identity is not None:
+            exchanged_temporary = os.stat(
+                temporary_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if _entry_identity(exchanged_temporary) != previous_identity:
+                unexpected_temporary_identity = _entry_identity(
+                    exchanged_temporary
+                )
+                raise ValueError(
+                    f"destination rollback name changed while publishing: "
+                    f"{destination_rel.as_posix()}"
+                )
+        else:
             linked_temporary = os.fstat(temporary_descriptor)
             if linked_temporary.st_nlink != 2:
                 raise ValueError(
@@ -767,6 +982,7 @@ def write_regular_file_nofollow(
                     f"{destination_rel.as_posix()}"
                 )
             temporary_name = ""
+            temporary_named_identity = None
 
         verification_file = os.open(
             destination_name,
@@ -808,78 +1024,270 @@ def write_regular_file_nofollow(
         os.fsync(parent_descriptor)
         publication_committed = True
         if (
-            backup_name
-            and backup_identity is not None
-            and not _remove_owned_name_nofollow(
-                parent_descriptor=parent_descriptor,
-                name=backup_name,
-                expected_identity=backup_identity,
-            )
+            previous_identity is not None
+            and temporary_name
+            and temporary_named_identity is not None
         ):
-            preserve_backup = True
-            raise ValueError(
-                f"destination rollback backup changed after publishing: "
-                f"{destination_rel.as_posix()}"
-            )
-        backup_name = ""
+            try:
+                old_destination_removed = _remove_owned_name_nofollow(
+                    parent_descriptor=parent_descriptor,
+                    name=temporary_name,
+                    expected_identity=temporary_named_identity,
+                )
+            except OSError:
+                old_destination_removed = False
+            if old_destination_removed:
+                temporary_name = ""
+                temporary_named_identity = None
+            else:
+                preserve_temporary = True
         return expected_digest
     except BaseException as exc:
         rollback_failure = ""
+        rollback_durability_failure = ""
         if (
             destination_published
             and not publication_committed
             and parent_descriptor is not None
             and temporary_identity is not None
         ):
+            rollback_attempted = True
             try:
-                current_destination = os.stat(
-                    parts[-1],
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                current_destination = None
-            if (
-                previous_identity is not None
-                and backup_name
-                and backup_identity is not None
-            ):
                 try:
-                    current_backup = os.stat(
-                        backup_name,
+                    current_destination = os.stat(
+                        parts[-1],
                         dir_fd=parent_descriptor,
                         follow_symlinks=False,
                     )
                 except FileNotFoundError:
-                    current_backup = None
-                if (
-                    current_destination is not None
-                    and _entry_identity(current_destination)
-                    == temporary_identity
-                    and current_backup is not None
-                    and _entry_identity(current_backup) == backup_identity
-                ):
-                    os.replace(
-                        backup_name,
-                        parts[-1],
-                        src_dir_fd=parent_descriptor,
-                        dst_dir_fd=parent_descriptor,
+                    current_destination = None
+                if previous_identity is not None and exchange_completed:
+                    try:
+                        current_temporary = os.stat(
+                            temporary_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        current_temporary = None
+                    destination_identity = (
+                        _entry_identity(current_destination)
+                        if current_destination is not None
+                        else None
                     )
-                    backup_name = ""
-                else:
-                    preserve_backup = True
-                    rollback_failure = (
-                        "destination changed before safe rollback"
+                    named_temporary_identity = (
+                        _entry_identity(current_temporary)
+                        if current_temporary is not None
+                        else None
                     )
-            elif current_destination is not None:
-                if not _remove_owned_name_nofollow(
-                    parent_descriptor=parent_descriptor,
-                    name=parts[-1],
-                    expected_identity=temporary_identity,
-                ):
-                    rollback_failure = (
-                        "destination changed before safe rollback"
+                    cleanup_after_rollback_identity = None
+                    quarantine_after_rollback_identity = None
+                    rollback_restored = (
+                        destination_identity == previous_identity
+                        and named_temporary_identity == temporary_identity
                     )
+                    if rollback_restored:
+                        cleanup_after_rollback_identity = temporary_identity
+                    if (
+                        not rollback_restored
+                        and current_destination is not None
+                        and current_temporary is not None
+                        and stat.S_ISREG(current_destination.st_mode)
+                        and stat.S_ISREG(current_temporary.st_mode)
+                    ):
+                        before_rollback_destination = destination_identity
+                        before_rollback_temporary = named_temporary_identity
+                        rollback_exchange_error: BaseException | None = None
+                        try:
+                            atomic_exchange_names(
+                                parent_descriptor,
+                                temporary_name,
+                                parent_descriptor,
+                                parts[-1],
+                            )
+                        except BaseException as exchange_exc:
+                            rollback_exchange_error = exchange_exc
+                        try:
+                            restored_destination = os.stat(
+                                parts[-1],
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                            restored_temporary = os.stat(
+                                temporary_name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            restored_destination = None
+                            restored_temporary = None
+                        rollback_restored = (
+                            restored_destination is not None
+                            and restored_temporary is not None
+                            and _entry_identity(restored_destination)
+                            == before_rollback_temporary
+                            and _entry_identity(restored_temporary)
+                            == before_rollback_destination
+                        )
+                        if (
+                            rollback_restored
+                            and before_rollback_destination
+                            == temporary_identity
+                        ):
+                            cleanup_after_rollback_identity = (
+                                temporary_identity
+                            )
+                        elif rollback_restored:
+                            quarantine_after_rollback_identity = (
+                                before_rollback_destination
+                            )
+                        if rollback_exchange_error and not rollback_restored:
+                            rollback_failure = (
+                                "atomic rollback exchange failed "
+                                f"({rollback_exchange_error})"
+                            )
+                    if rollback_restored:
+                        destination_published = False
+                        temporary_named_identity = (
+                            cleanup_after_rollback_identity
+                        )
+                        if cleanup_after_rollback_identity is not None:
+                            try:
+                                removed_temporary = (
+                                    _remove_owned_name_nofollow(
+                                        parent_descriptor=parent_descriptor,
+                                        name=temporary_name,
+                                        expected_identity=(
+                                            cleanup_after_rollback_identity
+                                        ),
+                                    )
+                                )
+                            except OSError:
+                                removed_temporary = False
+                            if removed_temporary:
+                                temporary_name = ""
+                                temporary_named_identity = None
+                            elif not rollback_failure:
+                                preserve_temporary = True
+                                rollback_failure = (
+                                    "rollback temporary cleanup failed"
+                                )
+                        else:
+                            quarantined_temporary = False
+                            if quarantine_after_rollback_identity is not None:
+                                try:
+                                    quarantined_temporary = (
+                                        _quarantine_ambiguous_name_nofollow(
+                                            parent_descriptor=(
+                                                parent_descriptor
+                                            ),
+                                            name=temporary_name,
+                                            expected_identity=(
+                                                quarantine_after_rollback_identity
+                                            ),
+                                        )
+                                    )
+                                except OSError:
+                                    quarantined_temporary = False
+                            if quarantined_temporary:
+                                temporary_name = ""
+                                temporary_named_identity = None
+                            else:
+                                preserve_temporary = True
+                    else:
+                        preserve_temporary = True
+                        try:
+                            stranded_temporary = os.stat(
+                                temporary_name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            stranded_temporary = None
+                        if (
+                            stranded_temporary is not None
+                            and _entry_identity(stranded_temporary)
+                            == previous_identity
+                            and _quarantine_ambiguous_name_nofollow(
+                                parent_descriptor=parent_descriptor,
+                                name=temporary_name,
+                                expected_identity=previous_identity,
+                            )
+                        ):
+                            temporary_name = ""
+                            temporary_named_identity = None
+                        if not rollback_failure:
+                            rollback_failure = (
+                                "destination changed before safe rollback"
+                            )
+                elif previous_identity is None and current_destination is not None:
+                    removed_destination = _remove_owned_name_nofollow(
+                        parent_descriptor=parent_descriptor,
+                        name=parts[-1],
+                        expected_identity=temporary_identity,
+                    )
+                    if (
+                        not removed_destination
+                        and unexpected_published_identity is not None
+                    ):
+                        removed_destination = (
+                            _quarantine_ambiguous_name_nofollow(
+                                parent_descriptor=parent_descriptor,
+                                name=parts[-1],
+                                expected_identity=unexpected_published_identity,
+                            )
+                        )
+                    if not removed_destination:
+                        rollback_failure = (
+                            "destination changed before safe rollback"
+                        )
+                if previous_identity is None and temporary_name:
+                    try:
+                        removed_temporary = _remove_owned_name_nofollow(
+                            parent_descriptor=parent_descriptor,
+                            name=temporary_name,
+                            expected_identity=temporary_identity,
+                        )
+                    except OSError:
+                        removed_temporary = False
+                    if (
+                        not removed_temporary
+                        and unexpected_temporary_identity is not None
+                    ):
+                        removed_temporary = (
+                            _quarantine_ambiguous_name_nofollow(
+                                parent_descriptor=parent_descriptor,
+                                name=temporary_name,
+                                expected_identity=(
+                                    unexpected_temporary_identity
+                                ),
+                            )
+                        )
+                    if removed_temporary:
+                        temporary_name = ""
+            except Exception as rollback_exc:
+                preserve_temporary = True
+                rollback_failure = (
+                    "rollback namespace mutation failed "
+                    f"({rollback_exc})"
+                )
+            finally:
+                try:
+                    rollback_durability_failure = (
+                        _fsync_rollback_namespaces(parent_descriptor)
+                    )
+                except Exception as rollback_fsync_exc:
+                    rollback_durability_failure = (
+                        "rollback namespace fsync could not complete: "
+                        f"{rollback_fsync_exc}"
+                    )
+        if rollback_durability_failure:
+            preserve_temporary = True
+            raise ValueError(
+                f"{exc}; rollback durability could not be proved "
+                f"({rollback_durability_failure}): "
+                f"{destination_rel.as_posix()}"
+            ) from exc
         if rollback_failure:
             raise ValueError(
                 f"{exc}; {rollback_failure}: "
@@ -891,27 +1299,29 @@ def write_regular_file_nofollow(
             os.close(verification_file)
         if verification_parent is not None:
             os.close(verification_parent)
-        if temporary_name and parent_descriptor is not None:
-            if (
-                temporary_identity is None
-                or not _remove_owned_name_nofollow(
+        if (
+            temporary_name
+            and parent_descriptor is not None
+            and not rollback_attempted
+            and not preserve_temporary
+        ):
+            removed_temporary = (
+                temporary_named_identity is not None
+                and _remove_owned_name_nofollow(
                     parent_descriptor=parent_descriptor,
                     name=temporary_name,
-                    expected_identity=temporary_identity,
+                    expected_identity=temporary_named_identity,
                 )
-            ):
-                pass
-        if (
-            backup_name
-            and not preserve_backup
-            and parent_descriptor is not None
-            and backup_identity is not None
-        ):
-            _remove_owned_name_nofollow(
-                parent_descriptor=parent_descriptor,
-                name=backup_name,
-                expected_identity=backup_identity,
             )
+            if (
+                not removed_temporary
+                and unexpected_temporary_identity is not None
+            ):
+                _quarantine_ambiguous_name_nofollow(
+                    parent_descriptor=parent_descriptor,
+                    name=temporary_name,
+                    expected_identity=unexpected_temporary_identity,
+                )
         if temporary_descriptor is not None:
             os.close(temporary_descriptor)
         if parent_descriptor is not None:
@@ -1031,6 +1441,8 @@ def copy_regular_file_atomic_nofollow(
     published_descriptor: int | None = None
     linked_identity: tuple[int, int, int] | None = None
     temporary_identity: tuple[int, int, int] | None = None
+    unexpected_linked_identity: tuple[int, int, int] | None = None
+    unexpected_temporary_identity: tuple[int, int, int] | None = None
     publication_committed = False
     temporary_name = ""
     temporary_present = False
@@ -1198,6 +1610,25 @@ def copy_regular_file_atomic_nofollow(
             follow_symlinks=False,
         )
         if _entry_identity(linked_stat) != linked_identity:
+            held_temporary = os.fstat(destination_descriptor)
+            try:
+                named_after_link = os.stat(
+                    temporary_name,
+                    dir_fd=destination_parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                named_after_link = None
+            if (
+                held_temporary.st_nlink == 0
+                and named_after_link is not None
+                and _entry_identity(named_after_link)
+                == _entry_identity(linked_stat)
+            ):
+                unexpected_linked_identity = _entry_identity(linked_stat)
+                unexpected_temporary_identity = _entry_identity(
+                    named_after_link
+                )
             raise ValueError(
                 f"published destination identity mismatch: "
                 f"{destination_rel.as_posix()}"
@@ -1287,11 +1718,20 @@ def copy_regular_file_atomic_nofollow(
             and destination_parent is not None
         ):
             try:
-                _remove_owned_name_nofollow(
+                removed_publication = _remove_owned_name_nofollow(
                     parent_descriptor=destination_parent,
                     name=destination_parts[-1],
                     expected_identity=linked_identity,
                 )
+                if (
+                    not removed_publication
+                    and unexpected_linked_identity is not None
+                ):
+                    _quarantine_ambiguous_name_nofollow(
+                        parent_descriptor=destination_parent,
+                        name=destination_parts[-1],
+                        expected_identity=unexpected_linked_identity,
+                    )
             except OSError:
                 pass
         if (
@@ -1301,11 +1741,20 @@ def copy_regular_file_atomic_nofollow(
         ):
             try:
                 if temporary_identity is not None:
-                    _remove_owned_name_nofollow(
+                    removed_temporary = _remove_owned_name_nofollow(
                         parent_descriptor=destination_parent,
                         name=temporary_name,
                         expected_identity=temporary_identity,
                     )
+                    if (
+                        not removed_temporary
+                        and unexpected_temporary_identity is not None
+                    ):
+                        _quarantine_ambiguous_name_nofollow(
+                            parent_descriptor=destination_parent,
+                            name=temporary_name,
+                            expected_identity=unexpected_temporary_identity,
+                        )
             except OSError:
                 pass
         if destination_parent is not None:
